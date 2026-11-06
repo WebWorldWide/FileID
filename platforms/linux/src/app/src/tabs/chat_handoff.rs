@@ -25,6 +25,10 @@ pub(super) fn set_files(ids: Vec<i64>) {
     SHARED.with_borrow_mut(|shared| shared.files = ids);
 }
 
+pub(super) fn selected_files() -> Vec<i64> {
+    SHARED.with_borrow(|shared| shared.files.clone())
+}
+
 pub(super) fn set_people(ids: Vec<i64>) {
     SHARED.with_borrow_mut(|shared| shared.people = ids);
 }

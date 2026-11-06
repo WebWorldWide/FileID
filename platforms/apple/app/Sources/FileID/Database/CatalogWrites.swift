@@ -198,6 +198,47 @@ enum CatalogWrites {
         return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
     }
 
+    struct NamedRename: Sendable, Equatable {
+        let fileID: Int64
+        let newName: String
+    }
+
+    /// Renames files to names the user confirmed, exactly as given. A name
+    /// that is taken fails for that file instead of getting a `_N` bump.
+    static func applyNames(_ renames: [NamedRename], engine: EngineClient, store: ReadStore) async -> ReadStore.BulkRenameResult {
+        guard !renames.isEmpty else { return ReadStore.BulkRenameResult(renamed: [], failed: 0, firstError: nil) }
+        let current = await Task.detached(priority: .userInitiated) {
+            Dictionary(store.files(forFileIDs: renames.map(\.fileID)).map { ($0.id, $0.pathText) }, uniquingKeysWith: { first, _ in first })
+        }.value
+        let known = renames.filter { current[$0.fileID] != nil }
+        var renamed: [ReadStore.RenameOutcome] = []
+        var failed = renames.count - known.count
+        var firstError: String?
+        for start in stride(from: 0, to: known.count, by: renameChunk) {
+            let chunk = Array(known[start..<min(start + renameChunk, known.count)])
+            let result = await request(engine, .renameFiles(renames: chunk.map { RenameEntry(fileID: $0.fileID, newName: $0.newName) }),
+                                       action: "renameFiles", id: chunk[0].fileID, timeout: 60 + Double(chunk.count) / 4)
+            let byID = Dictionary(chunk.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
+            let landed = result.messages.filter(\.ok).compactMap(\.fileID).compactMap { byID[$0] }
+            renamed += await Task.detached(priority: .userInitiated) {
+                landed.compactMap { entry in
+                    current[entry.fileID].map { old in
+                        ReadStore.RenameOutcome(fileID: entry.fileID, oldPath: old,
+                                                newPath: URL(fileURLWithPath: old).deletingLastPathComponent().appendingPathComponent(entry.newName).path)
+                    }
+                }
+            }.value
+            failed += chunk.count - landed.count
+            if firstError == nil { firstError = result.messages.first { !$0.ok }?.message }
+            if !answered(result) {
+                failed += known.count - start - chunk.count
+                break
+            }
+        }
+        if !renamed.isEmpty { store.notifyChanged() }
+        return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
+    }
+
     /// One file's suggested-name rename. Returns its path afterwards (the old
     /// one when it already had the name), or nil when the rename failed.
     static func applyProposedName(_ file: FileRow, engine: EngineClient, store: ReadStore) async -> URL? {

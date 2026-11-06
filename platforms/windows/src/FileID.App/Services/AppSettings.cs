@@ -102,6 +102,19 @@ internal sealed class AppSettings
     /// the default remains Qwen2.5-VL-7B for existing and new installs.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
 
+    /// <summary>Describe Files ▸ Name style, the saved smart-name style sent with
+    /// proposeNames (macOS `naming.*` keys): short / descriptive / dateFirst.</summary>
+    public string NamingStyle { get; set; } = ViewModels.NameStylePolicy.DefaultStyle;
+
+    /// <summary>Longest smart name in characters, 4–120.</summary>
+    public int NamingMaxLength { get; set; } = ViewModels.NameStylePolicy.DefaultMaxLength;
+
+    public bool NamingIncludePeople { get; set; } = ViewModels.NameStylePolicy.DefaultIncludePeople;
+
+    public bool NamingIncludeEvent { get; set; } = ViewModels.NameStylePolicy.DefaultIncludeEvent;
+
+    public bool NamingIncludeDate { get; set; } = ViewModels.NameStylePolicy.DefaultIncludeDate;
+
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
     /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
@@ -220,6 +233,8 @@ internal sealed class AppSettings
         {
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
+        s.NamingStyle = ViewModels.NameStylePolicy.SanitizeStyle(s.NamingStyle);
+        s.NamingMaxLength = ViewModels.NameStylePolicy.ClampLength(s.NamingMaxLength);
     }
 
     // debounce + offload. The previous implementation ran every

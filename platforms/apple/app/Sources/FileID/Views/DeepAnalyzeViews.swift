@@ -205,6 +205,8 @@ struct DeepAnalyzeView: View {
     @State private var skipExisting = true
     @State private var bulkRenameSheetOpen = false
     @State private var pendingRenameCount: Int = 0
+    @State private var namePreviewOpen = false
+    @State private var namePreviewIDs: [Int64] = []
 
     // Item 4: lay-person explainer distinguishing automatic in-scan Tagging
     // from the opt-in Deep Analyze pass. Dismissible; stays hidden once read.
@@ -266,7 +268,7 @@ struct DeepAnalyzeView: View {
                 // bulk apply. Lives in this tab (not Library) because
                 // smart names ARE Deep Analyze's output — putting the
                 // bulk-rename trigger anywhere else split the workflow.
-                if pendingRenameCount > 0 {
+                if pendingRenameCount > 0 || !ChatHandoff.shared.selectedFileIDs.isEmpty {
                     smartNamesCard
                 }
                 if pendingTotals.total > 0 || pendingRenameCount > 0 || hasNamedAnyone {
@@ -310,6 +312,9 @@ struct DeepAnalyzeView: View {
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
             BulkRenameSheet(engine: engine, store: store)
+        }
+        .sheet(isPresented: $namePreviewOpen, onDismiss: refreshPendingRenameCount) {
+            SmartNamePreviewSheet(engine: engine, store: store, fileIDs: namePreviewIDs)
         }
     }
 
@@ -511,14 +516,39 @@ struct DeepAnalyzeView: View {
                 Text("FileID suggested clearer names for these files. Check them and choose which to use; nothing is renamed until you do.")
                     .font(Theme.Font.body(12))
                     .foregroundStyle(Theme.text3)
-                Button {
-                    bulkRenameSheetOpen = true
-                } label: {
-                    Label("Review suggested names…", systemImage: "wand.and.rays")
+                HStack(spacing: 10) {
+                    Button {
+                        bulkRenameSheetOpen = true
+                    } label: {
+                        Label("Review suggested names…", systemImage: "wand.and.rays")
+                    }
+                    .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                    .disabled(pendingRenameCount == 0)
+                    Button {
+                        openNamePreview()
+                    } label: {
+                        Label("Preview names", systemImage: "textformat")
+                    }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 30))
+                    .help(ChatHandoff.shared.selectedFileIDs.isEmpty
+                          ? "Name the files that have suggestions in the style below"
+                          : "Name the files chosen in Library in the style below")
                 }
-                .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                Divider().opacity(0.3)
+                NameStyleControls()
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
+        }
+    }
+
+    private func openNamePreview() {
+        let selection = ChatHandoff.shared.selectedFileIDs
+        Task {
+            let fallback = selection.isEmpty
+                ? await Task.detached(priority: .userInitiated) { [store] in store.filesWithProposedNames(limit: NameStyle.maxFiles).map(\.id) }.value
+                : []
+            namePreviewIDs = NameStyle.fileIDs(selection: selection, fallback: fallback)
+            namePreviewOpen = true
         }
     }
 
