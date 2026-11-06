@@ -294,6 +294,82 @@ struct CommonMediaToolsTests {
         #expect(try MediaTools.hash(source) == original)
     }
 
+    /// 96x54 landscape H.264 with a white block in the top-left quarter and black elsewhere.
+    private func markerClip(at url: URL) async throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 96, AVVideoHeightKey: 54,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: 96, kCVPixelBufferHeightKey as String: 54])
+        writer.add(input)
+        #expect(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<30 {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while !input.isReadyForMoreMediaData {
+                guard ContinuousClock.now < deadline else { throw MediaTools.Failure(text: "Fixture encoder timed out.") }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            var buffer: CVPixelBuffer?
+            #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 54, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+            let pixels = try #require(buffer)
+            CVPixelBufferLockBaseAddress(pixels, [])
+            let base = try #require(CVPixelBufferGetBaseAddress(pixels))
+            for row in 0..<54 {
+                let line = base.advanced(by: row * CVPixelBufferGetBytesPerRow(pixels)).assumingMemoryBound(to: UInt8.self)
+                for column in 0..<96 {
+                    let value: UInt8 = column < 32 && row < 18 ? 255 : 0
+                    line[column * 4] = value; line[column * 4 + 1] = value; line[column * 4 + 2] = value; line[column * 4 + 3] = 255
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pixels, [])
+            #expect(adaptor.append(pixels, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        #expect(writer.status == .completed)
+    }
+
+    /// Luma of each pixel of the displayed (transform-applied) frame, row 0 at the top.
+    private func displayedLuma(_ url: URL) throws -> (width: Int, height: Int, luma: [UInt8]) {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try generator.copyCGImage(at: CMTime(value: 1, timescale: 2), actualTime: nil)
+        let (width, height) = (image.width, image.height)
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = rgba.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        try #require(drawn)
+        return (width, height, stride(from: 0, to: rgba.count, by: 4).map { UInt8((Int(rgba[$0]) + Int(rgba[$0 + 1]) + Int(rgba[$0 + 2])) / 3) })
+    }
+
+    @Test func rotatingNinetyRightMovesTheTopLeftMarkerToTheTopRight() async throws {
+        let root = try scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Marker.mov")
+        try await markerClip(at: source)
+        let before = try displayedLuma(source)
+        #expect(before.width == 96 && before.height == 54)
+        let sample = { (frame: (width: Int, height: Int, luma: [UInt8]), x: Int, y: Int) in frame.luma[y * frame.width + x] }
+        #expect(sample(before, 12, 6) > 180 && sample(before, 84, 6) < 70 && sample(before, 12, 48) < 70)
+
+        let database = try await catalog(root, source: source)
+        let result = try await run(ToolRecipe(kind: "rotate", format: "mov", maxDimension: 1920, rotationDegrees: 90), root: root, database: database, tools: MediaTools())
+        let after = try displayedLuma(result.output)
+        #expect(after.width == 54 && after.height == 96)
+        // Turned 90 degrees clockwise, the top-left block (x < 32, y < 18) lands at x >= 36, y < 32.
+        #expect(sample(after, 45, 10) > 180, "marker should be top right")
+        #expect(sample(after, 8, 10) < 70, "top left should be dark")
+        #expect(sample(after, 45, 85) < 70, "bottom right should be dark")
+        #expect(sample(after, 8, 85) < 70, "bottom left should be dark")
+    }
+
     @Test func lossyAndLosslessRecipesRefuseUnsupportedSourcesBeforeWriting() async throws {
         let root = try scratch()
         defer { try? FileManager.default.removeItem(at: root) }
