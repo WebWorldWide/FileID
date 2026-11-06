@@ -73,7 +73,7 @@ The approved, verified Qwen3-VL 4B MLX fixture reached the existing `FileID.Mode
 
 The isolated macOS UI fixture and default native test run used no downloaded model weights. The registered visual-model evaluation tests require an explicit internal frame corpus and model cache; they skipped in this checkpoint. No candidate was promoted or quality claim changed. Keep the existing memory-admission and license gates when resuming model-backed assessment.
 
-FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the canonical URL, pin, size, platform, and license record. The Windows compiled registry (`platforms/windows/src/engine/src/models/registry.rs`) is locked to it by `tests/manifest_consistency.rs`; MLX VLM repositories instead pin immutable revisions and resolve their files' hashes from that revision.
+FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the one definition of the curated download set: each artifact's Hugging Face repo, revision, path, SHA256, size, platforms and license (the URL is `https://huggingface.co/<repo>/resolve/<revision>/<path>`). The shared Rust engine embeds it (`models/manifest.rs`) and the registry only adds install paths; the macOS table `ModelManifest.swift` is generated from it by `shared/scripts/gen_model_manifest.py` (`--check` in CI). MLX VLM repositories pin immutable revisions and resolve their files' hashes from that revision. `check_runtime_egress.py` verifies every manifest URL (Hugging Face only, SHA256, permitted license, fail-closed parsing); 17 static artifacts still resolve `main` and are a reviewed release-blocking baseline until each is pinned to a commit.
 
 ## macOS CLIP cache identity (2026-10-02)
 
@@ -209,7 +209,7 @@ The pinned [llama.cpp b9254](https://github.com/ggml-org/llama.cpp/releases/tag/
 
 ### macOS lineup (MLX)
 
-Current `AIModels.swift` exposes seven model kinds; repositories/revisions are pinned in the shared manifest and mirrored by `ModelManifest.swift`. Qwen3-VL is available on macOS; Windows/Linux Qwen3-VL runtime parity is still pending.
+Current `AIModels.swift` exposes seven model kinds; repositories, revisions, sizes and licenses come from the shared manifest through the generated `ModelManifest.swift`. Qwen3-VL is available on macOS; Windows/Linux Qwen3-VL runtime parity is still pending.
 
 | Model | Source repository | Notes |
 |---|---|---|

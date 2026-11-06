@@ -50,10 +50,12 @@ final class ModelInstaller: ModelInstalling {
 
     struct Spec: Sendable {
         struct Download: Sendable {
-            let url: String
+            let artifact: String
             let file: String
             var parts = 1
             var optional = false
+
+            var manifest: ModelArtifact? { ModelManifest.artifact(id: artifact) }
         }
         let activity: String
         let directory: URL
@@ -70,21 +72,21 @@ final class ModelInstaller: ModelInstalling {
         activity: "Install RAM++ model",
         directory: AppSupportPath.models.appendingPathComponent("ram_plus", isDirectory: true),
         ownsDirectory: true,
-        approxBytes: 925_600_000,
+        approxBytes: ModelManifest.artifact(id: "ram_plus_model")?.approxBytes ?? 0,
         downloads: [
-            .init(url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx", file: "ram_plus.onnx", parts: 12),
-            .init(url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt", file: "ram_plus_tags.txt"),
-            .init(url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt", file: "ram_plus_thresholds.txt", optional: true),
+            .init(artifact: "ram_plus_model", file: "ram_plus.onnx", parts: 12),
+            .init(artifact: "ram_plus_tags", file: "ram_plus_tags.txt"),
+            .init(artifact: "ram_plus_thresholds", file: "ram_plus_thresholds.txt", optional: true),
         ]))
 
     static let bge = ModelInstaller(Spec(
         activity: "Install BGE model",
         directory: AppSupportPath.models.appendingPathComponent("bge_text", isDirectory: true),
         ownsDirectory: true,
-        approxBytes: 135_000_000,
+        approxBytes: ModelManifest.artifact(id: "bge_model")?.approxBytes ?? 0,
         downloads: [
-            .init(url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx", file: "bge_small.onnx", parts: 8),
-            .init(url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt", file: "vocab.txt"),
+            .init(artifact: "bge_model", file: "bge_small.onnx", parts: 8),
+            .init(artifact: "bge_vocab", file: "vocab.txt"),
         ]))
 
     static let face = ModelInstaller(Spec(
@@ -93,8 +95,7 @@ final class ModelInstaller: ModelInstalling {
         ownsDirectory: false,
         approxBytes: FaceEmbedderKind.sface.approxBytes,
         downloads: [
-            .init(url: "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx",
-                  file: FaceEmbedderKind.sface.modelFileName, parts: 12),
+            .init(artifact: "sface_embedder", file: FaceEmbedderKind.sface.modelFileName, parts: 12),
         ]))
 
     let spec: Spec
@@ -154,7 +155,7 @@ final class ModelInstaller: ModelInstalling {
             status = .installFailed("Not enough free space.")
             return
         }
-        let remotes = spec.downloads.map { URL(string: $0.url) }
+        let remotes = spec.downloads.map { $0.manifest.flatMap { URL(string: $0.url) } }
         guard remotes.allSatisfy({ $0 != nil }) else {
             status = .installFailed("Internal error: bad model URL.")
             return
@@ -172,7 +173,7 @@ final class ModelInstaller: ModelInstalling {
                     try await parallelStreamingDownload(
                         remote: remote, dest: spec.destination(download), parts: download.parts,
                         approxBytes: primary ? spec.approxBytes : 0,
-                        expectedSHA256: ModelManifest.sha256(forURL: remote)
+                        expectedSHA256: download.manifest?.sha256
                     ) { tick in
                         guard primary else { return }
                         Task { @MainActor [weak self] in

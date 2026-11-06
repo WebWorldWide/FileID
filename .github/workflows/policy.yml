@@ -46,3 +46,7 @@ jobs:
         run: python shared/scripts/test_check_model_license_policy.py
       - name: Enforce reviewed model license policy
         run: python shared/scripts/check_model_license_policy.py
+      - name: Test model manifest generator
+        run: python shared/scripts/test_gen_model_manifest.py
+      - name: Enforce macOS model table matches manifest.json
+        run: python shared/scripts/gen_model_manifest.py --check

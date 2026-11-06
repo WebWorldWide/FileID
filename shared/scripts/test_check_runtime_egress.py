@@ -1,3 +1,5 @@
+import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,9 @@ from check_runtime_egress import (
     EXPECTED_INITIAL_GUARD,
     EXPECTED_INITIAL_PREDICATE,
     EXPECTED_REDIRECT_POLICY,
+    KNOWN_MOVING_REVISION_URLS,
+    MANIFEST_URL_BUILDER,
+    manifest_urls_checked,
     RAW_NETWORK_FILES,
     REVIEWED_NETWORK_SOURCE_SHA256,
     SAFE_NETWORK_CALLER_FILES,
@@ -41,19 +46,62 @@ class RuntimeEgressTests(unittest.TestCase):
             destination.write_text((repository / relative).read_text(encoding="utf-8"), encoding="utf-8")
         return root
 
+    REVISION = "c" * 40
+    POLICIES = {
+        "MIT": {"spdx": "MIT", "licenseUrl": "https://spdx.org/licenses/MIT.html", "termsRequired": False, "reviewedAt": "2026-07-16"},
+        "Apache-2.0": {"spdx": "Apache-2.0", "licenseUrl": "https://spdx.org/licenses/Apache-2.0.html", "termsRequired": False, "reviewedAt": "2026-07-16"},
+        "Gemma": {"spdx": "LicenseRef-Gemma", "licenseUrl": "https://ai.google.dev/gemma/terms", "termsRequired": True, "reviewedAt": "2026-07-16"},
+    }
+    MANIFEST_FILE_ENTRY = (
+        "Some(FileEntry {\n"
+        "    url: artifact.url(),\n"
+        "    dest: models_root.join(dest),\n"
+        "    sha256: Some(artifact.sha256.clone()),\n"
+        "    approx_bytes: artifact.approx_bytes,\n"
+        "})\n"
+    )
+
+    def artifact(self, **overrides: object) -> dict:
+        return {
+            "id": "model", "kind": "model", "platforms": ["windows"], "repo": "org/model",
+            "revision": self.REVISION, "path": "onnx/model.onnx", "sha256": "d" * 64,
+            "approxBytes": 10, "license": "MIT", **overrides,
+        }
+
+    def manifest(self, artifacts: list[dict] | None = None, repos: list[dict] | None = None) -> dict:
+        return {
+            "comment": "test",
+            "schemaVersion": 2,
+            "licensePolicies": copy.deepcopy(self.POLICIES),
+            "artifacts": [self.artifact()] if artifacts is None else artifacts,
+            "vlmRepos": [{
+                "repo": "org/vlm", "kind": "vlm", "platforms": ["macos"], "revision": self.REVISION,
+                "approxBytes": 10, "license": "Gemma",
+            }] if repos is None else repos,
+        }
+
+    def write_manifest(self, directory: str, document: object) -> Path:
+        path = Path(directory) / "manifest.json"
+        path.write_text(document if isinstance(document, str) else json.dumps(document), encoding="utf-8")
+        return path
+
     def files(
-        self, directory: str, urls: list[str], hosts: list[str],
-        *, dynamic: str = "", comment_decoy: str = "", limited_redirect: bool = False,
-        ineffective_guards: bool = False, misplaced_guards: bool = False,
-        pre_guard_request: bool = False,
-    ) -> tuple[Path, Path]:
+        self, directory: str, hosts: list[str],
+        *, manifest: object | None = None, dynamic: str = "", comment_decoy: str = "",
+        limited_redirect: bool = False, ineffective_guards: bool = False, misplaced_guards: bool = False,
+        pre_guard_request: bool = False, builder: str = MANIFEST_URL_BUILDER,
+    ) -> tuple[Path, Path, Path]:
         root = Path(directory)
         registry = root / "registry.rs"
         registry.write_text(
-            "\n".join(f'FileEntry {{ url: "{url}".to_string() }}' for url in urls)
-            + (f"\nFileEntry {{ url: {dynamic} }}" if dynamic else ""),
+            self.MANIFEST_FILE_ENTRY + (f"\nFileEntry {{ url: {dynamic} }}" if dynamic else ""),
             encoding="utf-8",
         )
+        (root / "manifest.rs").write_text(
+            "impl Artifact {\n    pub fn url(&self) -> String {\n        " + builder + "\n    }\n}\n",
+            encoding="utf-8",
+        )
+        manifest_path = self.write_manifest(directory, self.manifest() if manifest is None else manifest)
         downloader = root / "downloader.rs"
         predicate = EXPECTED_INITIAL_PREDICATE
         redirect = EXPECTED_REDIRECT_POLICY
@@ -110,30 +158,95 @@ class RuntimeEgressTests(unittest.TestCase):
             + entry_points,
             encoding="utf-8",
         )
-        return registry, downloader
+        return registry, downloader, manifest_path
 
-    def test_accepts_only_hugging_face_and_subdomains(self) -> None:
+    def test_accepts_pinned_licensed_manifest_and_hugging_face_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
-                directory,
-                [
-                    "https://huggingface.co/org/model/resolve/main/file.bin",
-                    "https://cdn-lfs.hf.co/file.bin",
-                ],
-                ["huggingface.co", "hf.co"],
-            )
-            self.assertEqual(violations(registry, downloader), [])
+            registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"])
+            self.assertEqual(violations(registry, downloader, manifest), [])
+            failures, urls, moving = manifest_urls_checked(manifest)
+            self.assertEqual((failures, moving), ([], set()))
+            self.assertEqual(urls, {f"https://huggingface.co/org/model/resolve/{self.REVISION}/onnx/model.onnx"})
 
-    def test_rejects_off_policy_url_and_allowlist_host(self) -> None:
+    def test_rejects_off_policy_allowlist_host_and_url_builder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
-                directory,
-                ["https://github.com/org/repo/releases/download/v1/runtime.zip"],
-                ["huggingface.co", "hf.co", "github.com"],
+            registry, downloader, manifest = self.files(
+                directory, ["huggingface.co", "hf.co", "github.com"],
+                builder='format!("https://evil.example/{}/resolve/{}/{}", self.repo, self.revision, self.path)',
             )
-            failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            failures = violations(registry, downloader, manifest)
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
+            self.assertTrue(any("manifest URL builder differs" in failure for failure in failures))
+
+    def test_manifest_entries_must_be_pinned_hashed_and_licensed(self) -> None:
+        cases = {
+            "not pinned to an immutable revision": [self.artifact(revision="main")],
+            "SHA256-pinned": [self.artifact(sha256="abc")],
+            "SHA256-pinned ": [self.artifact(sha256=None)],
+            "is not permitted": [self.artifact(license="CC-BY-NC-4.0")],
+            "is not permitted ": [self.artifact(license="NVIDIA-CUDA")],
+            "malformed": [self.artifact(repo="evil.example/org/model")],
+            "malformed ": [self.artifact(path="../escape.onnx")],
+            "malformed  ": [self.artifact(path="model.onnx?download=1")],
+            "malformed   ": [self.artifact(approxBytes=0)],
+            "duplicate id": [self.artifact(), self.artifact()],
+            "exactly the keys": [{**self.artifact(), "url": "https://evil.example/model.onnx"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for expected, artifacts in cases.items():
+                with self.subTest(expected=expected):
+                    registry, downloader, manifest = self.files(
+                        directory, ["huggingface.co", "hf.co"], manifest=self.manifest(artifacts),
+                    )
+                    failures = violations(registry, downloader, manifest)
+                    self.assertTrue(any(expected.strip() in failure for failure in failures), failures)
+            gemma_without_terms = self.manifest([self.artifact(license="Gemma")])
+            gemma_without_terms["licensePolicies"]["Gemma"]["termsRequired"] = False
+            manifest = self.write_manifest(directory, gemma_without_terms)
+            self.assertTrue(any("lacks its reviewed policy" in f for f in manifest_urls_checked(manifest)[0]))
+            moving_repo = self.manifest(repos=[{
+                "repo": "org/vlm", "kind": "vlm", "platforms": ["macos"], "revision": "main",
+                "approxBytes": 10, "license": "Apache-2.0",
+            }])
+            manifest = self.write_manifest(directory, moving_repo)
+            self.assertTrue(any("VLM repo is not pinned" in f for f in manifest_urls_checked(manifest)[0]))
+
+    def test_malformed_manifest_fails_closed(self) -> None:
+        good = self.manifest()
+        documents = {
+            "not json": "not json",
+            "array": [],
+            "missing key": {key: value for key, value in good.items() if key != "vlmRepos"},
+            "extra key": {**good, "artifactLicenses": {}},
+            "old schema": {**good, "schemaVersion": 1},
+            "empty artifacts": {**good, "artifacts": []},
+            "artifacts object": {**good, "artifacts": {"model": self.artifact()}},
+            "policy malformed": {**good, "licensePolicies": {**good["licensePolicies"], "MIT": "MIT"}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, document in documents.items():
+                with self.subTest(name=name):
+                    registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"], manifest=document)
+                    self.assertTrue(manifest_urls_checked(manifest)[0])
+                    self.assertTrue(violations(registry, downloader, manifest))
+                    self.assertTrue(known_blocker_violations(registry, downloader, manifest))
+
+    def test_moving_revision_baseline_rejects_additions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = [
+                self.artifact(id=f"a{index}", repo="/".join(url.split("/")[3:5]), revision="main",
+                              path="/".join(url.split("/")[7:]))
+                for index, url in enumerate(sorted(KNOWN_MOVING_REVISION_URLS))
+            ]
+            registry, downloader, manifest = self.files(
+                directory, ["huggingface.co", "hf.co"], manifest=self.manifest(artifacts),
+            )
+            self.assertEqual(known_blocker_violations(registry, downloader, manifest), [])
+            self.assertEqual(len(violations(registry, downloader, manifest)), len(KNOWN_MOVING_REVISION_URLS))
+            added = self.manifest(artifacts + [self.artifact(id="new", revision="main")])
+            registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"], manifest=added)
+            self.assertTrue(any("moving-revision manifest URL baseline changed" in failure
+                                for failure in known_blocker_violations(registry, downloader, manifest)))
 
     def test_catalog_urls_must_be_pinned_files_in_their_own_revision(self) -> None:
         import json
@@ -163,9 +276,8 @@ class RuntimeEgressTests(unittest.TestCase):
 
     def test_rejects_dynamic_url_comment_decoy_and_redirect_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
+            registry, downloader, _ = self.files(
                 directory,
-                ["https://huggingface.co/org/model/file"],
                 ["huggingface.co", "hf.co", "evil.example"],
                 dynamic='format!("https://{}.example/file", "evil")',
                 comment_decoy=(
@@ -174,29 +286,27 @@ class RuntimeEgressTests(unittest.TestCase):
                 limited_redirect=True,
             )
             failures = violations(registry, downloader)
-            self.assertTrue(any("exactly one literal" in failure for failure in failures))
+            self.assertTrue(any("from the model manifest or catalog" in failure for failure in failures))
             self.assertTrue(any("limited redirect" in failure for failure in failures))
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
 
     def test_rejects_shorthand_url_and_ineffective_guards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
+            registry, downloader, _ = self.files(
                 directory,
-                ["https://huggingface.co/org/model/file"],
                 ["huggingface.co", "hf.co"],
                 dynamic="url",
                 ineffective_guards=True,
             )
             failures = violations(registry, downloader)
-            self.assertTrue(any("exactly one literal" in failure for failure in failures))
+            self.assertTrue(any("from the model manifest or catalog" in failure for failure in failures))
             self.assertTrue(any("predicate differs" in failure for failure in failures))
             self.assertTrue(any("redirect policy differs" in failure for failure in failures))
 
     def test_rejects_model_file_alias_and_dead_guard_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
+            registry, downloader, _ = self.files(
                 directory,
-                ["https://huggingface.co/org/model/file"],
                 ["huggingface.co", "hf.co"],
                 dynamic="url",
                 misplaced_guards=True,
@@ -204,15 +314,14 @@ class RuntimeEgressTests(unittest.TestCase):
             text = registry.read_text(encoding="utf-8").replace("FileEntry { url }", "ModelFile { url }")
             registry.write_text(text, encoding="utf-8")
             failures = violations(registry, downloader)
-            self.assertTrue(any("exactly one literal" in failure for failure in failures))
+            self.assertTrue(any("from the model manifest or catalog" in failure for failure in failures))
             self.assertTrue(any("download_simple must begin" in failure for failure in failures))
             self.assertTrue(any("download_parallel must begin" in failure for failure in failures))
 
     def test_rejects_alternate_request_before_canonical_guard(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
+            registry, downloader, _ = self.files(
                 directory,
-                ["https://huggingface.co/org/model/file"],
                 ["huggingface.co", "hf.co"],
                 pre_guard_request=True,
             )
@@ -296,11 +405,7 @@ class RuntimeEgressTests(unittest.TestCase):
 
     def test_string_decoys_cannot_replace_live_downloader_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
-                directory,
-                ["https://huggingface.co/org/model/file"],
-                ["huggingface.co", "hf.co"],
-            )
+            registry, downloader, _ = self.files(directory, ["huggingface.co", "hf.co"])
             decoy = EXPECTED_INITIAL_PREDICATE + EXPECTED_REDIRECT_POLICY + (
                 "pub async fn download_simple(request: Request) {\n"
                 + EXPECTED_INITIAL_GUARD + "}\n"
@@ -322,11 +427,7 @@ class RuntimeEgressTests(unittest.TestCase):
 
     def test_registry_file_entry_string_decoy_is_not_production(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            registry, downloader = self.files(
-                directory,
-                ["https://huggingface.co/org/model/file"],
-                ["huggingface.co", "hf.co"],
-            )
+            registry, downloader, _ = self.files(directory, ["huggingface.co", "hf.co"])
             registry.write_text(
                 'const DECOY: &str = r#"FileEntry { url: \\"https://huggingface.co/x\\" }"#;\n',
                 encoding="utf-8",
@@ -607,18 +708,51 @@ class RuntimeEgressTests(unittest.TestCase):
                 'const ROGUE: FileEntry = FileEntry { url: "https://evil.invalid/model" };\n'
             )
             registry.write_text(registry_text.replace("#[cfg(test)]", insertion + "#[cfg(test)]", 1), encoding="utf-8")
-            downloader.write_text(
-                (repository / "platforms/windows/src/engine/src/downloader.rs").read_text(encoding="utf-8"),
-                encoding="utf-8",
+            for name in ("downloader.rs", "models/manifest.rs"):
+                (root / Path(name).name).write_text(
+                    (repository / "platforms/windows/src/engine/src" / name).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            failures = known_blocker_violations(registry, downloader)
+            self.assertEqual(
+                [failure for failure in failures if "from the model manifest or catalog" in failure and "registry.rs" in failure],
+                failures,
             )
-            self.assertTrue(any("off-policy runtime URL baseline changed" in failure
-                                for failure in known_blocker_violations(registry, downloader)))
+            self.assertEqual(len(failures), 1)
 
     def test_repository_known_blocker_baseline_has_no_unreviewed_additions(self) -> None:
         root = Path(__file__).resolve().parents[2]
         registry = root / "platforms/windows/src/engine/src/models/registry.rs"
         downloader = root / "platforms/windows/src/engine/src/downloader.rs"
         self.assertEqual(known_blocker_violations(registry, downloader), [])
+
+    def test_repository_strict_gate_reports_only_moving_revisions(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        registry = root / "platforms/windows/src/engine/src/models/registry.rs"
+        downloader = root / "platforms/windows/src/engine/src/downloader.rs"
+        prefix = "manifest URL is not pinned to an immutable revision: "
+        failures = violations(registry, downloader)
+        self.assertTrue(all(failure.startswith(prefix) for failure in failures), failures)
+        self.assertEqual({failure.removeprefix(prefix) for failure in failures}, KNOWN_MOVING_REVISION_URLS)
+
+    def test_registry_literal_or_duplicate_manifest_constructions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"])
+            registry.write_text(
+                self.MANIFEST_FILE_ENTRY
+                + 'FileEntry { url: "https://huggingface.co/org/model/resolve/main/x.onnx".to_string() }\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(any("from the model manifest or catalog" in failure
+                                for failure in violations(registry, downloader, manifest)))
+            registry.write_text(self.MANIFEST_FILE_ENTRY * 2, encoding="utf-8")
+            self.assertTrue(any("only one manifest-backed" in failure
+                                for failure in violations(registry, downloader, manifest)))
+            registry.write_text(
+                "Some(FileEntry { url: artifact.url(), mirror_url: artifact.url() })\n", encoding="utf-8",
+            )
+            self.assertTrue(any("from the model manifest or catalog" in failure
+                                for failure in violations(registry, downloader, manifest)))
 
     def test_rejects_conditional_or_filtered_policy_workflow(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -662,7 +796,8 @@ class RuntimeEgressTests(unittest.TestCase):
             registry.write_text('FileEntry { url: "http://huggingface.co/file" }\n', encoding="utf-8")
             downloader.write_text("fn main() {}\n", encoding="utf-8")
             failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            self.assertTrue(any("from the model manifest or catalog" in failure for failure in failures))
+            self.assertTrue(any("no production FileEntry" in failure for failure in failures))
             self.assertTrue(any("expected exactly one" in failure for failure in failures))
 
 

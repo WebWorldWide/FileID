@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release gate: shipped engine downloads must remain Hugging Face-only."""
+"""Release gate: shipped engine downloads must remain pinned, licensed and Hugging Face-only."""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "91bd0372f96dd9a61627e8b518e80ba89f9b8f576710a662355eca948136f132",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "6a0380062bc0c535e61d1ec96b35979991547e31bd0dfae7eaf99402c2f68168",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "5ea71c5cdb780ee61ab6fb865887be963dc8c2e8b24d1eaf0583e4d792e6b0e8",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "c21da9887868e00c68f94e9aeb594511626709a76268b63c231d34ec9493453c",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "f3dcdd38ed26a9885c28f6280e369347a9ef9b297ee30f693aa30b36dc6374f6",
@@ -737,16 +737,55 @@ def _file_entry_blocks(text: str) -> tuple[list[str], list[str]]:
 
 
 CATALOG_FILE_ENTRY_URL = _normalized("url: file.url.clone()")
+MANIFEST_FILE_ENTRY_URL = _normalized("url: artifact.url()")
+MANIFEST_URL_BUILDER = 'format!("https://huggingface.co/{}/resolve/{}/{}", self.repo, self.revision, self.path)'
 CATALOG_URL_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/resolve/([0-9a-f]{40})/([^?#]+)$")
+NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+REVISION_RE = re.compile(r"[0-9a-f]{40}")
+MANIFEST_SCHEMA_VERSION = 2
+PERMITTED_LICENSES = {"Apache-2.0": False, "MIT": False, "Gemma": True}
+MANIFEST_KEYS = {"comment", "schemaVersion", "licensePolicies", "artifacts", "vlmRepos"}
+ARTIFACT_KEYS = {"id", "kind", "platforms", "repo", "revision", "path", "sha256", "approxBytes", "license"}
+VLM_REPO_KEYS = {"repo", "kind", "platforms", "revision", "approxBytes", "license"}
+POLICY_KEYS = {"spdx", "licenseUrl", "termsRequired", "reviewedAt"}
+KNOWN_MOVING_REVISION_URLS = {
+    "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+    "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx",
+    "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx",
+    "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model.onnx",
+    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json",
+    "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt",
+    "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx",
+    "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt",
+    "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt",
+    "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+    "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf",
+    "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+    "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
+    "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+    "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf",
+    "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
+    "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
+}
 
 
-def catalog_for(registry: Path) -> Path:
-    """The catalog beside the registry's repository, else this script's."""
-    relative = Path("shared") / "models" / "catalog.json"
+def _shared_file_for(registry: Path, name: str) -> Path:
+    relative = Path("shared") / "models" / name
     for parent in registry.resolve().parents:
         if (parent / relative).is_file():
             return parent / relative
     return Path(__file__).resolve().parents[2] / relative
+
+
+def catalog_for(registry: Path) -> Path:
+    """The catalog beside the registry's repository, else this script's."""
+    return _shared_file_for(registry, "catalog.json")
+
+
+def manifest_for(registry: Path) -> Path:
+    """The curated manifest beside the registry's repository, else this script's."""
+    return _shared_file_for(registry, "manifest.json")
 
 
 def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
@@ -772,34 +811,155 @@ def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
     return failures, urls
 
 
-def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[str]]:
+def _repo_ok(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split("/")
+    return len(parts) == 2 and all(NAME_RE.fullmatch(part) and part not in {".", ".."} for part in parts)
+
+
+def _path_ok(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return all(NAME_RE.fullmatch(part) and part not in {".", ".."} for part in value.split("/"))
+
+
+def _platforms_ok(value: object) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(item, str) and item for item in value)
+
+
+def manifest_urls_checked(manifest: Path) -> tuple[list[str], set[str], set[str]]:
+    """Every curated download must be a Hugging Face file with a SHA256 pin
+    and a permitted license. Returns failures, every derived URL, and the
+    URLs whose revision is not an immutable commit. A malformed document
+    fails closed."""
+    failures: list[str] = []
+    urls: set[str] = set()
+    moving: set[str] = set()
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"{manifest}: unreadable model manifest ({error})"], urls, moving
+    if not isinstance(document, dict) or set(document) != MANIFEST_KEYS:
+        return [f"{manifest}: model manifest must have exactly the keys {sorted(MANIFEST_KEYS)}"], urls, moving
+    if document["schemaVersion"] != MANIFEST_SCHEMA_VERSION or isinstance(document["schemaVersion"], bool):
+        return [f"{manifest}: model manifest schemaVersion must be {MANIFEST_SCHEMA_VERSION}"], urls, moving
+    policies = document["licensePolicies"]
+    artifacts = document["artifacts"]
+    repos = document["vlmRepos"]
+    if not isinstance(policies, dict) or not isinstance(artifacts, list) or not isinstance(repos, list) or not artifacts:
+        return [f"{manifest}: model manifest licensePolicies, artifacts and vlmRepos are malformed"], urls, moving
+    for key, policy in policies.items():
+        if not isinstance(policy, dict) or set(policy) != POLICY_KEYS or not isinstance(policy["termsRequired"], bool):
+            failures.append(f"{manifest}: license policy {key!r} is malformed")
+
+    def license_failure(name: str, license_key: object) -> str | None:
+        if license_key not in PERMITTED_LICENSES:
+            return f"{manifest}: {name}: license {license_key!r} is not permitted"
+        policy = policies.get(license_key)
+        if not isinstance(policy, dict) or policy.get("termsRequired") is not PERMITTED_LICENSES[license_key]:
+            return f"{manifest}: {name}: license {license_key!r} lacks its reviewed policy"
+        return None
+
+    def size_ok(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    seen_ids: set[str] = set()
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict) or set(artifact) != ARTIFACT_KEYS:
+            failures.append(f"{manifest}: artifact {index} must have exactly the keys {sorted(ARTIFACT_KEYS)}")
+            continue
+        name = artifact["id"]
+        if not isinstance(name, str) or not name or name in seen_ids:
+            failures.append(f"{manifest}: artifact {index} has a missing or duplicate id")
+            continue
+        seen_ids.add(name)
+        revision = artifact["revision"]
+        if not _repo_ok(artifact["repo"]) or not _path_ok(artifact["path"]) \
+                or not isinstance(revision, str) or not NAME_RE.fullmatch(revision) \
+                or not isinstance(artifact["kind"], str) or not artifact["kind"] \
+                or not _platforms_ok(artifact["platforms"]) or not size_ok(artifact["approxBytes"]):
+            failures.append(f"{manifest}: {name}: repo, revision, path, kind, platforms or approxBytes is malformed")
+            continue
+        url = f"https://huggingface.co/{artifact['repo']}/resolve/{revision}/{artifact['path']}"
+        if not isinstance(artifact["sha256"], str) or not SHA256_RE.fullmatch(artifact["sha256"]):
+            failures.append(f"{manifest}: {name}: manifest file is not SHA256-pinned: {url}")
+            continue
+        problem = license_failure(name, artifact["license"])
+        if problem:
+            failures.append(problem)
+            continue
+        if not REVISION_RE.fullmatch(revision):
+            moving.add(url)
+        urls.add(url)
+    seen_repos: set[str] = set()
+    for index, repo in enumerate(repos):
+        if not isinstance(repo, dict) or set(repo) != VLM_REPO_KEYS:
+            failures.append(f"{manifest}: vlmRepo {index} must have exactly the keys {sorted(VLM_REPO_KEYS)}")
+            continue
+        name = repo["repo"]
+        if not _repo_ok(name) or name in seen_repos:
+            failures.append(f"{manifest}: vlmRepo {index} has a malformed or duplicate repo")
+            continue
+        seen_repos.add(name)
+        if not isinstance(repo["revision"], str) or not REVISION_RE.fullmatch(repo["revision"]):
+            failures.append(f"{manifest}: {name}: VLM repo is not pinned to an immutable revision")
+            continue
+        if not isinstance(repo["kind"], str) or not repo["kind"] \
+                or not _platforms_ok(repo["platforms"]) or not size_ok(repo["approxBytes"]):
+            failures.append(f"{manifest}: {name}: kind, platforms or approxBytes is malformed")
+            continue
+        problem = license_failure(name, repo["license"])
+        if problem:
+            failures.append(problem)
+    return failures, urls, moving
+
+
+def _manifest_builder_failures(builder: Path) -> list[str]:
+    if not builder.is_file():
+        return [f"{builder}: reviewed manifest URL builder is missing"]
+    code = _without_rust_test_code(_without_comments(builder.read_text(encoding="utf-8")))
+    if _normalized(code).count(_normalized(MANIFEST_URL_BUILDER)) != 1 or len(re.findall(r"https?://", code)) != 1:
+        return [f"{builder}: manifest URL builder differs from the reviewed Hugging Face resolve URL"]
+    return []
+
+
+def analyze(
+    registry: Path, downloader: Path, manifest: Path | None = None, catalog: Path | None = None,
+) -> tuple[list[str], set[str], set[str], set[str]]:
     failures: list[str] = []
     registry_text = _without_comments(
         _without_rust_test_code(registry.read_text(encoding="utf-8"))
     )
     urls: set[str] = set()
+    moving: set[str] = set()
     blocks, block_failures = _file_entry_blocks(registry_text)
     failures.extend(f"{registry}: {failure}" for failure in block_failures)
-    catalog_constructions = 0
+    constructions = {MANIFEST_FILE_ENTRY_URL: 0, CATALOG_FILE_ENTRY_URL: 0}
     for index, block in enumerate(blocks, 1):
-        matches = re.findall(r'\burl:\s*"(https?://[^"\\]+)"', block)
-        # The one reviewed catalog construction takes its URL from
-        # shared/models/catalog.json, whose URLs are verified below.
-        if not matches and CATALOG_FILE_ENTRY_URL in _normalized(block):
-            catalog_constructions += 1
-            continue
-        if len(matches) != 1:
+        normalized = _normalized(block)
+        url_fields = re.findall(r"\burl\s*:", _mask_comments_and_strings(block))
+        source = next((source for source in constructions if source in normalized), None)
+        if len(url_fields) != 1 or source is None or re.search(r"https?://", block) \
+                or normalized.count(source.removeprefix("url: ")) != 1:
             failures.append(
-                f"{registry}: FileEntry construction {index} must contain exactly one literal http(s) url field"
+                f"{registry}: FileEntry construction {index} must take its URL from the model manifest or catalog"
             )
             continue
-        urls.add(matches[0])
-    if not blocks or not urls:
+        constructions[source] += 1
+    if not constructions[MANIFEST_FILE_ENTRY_URL]:
         failures.append(f"{registry}: no production FileEntry URL constructions found")
-    if catalog_constructions > 1:
+    if constructions[MANIFEST_FILE_ENTRY_URL] > 1:
+        failures.append(f"{registry}: only one manifest-backed FileEntry construction is reviewed")
+    if constructions[CATALOG_FILE_ENTRY_URL] > 1:
         failures.append(f"{registry}: only one catalog-backed FileEntry construction is reviewed")
-    if catalog_constructions:
-        catalog_failures, catalog_urls = catalog_urls_checked(catalog_for(registry))
+    if constructions[MANIFEST_FILE_ENTRY_URL]:
+        failures.extend(_manifest_builder_failures(registry.with_name("manifest.rs")))
+        manifest_failures, manifest_urls, moving = manifest_urls_checked(manifest or manifest_for(registry))
+        failures.extend(manifest_failures)
+        urls |= manifest_urls
+    if constructions[CATALOG_FILE_ENTRY_URL]:
+        catalog_failures, catalog_urls = catalog_urls_checked(catalog or catalog_for(registry))
         failures.extend(catalog_failures)
         urls |= catalog_urls
 
@@ -848,15 +1008,17 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
     guard_count = downloader_structure.count("if !download_url_allowed(&request.url)")
     if guard_count != 2:
         failures.append(f"{downloader}: initial URL guard must appear only in both download entry points")
-    return failures, urls, hosts
+    return failures, urls, hosts, moving
 
 
-def violations(registry: Path, downloader: Path) -> list[str]:
-    failures, urls, hosts = analyze(registry, downloader)
+def violations(registry: Path, downloader: Path, manifest: Path | None = None) -> list[str]:
+    failures, urls, hosts, moving = analyze(registry, downloader, manifest)
     for url in sorted(urls):
         parsed = urlparse(url)
         if parsed.scheme != "https" or not _approved(parsed.hostname):
             failures.append(f"{registry}: non-Hugging-Face runtime URL: {url}")
+    for url in sorted(moving):
+        failures.append(f"manifest URL is not pinned to an immutable revision: {url}")
     if hosts != APPROVED_HOSTS:
         failures.append(
             f"{downloader}: download host allowlist must be exactly {sorted(APPROVED_HOSTS)}; got {sorted(hosts)}"
@@ -864,13 +1026,19 @@ def violations(registry: Path, downloader: Path) -> list[str]:
     return failures
 
 
-def known_blocker_violations(registry: Path, downloader: Path) -> list[str]:
-    failures, urls, hosts = analyze(registry, downloader)
+def known_blocker_violations(registry: Path, downloader: Path, manifest: Path | None = None) -> list[str]:
+    failures, urls, hosts, moving = analyze(registry, downloader, manifest)
     off_policy = {url for url in urls if not _approved(urlparse(url).hostname)}
     if off_policy != KNOWN_OFF_POLICY_URLS:
         failures.append(
             "off-policy runtime URL baseline changed; mirror removals require updating the reviewed baseline, "
             f"additions are forbidden: got {sorted(off_policy)}"
+        )
+    if moving != KNOWN_MOVING_REVISION_URLS:
+        failures.append(
+            "moving-revision manifest URL baseline changed; pinned removals require updating the reviewed baseline, "
+            f"additions are forbidden: added {sorted(moving - KNOWN_MOVING_REVISION_URLS)}, "
+            f"removed {sorted(KNOWN_MOVING_REVISION_URLS - moving)}"
         )
     extras = hosts - APPROVED_HOSTS
     if extras != KNOWN_EXTRA_HOSTS or not APPROVED_HOSTS.issubset(hosts):
@@ -935,7 +1103,7 @@ def main() -> int:
     if args.known_blockers:
         print("Runtime egress audit passed: no additions beyond the reviewed release-blocking baseline.")
     else:
-        print("Runtime egress release gate passed: registry and redirects are Hugging Face-only.")
+        print("Runtime egress release gate passed: manifest, catalog and redirects are Hugging Face-only and pinned.")
     return 0
 
 
