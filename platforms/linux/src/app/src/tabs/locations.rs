@@ -2,7 +2,7 @@
 // catalog has scanned and whether it is reachable now. An unplugged drive
 // reads OFFLINE and its catalog rows are kept.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -65,12 +65,23 @@ struct Locations {
     list: gtk::Box,
     status: gtk::Label,
     generation: Cell<u64>,
+    request: RefCell<String>,
 }
 
 impl Locations {
+    /// Asks the engine (`listRoots`); before it is ready, reads the catalog directly.
     fn refresh(self: &Rc<Self>) {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
+        let request_id = format!("locations-{generation}");
+        let request = fileid_engine::ipc::ListRootsPayload { request_id: request_id.clone() };
+        let sent = self.engine.borrow().is_ready()
+            && self.engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::ListRoots(request)).is_ok();
+        if sent {
+            *self.request.borrow_mut() = request_id;
+            return;
+        }
+        self.request.borrow_mut().clear();
         let rx = read_db(|conn| fileid_engine::commands::roots::list(conn).ok());
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
@@ -192,6 +203,7 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
         list,
         status,
         generation: Cell::new(0),
+        request: RefCell::new(String::new()),
     });
     let weak = Rc::downgrade(&this);
     refresh.connect_clicked(move |_| {
@@ -210,8 +222,20 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
             let Some(this) = weak.upgrade() else { break };
-            if matches!(event, EngineState::ScanComplete(_)) && this.list.is_mapped() {
-                this.refresh();
+            let waiting = !this.request.borrow().is_empty();
+            match event {
+                EngineState::ScanComplete(_) if this.list.is_mapped() => this.refresh(),
+                EngineState::RootsList(list) if waiting && list.request_id == *this.request.borrow() => {
+                    this.request.borrow_mut().clear();
+                    this.render(Some(list.roots));
+                }
+                EngineState::Error { kind, .. }
+                    if waiting && (kind == "list_roots_failed" || kind == "invalid_list_roots_request") =>
+                {
+                    this.request.borrow_mut().clear();
+                    this.render(None);
+                }
+                _ => {}
             }
         }
     });

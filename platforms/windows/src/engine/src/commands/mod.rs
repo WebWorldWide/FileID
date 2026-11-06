@@ -22,6 +22,7 @@ pub(crate) mod catalog_retrieval;
 
 pub mod catalog_takes;
 pub mod catalog_take_auto;
+pub(crate) mod take_goal;
 mod catalog_take_suggestions;
 
 pub mod chat;

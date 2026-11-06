@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-11-05 (late night) — Rust goal ranking for Best Takes; Describe hands the model to Chat; GTK Locations over IPC; CI memory fix
+
+- **Owner approved the `deep_analyze.rs` and `engine_client.rs` digest refreshes.** Only `engine_client.rs` changed; the two Rust items below fit in unlocked files.
+- **Best Takes goal ranking on Windows/Linux:** `rankTakesWithGoal` used to answer "not available". The shared engine now draws a numbered contact sheet of up to six shots (gold number boxes, as on the Mac), sends it with the Mac's prompt to the installed description model through the resident server, and orders the best shot first, then the others that met the goal, then the rest by quality; an unclear reply keeps the quality order. 3 unit tests; conformance unchanged (Rust 30, Swift 36 pass). Not yet tried with a real GGUF vision model.
+- **Chat no longer waits for a whole Describe batch** (Windows/Linux): the resident model service counts queued jobs, and the batch hands its lease over between files and takes it back; the model stays loaded unless the answer needs a different one. New test: the queued job gets the warm model with no reload.
+- **GTK Locations asks the engine** (`listRoots`) instead of reading the catalog directly; the catalog read stays as the fallback before the engine is ready.
+- **CI on PR #293:** engine test jobs on Linux and macOS ran out of memory. The IPC fuzzer could build a single 13 GB frame by repeating a large string 120,000 times; array growth is now held near 8 MiB (fuzzer 55 s / 4 GB → 3.5 s / 0.8 GB). Chat subject words are capped (6 alternatives × 8 words) in both engines.
+- Checks: Rust 1,132 tests, GTK 174, conformance Rust 30 / Swift 36, egress and DTO gates; state folders untouched.
+
 ## 2026-11-05 (night) — Mac capture-date filter and OFFLINE badge; dated searches reach every match
 
 - **Mac** (agent): Search & Moments has an "Any date" button under the search field; its popover sets optional From/To days (checkbox + date field, From ≤ To, Clear, Done) sent as whole local days in `capturedFrom`/`capturedTo`; VoiceOver reads "Capture date" with the range. Library tiles show an OFFLINE badge (amber `#E0A340`, one Core Animation layer, no SwiftUI per tile) for files whose library root is offline, the most specific root deciding; the Selected pane shows the pill and disables Finder/Open. Locations refresh on page appear, after scans and on mount/unmount. Not yet seen on screen. The "All locations" scope was not built: DESIGN_V3.md does not define it.

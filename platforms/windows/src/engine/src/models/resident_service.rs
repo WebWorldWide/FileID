@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}}, time::{Instant, Duration}, future::Future};
+use std::{path::PathBuf, sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Instant, Duration}, future::Future};
 use anyhow::{anyhow, Result};
 use super::{vlm_server::VlmServer, model_provenance::VerifiedModel, runtime_cache::RuntimeInputs, native_admission::HostAdmissionError};
 use crate::resource_scheduler::ResourceScheduler;
@@ -9,7 +9,10 @@ struct State {entry:Option<Entry>,last_used:Instant,failure:Option<String>}
 pub(crate) struct ResidentService {
     state:Arc<tokio::sync::Mutex<State>>,closed:AtomicBool,stopped:tokio::sync::Notify,
     idle:Duration,scheduler:Arc<ResourceScheduler>,cpu:Box<dyn Fn()->bool+Send+Sync>,
+    waiters:AtomicUsize,
 }
+struct Waiting<'a>(&'a AtomicUsize);
+impl Drop for Waiting<'_> {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
 pub(crate) struct ResidentLease {service:Arc<ResidentService>,state:tokio::sync::OwnedMutexGuard<State>}
 impl std::ops::Deref for ResidentLease {type Target=VlmServer;fn deref(&self)->&Self::Target{&self.state.entry.as_ref().expect("live resident lease").server}}
 impl ResidentService {
@@ -25,8 +28,11 @@ impl ResidentService {
         }).clone()
     }
     pub(crate) fn new(scheduler:Arc<ResourceScheduler>,idle:Duration,cpu:impl Fn()->bool+Send+Sync+'static)->Arc<Self> {
-        Arc::new(Self{state:Arc::new(tokio::sync::Mutex::new(State{entry:None,last_used:Instant::now(),failure:None})),closed:AtomicBool::new(false),stopped:tokio::sync::Notify::new(),idle,scheduler,cpu:Box::new(cpu)})
+        Arc::new(Self{state:Arc::new(tokio::sync::Mutex::new(State{entry:None,last_used:Instant::now(),failure:None})),closed:AtomicBool::new(false),stopped:tokio::sync::Notify::new(),idle,scheduler,cpu:Box::new(cpu),waiters:AtomicUsize::new(0)})
     }
+    /// Another job (a Chat answer) is queued for the model, so a long batch
+    /// should hand its lease over between files.
+    pub(crate) fn has_waiters(&self)->bool {self.waiters.load(Ordering::Acquire)>0}
     pub(crate) async fn acquire(self:&Arc<Self>,kind:&str,cancel:Arc<AtomicBool>)->Result<ResidentLease> {
         let root=crate::paths::models_dir()?;let proof_cancel=cancel.clone();let key_cancel=cancel.clone();let load_cancel=cancel.clone();
         self.acquire_with(kind,root,cancel,
@@ -38,7 +44,10 @@ impl ResidentService {
         self:&Arc<Self>,kind:&str,root:PathBuf,cancel:Arc<AtomicBool>,proof:impl FnOnce()->P,mut key:impl FnMut()->K,load:impl FnOnce(Arc<VerifiedModel>)->L,
     )->Result<ResidentLease> {
         if self.closed.load(Ordering::Relaxed){return Err(HostAdmissionError(anyhow!("Resident owner closed")).into());}
+        self.waiters.fetch_add(1,Ordering::AcqRel);
+        let waiting=Waiting(&self.waiters);
         let mut state=tokio::select!{biased;_=wait_cancelled(&cancel)=>return Err(HostAdmissionError(anyhow!("Resident checkout cancelled")).into()),state=self.state.clone().lock_owned()=>state};
+        drop(waiting);
         if self.closed.load(Ordering::Relaxed){return Err(HostAdmissionError(anyhow!("Resident owner closed")).into());}
         if let Some(failure)=&state.failure{return Err(HostAdmissionError(anyhow!(failure.clone())).into());}
         let verified=match &state.entry {

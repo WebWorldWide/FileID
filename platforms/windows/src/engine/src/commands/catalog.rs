@@ -14,6 +14,26 @@ pub async fn handle(
     request: CatalogRequest,
 ) {
     let request_id = request.request_id.clone();
+    if request.action == "rankTakesWithGoal"
+        && let Some(database) = database.clone()
+    {
+        let goal = request.query.as_deref().unwrap_or("").trim().to_owned();
+        let ids = request.file_ids.clone().unwrap_or_default();
+        let reply = if goal.is_empty() || goal.chars().count() > 500 || !(2..=100).contains(&ids.len()) {
+            response(&request_id, "error", Some("Invalid goal ranking request".into()))
+        } else {
+            match super::take_goal::rank(database, goal, ids).await {
+                Ok(ranking) => {
+                    let mut ok = response(&request_id, "ok", None);
+                    ok.take_goal_ranking = Some(Box::new(ranking));
+                    ok
+                }
+                Err(error) => response(&request_id, "error", Some(error.to_string())),
+            }
+        };
+        sink.send(IpcEvent { t: chrono::Utc::now(), payload: EventPayload::CatalogResponse(Wrap::new(reply)) }).await;
+        return;
+    }
     let action = request.action.clone();
     let job_id = request.job_id.clone();
     let scheduler = database.clone();

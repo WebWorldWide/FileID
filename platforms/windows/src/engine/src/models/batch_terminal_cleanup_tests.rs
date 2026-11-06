@@ -226,7 +226,7 @@ fn batch_cleanup_actual_handler_terminals_and_dispatch_guard_await_finalization(
         .unwrap();
     let end = begin + commands[begin..].find("#[cfg(test)]").unwrap();
     let body = &commands[begin..end];
-    assert_eq!(body.matches("finalize_batch(&sink, &mut server,").count(), 4);
+    assert_eq!(body.matches("finalize_batch(&sink, &mut server,").count(), 5);
     assert!(!body.contains("sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete"));
     let helper_begin = commands
         .find("pub(crate) async fn emit_batch_terminal_after_cleanup")

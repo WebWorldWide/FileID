@@ -933,6 +933,27 @@ async fn run_deep_analyze_batch(
                 }),
             )));
         };
+        // A queued Chat answer gets the model between files instead of waiting
+        // for the whole batch; the model stays loaded, so the batch takes it back
+        // without a reload unless the answer used a different model.
+        if use_server && server.is_some() && crate::models::resident_service::ResidentService::shared().has_waiters() {
+            drop(server.take());
+            tokio::task::yield_now().await;
+            match crate::models::resident_service::ResidentService::shared().acquire(model_kind, cancel.clone()).await {
+                Ok(lease) => server = Some(lease),
+                Err(error) if runner.is_some() && !cancel.load(Ordering::Relaxed) => {
+                    tracing::warn!(?error, "[VLM-SERVER] could not take the model back after a hand-over; using the per-file CLI");
+                    use_server = false;
+                }
+                Err(error) => {
+                    finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
+                        processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                        model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                    }, (!cancel.load(Ordering::Relaxed)).then(|| error.to_string())).await;
+                    return;
+                }
+            }
+        }
         // Persistent server while it's healthy (model already resident); else
         // per-file CLI. `use_server` flips off below if the server dies.
         let server_active = if use_server { server.as_ref() } else { None };
