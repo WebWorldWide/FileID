@@ -243,11 +243,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .css_classes(["gold-button"])
         .halign(gtk::Align::Start)
         .build();
-    let smart_revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .child(&smart_list)
-        .reveal_child(false)
-        .build();
+    let smart_revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &smart_list);
     let smart_card = build_smart_card(&smart_count, &review_btn, &smart_revealer);
     smart_card.set_visible(false);
     content.append(&smart_card);
@@ -470,7 +466,7 @@ struct DeepUi {
     smart_count: gtk::Label,
     smart_list: gtk::ListBox,
     review_btn: gtk::Button,
-    smart_revealer: gtk::Revealer,
+    smart_revealer: crate::motion::SpringRevealer,
     proposed: RefCell<Vec<ProposedRow>>,
 
     starting_card: gtk::Box,
@@ -1784,7 +1780,7 @@ fn build_naming_banner() -> (gtk::Box, gtk::Button) {
 fn build_smart_card(
     count: &gtk::Label,
     review_btn: &gtk::Button,
-    revealer: &gtk::Revealer,
+    revealer: &crate::motion::SpringRevealer,
 ) -> gtk::Box {
     let card = glass_card();
     let head = gtk::Box::builder()

@@ -754,7 +754,7 @@ impl Ui {
                 }
             });
             tile.frame.add_controller(click);
-            self.strip.append(&tile.frame);
+            self.strip.append(&tile.holder);
             jobs.push((quality.path.clone(), video, TILE_PX, tile.view.clone()));
             tiles.push(tile);
         }

@@ -137,7 +137,7 @@ pub(super) fn append_details(target: &gtk::Box, file_id: i64) {
 }
 
 pub(super) struct SelectedPane {
-    pub revealer: gtk::Revealer,
+    pub revealer: crate::motion::SpringRevealer,
     engine: Rc<RefCell<EngineClient>>,
     picture: gtk::Picture,
     frame: gtk::AspectFrame,
@@ -246,12 +246,7 @@ impl SelectedPane {
             .width_request(300)
             .child(&body)
             .build();
-        let revealer = gtk::Revealer::builder()
-            .transition_type(gtk::RevealerTransitionType::SlideLeft)
-            .transition_duration(220)
-            .reveal_child(false)
-            .child(&scroller)
-            .build();
+        let revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Left, &scroller);
 
         let pane = Rc::new(Self {
             revealer,

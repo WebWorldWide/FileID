@@ -353,6 +353,7 @@ impl ComparePane {
 /// a star, a pink check when kept, and the focus / best stroke.
 pub struct Tile {
     pub frame: gtk::Overlay,
+    pub holder: crate::motion::SpringScale,
     pub view: ShotView,
     badge: gtk::Label,
     star: gtk::Label,
@@ -388,8 +389,11 @@ impl Tile {
         check.set_margin_end(5);
         check.set_margin_top(5);
         frame.add_overlay(&check);
+        let holder = crate::motion::SpringScale::new(&frame);
+        holder.set_valign(gtk::Align::Center);
         Self {
             frame,
+            holder,
             view,
             badge,
             star,
@@ -400,6 +404,7 @@ impl Tile {
     pub fn update(&self, best: bool, kept: bool, focused: bool, spoken: &str, hint: &str) {
         toggle_class(&self.frame, "best", best);
         toggle_class(&self.frame, "focused", focused);
+        self.holder.set_scale(if focused { 1.04 } else { 1.0 });
         toggle_class(&self.badge, "best", best);
         self.star.set_visible(best);
         self.check.set_visible(kept);

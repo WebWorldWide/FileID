@@ -61,7 +61,7 @@ pub(super) struct CatalogUi {
     timeline: Rc<Timeline>,
     chapter_panel: v3::Panel,
     draft_note: gtk::Label,
-    editor: gtk::Revealer,
+    editor: crate::motion::SpringRevealer,
     editor_title: gtk::Label,
     save: gtk::Button,
     chapter_rows: RefCell<Vec<ChapterRow>>,
@@ -934,15 +934,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     times.append(&cancel);
     times.append(&save);
     editor_box.append(&times);
-    let editor = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(if crate::spring::animations_enabled() {
-            220
-        } else {
-            0
-        })
-        .child(&editor_box)
-        .build();
+    let editor = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &editor_box);
     chapter_panel.body.append(&editor);
     let chapters = v3::vbox(0);
     chapter_panel.body.append(&chapters);

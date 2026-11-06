@@ -110,7 +110,7 @@ struct Ui {
     staying_header: gtk::Button,
     staying_meta: gtk::Label,
     staying_chevron: gtk::Image,
-    staying_list: gtk::Revealer,
+    staying_list: crate::motion::SpringRevealer,
     staying_rows: gtk::Box,
     bus: Rc<HoverBus>,
     map: Rc<MapView>,
@@ -304,15 +304,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     staying_header.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
     staying.append(&staying_header);
     let staying_rows = v3::vbox(0);
-    let staying_list = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(if crate::spring::animations_enabled() {
-            220
-        } else {
-            0
-        })
-        .child(&staying_rows)
-        .build();
+    let staying_list = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &staying_rows);
     staying.append(&staying_list);
     content.append(&staying);
 
