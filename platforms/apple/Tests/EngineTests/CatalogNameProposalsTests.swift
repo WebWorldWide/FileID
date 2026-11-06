@@ -18,7 +18,7 @@ struct CatalogNameProposalsTests {
         let blob = Data(Float(1).bitPattern.littleEndianBytes) + Data(count: 508)
         try await db.pool.write { d in
             for id in [1, 2] {
-                try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,created_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?,?,?,1,10.0,1688428800.0,0,'image','jpg',0,'Sam - Baseball Hit')",
+                try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,created_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?,?,?,1,10.0,1688472000.0,0,'image','jpg',0,'Sam - Baseball Hit')",
                               arguments: [id, root.appendingPathComponent("IMG_\(id).jpg").path, id])
             }
             try d.execute(sql: "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Sam',0),(2,'Alex',0)")

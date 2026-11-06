@@ -10,7 +10,7 @@
         "row": {
           "id": 1,
           "kind": "image",
-          "created_at": 1688428800,
+          "created_at": 1688472000,
           "vlm_proposed_name": "Sam - Baseball Hit",
           "vlm_description": "Sam swings a baseball bat and hits the ball over the fence at the park. Mira cheers."
         }
@@ -22,7 +22,7 @@
         "row": {
           "id": 2,
           "kind": "image",
-          "created_at": 1688428800,
+          "created_at": 1688472000,
           "vlm_proposed_name": "Alex - Baseball Hit"
         }
       },
