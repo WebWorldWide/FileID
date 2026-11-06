@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
@@ -935,14 +935,11 @@ impl Cleanup {
         // Thumbnail (images decode client-side, videos get an ffmpeg keyframe;
         // everything else gets an icon).
         if member.kind == "image" || member.kind == "video" {
+            let dim = decode_px(&pic, TILE_THUMB_PX);
             let rx = if member.kind == "video" {
-                self.engine
-                    .borrow()
-                    .request_video_thumbnail(member.path.clone(), TILE_THUMB_PX)
+                self.engine.borrow().request_video_thumbnail(member.path.clone(), dim)
             } else {
-                self.engine
-                    .borrow()
-                    .request_scaled_thumbnail(member.path.clone(), TILE_THUMB_PX)
+                self.engine.borrow().request_scaled_thumbnail(member.path.clone(), dim)
             };
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {

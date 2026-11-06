@@ -32,3 +32,37 @@ pub(super) fn glass_card() -> gtk::Box {
         .css_classes(["glass-card"])
         .build()
 }
+
+/// The most pixels a thumbnail or preview decodes on its long side, however
+/// dense the display.
+const MAX_DECODE_PX: i32 = 4096;
+const MAX_SCALE: i32 = 4;
+
+/// Decode size for `dim` logical pixels on a display at `scale`: sharp on
+/// HiDPI, never past `MAX_DECODE_PX` (and never below `dim`).
+pub(super) fn hidpi_px(dim: i32, scale: i32) -> i32 {
+    dim.saturating_mul(scale.clamp(1, MAX_SCALE)).min(MAX_DECODE_PX).max(dim)
+}
+
+/// `hidpi_px` at the scale of the widget the image will be drawn in.
+pub(super) fn decode_px(widget: &impl gtk::prelude::IsA<gtk::Widget>, dim: i32) -> i32 {
+    use gtk::prelude::WidgetExt;
+    hidpi_px(dim, widget.scale_factor())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidpi_px;
+
+    #[test]
+    fn decode_sizes_follow_the_display_scale_within_a_cap() {
+        assert_eq!(hidpi_px(256, 1), 256);
+        assert_eq!(hidpi_px(256, 2), 512);
+        assert_eq!(hidpi_px(256, 3), 768);
+        assert_eq!(hidpi_px(256, 0), 256);
+        assert_eq!(hidpi_px(256, 9), 1024);
+        assert_eq!(hidpi_px(2400, 2), 4096);
+        assert_eq!(hidpi_px(1200, 2), 2400);
+        assert_eq!(hidpi_px(5000, 2), 5000);
+    }
+}

@@ -71,12 +71,15 @@ internal static class ThumbnailDiskCache
     /// an mtime get a stable key, but won't naturally invalidate on edit
     /// — these are the discovered-during-scan transient case). SHA256 over
     /// SHA1 because the CA5350 analyzer flags SHA1; not a security
-    /// concern here (path keying, no secrets), but consistency wins.</summary>
-    private static string Key(string path, double? modifiedAt)
+    /// concern here (path keying, no secrets), but consistency wins.
+    /// A video keyframe also keys on the long side it was asked for, so a
+    /// restart (or a different display scale) never reuses a smaller one.</summary>
+    internal static string Key(string path, double? modifiedAt, int? videoPixelSize = null)
     {
         var s = modifiedAt.HasValue
             ? $"{path}|{modifiedAt.Value:R}"
             : path;
+        if (videoPixelSize is { } size) s += $"|video@{size}";
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(s), hash);
         // Hex-encode first 20 bytes (40 hex chars) — plenty of distinct
@@ -96,14 +99,16 @@ internal static class ThumbnailDiskCache
     /// the UI dispatcher and return the BitmapImage. Bumps the file's
     /// last-access timestamp so the LRU sweep keeps it alive. Returns
     /// null on miss OR on any decode error (treats the cached file as
-    /// poisoned and deletes it).</summary>
+    /// poisoned and deletes it). A video keyframe (<paramref name="videoPixelSize"/>
+    /// set) decodes at its stored size, which is the size it was asked for.</summary>
     public static async Task<BitmapImage?> TryReadAsync(
         string path,
         double? modifiedAt,
         DispatcherQueue dispatcher,
-        CancellationToken ct)
+        CancellationToken ct,
+        int? videoPixelSize = null)
     {
-        var key = Key(path, modifiedAt);
+        var key = Key(path, modifiedAt, videoPixelSize);
         var cached = CachePathFor(key);
         if (!File.Exists(cached)) { return null; }
 
@@ -120,7 +125,7 @@ internal static class ThumbnailDiskCache
             return null;
         }
 
-        var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
+        var bmp = await RenderFromBytesOnDispatcherAsync(bytes, videoPixelSize is null, dispatcher, ct).ConfigureAwait(false);
         if (bmp != null)
         {
             // Only a successful decode counts as an LRU hit — a poisoned file
@@ -151,7 +156,7 @@ internal static class ThumbnailDiskCache
 
     /// <summary>Fire-and-forget write. Validates size + writes via temp + rename
     /// so a torn write never appears as a cache hit.</summary>
-    public static Task TryWriteAsync(string path, double? modifiedAt, byte[] bytes)
+    public static Task TryWriteAsync(string path, double? modifiedAt, byte[] bytes, int? videoPixelSize = null)
     {
         if (bytes.Length == 0 || bytes.Length > MaxBytesToCache)
         {
@@ -161,7 +166,7 @@ internal static class ThumbnailDiskCache
         {
             try
             {
-                var key = Key(path, modifiedAt);
+                var key = Key(path, modifiedAt, videoPixelSize);
                 var cached = CachePathFor(key);
                 var dir = Path.GetDirectoryName(cached)!;
                 Directory.CreateDirectory(dir);
@@ -282,6 +287,7 @@ internal static class ThumbnailDiskCache
     /// fired.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,
+        bool atTileSize,
         DispatcherQueue dispatcher,
         CancellationToken ct)
     {
@@ -307,8 +313,9 @@ internal static class ThumbnailDiskCache
                 stream.Seek(0);
                 // Match ThumbnailService.ThumbnailRequestPx (192). DPI-aware
                 // sampling was reverted — see the comment in
-                // ThumbnailService.cs for the rationale.
-                var bmp = new BitmapImage { DecodePixelWidth = 192 };
+                // ThumbnailService.cs for the rationale. Video keyframes are
+                // stored at the display-scaled size they were asked for.
+                var bmp = atTileSize ? new BitmapImage { DecodePixelWidth = 192 } : new BitmapImage();
                 await bmp.SetSourceAsync(stream).AsTask(ct);
                 DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(bmp);

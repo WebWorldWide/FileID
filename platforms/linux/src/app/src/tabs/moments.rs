@@ -207,7 +207,7 @@ impl CatalogUi {
             let rx = self
                 .engine
                 .borrow()
-                .request_preview(hit.path.clone(), 1600, false);
+                .request_preview(hit.path.clone(), super::util::decode_px(&self.picture, 1600), false);
             let picture = self.picture.downgrade();
             glib::MainContext::default().spawn_local(async move {
                 if let (Ok(ThumbReply::Image(decoded)), Some(picture)) =

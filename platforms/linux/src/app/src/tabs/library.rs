@@ -25,7 +25,7 @@ use gtk::glib::BoxedAnyObject;
 use super::library_pane::SelectedPane;
 use super::library_selection::{self as picking, PaneView};
 use super::offline_roots::{self, OfflineRoots};
-use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
     texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
@@ -652,7 +652,8 @@ fn tile_parts(vbox: &gtk::Box) -> Option<TileParts> {
     })
 }
 
-const THUMB_CACHE_CAP: usize = 512;
+/// 512 tiles at 1x; fewer as HiDPI tiles grow.
+const THUMB_CACHE_BYTES: usize = 512 * (TILE_THUMB_PX as usize).pow(2) * 4;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ThumbCacheKey {
@@ -681,22 +682,31 @@ thread_local! {
     static THUMB_CACHE: RefCell<(
         HashMap<ThumbCacheKey, gtk::gdk::Texture>,
         VecDeque<ThumbCacheKey>,
-    )> = RefCell::new((HashMap::new(), VecDeque::new()));
+        usize,
+    )> = RefCell::new((HashMap::new(), VecDeque::new(), 0));
 }
 
 fn thumb_cache_get(key: &ThumbCacheKey) -> Option<gtk::gdk::Texture> {
     THUMB_CACHE.with(|cache| cache.borrow().0.get(key).cloned())
 }
 
+fn texture_bytes(texture: &gtk::gdk::Texture) -> usize {
+    texture.width().max(0) as usize * texture.height().max(0) as usize * 4
+}
+
 fn thumb_cache_put(key: ThumbCacheKey, texture: gtk::gdk::Texture) {
     THUMB_CACHE.with(|cache| {
-        let (map, order) = &mut *cache.borrow_mut();
-        if map.insert(key.clone(), texture).is_none() {
-            order.push_back(key);
-            while order.len() > THUMB_CACHE_CAP {
-                if let Some(evict) = order.pop_front() {
-                    map.remove(&evict);
-                }
+        let (map, order, bytes) = &mut *cache.borrow_mut();
+        *bytes += texture_bytes(&texture);
+        match map.insert(key.clone(), texture) {
+            Some(old) => *bytes -= texture_bytes(&old),
+            None => order.push_back(key),
+        }
+        while *bytes > THUMB_CACHE_BYTES && order.len() > 1 {
+            if let Some(evict) = order.pop_front()
+                && let Some(old) = map.remove(&evict)
+            {
+                *bytes -= texture_bytes(&old);
             }
         }
     });
@@ -824,10 +834,11 @@ fn cancel_tile_token(list_item: &gtk::ListItem) {
 
 fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry: bool) {
     let cancel = renew_tile_token(list_item);
+    let dim = request.pic.upgrade().map_or(TILE_THUMB_PX, |pic| decode_px(&pic, TILE_THUMB_PX));
     let rx = request
         .engine
         .borrow()
-        .request_tile(request.key.path.clone(), TILE_THUMB_PX, request.is_video, cancel);
+        .request_tile(request.key.path.clone(), dim, request.is_video, cancel);
     glib::MainContext::default().spawn_local(async move {
         let reply = rx.recv().await.unwrap_or(ThumbReply::Dropped);
         let still_wanted = tile_still_wants(&request.list_item, &request.key);
@@ -1273,7 +1284,7 @@ fn load_preview_image(
     if row.kind == "image" || row.kind == "video" {
         let rx = engine
             .borrow()
-            .request_preview(row.path.clone(), PREVIEW_PX, row.kind == "video");
+            .request_preview(row.path.clone(), decode_px(pic, PREVIEW_PX), row.kind == "video");
         let kind = row.kind.clone();
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {

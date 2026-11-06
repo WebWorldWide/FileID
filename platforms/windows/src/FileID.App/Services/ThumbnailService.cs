@@ -207,13 +207,15 @@ internal sealed class ThumbnailService : IDisposable
                 // No ConfigureAwait(false): the returned BitmapImage is a
                 // UI-thread DispatcherObject, so keep the continuation (and the
                 // caller's, which sets tile.Thumbnail) on the UI thread.
-                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _uiDispatcher, linked.Token);
+                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _videoPixelSize, _uiDispatcher, linked.Token);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
                     _cache.Set(key, bmp, new MemoryCacheEntryOptions
                     {
-                        Size = DecodedBytesPerEntry,
+                        Size = VideoExtensions.Contains(Path.GetExtension(req.Path))
+                            ? (long)_videoPixelSize * _videoPixelSize * 4
+                            : DecodedBytesPerEntry,
                         SlidingExpiration = TimeSpan.FromMinutes(15),
                     });
                     req.Completion.TrySetResult(bmp);
@@ -378,7 +380,7 @@ internal sealed class ThumbnailService : IDisposable
 
             // Persist to L2 first so a later session / re-scroll L2-hits even if
             // no tile is currently pending (another instance, or post-timeout).
-            _ = ThumbnailDiskCache.TryWriteAsync(evt.Path, evt.ModifiedAt, bytes);
+            _ = ThumbnailDiskCache.TryWriteAsync(evt.Path, evt.ModifiedAt, bytes, _videoPixelSize);
 
             // We're already on the UI dispatcher (TryEnqueue above), so the
             // BitmapImage decode + SetSourceAsync is thread-affinity-safe.
@@ -542,6 +544,7 @@ internal sealed class ThumbnailService : IDisposable
     private static async Task<BitmapImage?> RenderAsync(
         string path,
         double? modifiedAt,
+        int videoPixelSize,
         Microsoft.UI.Dispatching.DispatcherQueue? uiDispatcher,
         CancellationToken ct)
     {
@@ -564,8 +567,11 @@ internal sealed class ThumbnailService : IDisposable
             return null;
         }
 
+        var ext = Path.GetExtension(path);
+
         // 0) Disk cache — survives app restart.
-        var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct)
+        int? diskVideoSize = VideoExtensions.Contains(ext) ? videoPixelSize : null;
+        var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct, diskVideoSize)
             .ConfigureAwait(false);
         if (diskHit != null)
         {
@@ -574,8 +580,6 @@ internal sealed class ThumbnailService : IDisposable
             return diskHit;
         }
         if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] L2_MISS file={PathRedactor.Redact(path)}");
-
-        var ext = Path.GetExtension(path);
 
         // Audio: do NOT invoke the in-process shell provider (see
         // AudioExtensions). A previously-cached cover already returned above via

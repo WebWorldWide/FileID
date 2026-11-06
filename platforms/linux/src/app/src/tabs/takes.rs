@@ -855,7 +855,7 @@ impl Ui {
         }
         let rx = self.engine.borrow().request_tile(
             quality.path.clone(),
-            COMPARE_PX,
+            super::util::decode_px(&self.best_pane.view.area, COMPARE_PX),
             video,
             self.tile_token.borrow().clone(),
         );
@@ -1164,6 +1164,7 @@ pub(super) fn load_in_order(
             if token.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
+            let dim = super::util::decode_px(&view.area, dim);
             let Some(rx) = engine.upgrade().map(|engine| {
                 engine
                     .borrow()

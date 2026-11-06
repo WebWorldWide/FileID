@@ -10,7 +10,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::offline_roots::OfflineRoots;
-use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, FileRow, ThumbReply};
 
@@ -426,7 +426,7 @@ impl SelectedPane {
         }
         let rx = self.engine.borrow().request_preview(
             row.path.clone(),
-            PANE_PREVIEW_PX,
+            decode_px(&self.picture, PANE_PREVIEW_PX),
             row.kind == "video",
         );
         let picture = self.picture.downgrade();
