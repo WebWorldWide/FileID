@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-06 — Mac app uses the engine for merge suggestions, CLIP query vectors and video thumbnails
+
+- **Mac** (agent; owner-approved digest refreshes of `EngineClient.swift`, `ThumbnailService.swift` and `CLIPModelInstaller.swift`): the app awaits `mergeSuggestions`, `clipTextEmbedding` and `thumbnailGenerated` through a new `EngineQueryReplies` (vectors by query id, thumbnails by path, `modifiedAt` and size; timeouts 60/30/15 s; cancellation, engine exit and restart release every waiter). People ▸ Suggest merges, Library search and Chat call the engine; keyword results show before the vector arrives. The app process no longer builds a CLIP text session at all (the 254 MB model now loads only in the engine). Video thumbnails come from the engine at the size shown: `generateVideoThumbnail` gains optional `maxPixelSize` (schema 1.20.0), both engines clamp it to 64–2048, default to 192 and never upscale (the Rust helper did upscale before); Quick Look only when the engine is down or silent.
+- Verified: Swift 826 tests (serial, one against the real engine), Rust 1,139, C# 62, Swift conformance, gates. Not yet seen on screen.
+
 ## 2026-11-06 — renameFiles carries uncatalogued sidecars and rolls back a failed group
 
 - **Both engines** (agent; owner-approved `commands/bulk.rs` digest refresh): `renameFiles` moves an uncatalogued `<stem>.xmp`/`.aae` or `<name>.xmp` to `<new stem><its old suffix>` with a no-replace rename, only when every same-stem RAW, JPEG/HEIC and MOV in the folder is in the batch (a lone JPEG never takes its RAW's XMP). Best effort: an occupied target or an error leaves the sidecar and adds a note. Undo brings it back. `proposeNames` no longer holds a group for an unscanned `.xmp`/`.aae`.
