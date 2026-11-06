@@ -26,6 +26,7 @@ internal sealed class NameStyleCard : UserControl
     private readonly Brush _text2 = ThemeHelper.GetBrushSafe("Text2Brush");
     private readonly Brush _text3 = ThemeHelper.GetBrushSafe("Text3Brush");
     private readonly Brush _chip = new SolidColorBrush(Color.FromArgb(0x1F, 0xB1, 0x9B, 0xCE));
+    private readonly Brush _companionChip = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xCC, 0x00));
     private readonly Style _rowContainer;
     private readonly ComboBox _style = new() { MinWidth = 180 };
     private readonly Slider _length = new() { Minimum = NameStylePolicy.MinLength, Maximum = NameStylePolicy.MaxLength, StepFrequency = 1, SmallChange = 1, LargeChange = 10, MinWidth = 220 };
@@ -41,6 +42,8 @@ internal sealed class NameStyleCard : UserControl
     private readonly Grid _header;
     private readonly ListView _list = new() { SelectionMode = ListViewSelectionMode.None, MaxHeight = 440, Visibility = Visibility.Collapsed };
     private IReadOnlyList<NameProposalRow> _rows = Array.Empty<NameProposalRow>();
+    private readonly Dictionary<long, RowView> _views = new();
+    private bool _syncingChecks;
     private CancellationTokenSource? _previewCts;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _debounce;
     private int _generation;
@@ -289,6 +292,7 @@ internal sealed class NameStyleCard : UserControl
     private void RenderRows()
     {
         _list.Items.Clear();
+        _views.Clear();
         var animate = !ReducedMotion.Instance.IsReduced;
         foreach (var row in _rows) _list.Items.Add(BuildRow(row, animate));
         var any = _rows.Count > 0;
@@ -297,51 +301,109 @@ internal sealed class NameStyleCard : UserControl
         SyncApply();
     }
 
+    private sealed record RowView(Grid Grid, CheckBox Check, TextBox? Box, TextBlock? Follows);
+
     private Grid BuildRow(NameProposalRow row, bool animate)
     {
         var grid = new Grid { ColumnSpacing = 10, Padding = new Thickness(12, 4, 12, 4), Opacity = row.CanCheck ? 1 : 0.5 };
         Columns(grid);
         var check = new CheckBox { IsChecked = row.Checked, IsEnabled = row.CanCheck, MinWidth = 0, VerticalAlignment = VerticalAlignment.Center };
         AutomationProperties.SetName(check, "Rename " + row.CurrentName);
-        var original = new TextBlock { Text = row.CurrentName, Foreground = _text2, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        var original = new TextBlock
+        {
+            Text = row.IsFollower ? "\u21B3 " + row.CurrentName : row.CurrentName,
+            Foreground = _text2,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(row.IsFollower ? 16 : 0, 0, 0, 0),
+        };
         ToolTipService.SetToolTip(original, row.Path);
         UIElement proposed;
-        if (row.CanCheck)
+        TextBox? box = null;
+        TextBlock? follows = null;
+        if (row.CanCheck && row.IsFollower)
         {
-            var box = new TextBox { Text = row.Edited, Foreground = _gold, IsEnabled = row.Checked, VerticalAlignment = VerticalAlignment.Center };
+            follows = new TextBlock { Text = row.Edited, Foreground = _gold, Opacity = row.Checked ? 0.85 : 0.45, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+            ToolTipService.SetToolTip(follows, "Follows the name above");
+            proposed = follows;
+        }
+        else if (row.CanCheck)
+        {
+            box = new TextBox { Text = row.Edited, Foreground = _gold, IsEnabled = row.Checked, VerticalAlignment = VerticalAlignment.Center };
             AutomationProperties.SetName(box, "New name for " + row.CurrentName);
+            var editor = box;
             box.TextChanged += (_, _) => DebugLog.SafeRun("NameStyleCard.Edit", () =>
             {
-                row.Edited = box.Text;
-                AutomationProperties.SetName(grid, NameStylePolicy.AccessibleName(row));
+                var followers = NameStylePolicy.Edit(_rows, row.FileId, editor.Text);
+                AutomationProperties.SetName(grid, NameStylePolicy.AccessibleName(row, _rows));
+                foreach (var follower in followers)
+                {
+                    if (!_views.TryGetValue(follower.FileId, out var view)) continue;
+                    if (view.Follows is not null) view.Follows.Text = follower.Edited;
+                    AutomationProperties.SetName(view.Grid, NameStylePolicy.AccessibleName(follower, _rows));
+                }
                 SyncApply();
             });
-            check.Checked += (_, _) => DebugLog.SafeRun("NameStyleCard.Check", () => { row.Checked = true; box.IsEnabled = true; SyncApply(); });
-            check.Unchecked += (_, _) => DebugLog.SafeRun("NameStyleCard.Uncheck", () => { row.Checked = false; box.IsEnabled = false; SyncApply(); });
             proposed = box;
         }
         else
         {
             proposed = new TextBlock { Text = "Keeps its name", Foreground = _text3, VerticalAlignment = VerticalAlignment.Center };
         }
-        var chip = new Border
+        if (row.CanCheck)
+        {
+            check.Checked += (_, _) => DebugLog.SafeRun("NameStyleCard.Check", () => OnChecked(row, true));
+            check.Unchecked += (_, _) => DebugLog.SafeRun("NameStyleCard.Uncheck", () => OnChecked(row, false));
+        }
+        var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        if (NameStylePolicy.CompanionChip(row, _rows) is { } companions)
+        {
+            var companionChip = new Border
+            {
+                Background = _companionChip,
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(7, 2, 7, 2),
+                Child = new TextBlock { Text = companions, Foreground = _gold, FontSize = 11.5 },
+            };
+            ToolTipService.SetToolTip(companionChip, "Renamed together with this file");
+            chips.Children.Add(companionChip);
+        }
+        chips.Children.Add(new Border
         {
             Background = _chip,
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(7, 2, 7, 2),
-            VerticalAlignment = VerticalAlignment.Center,
             Child = new TextBlock { Text = NameStylePolicy.ReasonLabel(row.Reason), Foreground = _ai, FontSize = 11.5 },
-        };
+        });
         Grid.SetColumn(original, 1);
         Grid.SetColumn((FrameworkElement)proposed, 2);
-        Grid.SetColumn(chip, 3);
+        Grid.SetColumn(chips, 3);
         grid.Children.Add(check);
         grid.Children.Add(original);
         grid.Children.Add(proposed);
-        grid.Children.Add(chip);
-        AutomationProperties.SetName(grid, NameStylePolicy.AccessibleName(row));
+        grid.Children.Add(chips);
+        AutomationProperties.SetName(grid, NameStylePolicy.AccessibleName(row, _rows));
+        _views[row.FileId] = new RowView(grid, check, box, follows);
         if (animate) grid.Loaded += (_, _) => DebugLog.SafeRun("NameStyleCard.RowIn", () => SpringIn(grid));
         return grid;
+    }
+
+    private void OnChecked(NameProposalRow row, bool isChecked)
+    {
+        if (_syncingChecks) return;
+        _syncingChecks = true;
+        try
+        {
+            foreach (var member in NameStylePolicy.SetChecked(_rows, row.FileId, isChecked))
+            {
+                if (!_views.TryGetValue(member.FileId, out var view)) continue;
+                view.Check.IsChecked = isChecked;
+                if (view.Box is not null) view.Box.IsEnabled = isChecked;
+                if (view.Follows is not null) view.Follows.Opacity = isChecked ? 0.85 : 0.45;
+            }
+        }
+        finally { _syncingChecks = false; }
+        SyncApply();
     }
 
     private static void SpringIn(UIElement row)

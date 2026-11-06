@@ -55,21 +55,91 @@ internal static class NameStylePolicy
         "budget" => "Too long for the length limit",
         "reserved" => "Not allowed as a file name",
         "collision" => "No free name in this folder",
+        UnscannedCompanion => "Its partner file isn't scanned yet",
         _ => "Nothing to name it from yet",
     };
 
-    /// <summary>Rows for a reply. A file unticked in the last preview stays unticked; rows
-    /// without a proposed name can't be ticked.</summary>
+    public const string UnscannedCompanion = "unscannedCompanion";
+    private const string GroupMarker = "|group:";
+
+    /// <summary>Splits a proposeNames evidenceID into its reason and the companion group's
+    /// leader file ID ("proposedName|group:11"), matching both engines.</summary>
+    public static (string Reason, long? Group) ParseReason(string? evidenceId)
+    {
+        var text = evidenceId ?? "noEvidence";
+        var marker = text.IndexOf(GroupMarker, StringComparison.Ordinal);
+        if (marker < 0) return (text, null);
+        return (text[..marker], long.TryParse(text[(marker + GroupMarker.Length)..], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var group) ? group : null);
+    }
+
+    /// <summary>Rows for a reply, companions kept together leader first. A file (or group)
+    /// unticked in the last preview stays unticked; rows without a proposed name can't be ticked.</summary>
     public static IReadOnlyList<NameProposalRow> Rows(IEnumerable<CatalogHit> hits, IReadOnlyList<NameProposalRow> previous)
     {
-        var unticked = previous.Where(r => r.CanCheck && !r.Checked).Select(r => r.FileId).ToHashSet();
-        return hits.Where(h => h.Kind == "proposedName")
-            .Select(h => new NameProposalRow(h.FileID, h.Path, h.Text, h.EvidenceID ?? "noEvidence")
+        var unticked = previous.Where(r => r.CanCheck && !r.Checked).Select(r => r.GroupKey).ToHashSet();
+        var rows = hits.Where(h => h.Kind == "proposedName")
+            .Select(h =>
             {
-                Edited = h.Text,
-                Checked = h.Text.Length > 0 && !unticked.Contains(h.FileID),
+                var (reason, group) = ParseReason(h.EvidenceID);
+                return new NameProposalRow(h.FileID, h.Path, h.Text, reason)
+                {
+                    Group = group,
+                    Edited = h.Text,
+                    Checked = h.Text.Length > 0 && !unticked.Contains(group ?? h.FileID),
+                };
             })
             .ToArray();
+        var leaderStems = rows.Where(r => r.IsLeader).GroupBy(r => r.FileId).ToDictionary(g => g.Key, g => Stem(g.First().Proposed));
+        foreach (var row in rows)
+        {
+            if (row.Group is { } group && leaderStems.TryGetValue(group, out var stem))
+                row.Suffix = row.Proposed.StartsWith(stem, StringComparison.Ordinal) ? row.Proposed[stem.Length..] : string.Empty;
+        }
+        return rows;
+    }
+
+    /// <summary>The name before its last dot, like the engines' split (a leading dot is part of the stem).</summary>
+    public static string Stem(string name)
+    {
+        var dot = name.LastIndexOf('.');
+        return dot > 0 && dot + 1 < name.Length ? name[..dot] : name;
+    }
+
+    /// <summary>Ticking any member of a companion group ticks the whole group. Returns the rows changed.</summary>
+    public static IReadOnlyList<NameProposalRow> SetChecked(IReadOnlyList<NameProposalRow> rows, long fileId, bool isChecked)
+    {
+        var key = rows.FirstOrDefault(r => r.FileId == fileId)?.GroupKey;
+        if (key is null) return Array.Empty<NameProposalRow>();
+        var changed = rows.Where(r => r.GroupKey == key && r.CanCheck).ToArray();
+        foreach (var row in changed) row.Checked = isChecked;
+        return changed;
+    }
+
+    /// <summary>Editing the leader's name gives every companion the same stem. Returns the followers changed.</summary>
+    public static IReadOnlyList<NameProposalRow> Edit(IReadOnlyList<NameProposalRow> rows, long fileId, string text)
+    {
+        var row = rows.FirstOrDefault(r => r.FileId == fileId);
+        if (row is null || row.IsFollower) return Array.Empty<NameProposalRow>();
+        row.Edited = text;
+        if (!row.IsLeader) return Array.Empty<NameProposalRow>();
+        var stem = Stem(text.Trim());
+        var followers = Followers(rows, row).Where(r => r.CanCheck).ToArray();
+        foreach (var follower in followers) follower.Edited = stem + follower.Suffix;
+        return followers;
+    }
+
+    public static IEnumerable<NameProposalRow> Followers(IEnumerable<NameProposalRow> rows, NameProposalRow leader) =>
+        rows.Where(r => r.IsFollower && r.Group == leader.FileId);
+
+    /// <summary>The leader's chip naming its companions' extensions: "+ ARW, XMP".</summary>
+    public static string? CompanionChip(NameProposalRow row, IReadOnlyList<NameProposalRow> rows)
+    {
+        if (!row.IsLeader) return null;
+        var extensions = Followers(rows, row)
+            .Select(r => { var name = r.CurrentName; var stem = Stem(name); return stem.Length < name.Length ? name[(stem.Length + 1)..].ToUpperInvariant() : string.Empty; })
+            .ToArray();
+        return extensions.Length == 0 ? null : "+ " + string.Join(", ", extensions);
     }
 
     public static string? ValidName(string? text)
@@ -79,12 +149,19 @@ internal static class NameStylePolicy
         return name;
     }
 
-    public static IReadOnlyList<RenameEntry> Renames(IEnumerable<NameProposalRow> rows) =>
-        rows.Where(r => r.Checked && r.CanCheck)
+    /// <summary>Ticked renames in row order, as one batch. A companion group goes whole or not
+    /// at all: one invalid member name holds every member back.</summary>
+    public static IReadOnlyList<RenameEntry> Renames(IEnumerable<NameProposalRow> rows)
+    {
+        var list = rows as IReadOnlyList<NameProposalRow> ?? rows.ToArray();
+        var blocked = list.Where(r => r.Group is not null && r.Checked && r.CanCheck && ValidName(r.Edited) is null)
+            .Select(r => r.GroupKey).ToHashSet();
+        return list.Where(r => r.Checked && r.CanCheck && !blocked.Contains(r.GroupKey))
             .Select(r => (Row: r, Name: ValidName(r.Edited)))
             .Where(x => x.Name is not null && x.Name != x.Row.CurrentName)
             .Select(x => new RenameEntry(x.Row.FileId, x.Name!))
             .ToArray();
+    }
 
     /// <summary>The renames that put back the original names of the files the engine confirmed.</summary>
     public static IReadOnlyList<RenameEntry> UndoEntries(
@@ -97,13 +174,17 @@ internal static class NameStylePolicy
             .ToArray();
     }
 
-    public static string AccessibleName(NameProposalRow row)
+    public static string AccessibleName(NameProposalRow row, IReadOnlyList<NameProposalRow>? rows = null)
     {
         var reason = ReasonLabel(row.Reason);
         var because = char.ToLowerInvariant(reason[0]) + reason[1..];
+        var others = row.Group is { } group && rows is not null
+            ? rows.Where(r => r.Group == group && r.FileId != row.FileId).Select(r => r.CurrentName).ToArray()
+            : Array.Empty<string>();
+        var together = others.Length == 0 ? string.Empty : ", together with " + string.Join(", ", others);
         return row.CanCheck
-            ? $"{row.CurrentName}, rename to {row.Edited.Trim()}, {because}"
-            : $"{row.CurrentName}, keeps its name, {because}";
+            ? $"{row.CurrentName}, rename to {row.Edited.Trim()}, {because}{together}"
+            : $"{row.CurrentName}, keeps its name, {because}{together}";
     }
 }
 
@@ -111,6 +192,11 @@ internal sealed record NameProposalRow(long FileId, string Path, string Proposed
 {
     public string Edited { get; set; } = string.Empty;
     public bool Checked { get; set; }
+    public long? Group { get; init; }
+    public string Suffix { get; set; } = string.Empty;
     public bool CanCheck => Proposed.Length > 0;
+    public long GroupKey => Group ?? FileId;
+    public bool IsLeader => Group == FileId;
+    public bool IsFollower => Group is { } group && group != FileId;
     public string CurrentName => System.IO.Path.GetFileName(Path.Replace('\\', '/'));
 }

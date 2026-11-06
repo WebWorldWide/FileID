@@ -81,7 +81,29 @@ pub(super) fn reason_label(reason: &str) -> &'static str {
         "budget" => "Too long for the length limit",
         "reserved" => "Not allowed as a file name",
         "collision" => "No free name in this folder",
+        UNSCANNED_COMPANION => "Its partner file isn't scanned yet",
         _ => "Nothing to name it from yet",
+    }
+}
+
+pub(super) const UNSCANNED_COMPANION: &str = "unscannedCompanion";
+const GROUP_MARKER: &str = "|group:";
+
+/// Splits a proposeNames evidenceID into its reason and the companion
+/// group's leader file ID ("proposedName|group:11").
+pub(super) fn parse_reason(evidence: Option<&str>) -> (String, Option<i64>) {
+    let text = evidence.unwrap_or("noEvidence");
+    match text.split_once(GROUP_MARKER) {
+        Some((reason, leader)) => (reason.to_owned(), leader.parse().ok()),
+        None => (text.to_owned(), None),
+    }
+}
+
+/// The name before its last dot, like the engines' split.
+pub(super) fn stem(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(dot) if dot > 0 && dot + 1 < name.len() => &name[..dot],
+        _ => name,
     }
 }
 
@@ -93,36 +115,114 @@ pub(super) struct Row {
     pub reason: String,
     pub edited: String,
     pub checked: bool,
+    pub group: Option<i64>,
+    pub suffix: String,
 }
 
 impl Row {
     pub fn can_check(&self) -> bool {
         !self.proposed.is_empty()
     }
+    pub fn group_key(&self) -> i64 {
+        self.group.unwrap_or(self.file_id)
+    }
+    pub fn is_leader(&self) -> bool {
+        self.group == Some(self.file_id)
+    }
+    pub fn is_follower(&self) -> bool {
+        self.group.is_some_and(|group| group != self.file_id)
+    }
     pub fn current_name(&self) -> &str {
         fileid_engine::util::display::basename(&self.path)
     }
 }
 
-/// Rows for a reply. A file unticked in the last preview stays unticked;
-/// rows without a proposed name can't be ticked.
+/// Rows for a reply, companions kept together leader first. A file (or
+/// group) unticked in the last preview stays unticked; rows without a
+/// proposed name can't be ticked.
 pub(super) fn rows(hits: &[CatalogHit], previous: &[Row]) -> Vec<Row> {
     let unticked: HashSet<i64> = previous
         .iter()
         .filter(|row| row.can_check() && !row.checked)
-        .map(|row| row.file_id)
+        .map(Row::group_key)
         .collect();
-    hits.iter()
+    let mut rows: Vec<Row> = hits
+        .iter()
         .filter(|hit| hit.kind == "proposedName")
-        .map(|hit| Row {
-            file_id: hit.file_id,
-            path: hit.path.clone(),
-            proposed: hit.text.clone(),
-            reason: hit.evidence_id.clone().unwrap_or_else(|| "noEvidence".to_owned()),
-            edited: hit.text.clone(),
-            checked: !hit.text.is_empty() && !unticked.contains(&hit.file_id),
+        .map(|hit| {
+            let (reason, group) = parse_reason(hit.evidence_id.as_deref());
+            Row {
+                file_id: hit.file_id,
+                path: hit.path.clone(),
+                proposed: hit.text.clone(),
+                reason,
+                edited: hit.text.clone(),
+                checked: !hit.text.is_empty() && !unticked.contains(&group.unwrap_or(hit.file_id)),
+                group,
+                suffix: String::new(),
+            }
         })
-        .collect()
+        .collect();
+    let leader_stems: HashMap<i64, String> = rows
+        .iter()
+        .filter(|row| row.is_leader())
+        .map(|row| (row.file_id, stem(&row.proposed).to_owned()))
+        .collect();
+    for row in &mut rows {
+        if let Some(leader_stem) = row.group.and_then(|group| leader_stems.get(&group)) {
+            row.suffix = row.proposed.strip_prefix(leader_stem.as_str()).unwrap_or_default().to_owned();
+        }
+    }
+    rows
+}
+
+/// Ticking any member of a companion group ticks the whole group; returns
+/// the indices changed.
+pub(super) fn set_checked(rows: &mut [Row], file_id: i64, checked: bool) -> Vec<usize> {
+    let Some(key) = rows.iter().find(|row| row.file_id == file_id).map(Row::group_key) else { return Vec::new() };
+    let mut changed = Vec::new();
+    for (index, row) in rows.iter_mut().enumerate() {
+        if row.group_key() == key && row.can_check() {
+            row.checked = checked;
+            changed.push(index);
+        }
+    }
+    changed
+}
+
+/// Editing the leader's name gives every companion the same stem; returns
+/// the follower indices changed.
+pub(super) fn edit(rows: &mut [Row], file_id: i64, text: &str) -> Vec<usize> {
+    let Some(at) = rows.iter().position(|row| row.file_id == file_id && !row.is_follower()) else { return Vec::new() };
+    rows[at].edited = text.to_owned();
+    if !rows[at].is_leader() {
+        return Vec::new();
+    }
+    let new_stem = stem(text.trim()).to_owned();
+    let mut changed = Vec::new();
+    for (index, row) in rows.iter_mut().enumerate() {
+        if row.is_follower() && row.group == Some(file_id) && row.can_check() {
+            row.edited = format!("{new_stem}{}", row.suffix);
+            changed.push(index);
+        }
+    }
+    changed
+}
+
+/// The leader's chip naming its companions' extensions: "+ ARW, XMP".
+pub(super) fn companion_chip(row: &Row, rows: &[Row]) -> Option<String> {
+    if !row.is_leader() {
+        return None;
+    }
+    let extensions: Vec<String> = rows
+        .iter()
+        .filter(|other| other.is_follower() && other.group == Some(row.file_id))
+        .map(|other| {
+            let name = other.current_name();
+            name.get(stem(name).len() + 1..).unwrap_or_default().to_uppercase()
+        })
+        .collect();
+    (!extensions.is_empty()).then(|| format!("+ {}", extensions.join(", ")))
 }
 
 pub(super) fn valid_name(text: &str) -> Option<String> {
@@ -130,9 +230,16 @@ pub(super) fn valid_name(text: &str) -> Option<String> {
     (!name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])).then(|| name.to_owned())
 }
 
+/// Ticked renames in row order, as one batch. A companion group goes whole
+/// or not at all: one invalid member name holds every member back.
 pub(super) fn renames(rows: &[Row]) -> Vec<RenameEntry> {
+    let blocked: HashSet<i64> = rows
+        .iter()
+        .filter(|row| row.group.is_some() && row.checked && row.can_check() && valid_name(&row.edited).is_none())
+        .map(Row::group_key)
+        .collect();
     rows.iter()
-        .filter(|row| row.checked && row.can_check())
+        .filter(|row| row.checked && row.can_check() && !blocked.contains(&row.group_key()))
         .filter_map(|row| {
             let name = valid_name(&row.edited)?;
             (name != row.current_name()).then_some(RenameEntry { file_id: row.file_id, new_name: name })
@@ -140,13 +247,22 @@ pub(super) fn renames(rows: &[Row]) -> Vec<RenameEntry> {
         .collect()
 }
 
-pub(super) fn accessible_label(row: &Row) -> String {
+pub(super) fn accessible_label(row: &Row, rows: &[Row]) -> String {
     let reason = reason_label(&row.reason);
     let because = reason[..1].to_lowercase() + &reason[1..];
+    let others: Vec<&str> = match row.group {
+        Some(group) => rows
+            .iter()
+            .filter(|other| other.group == Some(group) && other.file_id != row.file_id)
+            .map(Row::current_name)
+            .collect(),
+        None => Vec::new(),
+    };
+    let together = if others.is_empty() { String::new() } else { format!(", together with {}", others.join(", ")) };
     if row.can_check() {
-        format!("{}, rename to {}, {because}", row.current_name(), row.edited.trim())
+        format!("{}, rename to {}, {because}{together}", row.current_name(), row.edited.trim())
     } else {
-        format!("{}, keeps its name, {because}", row.current_name())
+        format!("{}, keeps its name, {because}{together}", row.current_name())
     }
 }
 
@@ -567,6 +683,12 @@ fn column(
     ui.view.append_column(&column);
 }
 
+fn refresh_rows(ui: &NamingUi, indices: &[usize]) {
+    for &index in indices {
+        ui.store.items_changed(index as u32, 1, 1);
+    }
+}
+
 fn add_columns(ui: &Rc<NamingUi>) {
     column(
         ui,
@@ -581,7 +703,13 @@ fn add_columns(ui: &Rc<NamingUi>) {
         },
         |_, row, widget| {
             let Some(label) = widget.downcast_ref::<gtk::Label>() else { return };
-            label.set_label(row.current_name());
+            if row.is_follower() {
+                label.set_label(&format!("\u{21B3} {}", row.current_name()));
+                label.set_margin_start(16);
+            } else {
+                label.set_label(row.current_name());
+                label.set_margin_start(0);
+            }
             label.set_tooltip_text(Some(&row.path));
         },
     );
@@ -600,33 +728,36 @@ fn add_columns(ui: &Rc<NamingUi>) {
                     return;
                 }
                 let Some(index) = item_index(&item) else { return };
-                let label = {
+                let (followers, label) = {
                     let mut rows = ui.rows.borrow_mut();
-                    let Some(row) = rows.get_mut(index).filter(|row| row.can_check()) else { return };
-                    row.edited = editable.text().to_string();
-                    accessible_label(row)
+                    let Some(file_id) = rows.get(index).filter(|row| row.can_check()).map(|row| row.file_id) else { return };
+                    let followers = edit(&mut rows, file_id, &editable.text());
+                    (followers, accessible_label(&rows[index], &rows))
                 };
                 editable.update_property(&[gtk::accessible::Property::Description(&label)]);
+                refresh_rows(&ui, &followers);
                 sync_apply(&ui);
             });
             editable.upcast()
         },
-        |_, row, widget| {
+        |ui, row, widget| {
             let Some(editable) = widget.downcast_ref::<gtk::EditableLabel>() else { return };
             if row.can_check() {
                 editable.set_text(&row.edited);
-                editable.set_editable(true);
+                editable.set_editable(!row.is_follower());
                 editable.add_css_class("gold-accent");
                 editable.remove_css_class("dim-label");
+                editable.set_tooltip_text(row.is_follower().then_some("Follows the name above"));
             } else {
                 editable.set_text("Keeps its name");
                 editable.set_editable(false);
                 editable.remove_css_class("gold-accent");
                 editable.add_css_class("dim-label");
+                editable.set_tooltip_text(None);
             }
             editable.update_property(&[
                 gtk::accessible::Property::Label(&format!("New name for {}", row.current_name())),
-                gtk::accessible::Property::Description(&accessible_label(row)),
+                gtk::accessible::Property::Description(&accessible_label(row, &ui.rows.borrow())),
             ]);
         },
     );
@@ -634,10 +765,24 @@ fn add_columns(ui: &Rc<NamingUi>) {
         ui,
         "Reason",
         false,
-        |_, _| gtk::Label::builder().css_classes(["chip", "reason-chip"]).build().upcast(),
-        |_, row, widget| {
-            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
-                label.set_label(reason_label(&row.reason));
+        |_, _| {
+            let chips = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+            let companions = gtk::Label::builder()
+                .css_classes(["chip", "gold-accent"])
+                .tooltip_text("Renamed together with this file")
+                .visible(false)
+                .build();
+            chips.append(&companions);
+            chips.append(&gtk::Label::builder().css_classes(["chip", "reason-chip"]).build());
+            chips.upcast()
+        },
+        |ui, row, widget| {
+            let Some(companions) = widget.first_child().and_downcast::<gtk::Label>() else { return };
+            let chip = companion_chip(row, &ui.rows.borrow());
+            companions.set_visible(chip.is_some());
+            companions.set_label(chip.as_deref().unwrap_or_default());
+            if let Some(reason) = companions.next_sibling().and_downcast::<gtk::Label>() {
+                reason.set_label(reason_label(&row.reason));
             }
         },
     );
@@ -655,18 +800,21 @@ fn add_columns(ui: &Rc<NamingUi>) {
                     return;
                 }
                 let Some(index) = item_index(&item) else { return };
-                if let Some(row) = ui.rows.borrow_mut().get_mut(index).filter(|row| row.can_check()) {
-                    row.checked = check.is_active();
-                }
+                let others: Vec<usize> = {
+                    let mut rows = ui.rows.borrow_mut();
+                    let Some(file_id) = rows.get(index).filter(|row| row.can_check()).map(|row| row.file_id) else { return };
+                    set_checked(&mut rows, file_id, check.is_active()).into_iter().filter(|i| *i != index).collect()
+                };
+                refresh_rows(&ui, &others);
                 sync_apply(&ui);
             });
             check.upcast()
         },
-        |_, row, widget| {
+        |ui, row, widget| {
             let Some(check) = widget.downcast_ref::<gtk::CheckButton>() else { return };
             check.set_active(row.checked);
             check.set_sensitive(row.can_check());
-            check.update_property(&[gtk::accessible::Property::Label(&accessible_label(row))]);
+            check.update_property(&[gtk::accessible::Property::Label(&accessible_label(row, &ui.rows.borrow()))]);
         },
     );
 }
@@ -815,7 +963,68 @@ mod tests {
     #[test]
     fn accessible_label_reads_name_target_and_reason() {
         let list = rows(&[hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"), hit(2, "Beach.jpg", "", "unchanged")], &[]);
-        assert_eq!(accessible_label(&list[0]), "IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name");
-        assert_eq!(accessible_label(&list[1]), "Beach.jpg, keeps its name, already well named");
+        assert_eq!(accessible_label(&list[0], &list), "IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name");
+        assert_eq!(accessible_label(&list[1], &list), "Beach.jpg, keeps its name, already well named");
+    }
+
+    fn pair() -> Vec<CatalogHit> {
+        vec![
+            hit(11, "DSC_1.JPG", "beach-sunset_2.JPG", "proposedName|group:11"),
+            hit(10, "DSC_1.ARW", "beach-sunset_2.ARW", "proposedName|group:11"),
+            hit(12, "DSC_1.ARW.xmp", "beach-sunset_2.ARW.xmp", "proposedName|group:11"),
+            hit(14, "DSC_3.ARW", "lone-hill.ARW", "proposedName"),
+        ]
+    }
+
+    #[test]
+    fn companions_arrive_together_leader_first() {
+        let list = rows(&pair(), &[]);
+        assert_eq!(list.iter().map(|row| row.file_id).collect::<Vec<_>>(), vec![11, 10, 12, 14]);
+        assert!(list.iter().all(|row| row.reason == "proposedName"));
+        assert!(list[0].is_leader() && list[1].is_follower() && list[2].is_follower() && list[3].group.is_none());
+        assert_eq!(list.iter().map(|row| row.suffix.as_str()).collect::<Vec<_>>(), vec![".JPG", ".ARW", ".ARW.xmp", ""]);
+        assert_eq!(companion_chip(&list[0], &list).as_deref(), Some("+ ARW, XMP"));
+        assert_eq!(companion_chip(&list[1], &list), None);
+        assert_eq!(reason_label("unscannedCompanion"), "Its partner file isn't scanned yet");
+        assert_eq!(
+            accessible_label(&list[1], &list),
+            "DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp"
+        );
+        assert_eq!(parse_reason(Some("collision|group:30")), ("collision".to_owned(), Some(30)));
+        assert_eq!(parse_reason(None), ("noEvidence".to_owned(), None));
+    }
+
+    #[test]
+    fn ticking_the_leader_ticks_the_whole_group_and_stays_unticked() {
+        let mut list = rows(&pair(), &[]);
+        assert_eq!(set_checked(&mut list, 11, false), vec![0, 1, 2]);
+        assert_eq!(list.iter().map(|row| row.checked).collect::<Vec<_>>(), vec![false, false, false, true]);
+        assert_eq!(rows(&pair(), &list).iter().map(|row| row.checked).collect::<Vec<_>>(), vec![false, false, false, true]);
+        set_checked(&mut list, 10, true);
+        assert!(list.iter().all(|row| row.checked));
+    }
+
+    #[test]
+    fn editing_the_leader_gives_every_companion_the_same_stem() {
+        let mut list = rows(&pair(), &[]);
+        assert_eq!(edit(&mut list, 11, " sunset-walk.JPG "), vec![1, 2]);
+        assert_eq!(
+            list.iter().map(|row| row.edited.as_str()).collect::<Vec<_>>(),
+            vec![" sunset-walk.JPG ", "sunset-walk.ARW", "sunset-walk.ARW.xmp", "lone-hill.ARW"]
+        );
+        assert!(edit(&mut list, 10, "rogue.ARW").is_empty());
+        assert_eq!(list[1].edited, "sunset-walk.ARW");
+        let sent: Vec<(i64, String)> = renames(&list).into_iter().map(|entry| (entry.file_id, entry.new_name)).collect();
+        assert_eq!(
+            sent,
+            vec![
+                (11, "sunset-walk.JPG".to_owned()),
+                (10, "sunset-walk.ARW".to_owned()),
+                (12, "sunset-walk.ARW.xmp".to_owned()),
+                (14, "lone-hill.ARW".to_owned()),
+            ]
+        );
+        edit(&mut list, 11, "bad/name.JPG");
+        assert_eq!(renames(&list).into_iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![14]);
     }
 }

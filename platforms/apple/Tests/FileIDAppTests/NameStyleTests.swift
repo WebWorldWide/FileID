@@ -79,4 +79,60 @@ struct NameStyleTests {
         #expect(NameStyle.accessibilityLabel(rows[0]) == "IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name")
         #expect(NameStyle.accessibilityLabel(rows[1]) == "Beach.jpg, keeps its name, already well named")
     }
+
+    private func pair() -> [CatalogHit] {
+        [hit(11, "DSC_1.JPG", "beach-sunset_2.JPG", "proposedName|group:11"),
+         hit(10, "DSC_1.ARW", "beach-sunset_2.ARW", "proposedName|group:11"),
+         hit(12, "DSC_1.ARW.xmp", "beach-sunset_2.ARW.xmp", "proposedName|group:11"),
+         hit(14, "DSC_3.ARW", "lone-hill.ARW", "proposedName")]
+    }
+
+    @Test func companionsArriveTogetherLeaderFirst() {
+        let rows = NameStyle.rows(from: pair(), previous: [])
+        #expect(rows.map(\.fileID) == [11, 10, 12, 14])
+        #expect(rows.map(\.reason) == ["proposedName", "proposedName", "proposedName", "proposedName"])
+        #expect(rows[0].isLeader && rows[1].isFollower && rows[2].isFollower && rows[3].group == nil)
+        #expect(rows.map(\.suffix) == [".JPG", ".ARW", ".ARW.xmp", ""])
+        #expect(NameStyle.companionChip(rows[0], in: rows) == "+ ARW, XMP")
+        #expect(NameStyle.companionChip(rows[1], in: rows) == nil && NameStyle.companionChip(rows[3], in: rows) == nil)
+        #expect(NameStyle.reasonLabel("unscannedCompanion") == "Its partner file isn't scanned yet")
+        #expect(NameStyle.accessibilityLabel(rows[1], in: rows)
+                == "DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp")
+    }
+
+    @Test func tickingTheLeaderTicksTheWholeGroupAndStaysUnticked() {
+        var rows = NameStyle.rows(from: pair(), previous: [])
+        NameStyle.setChecked(&rows, fileID: 11, false)
+        #expect(rows.map(\.checked) == [false, false, false, true])
+        #expect(NameStyle.rows(from: pair(), previous: rows).map(\.checked) == [false, false, false, true])
+        NameStyle.setChecked(&rows, fileID: 11, true)
+        #expect(rows.allSatisfy { $0.checked })
+    }
+
+    @Test func editingTheLeaderGivesEveryCompanionTheSameStem() {
+        var rows = NameStyle.rows(from: pair(), previous: [])
+        NameStyle.edit(&rows, fileID: 11, " sunset-walk.JPG ")
+        #expect(rows.map(\.edited) == [" sunset-walk.JPG ", "sunset-walk.ARW", "sunset-walk.ARW.xmp", "lone-hill.ARW"])
+        NameStyle.edit(&rows, fileID: 10, "rogue.ARW")
+        #expect(rows[1].edited == "sunset-walk.ARW")
+        #expect(NameStyle.renames(rows) == [
+            CatalogWrites.NamedRename(fileID: 11, newName: "sunset-walk.JPG", group: 11),
+            CatalogWrites.NamedRename(fileID: 10, newName: "sunset-walk.ARW", group: 11),
+            CatalogWrites.NamedRename(fileID: 12, newName: "sunset-walk.ARW.xmp", group: 11),
+            CatalogWrites.NamedRename(fileID: 14, newName: "lone-hill.ARW"),
+        ])
+        NameStyle.edit(&rows, fileID: 11, "bad/name.JPG")
+        #expect(NameStyle.renames(rows) == [CatalogWrites.NamedRename(fileID: 14, newName: "lone-hill.ARW")])
+    }
+
+    @Test func applyBatchesNeverSplitAGroup() {
+        let renames = [CatalogWrites.NamedRename(fileID: 1, newName: "a"),
+                       CatalogWrites.NamedRename(fileID: 2, newName: "b", group: 2),
+                       CatalogWrites.NamedRename(fileID: 3, newName: "b", group: 2),
+                       CatalogWrites.NamedRename(fileID: 4, newName: "c", group: 4),
+                       CatalogWrites.NamedRename(fileID: 5, newName: "c", group: 4),
+                       CatalogWrites.NamedRename(fileID: 6, newName: "c", group: 4)]
+        #expect(CatalogWrites.groupedChunks(renames, size: 2).map { $0.map(\.fileID) } == [[1], [2, 3], [4, 5, 6]])
+        #expect(CatalogWrites.groupedChunks(renames, size: 250).map { $0.map(\.fileID) } == [[1, 2, 3, 4, 5, 6]])
+    }
 }

@@ -652,7 +652,14 @@ pub struct CatalogRequest {
     /// unchanged, budget, reserved, collision or noEvidence when it is empty. A person token
     /// appears only for a user-named person confirmed on the file by a current compatible face or a
     /// user observation; an event token only from one user-edited event. Names taken in the folder
-    /// or earlier in the batch get the _2 to _99 bump. Apply with renameFiles.
+    /// or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its
+    /// JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder
+    /// come back together, catalogued members added even when not requested, leader first (the
+    /// member with the best evidence, preferring the image), each with its own extension and
+    /// evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump
+    /// is free every member keeps its name (collision), and a companion on disk but not in the
+    /// catalog holds the whole group (unscannedCompanion). Apply with renameFiles, every member in
+    /// one batch.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
