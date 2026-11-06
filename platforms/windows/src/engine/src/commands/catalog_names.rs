@@ -247,7 +247,7 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         for (id, path) in [(1, &photo), (2, &other)] {
             conn.execute(
-                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,created_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,1688428800.0,0,'image','jpg',0,'Sam - Baseball Hit')",
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,created_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,1688472000.0,0,'image','jpg',0,'Sam - Baseball Hit')",
                 params![id, path.to_string_lossy()],
             )
             .unwrap();
