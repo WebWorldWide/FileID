@@ -527,15 +527,25 @@ const SUBJECT_FILLERS: [&str; 56] = [
 pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 
 /// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
+/// Each subject word costs several index lookups, so a pasted paragraph is cut
+/// to the first few alternatives and words (Swift `ChatFacts.subjectGroups`).
+pub(crate) const SUBJECT_MAX_GROUPS: usize = 6;
+pub(crate) const SUBJECT_MAX_WORDS: usize = 8;
+
 pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = vec![vec![]];
     for word in query.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
         if word == "or" {
             if groups.last().is_some_and(|group| !group.is_empty()) {
+                if groups.len() == SUBJECT_MAX_GROUPS {
+                    break;
+                }
                 groups.push(vec![]);
             }
         } else if !SUBJECT_FILLERS.contains(&word)
             && let Some(group) = groups.last_mut()
+            && group.len() < SUBJECT_MAX_WORDS
+            && !group.iter().any(|seen| seen == word)
         {
             group.push(word.to_owned());
         }
@@ -636,6 +646,16 @@ pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subject_groups_are_bounded() {
+        let long = (0..500).map(|n| format!("word{n}")).collect::<Vec<_>>().join(" or ");
+        let groups = subject_groups(&long);
+        assert_eq!(groups.len(), SUBJECT_MAX_GROUPS);
+        let wide = subject_groups(&(0..500).map(|n| format!("w{n}")).collect::<Vec<_>>().join(" "));
+        assert_eq!(wide, vec![(0..SUBJECT_MAX_WORDS).map(|n| format!("w{n}")).collect::<Vec<_>>()]);
+        assert_eq!(subject_groups("dog dog DOG"), vec![vec!["dog".to_string()]]);
+    }
+
     #[test]
     fn folders_with_the_same_name_are_told_apart_by_their_parent() {
         let conn = crate::db::test_support::memory_db();

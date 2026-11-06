@@ -335,12 +335,20 @@ enum ChatFacts {
     static let subjectLimit = 200_000
 
     /// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
+    /// Each subject word costs several index lookups, so a pasted paragraph is cut
+    /// to the first few alternatives and words (Rust `subject_groups`).
+    static let subjectMaxGroups = 6
+    static let subjectMaxWords = 8
+
     static func subjectGroups(_ query: String) -> [[String]] {
         var groups: [[String]] = [[]]
         for word in query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init) {
             if word == "or" {
-                if !(groups.last?.isEmpty ?? true) { groups.append([]) }
-            } else if !subjectFillers.contains(word) {
+                if !(groups.last?.isEmpty ?? true) {
+                    if groups.count == subjectMaxGroups { break }
+                    groups.append([])
+                }
+            } else if !subjectFillers.contains(word), groups[groups.count - 1].count < subjectMaxWords, !groups[groups.count - 1].contains(word) {
                 groups[groups.count - 1].append(word)
             }
         }
