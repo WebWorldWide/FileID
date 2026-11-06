@@ -43,7 +43,8 @@ public sealed class NativeWorkbenchCompletionContractTests
         Assert.Contains("completion.WaitAsync(deadline.Token)", execute, StringComparison.Ordinal);
         var tools = ReadSource("Views/Workbenches/ToolsWorkbench.cs");
         Assert.Contains("_execution = Engine.ToolExecution", tools, StringComparison.Ordinal);
-        Assert.Contains("OnClosed() => Engine.PropertyChanged -= OnEngineChanged", tools, StringComparison.Ordinal);
+        var closed = tools[tools.IndexOf("protected override void OnClosed()", StringComparison.Ordinal)..];
+        Assert.Contains("Engine.PropertyChanged -= OnEngineChanged;", closed[..closed.IndexOf('}')], StringComparison.Ordinal);
         Assert.Contains("ApplyExecutionSnapshot", tools, StringComparison.Ordinal);
         Assert.DoesNotContain("InvalidateGeneration", tools, StringComparison.Ordinal);
         Assert.Contains("ToolExecution.InvalidateGeneration(retiringGeneration)", ReadSource("ViewModels/EngineClient.cs"), StringComparison.Ordinal);

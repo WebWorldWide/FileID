@@ -103,6 +103,89 @@ struct LibraryView: View {
     }
 
     var body: some View {
+        lifecycle(content)
+            .onChange(of: searchText) { _, _ in
+                similarSeed = nil   // typing exits similarity mode
+                // Debounce: cancel any pending reload, schedule a new one.
+                // The DB hit + optional CLIP encode is ~50-100ms; without
+                // debounce, fast typers stutter their own keystrokes.
+                searchDebounce?.cancel()
+                searchDebounce = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else { return }
+                    reload()
+                }
+            }
+            .onChange(of: kindFilterRaw) { _, _ in reload() }
+            .onChange(of: similarSeed?.id) { _, _ in reload() }
+            .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
+            // Keep the tile-refresh epoch tracking store.version while idle so a
+            // tag edit / undo refreshes the dots, but leave it frozen during a
+            // scan (the per-second counter bump must not re-task every tile).
+            .onChange(of: store.version) { _, v in
+                if !scanActive { frozenTileVersion = v }
+            }
+            // The encoder's ORT session takes seconds to build after launch /
+            // install; without this the first search silently stays keyword-only.
+            .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
+                if ready { reload() }
+            }
+            // Surface the undo outcome (renames or tags, incl. partial/total
+            // failures) — it was written to `undoStatus` but never shown, so
+            // failures were silent.
+            .alert("Undo", isPresented: Binding(
+                get: { undoStatus != nil },
+                set: { if !$0 { undoStatus = nil } }
+            )) {
+                Button("OK", role: .cancel) { undoStatus = nil }
+            } message: {
+                Text(undoStatus ?? "")
+            }
+    }
+
+    /// Scan, mount and location hooks, split from `body` so the type checker
+    /// does not time out on one long modifier chain.
+    private func lifecycle<V: View>(_ view: V) -> some View {
+        view
+            .onAppear {
+                store.openIfPossible()
+                reload()
+                refreshBulkState()
+                engine.refreshLibraryRoots()
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
+            .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
+                if new != lastSeenBatchIndex {
+                    lastSeenBatchIndex = new
+                    guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
+                    lastReloadAt = Date()
+                    store.notifyChanged()
+                    reload()
+                    refreshBulkState()
+                }
+            }
+            .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+                refreshBulkState()
+            }
+            .onChange(of: store.scopeEpoch) { _, _ in
+                listedQuery = nil
+                reload()
+            }
+            // Terminal reload: the 1 s batch throttle above can swallow the FINAL
+            // scan batch (it advances lastSeenBatchIndex before the throttle guard,
+            // so the last batch never triggers a reload if it lands within 1 s).
+            // Reloading on any terminal event guarantees the grid ends complete.
+            .onChange(of: engine.lastTerminalEventAt) { _, _ in
+                store.notifyChanged()
+                refreshOpenPreview()
+                reload()
+                refreshBulkState()
+                engine.refreshLibraryRoots()
+            }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -157,79 +240,6 @@ struct LibraryView: View {
                 .opacity(0)
                 .frame(width: 0, height: 0)
         )
-        .onAppear {
-            store.openIfPossible()
-            reload()
-            refreshBulkState()
-            engine.refreshLibraryRoots()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
-        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-            if new != lastSeenBatchIndex {
-                lastSeenBatchIndex = new
-                guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
-                lastReloadAt = Date()
-                store.notifyChanged()
-                reload()
-                refreshBulkState()
-            }
-        }
-        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
-            refreshBulkState()
-        }
-        .onChange(of: store.scopeEpoch) { _, _ in
-            listedQuery = nil
-            reload()
-        }
-        // Terminal reload: the 1 s batch throttle above can swallow the FINAL
-        // scan batch (it advances lastSeenBatchIndex before the throttle guard,
-        // so the last batch never triggers a reload if it lands within 1 s).
-        // Reloading on any terminal event guarantees the grid ends complete.
-        .onChange(of: engine.lastTerminalEventAt) { _, _ in
-            store.notifyChanged()
-            refreshOpenPreview()
-            reload()
-            refreshBulkState()
-            engine.refreshLibraryRoots()
-        }
-        .onChange(of: searchText) { _, _ in
-            similarSeed = nil   // typing exits similarity mode
-            // Debounce: cancel any pending reload, schedule a new one.
-            // The DB hit + optional CLIP encode is ~50-100ms; without
-            // debounce, fast typers stutter their own keystrokes.
-            searchDebounce?.cancel()
-            searchDebounce = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard !Task.isCancelled else { return }
-                reload()
-            }
-        }
-        .onChange(of: kindFilterRaw) { _, _ in reload() }
-        .onChange(of: similarSeed?.id) { _, _ in reload() }
-        .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
-        // Keep the tile-refresh epoch tracking store.version while idle so a
-        // tag edit / undo refreshes the dots, but leave it frozen during a
-        // scan (the per-second counter bump must not re-task every tile).
-        .onChange(of: store.version) { _, v in
-            if !scanActive { frozenTileVersion = v }
-        }
-        // The encoder's ORT session takes seconds to build after launch /
-        // install; without this the first search silently stays keyword-only.
-        .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
-            if ready { reload() }
-        }
-        // Surface the undo outcome (renames or tags, incl. partial/total
-        // failures) — it was written to `undoStatus` but never shown, so
-        // failures were silent.
-        .alert("Undo", isPresented: Binding(
-            get: { undoStatus != nil },
-            set: { if !$0 { undoStatus = nil } }
-        )) {
-            Button("OK", role: .cancel) { undoStatus = nil }
-        } message: {
-            Text(undoStatus ?? "")
-        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and
