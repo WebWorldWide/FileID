@@ -25,7 +25,7 @@ struct PeopleView: View {
     @State private var unknownChecked: Set<Int64> = []
     @State private var mergeStatus: String?
 
-    @State private var suggestions: [ClusterSuggestions.Candidate] = []
+    @State private var suggestions: [MergeSuggestionPair] = []
     @State private var suggestionsLoading: Bool = false
     @State private var mergeInFlight: Bool = false
 
@@ -84,8 +84,8 @@ struct PeopleView: View {
                     inFlight: mergeInFlight,
                     onAccept: { candidate in
                         guard !mergeInFlight else { return }
-                        let a = personByID[candidate.personA]
-                        let b = personByID[candidate.personB]
+                        let a = personByID[candidate.sourcePersonID]
+                        let b = personByID[candidate.destinationPersonID]
                         let target = preferredTarget(a, b) ?? a ?? b
                         let source = (target?.id == a?.id) ? b : a
                         if let t = target, let s = source {
@@ -115,16 +115,16 @@ struct PeopleView: View {
                         var pairs: [(target: Int64, source: Int64)] = []
                         pairs.reserveCapacity(batch.count)
                         for candidate in batch {
-                            let a = personByID[candidate.personA]
-                            let b = personByID[candidate.personB]
+                            let a = personByID[candidate.sourcePersonID]
+                            let b = personByID[candidate.destinationPersonID]
                             guard let target = preferredTarget(a, b) ?? a ?? b else { continue }
                             let source = (target.id == a?.id) ? b : a
                             guard let s = source, s.id != target.id else { continue }
                             pairs.append((target.id, s.id))
                         }
-                        let batchToRemove = batch
+                        let batchToRemove = Set(batch.map(\.id))
                         guard !pairs.isEmpty else {
-                            suggestions.removeAll { batchToRemove.contains($0) }
+                            suggestions.removeAll { batchToRemove.contains($0.id) }
                             reload()
                             return
                         }
@@ -134,7 +134,7 @@ struct PeopleView: View {
                             let plan = await Task.detached(priority: .userInitiated) { [store] in store.mergeBatchPlan(submitted) }.value
                             let merged = await CatalogWrites.mergeBatch(engine, store: store, plan: plan)
                             if merged > 0 {
-                                suggestions.removeAll { batchToRemove.contains($0) }
+                                suggestions.removeAll { batchToRemove.contains($0.id) }
                                 mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
                             } else {
                                 mergeStatus = "Merge failed — see logs."
@@ -225,9 +225,7 @@ struct PeopleView: View {
                 suggestionsLoading = true
                 Task {
                     let result = await Task.detached(priority: .userInitiated) {
-                        ClusterSuggestions.findCandidates(
-                            dbPath: ReadStore.defaultDBURL.path
-                        )
+                        (try? PersonMergeSuggestions.find(dbPath: ReadStore.defaultDBURL.path)) ?? []
                     }.value
                     suggestionsLoading = false
                     // The scan is multi-second; don't preempt whatever the
@@ -1259,12 +1257,12 @@ private struct MovePhotosTargetPicker: View {
 /// Borderline-similar centroid pairs. Merge picks the named (or larger)
 /// cluster as target; dismissed rows drop from the list.
 private struct SuggestedMergesSheet: View {
-    let candidates: [ClusterSuggestions.Candidate]
+    let candidates: [MergeSuggestionPair]
     let personByID: [Int64: ReadStore.PersonRow]
     let store: ReadStore
     let inFlight: Bool
-    let onAccept: (ClusterSuggestions.Candidate) -> Void
-    let onAcceptMany: ([ClusterSuggestions.Candidate]) -> Void
+    let onAccept: (MergeSuggestionPair) -> Void
+    let onAcceptMany: ([MergeSuggestionPair]) -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -1357,9 +1355,9 @@ private struct SuggestedMergesSheet: View {
     }
 
     @ViewBuilder
-    private func row(for cand: ClusterSuggestions.Candidate) -> some View {
-        let a = personByID[cand.personA]
-        let b = personByID[cand.personB]
+    private func row(for cand: MergeSuggestionPair) -> some View {
+        let a = personByID[cand.sourcePersonID]
+        let b = personByID[cand.destinationPersonID]
         // Skip rows where one side has been merged-away.
         if let a, let b {
             HStack(spacing: 12) {
@@ -1404,13 +1402,13 @@ private struct SuggestedMergesSheet: View {
         .frame(width: 170, alignment: .leading)
     }
 
-    private func similarityColor(_ s: Float) -> Color {
+    private func similarityColor(_ s: Double) -> Color {
         if s >= 0.55 { return Theme.delight }
         if s >= 0.50 { return Theme.gold }
         return Theme.warning
     }
 
-    private func similarityLabel(_ s: Float) -> String {
+    private func similarityLabel(_ s: Double) -> String {
         if s >= 0.55 { return "Very likely same" }
         if s >= 0.50 { return "Likely same" }
         return "Possibly same"

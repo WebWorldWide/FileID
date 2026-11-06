@@ -86,10 +86,7 @@ public struct IPCCommand: Codable, Sendable {
 
         // ── Windows-originated commands ───────────────────────────
         // These land on mac only when the schema needs to round-trip
-        // them (cross-platform tooling, shared test corpus). The mac
-        // engine implements the subset with equivalent engine-side semantics
-        // and returns structured "not_implemented_yet" errors for UI-owned
-        // flows that remain app-side on macOS.
+        // them (cross-platform tooling, shared test corpus).
         case planRestructure(libraryRoot: String, supportsPagedPlans: Bool?)
         case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool, planID: String?)
         /// Reverse the most recent applyRestructure: move every file the last run
@@ -110,10 +107,9 @@ public struct IPCCommand: Codable, Sendable {
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)
         /// Generate a 192px JPEG thumbnail for a video on demand; the engine
-        /// replies with a `thumbnailGenerated` event. macOS renders video
-        /// thumbs in-process, so the mac engine returns the structured
-        /// not-implemented pointer — the case exists for wire symmetry.
-        /// `modifiedAt` (optional) is echoed on the reply for cache keying.
+        /// replies with a `thumbnailGenerated` event, or with nothing when the
+        /// video can't be decoded. `modifiedAt` (optional) is echoed on the
+        /// reply for cache keying.
         case generateVideoThumbnail(path: String, modifiedAt: Double?)
         case restoreFromTrash(batchID: String)
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])

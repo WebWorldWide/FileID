@@ -4,8 +4,8 @@ import PackageDescription
 // FileID — workspace package.
 //
 // Two products + a shared module:
-// - FileIDShared: Codable DTOs and IPC protocol shared between the engine
-//                 and the app. Pure Swift, no dependencies.
+// - FileIDShared: Codable DTOs, the IPC protocol and the few read-only
+//                 catalog/model routines both the engine and the app run.
 // - FileIDEngine: CLI binary — owns the scan pipeline, the SQLite DB,
 //                 and ML inference. Reads commands from stdin
 //                 (newline-delimited JSON), writes events to stdout (same).
@@ -38,10 +38,16 @@ let package = Package(
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0")
     ],
     targets: [
-        // Shared types: Codable DTOs, IPC envelope. Pure Swift, no
-        // dependencies — both engine and app link this.
+        // Shared types (Codable DTOs, IPC envelope) plus code the engine and
+        // the app must not fork: merge suggestions over the catalog (GRDB) and
+        // the CLIP text encoder (ONNX Runtime). Both executables already link
+        // these packages.
         .target(
             name: "FileIDShared",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+            ],
             path: "shared/Sources/FileIDShared",
             resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v6)]
