@@ -4,7 +4,7 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## Backlog plan (2026-11-03, from four read-only gap analyses)
 
-Done: Mac orphan-sweep mount guard; text-data and html indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines); catalog v29 `library_roots` registry fed by scans; `capturedFrom`/`capturedTo` search window (engines + schema, no UI yet); Rust chat retrieval off the writer lock; chat summary no longer blocks Describe on macOS; Mac document text cap 32k.
+Done: Chat semantic step off the writer lock (tested), BGE document matrix in both engines, idle parking of CLIP text/BGE (Rust); Mac orphan-sweep mount guard; text-data and html indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines); catalog v29 `library_roots` registry fed by scans; `capturedFrom`/`capturedTo` search window (engines + schema, no UI yet); Rust chat retrieval off the writer lock; chat summary no longer blocks Describe on macOS; Mac document text cap 32k.
 
 Open and needs the Windows GPU PC (blind edit refused): the Rust Describe batch holds the resident-model lease for the whole run, so a chat summary waits unbounded (`commands/deep_analyze.rs` ~677, `models/resident_service.rs`). Add a waiter count and release/reacquire the lease between files.
 Windows/Linux parity still open (Moments lanes and playhead done 2026-11-05): look at the new Best Takes, Moments and Chat pages on real WinUI/GTK displays; Windows springs coverage audit; fold or document the extra Windows Models page.
@@ -36,7 +36,7 @@ Locations (schema first): `v29` `library_roots`; IPC list/add/remove/rescan root
 
 Search and Moments: from/to capture-time filters (Mac UI 2026-11-05; both engines now fill a dated search from every matching file, not only the hundred best); automatic event grouping (needs owner thresholds); rank moment chapters above frame captions; populated-panel and playback checks on Mac and Windows.
 
-Performance (needs a quiet Mac / the Windows GPU PC; `analyzeSequence` already runs the greedy loop with JSON early stop, and moments/goals use the frame pool): A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; Rust chat semantic step off the writer lock and BGE brute-force scan replaced by an index; Windows streaming + early stop and `cache_prompt` check; park CLIP/RAM++/BGE/face models when idle; charge VRAM in the Rust scheduler from measured numbers.
+Performance (needs a quiet Mac / the Windows GPU PC; `analyzeSequence` already runs the greedy loop with JSON early stop, and moments/goals use the frame pool): A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; measure BGE text model parking on a machine with BGE installed; the CLIP HNSW graph cache is not parked; Windows streaming + early stop and `cache_prompt` check; charge VRAM in the Rust scheduler from measured numbers.
 
 Parity (Best Takes pages and Moments lanes done 2026-11-05): fold or document the Windows Models page; audit Windows springs.
 

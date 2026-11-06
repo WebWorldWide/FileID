@@ -292,17 +292,22 @@ actor ChatService {
         return lists
     }
 
-    private static func bgeHits(_ db: GRDB.Database, _ wanted: [Float]) throws -> [CatalogHit] {
+    static func bgeHits(_ db: GRDB.Database, _ wanted: [Float]) throws -> [CatalogHit] {
+        // Unreadable files drop out after scoring, so take a margin over the twenty shown.
+        if let best = try BGEDocumentMatrix.shared.scores(db, wanted: wanted, floor: bgeFloor, model: "bge_small_en_v1_5", limit: 200) {
+            guard !best.isEmpty else { return [] }
+            let ids = String(decoding: try JSONEncoder().encode(best.map(\.1)), as: UTF8.self)
+            let rows = try Row.fetchAll(db, sql: "SELECT f.id,f.path_text,COALESCE(substr(d.text,1,200),'') AS text FROM files f LEFT JOIN doc_text d ON d.file_id=f.id WHERE f.failed=0 AND f.id IN (SELECT value FROM json_each(?))", arguments: [ids])
+            let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0["id"] as Int64, $0) })
+            return best.compactMap { score, id -> CatalogHit? in
+                guard let row = byID[id] else { return nil }
+                return CatalogHit(fileID: id, path: row["path_text"], kind: "documentText", text: row["text"], evidenceID: "documentText:\(id)")
+            }.prefix(20).map { $0 }
+        }
         var scored: [(Float, CatalogHit)] = []
         let rows = try Row.fetchCursor(db, sql: "SELECT e.file_id,e.embedding,f.path_text,COALESCE(substr(d.text,1,200),'') AS text FROM text_embeddings e JOIN files f ON f.id=e.file_id LEFT JOIN doc_text d ON d.file_id=e.file_id WHERE f.failed=0 AND e.model='bge_small_en_v1_5' AND length(e.embedding)=?", arguments: [wanted.count * 4])
         while let row = try rows.next() {
-            let blob: Data = row["embedding"]
-            var score: Float = 0
-            blob.withUnsafeBytes { raw in
-                for index in 0..<wanted.count {
-                    score += Float(bitPattern: UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: index * 4, as: UInt32.self))) * wanted[index]
-                }
-            }
+            let score = BGEDocumentMatrix.dot(row["embedding"], wanted)
             guard score.isFinite, score >= bgeFloor else { continue }
             let id: Int64 = row["file_id"]
             scored.append((score, CatalogHit(fileID: id, path: row["path_text"], kind: "documentText", text: row["text"], evidenceID: "documentText:\(id)")))
