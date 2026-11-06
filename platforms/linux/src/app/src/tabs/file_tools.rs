@@ -61,6 +61,10 @@ impl RecipeChoice {
             },
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         }
     }
 

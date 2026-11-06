@@ -37,6 +37,7 @@ pub mod roots;
 pub mod benchmark;
 pub mod timeline;
 pub(crate) mod video_export;
+mod media_recipes;
 
 /// Whether FileID's vetted FFmpeg runtime is installed (macOS video frames need it).
 #[cfg(all(not(windows), not(target_os = "linux")))]
