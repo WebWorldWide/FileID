@@ -8,12 +8,26 @@ using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
 
 namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarFolderHeader : UserControl
 {
+    private readonly Brush _text1 = ThemeHelper.GetBrushSafe("Text1Brush");
+    private readonly Brush _text2 = ThemeHelper.GetBrushSafe("Text2Brush");
+    private readonly Brush _text3 = ThemeHelper.GetBrushSafe("Text3Brush");
+    private readonly Brush _gold = ThemeHelper.GetBrushSafe("GoldBrush");
+    private readonly Brush _warning = ThemeHelper.GetBrushSafe("WarningBrush");
+    private readonly Brush _warningStroke = new SolidColorBrush(Color.FromArgb(0x99, 0xE0, 0xA3, 0x40));
+    private readonly Brush _selectedFill = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xCC, 0x00));
+    private readonly Brush _selectedStroke = new SolidColorBrush(Color.FromArgb(0x73, 0xFF, 0xCC, 0x00));
+    private readonly Brush _clear = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+    private long? _shownScope = -1;
+
     public SidebarFolderHeader()
     {
         InitializeComponent();
@@ -29,6 +43,8 @@ public sealed partial class SidebarFolderHeader : UserControl
         AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
         AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
         Sync();
+        SyncScope();
+        _ = DebugLog.SafeRunAsync("SidebarFolderHeader.RefreshRoots", () => AppViewModel.Instance.RefreshRootsAsync());
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -49,6 +65,106 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
+        if (e.PropertyName is nameof(AppViewModel.Scope) or nameof(AppViewModel.LibraryRoots))
+        {
+            DispatcherQueue.TryEnqueue(SyncScope);
+        }
+    }
+
+    /// <summary>"All locations" and one row per scanned location, rebuilt into the stable
+    /// ScopeList container when the flyout opens or the list changes.</summary>
+    private void SyncScope()
+    {
+        var vm = AppViewModel.Instance;
+        var roots = vm.LibraryRoots;
+        var current = vm.Scope?.Root.Id;
+        ScopeSection.Visibility = roots.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FoldersHeader.BorderThickness = new Thickness(0, roots.Count > 0 ? 1 : 0, 0, 0);
+        ScopeList.Children.Clear();
+        if (roots.Count == 0) return;
+        var size = roots.Count + 1;
+        ScopeList.Children.Add(ScopeRow(null, "All locations", null, LibraryScope.LocationCountText(roots.Count), online: true,
+            selected: current is null, spoken: $"All locations, {LibraryScope.LocationCountText(roots.Count)}",
+            hint: "Shows every location in Library, Search & Moments and Chat", position: 1, size: size));
+        var position = 2;
+        foreach (var root in roots)
+        {
+            ScopeList.Children.Add(ScopeRow(root.Id, root.Display, root.Path, LibraryScope.FileCountText(root.FileCount), root.Online,
+                selected: current == root.Id, spoken: LibraryScope.Spoken(root),
+                hint: "Shows only this location in Library, Search & Moments and Chat", position: position++, size: size));
+        }
+        _shownScope = current;
+    }
+
+    private Button ScopeRow(long? id, string name, string? path, string count, bool online, bool selected, string spoken, string hint, int position, int size)
+    {
+        var grid = new Grid { ColumnSpacing = 10 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var check = new FontIcon { Glyph = "\uE73E", FontSize = 11, Foreground = _gold, Opacity = selected ? 1 : 0, VerticalAlignment = VerticalAlignment.Center };
+        grid.Children.Add(check);
+        var labels = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        labels.Children.Add(new TextBlock { Text = name, FontSize = 13.5, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = _text1, TextTrimming = TextTrimming.CharacterEllipsis });
+        if (path is not null)
+        {
+            var pathText = new TextBlock { Text = path, FontSize = 11, Foreground = _text3, TextTrimming = TextTrimming.CharacterEllipsis };
+            if (Application.Current.Resources.TryGetValue("MonoFontFamily", out var mono) && mono is FontFamily family) pathText.FontFamily = family;
+            labels.Children.Add(pathText);
+        }
+        Grid.SetColumn(labels, 1);
+        grid.Children.Add(labels);
+        if (!online)
+        {
+            var pill = new Border
+            {
+                Padding = new Thickness(6, 2, 6, 2),
+                CornerRadius = new CornerRadius(4),
+                BorderBrush = _warningStroke,
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = "OFFLINE", FontSize = 10.5, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = _warning },
+            };
+            Grid.SetColumn(pill, 2);
+            grid.Children.Add(pill);
+        }
+        var countText = new TextBlock { Text = count, FontSize = 12, Foreground = _text2, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(countText, 3);
+        grid.Children.Add(countText);
+
+        var row = new Button
+        {
+            Content = grid,
+            Height = path is null ? 36 : 44,
+            MinHeight = 28,
+            Padding = new Thickness(10, 0, 10, 0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Background = selected ? _selectedFill : _clear,
+            BorderBrush = selected ? _selectedStroke : _clear,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+        };
+        if (ThemeHelper.GetStyleSafe("ShellNavRowStyle") is { } style) row.Style = style;
+        if (path is not null) ToolTipService.SetToolTip(row, path);
+        AutomationProperties.SetName(row, spoken);
+        AutomationProperties.SetHelpText(row, hint);
+        AutomationProperties.SetItemStatus(row, selected ? "Selected" : string.Empty);
+        AutomationProperties.SetPositionInSet(row, position);
+        AutomationProperties.SetSizeOfSet(row, size);
+        row.Click += (_, _) => DebugLog.SafeRun("SidebarFolderHeader.ChooseScope", () =>
+        {
+            RequestDismiss();
+            AppViewModel.Instance.ChooseScope(id);
+        });
+        if (selected && _shownScope != id)
+        {
+            FileID.Theme.Motion.SpringEasing.SetScalar(check, "Scale.X", 0.6f);
+            FileID.Theme.Motion.SpringEasing.SetScalar(check, "Scale.Y", 0.6f);
+            check.Loaded += (_, _) => FileID.Theme.Motion.SpringEasing.SpringScale(check, 1f, FileID.Theme.Motion.SpringEasing.Tokens.Tight);
+        }
+        return row;
     }
 
     private void Sync()

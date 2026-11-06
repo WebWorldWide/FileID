@@ -20,6 +20,7 @@ pub(super) fn search(
     people: &[i64],
     events: &[String],
     time: Option<f64>,
+    root: Option<&super::roots::RootScope>,
 ) -> Result<Vec<CatalogHit>> {
     if !kinds
         .iter()
@@ -49,7 +50,8 @@ pub(super) fn search(
     if quoted.is_empty() && kinds.is_none() && people.is_none() && events.is_none() && time.is_none() {
         return Ok(vec![]);
     }
-    let filters = "f.failed=0 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?3)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?3)) AND stale=0)) AND (?4 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?4))))";
+    let root = root.map(super::roots::RootScope::param);
+    let filters = &format!("f.failed=0 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?3)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?3)) AND stale=0)) AND (?4 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?4)))) AND {}", super::roots::clause("f.path_text", "?6"));
     let mut hits = Vec::new();
     if time.is_none() {
         let (from, predicate, order) = if quoted.is_empty() {
@@ -64,7 +66,7 @@ pub(super) fn search(
         let sql = format!("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),NULL,NULL,NULL FROM {from} WHERE {filters}{predicate} AND ?1 IS NOT NULL ORDER BY {order} LIMIT 100");
         hits.extend(
             conn.prepare(&sql)?
-                .query_map(params![quoted, kinds, people, events], hit)?
+                .query_map(params![quoted, kinds, people, events, time, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
@@ -88,21 +90,21 @@ pub(super) fn search(
         let sql = format!("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE {filters}{predicate}{temporal_people} AND ?1 IS NOT NULL AND (c.stale=0 OR p.stale=0) AND (?5 IS NULL OR ((c.start_seconds<=?5 AND c.end_seconds>=?5) OR ABS(c.start_seconds-?5)<=15 OR (p.start_seconds<=?5 AND COALESCE(p.end_seconds,p.start_seconds)>=?5) OR ABS(p.start_seconds-?5)<=15)) ORDER BY {order} LIMIT 100");
         hits.extend(
             conn.prepare(&sql)?
-                .query_map(params![quoted, kinds, people, events, time], hit)?
+                .query_map(params![quoted, kinds, people, events, time, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
     if people.is_some() || time.is_some() {
-        let sql = "SELECT f.id,f.path_text,f.kind,'Person: ' || COALESCE(NULLIF(trim(COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || COALESCE(p.last_name,'') || ' ' || COALESCE(p.suffix,'')),''),p.name,'Person') || CASE WHEN o.user_edited=1 THEN ' · user-confirmed appearance' ELSE ' · unverified appearance' END,'observation:' || o.id,o.start_seconds,NULL FROM catalog_observations o JOIN persons p ON p.id=o.person_id JOIN files f ON f.id=o.file_id WHERE f.failed=0 AND f.kind='video' AND (?4 IS NULL OR f.kind IN (SELECT value FROM json_each(?4))) AND o.stale=0 AND o.start_seconds IS NOT NULL AND (?1 IS NULL OR o.person_id IN (SELECT value FROM json_each(?1))) AND (?2 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?2)))) AND (?3 IS NULL OR ((o.start_seconds<=?3 AND COALESCE(o.end_seconds,o.start_seconds)>=?3) OR ABS(o.start_seconds-?3)<=15)) ORDER BY f.id,o.start_seconds,o.id LIMIT 100";
+        let sql = "SELECT f.id,f.path_text,f.kind,'Person: ' || COALESCE(NULLIF(trim(COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || COALESCE(p.last_name,'') || ' ' || COALESCE(p.suffix,'')),''),p.name,'Person') || CASE WHEN o.user_edited=1 THEN ' · user-confirmed appearance' ELSE ' · unverified appearance' END,'observation:' || o.id,o.start_seconds,NULL FROM catalog_observations o JOIN persons p ON p.id=o.person_id JOIN files f ON f.id=o.file_id WHERE f.failed=0 AND f.kind='video' AND (?4 IS NULL OR f.kind IN (SELECT value FROM json_each(?4))) AND o.stale=0 AND o.start_seconds IS NOT NULL AND (?1 IS NULL OR o.person_id IN (SELECT value FROM json_each(?1))) AND (?2 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?2)))) AND (?3 IS NULL OR ((o.start_seconds<=?3 AND COALESCE(o.end_seconds,o.start_seconds)>=?3) OR ABS(o.start_seconds-?3)<=15)) AND {} ORDER BY f.id,o.start_seconds,o.id LIMIT 100";
         hits.extend(
-            conn.prepare(sql)?
-                .query_map(params![people, events, time, kinds], hit)?
+            conn.prepare(&sql.replace("{}", &super::roots::clause("f.path_text", "?5")))?
+                .query_map(params![people, events, time, kinds, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
     if !quoted.is_empty() && time.is_none() {
         let seen: std::collections::HashSet<i64> = hits.iter().map(|h| h.file_id).collect();
-        hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
+        hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events, root))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
         // Handwriting (Vision's accurate tier or a VLM transcription) is its own
         // hit kind so results can say "Handwritten text". Mirrors CatalogStore.ocrHitKindSQL.
         const OCR_KIND: &str = "(SELECT CASE WHEN o.handwritten=1 THEN 'handwrittenText' ELSE 'ocrText' END FROM ocr_text o WHERE o.file_id=f.id)";
@@ -112,7 +114,7 @@ pub(super) fn search(
             );
             hits.extend(
                 conn.prepare(&sql)?
-                    .query_map(params![quoted, kinds, people, events], hit)?
+                    .query_map(params![quoted, kinds, people, events, time, root], hit)?
                     .collect::<rusqlite::Result<Vec<_>>>()?,
             );
         }
@@ -130,7 +132,7 @@ fn tag_hits(
     conn: &Connection,
     query: &str,
     filters: &str,
-    (kinds, people, events): (&Option<String>, &Option<String>, &Option<String>),
+    (kinds, people, events, root): (&Option<String>, &Option<String>, &Option<String>, Option<&str>),
 ) -> Result<Vec<CatalogHit>> {
     let mut words: Vec<String> = query
         .to_lowercase()
@@ -147,9 +149,9 @@ fn tag_hits(
     let mut scores: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
     for word in &words {
         let forms = word_forms(word);
-        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", index + 5)).collect::<Vec<_>>().join(" OR ");
+        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", index + 7)).collect::<Vec<_>>().join(" OR ");
         let sql = format!("SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone()), Box::new(None::<f64>), Box::new(root.map(str::to_owned))];
         args.extend(forms.iter().map(|form| Box::new(format!("% {form}%")) as Box<dyn rusqlite::ToSql>));
         let mut statement = conn.prepare(&sql)?;
         for id in statement.query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| row.get::<_, i64>(0))? {
@@ -209,14 +211,14 @@ mod tests {
             crate::db::test_support::insert_file(&conn, id, &format!("/fixture/IMG_{id}.jpg"), "image");
         }
         conn.execute("INSERT INTO tags(file_id,tag,source,score) VALUES(1,'grassland','auto',0.9),(1,'dog','auto',0.8),(2,'blue_sky','auto',0.9),(2,'grass','auto',0.7),(3,'grassy_knoll','rejected',0.9)", []).unwrap();
-        let ids = |q: &str| search(&conn, q, &[], &[], &[], None).unwrap().into_iter().map(|h| h.file_id).collect::<Vec<_>>();
+        let ids = |q: &str| search(&conn, q, &[], &[], &[], None, None).unwrap().into_iter().map(|h| h.file_id).collect::<Vec<_>>();
         assert_eq!(ids("photos with grass"), vec![2, 1]);
         assert_eq!(ids("dog on grass"), vec![1], "files matching every word outrank partial matches");
         assert_eq!(ids("sky"), vec![2]);
         assert!(ids("ass").is_empty(), "matches start at a tag word");
-        let hits = search(&conn, "grass", &["video".into()], &[], &[], None).unwrap();
+        let hits = search(&conn, "grass", &["video".into()], &[], &[], None, None).unwrap();
         assert!(hits.is_empty(), "kind filter applies");
-        assert!(search(&conn, "grass", &[], &[], &[], None).unwrap()[1].text.starts_with("Tags: grassland"));
+        assert!(search(&conn, "grass", &[], &[], &[], None, None).unwrap()[1].text.starts_with("Tags: grassland"));
         assert_eq!(ids("dogs on grass"), vec![1], "plural words reach singular tags");
     }
     #[test]
@@ -255,13 +257,13 @@ mod tests {
                 vec![("event".into(), vec!["Family Birthday".into()])]
             )
         );
-        let hits = search(&conn, "Birthday", &[], &[1], &["event".into()], Some(123.0)).unwrap();
+        let hits = search(&conn, "Birthday", &[], &[1], &["event".into()], Some(123.0), None).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].evidence_id.as_deref(), Some("near"));
         assert!(hits[1].text.contains("user-confirmed"));
         assert!(hits.iter().all(|h| h.file_id == 1));
         assert_eq!(
-            search(&conn, "", &[], &[1], &["event".into()], Some(123.0))
+            search(&conn, "", &[], &[1], &["event".into()], Some(123.0), None)
                 .unwrap()
                 .len(),
             2
@@ -269,7 +271,7 @@ mod tests {
         for kind in ["image", "audio", "doc", "pdf"] {
             for (query, time) in [("", None), ("Birthday", Some(123.0)), ("", Some(123.0))] {
                 assert!(
-                    search(&conn, query, &[kind.into()], &[1], &[], time)
+                    search(&conn, query, &[kind.into()], &[1], &[], time, None)
                         .unwrap()
                         .is_empty(),
                     "{kind} observation filter"
@@ -278,13 +280,13 @@ mod tests {
         }
         conn.execute("UPDATE catalog_passages SET stale=1 WHERE file_id=1", [])
             .unwrap();
-        assert_eq!(search(&conn, "Birthday", &[], &[1], &[], Some(123.0)).unwrap().len(), 1);
+        assert_eq!(search(&conn, "Birthday", &[], &[1], &[], Some(123.0), None).unwrap().len(), 1);
         conn.execute("UPDATE files SET failed=1 WHERE id=1", []).unwrap();
-        assert!(search(&conn, "Birthday", &[], &[1], &[], None).unwrap().is_empty());
-        assert!(search(&conn, "", &["video".into()], &[1], &[], None)
+        assert!(search(&conn, "Birthday", &[], &[1], &[], None, None).unwrap().is_empty());
+        assert!(search(&conn, "", &["video".into()], &[1], &[], None, None)
             .unwrap()
             .is_empty());
-        assert!(search(&conn, "", &[], &[1], &[], Some(123.0)).unwrap().is_empty());
+        assert!(search(&conn, "", &[], &[1], &[], Some(123.0), None).unwrap().is_empty());
     }
     #[test]
     fn chapters_rank_first() {
@@ -292,7 +294,7 @@ mod tests {
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/v/game.mov',1,100,0,'video','mov')", []).unwrap();
         conn.execute("INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence,stale) VALUES('frame',1,5,5,'goal goal goal kick','r','m',0,0),('verified',1,NULL,NULL,'a goal is scored','r','m',1,0)", []).unwrap();
         conn.execute("INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('chapter',1,40,60,'Winning goal','late in the game','r','m',1,1,0)", []).unwrap();
-        let evidence: Vec<String> = search(&conn, "goal", &[], &[], &[], None).unwrap().into_iter().filter_map(|hit| hit.evidence_id).collect();
+        let evidence: Vec<String> = search(&conn, "goal", &[], &[], &[], None, None).unwrap().into_iter().filter_map(|hit| hit.evidence_id).collect();
         assert_eq!(evidence, ["chapter", "verified", "frame"]);
     }
 }

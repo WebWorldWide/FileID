@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.19.0",
+  "version": "1.20.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1512,6 +1512,7 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
         "capturedFrom": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time (created_at, else modified_at) is at or after this Unix time in seconds. Applied to the top 100 candidates." },
         "capturedTo": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time is at or before this Unix time in seconds. Must be >= capturedFrom." },
+        "rootID": { "type": "integer", "minimum": 1, "description": "Search only (schema 1.20.0): keep files whose most specific library location (a listRoots id) is this one: the location's path or anything under it, never a sibling that shares its prefix (/Camera never matches /Camera2) and never a deeper location of its own. Applied before the 100-candidate cut, the capture window and the subject fill. An unknown id is an error." },
         "requestID": {
           "type": "string"
         },
@@ -1746,7 +1747,8 @@
         "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
         "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
         "folder": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 }
+        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "rootID": { "type": "integer", "minimum": 1, "description": "Schema 1.20.0: the library location (a listRoots id) the app is scoped to. Every search, count and list in the answer, and the files a proposed action covers, keep only files of that location by the CatalogRequest.rootID rule. Omitted means every location. An unknown id is an error." }
       }
     },
     "ChatPage": {

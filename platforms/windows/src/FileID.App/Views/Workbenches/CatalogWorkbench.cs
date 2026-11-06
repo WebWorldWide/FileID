@@ -499,7 +499,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         CatalogResponse result;
         try
         {
-            result = await Engine.CatalogSearchAsync(_query.Text, mode, dates.From, dates.To, ct);
+            result = await Engine.CatalogSearchAsync(_query.Text, mode, dates.From, dates.To, AppViewModel.Instance.Scope?.Root.Id, ct);
         }
         finally
         {

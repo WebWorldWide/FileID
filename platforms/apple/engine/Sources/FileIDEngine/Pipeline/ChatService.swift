@@ -68,6 +68,7 @@ actor ChatService {
                 if active.count >= 8 { throw Busy.tooMany }
                 guard let text = request.text,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 2000 else { throw CatalogStore.InvalidRequest() }
+                if let rootID = request.context?.rootID { _ = try await database.pool.read { db in try LibraryRoots.Scope.load(db, id: rootID) } }
                 active[request.conversationID] = request.requestID
                 latestRequest[request.conversationID] = request.requestID
                 try await database.pool.write { db in
@@ -155,7 +156,7 @@ actor ChatService {
         func pathOK(_ path: String?) -> Bool { path.map { !$0.isEmpty && $0.count <= 32_768 } ?? true }
         return idsOK(context.fileIDs, ChatActions.maxIDs) && idsOK(context.personIDs, 50)
             && (context.page.map(ChatAction.pages.contains) ?? true)
-            && pathOK(context.folder) && pathOK(context.libraryRoot)
+            && pathOK(context.folder) && pathOK(context.libraryRoot) && (context.rootID.map { $0 > 0 } ?? true)
     }
 
     /// The search plan a message implies, with its structured part.
@@ -177,12 +178,13 @@ actor ChatService {
 
     /// Parses requests and questions and gathers evidence. Reads only.
     static func prepare(_ request: ChatRequest, text: String, database: Database) async throws -> Prepared {
+        let root = request.context?.rootID == nil ? nil : try await database.pool.read { db in try LibraryRoots.Scope.load(db, id: request.context?.rootID) }
         let stage = try await database.pool.read { db -> (Prepared?, ChatSearchPlan, ChatIntent.Question, [CatalogHit]) in
             let knownPeople = try knownPeople(db)
             let knownEvents = try knownEvents(db)
             if let intent = ChatIntent.parse(text) {
                 let context = ChatActions.Context(requestID: request.requestID, text: text, chat: request.context, people: try ChatActions.people(db),
-                                                  knownPeople: knownPeople, knownEvents: knownEvents, source: "parser")
+                                                  knownPeople: knownPeople, knownEvents: knownEvents, source: "parser", root: root)
                 let resolution = try ChatActions.resolve(db, intent, context)
                 return (Prepared(message: resolution.message, hits: resolution.hits, actions: resolution.actions, summarize: false), ChatSearchPlan(query: "", kinds: []), ChatIntent.Question(), [])
             }
@@ -194,7 +196,7 @@ actor ChatService {
                                               date: question.date, folder: question.folder, undescribed: question.undescribed,
                                               extensions: question.formats ?? [], allPeople: plan.allPeople,
                                               excludedPersonIDs: plan.excludedPersonIDs, excludedPersonNames: plan.excludedPersonNames,
-                                              minBytes: question.minBytes, maxBytes: question.maxBytes)
+                                              minBytes: question.minBytes, maxBytes: question.maxBytes, root: root)
             // Counts, sizes, orders and duplicates must see every match, so a
             // subject becomes the full set of files it describes.
             let wantsAll = question.measure != "list" || question.explicitOrder || question.duplicates
@@ -208,8 +210,8 @@ actor ChatService {
             }
             let groups = ChatFacts.subjectGroups(plan.query)
             let hits = groups.count > 1
-                ? fuse(try groups.map { try CatalogStore.search(db, query: $0.joined(separator: " "), kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds) })
-                : try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds)
+                ? fuse(try groups.map { try CatalogStore.search(db, query: $0.joined(separator: " "), kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds, root: root) })
+                : try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds, root: root)
             return (nil, plan, question, hits)
         }
         if let done = stage.0 { return done }
@@ -218,7 +220,7 @@ actor ChatService {
         if !plan.query.isEmpty {
             let extra = await semantic(request, query: plan.query, database: database)
             if !extra.isEmpty {
-                let scope = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs)
+                let scope = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, root: root)
                 var lists = [lexical]
                 for list in extra { lists.append(try await database.pool.read { db in try ChatFacts.restrict(db, list, scope) }) }
                 hits = fuse(lists)
@@ -229,7 +231,7 @@ actor ChatService {
             extraFilter = ChatFacts.Filter(personIDs: plan.allPeople ? plan.personIDs : [], date: question.date, folder: question.folder,
                                            undescribed: question.undescribed, extensions: question.formats ?? [], allPeople: plan.allPeople,
                                            excludedPersonIDs: plan.excludedPersonIDs, excludedPersonNames: plan.excludedPersonNames,
-                                           minBytes: question.minBytes, maxBytes: question.maxBytes)
+                                           minBytes: question.minBytes, maxBytes: question.maxBytes, root: root)
             let filter = extraFilter!
             let current = hits
             hits = try await database.pool.read { db in try ChatFacts.restrict(db, current, filter) }
@@ -242,6 +244,7 @@ actor ChatService {
             fill.kinds = plan.kinds
             fill.personIDs = plan.personIDs
             fill.allPeople = plan.allPeople
+            fill.root = root
             let current = hits
             let base = fill
             let more = try await database.pool.read { db -> [CatalogHit] in
@@ -279,7 +282,7 @@ actor ChatService {
         var lists: [[CatalogHit]] = []
         if let vector = request.queryVector, request.embeddingModel == CLIPEmbeddingSpace.modelID {
             let search = CatalogRequest(requestID: request.requestID + "-visual", action: "search", searchMode: "semantic",
-                                        queryVector: vector, embeddingModel: CLIPEmbeddingSpace.modelID, limit: 100, resultScope: "files")
+                                        queryVector: vector, embeddingModel: CLIPEmbeddingSpace.modelID, limit: 100, rootID: request.context?.rootID, resultScope: "files")
             if let response = try? await CatalogSearch.handle(search, database: database), response.status == "ok" {
                 lists.append(response.hits)
             }
@@ -407,7 +410,8 @@ actor ChatService {
         guard !permitted.isEmpty else { return [] }
         return (try? await database.pool.read { db -> [ChatAction] in
             let context = ChatActions.Context(requestID: request.requestID, text: text, chat: request.context, people: try ChatActions.people(db),
-                                              knownPeople: try knownPeople(db), knownEvents: try knownEvents(db), source: "model")
+                                              knownPeople: try knownPeople(db), knownEvents: try knownEvents(db), source: "model",
+                                              root: try LibraryRoots.Scope.load(db, id: request.context?.rootID))
             return Array(try permitted.flatMap { try ChatActions.resolve(db, $0, context).actions }.prefix(1))
         }) ?? []
     }

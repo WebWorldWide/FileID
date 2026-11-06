@@ -281,6 +281,7 @@ fn context() -> ChatContext {
         person_ids,
         folder: folder.clone(),
         library_root: folder,
+        root_id: super::library_scope::current_id(),
     }
 }
 

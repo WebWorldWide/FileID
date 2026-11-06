@@ -61,10 +61,18 @@ struct JobRow {
     action: Option<(gtk::Button, Rc<RefCell<Option<JobAction>>>)>,
 }
 
+type ScopeShape = (Vec<(i64, String, String, i64, bool)>, Option<i64>);
+
 pub struct TitleBar {
     pub header: adw::HeaderBar,
     act: Rc<dyn Fn(Action)>,
+    folder_button: gtk::MenuButton,
+    folder_popover: gtk::Popover,
     folder_name: gtk::Label,
+    folder_head: gtk::Label,
+    scope_section: gtk::Box,
+    scope_list: gtk::Box,
+    scope_shape: RefCell<ScopeShape>,
     folder_row: gtk::Box,
     folder_row_name: gtk::Label,
     folder_row_path: gtk::Label,
@@ -123,12 +131,26 @@ impl TitleBar {
             .child(&folder_content)
             .popover(&folder_popover)
             .css_classes(["tb-control"])
-            .tooltip_text("Choose, rescan or close the folder FileID is working on")
+            .tooltip_text("Choose which location to show, or add, rescan or close a folder")
             .valign(gtk::Align::Center)
             .build();
         header.pack_start(&folder_button);
 
         let folder_body = vbox(0);
+        let scope_section = vbox(0);
+        let scope_head = section_label("Show");
+        scope_head.add_css_class("pop-head");
+        scope_head.update_property(&[gtk::accessible::Property::Label("Show")]);
+        scope_section.append(&scope_head);
+        let scope_list = vbox(2);
+        scope_list.add_css_class("scope-list");
+        scope_list.set_margin_start(6);
+        scope_list.set_margin_end(6);
+        scope_list.set_margin_bottom(8);
+        scope_list.update_property(&[gtk::accessible::Property::Label("Locations")]);
+        scope_section.append(&scope_list);
+        scope_section.set_visible(false);
+        folder_body.append(&scope_section);
         let head = section_label("Folders");
         head.add_css_class("pop-head");
         folder_body.append(&head);
@@ -189,6 +211,7 @@ impl TitleBar {
         folder_footer.append(&wipe);
         folder_body.append(&folder_footer);
         folder_popover.set_child(Some(&folder_body));
+        folder_popover.connect_show(|_| crate::tabs::library_scope::refresh());
         for (button, action) in [
             (&add, Action::PickFolder),
             (&rescan, Action::StartScan),
@@ -297,7 +320,13 @@ impl TitleBar {
         let bar = Rc::new(Self {
             header,
             act,
+            folder_button,
+            folder_popover,
             folder_name,
+            folder_head: head,
+            scope_section,
+            scope_list,
+            scope_shape: RefCell::new((Vec::new(), Some(-1))),
             folder_row,
             folder_row_name,
             folder_row_path,
@@ -459,25 +488,22 @@ impl TitleBar {
     }
 
     pub fn update(self: &Rc<Self>, status: &Status, folder_path: Option<&str>) {
-        match status.folder.as_deref() {
-            Some(name) => {
-                self.folder_name.set_text(name);
-                self.folder_name.remove_css_class("empty");
-                self.folder_row_name.set_text(name);
-                self.folder_row_path
-                    .set_text(folder_path.unwrap_or_default());
-                self.folder_row_path.set_tooltip_text(folder_path);
-                self.folder_row_count.set_text(&if status.total_files > 0 {
-                    format!("{} files", grouped(status.total_files))
-                } else {
-                    "Not scanned".to_owned()
-                });
-                self.rescan.set_label(&format!("Rescan {name}"));
-            }
-            None => {
-                self.folder_name.set_text("Choose a folder");
-                self.folder_name.add_css_class("empty");
-            }
+        let roots = crate::tabs::library_scope::roots();
+        let scope = crate::tabs::library_scope::current();
+        let title = crate::tabs::library_scope::title(scope.as_deref(), &roots, status.folder.as_deref());
+        self.set_title(&title);
+        self.sync_scope(&roots, scope.map(|scope| scope.root.id));
+        if let Some(name) = status.folder.as_deref() {
+            self.folder_row_name.set_text(name);
+            self.folder_row_path
+                .set_text(folder_path.unwrap_or_default());
+            self.folder_row_path.set_tooltip_text(folder_path);
+            self.folder_row_count.set_text(&if status.total_files > 0 {
+                format!("{} files", grouped(status.total_files))
+            } else {
+                "Not scanned".to_owned()
+            });
+            self.rescan.set_label(&format!("Rescan {name}"));
         }
         let has_folder = status.folder.is_some();
         self.add.set_label(if has_folder {
@@ -534,6 +560,150 @@ impl TitleBar {
                 slot.replace(Some(action));
             }
         }
+    }
+
+    fn set_title(&self, title: &str) {
+        let empty = title == "Choose a folder";
+        if empty {
+            self.folder_name.add_css_class("empty");
+        } else {
+            self.folder_name.remove_css_class("empty");
+        }
+        let spoken = if empty { title.to_owned() } else { format!("Location: {title}") };
+        self.folder_button.update_property(&[
+            gtk::accessible::Property::Label(&spoken),
+            gtk::accessible::Property::Description("Chooses which location Library, Search & Moments and Chat show"),
+        ]);
+        if self.folder_name.text() == title {
+            return;
+        }
+        let first = self.folder_name.text().is_empty() || self.folder_name.text() == "Choose a folder";
+        self.folder_name.set_text(title);
+        if !first {
+            let name = self.folder_name.downgrade();
+            let _ = crate::spring::animate_with(crate::spring::Spring::Tight, &self.folder_name, 0.4, 1.0, move |value| {
+                if let Some(name) = name.upgrade() {
+                    name.set_opacity(value);
+                }
+            });
+        }
+    }
+
+    /// "All locations" and one row per scanned location; rebuilt only when the
+    /// list or the choice changes.
+    fn sync_scope(&self, roots: &[fileid_engine::ipc::LibraryRoot], current: Option<i64>) {
+        let shape: ScopeShape = (
+            roots
+                .iter()
+                .map(|root| (root.id, root.display.clone(), root.path.clone(), root.file_count, root.online))
+                .collect(),
+            current,
+        );
+        if *self.scope_shape.borrow() == shape {
+            return;
+        }
+        let previous = self.scope_shape.replace(shape).1;
+        while let Some(child) = self.scope_list.first_child() {
+            self.scope_list.remove(&child);
+        }
+        let shown = !roots.is_empty();
+        self.scope_section.set_visible(shown);
+        if shown {
+            self.folder_head.add_css_class("pop-head-rule");
+        } else {
+            self.folder_head.remove_css_class("pop-head-rule");
+        }
+        if !shown {
+            return;
+        }
+        let count = crate::tabs::library_scope::location_count_text(roots.len());
+        self.scope_list.append(&self.scope_row(
+            None,
+            "All locations",
+            None,
+            &count,
+            true,
+            current.is_none(),
+            &format!("All locations, {count}"),
+            previous.is_some(),
+        ));
+        for root in roots {
+            self.scope_list.append(&self.scope_row(
+                Some(root.id),
+                &root.display,
+                Some(&root.path),
+                &crate::tabs::library_scope::file_count_text(root.file_count),
+                root.online,
+                current == Some(root.id),
+                &crate::tabs::library_scope::spoken(root),
+                previous != Some(root.id),
+            ));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scope_row(
+        &self,
+        id: Option<i64>,
+        name: &str,
+        path: Option<&str>,
+        count: &str,
+        online: bool,
+        selected: bool,
+        spoken: &str,
+        newly_selected: bool,
+    ) -> gtk::Button {
+        let content = hbox(10);
+        let check = label("✓", &["tone-gold", "scope-check"]);
+        check.set_opacity(if selected { 1.0 } else { 0.0 });
+        check.set_width_chars(2);
+        content.append(&check);
+        let names = vbox(2);
+        names.set_hexpand(true);
+        let title = label(name, &["pop-title"]);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        names.append(&title);
+        if let Some(path) = path {
+            let path_label = label(path, &["pop-meta", "monospace"]);
+            path_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+            names.append(&path_label);
+        }
+        content.append(&names);
+        if !online {
+            content.append(&crate::v3::pill("OFFLINE", Tone::Warning));
+        }
+        let meta = label(count, &["pop-meta"]);
+        meta.set_valign(gtk::Align::Center);
+        content.append(&meta);
+        let row = crate::v3::rail_row(&content);
+        row.add_css_class("scope-row");
+        row.set_size_request(-1, if path.is_some() { 44 } else { 36 });
+        crate::v3::set_selected(&row, selected);
+        row.set_tooltip_text(path);
+        row.update_property(&[
+            gtk::accessible::Property::Label(spoken),
+            gtk::accessible::Property::Description(if id.is_some() {
+                "Shows only this location in Library, Search & Moments and Chat"
+            } else {
+                "Shows every location in Library, Search & Moments and Chat"
+            }),
+        ]);
+        row.update_state(&[gtk::accessible::State::Selected(Some(selected))]);
+        if selected && newly_selected {
+            let check_weak = check.downgrade();
+            let _ = crate::spring::animate_with(crate::spring::Spring::Tight, &check, 0.0, 1.0, move |value| {
+                if let Some(check) = check_weak.upgrade() {
+                    check.set_opacity(value);
+                }
+            });
+        }
+        let act = self.act.clone();
+        let popover = self.folder_popover.clone();
+        row.connect_clicked(move |_| {
+            popover.popdown();
+            act(Action::ChooseScope(id));
+        });
+        row
     }
 
     fn rebuild_jobs(&self, jobs: &[Job]) {

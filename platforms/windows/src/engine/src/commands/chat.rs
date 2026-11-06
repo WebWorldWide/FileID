@@ -245,7 +245,8 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
 fn model_actions(conn: &Connection, request: &ChatRequest, proposals: &[super::chat_intent::Intent]) -> Result<Vec<ChatAction>> {
     let text = request.text.clone().unwrap_or_default();
     let (people, events) = super::catalog_retrieval::known(conn)?;
-    let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), people: &people, events: &events, source: "model" };
+    let root = super::roots::RootScope::load(conn, request.context.as_ref().and_then(|chat| chat.root_id))?;
+    let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "model" };
     let mut actions = Vec::new();
     for proposal in proposals.iter().filter(|proposal| chat_actions::permitted(proposal, &text)) {
         actions.extend(chat_actions::resolve(conn, proposal, &context)?.actions);
@@ -405,6 +406,7 @@ fn validate(request: &ChatRequest) -> Result<()> {
             || !ids_ok(&context.person_ids, 50)
             || context.page.as_deref().is_some_and(|page| !crate::ipc::CHAT_PAGES.contains(&page))
             || [&context.folder, &context.library_root].iter().any(|path| path.as_ref().is_some_and(|path| path.is_empty() || path.chars().count() > 32_768))
+            || context.root_id.is_some_and(|id| id <= 0)
         {
             bail!("Invalid conversation context")
         }
@@ -447,6 +449,7 @@ fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<V
             "embeddingModel": model,
             "limit": 100,
             "resultScope": "files",
+            "rootID": request.context.as_ref().and_then(|chat| chat.root_id),
         }));
         if let Ok(response) = search.map_err(anyhow::Error::from).and_then(|search| index.search(&search))
             && response.status == "ok" {
@@ -822,8 +825,9 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         bail!("A message of at most 2000 characters is required")
     }
     let (people, events) = super::catalog_retrieval::known(conn)?;
+    let root = super::roots::RootScope::load(conn, request.context.as_ref().and_then(|chat| chat.root_id))?;
     if let Some(intent) = parse_intent(&text) {
-        let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), people: &people, events: &events, source: "parser" };
+        let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "parser" };
         let Resolution { message, hits, actions } = chat_actions::resolve(conn, &intent, &context)?;
         return Ok(Prepared { text, message, hits, actions, summarize: false });
     }
@@ -851,6 +855,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         excluded_person_names: plan.excluded_person_names.clone(),
         min_bytes: question.min_bytes,
         max_bytes: question.max_bytes,
+        root: root.clone(),
         ..Filter::default()
     };
     // Counts, sizes, orders and duplicates must see every match, so a subject
@@ -866,7 +871,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
-    let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds);
+    let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds, root.as_ref());
     let groups = chat_facts::subject_groups(&plan.query);
     let mut hits = if groups.len() > 1 {
         fuse(groups.iter().map(|group| search(&group.join(" "))).collect::<Result<Vec<_>>>()?)
@@ -876,7 +881,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     if !plan.query.is_empty() {
         let extra = semantic(conn, request, &plan.query);
         if !extra.is_empty() {
-            let scope = Filter { kinds: plan.kinds.clone(), person_ids: plan.person_ids.clone(), ..Filter::default() };
+            let scope = Filter { kinds: plan.kinds.clone(), person_ids: plan.person_ids.clone(), root: root.clone(), ..Filter::default() };
             let mut lists = vec![hits];
             for list in extra {
                 lists.push(chat_facts::restrict(conn, list, &scope)?);
@@ -895,6 +900,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         excluded_person_names: plan.excluded_person_names.clone(),
         min_bytes: question.min_bytes,
         max_bytes: question.max_bytes,
+        root: root.clone(),
         ..Filter::default()
     });
     if let Some(filter) = &extra_filter {
@@ -908,6 +914,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         fill.kinds.clone_from(&plan.kinds);
         fill.person_ids.clone_from(&plan.person_ids);
         fill.all_people = plan.all_people;
+        fill.root.clone_from(&root);
         let subject = if plan.query.is_empty() { Some(None) } else { chat_facts::subject_ids(conn, &plan.query)?.map(Some) };
         if let Some(ids) = subject {
             fill.ids = ids;
@@ -1432,7 +1439,7 @@ mod tests {
         conn.execute("INSERT INTO catalog_passages(id,file_id,text,source_revision,model_version,confidence,stale) VALUES('v',1,'home run','test','test',1,0),('p',2,'home run','test','test',1,0)",[]).unwrap();
         let videos = vec!["video".to_owned()];
         assert_eq!(
-            super::super::catalog::search(&conn, "birthday", &videos)
+            super::super::catalog::search(&conn, "birthday", &videos, None)
                 .unwrap()
                 .iter()
                 .map(|hit| hit.file_id)
@@ -1440,7 +1447,7 @@ mod tests {
             vec![1]
         );
         assert_eq!(
-            super::super::catalog::search(&conn, "", &videos)
+            super::super::catalog::search(&conn, "", &videos, None)
                 .unwrap()
                 .iter()
                 .map(|hit| hit.file_id)
@@ -1448,7 +1455,7 @@ mod tests {
             vec![1]
         );
         assert_eq!(
-            super::super::catalog::search(&conn, "home run", &videos).unwrap()[0]
+            super::super::catalog::search(&conn, "home run", &videos, None).unwrap()[0]
                 .evidence_id
                 .as_deref(),
             Some("v")

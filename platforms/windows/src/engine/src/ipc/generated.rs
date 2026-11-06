@@ -691,6 +691,13 @@ pub struct CatalogRequest {
     /// be >= capturedFrom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_to: Option<f64>,
+    /// Search only (schema 1.20.0): keep files whose most specific library location (a listRoots
+    /// id) is this one: the location's path or anything under it, never a sibling that shares its
+    /// prefix (/Camera never matches /Camera2) and never a deeper location of its own. Applied
+    /// before the 100-candidate cut, the capture window and the subject fill. An unknown id is an
+    /// error.
+    #[serde(rename = "rootID", default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<CatalogEvent>,
     #[serde(rename = "eventID", default, skip_serializing_if = "Option::is_none")]
@@ -824,6 +831,12 @@ pub struct ChatContext {
     pub folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_root: Option<String>,
+    /// Schema 1.20.0: the library location (a listRoots id) the app is scoped to. Every search,
+    /// count and list in the answer, and the files a proposed action covers, keep only files of
+    /// that location by the CatalogRequest.rootID rule. Omitted means every location. An unknown id
+    /// is an error.
+    #[serde(rename = "rootID", default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<i64>,
 }
 
 /// Move one face to another person, or to a new person when createNewPerson is true. Replies with a

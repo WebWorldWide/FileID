@@ -167,7 +167,8 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             if mode != "keyword" {
                 bail!("Visual search requires the engine catalog runtime")
             }
-            result.hits = super::catalog_search::select(search(conn, query, &[])?, limit, files_only);
+            let root = super::roots::RootScope::load(conn, request.root_id)?;
+            result.hits = super::catalog_search::select(search(conn, query, &[], root.as_ref())?, limit, files_only);
         }
         "detail" => {
             result.chapters = chapters(
@@ -449,6 +450,6 @@ mod tests {
     }
 }
 
-pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result<Vec<CatalogHit>> {
-    super::catalog_retrieval::search(conn, query, kinds, &[], &[], None)
+pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String], root: Option<&super::roots::RootScope>) -> Result<Vec<CatalogHit>> {
+    super::catalog_retrieval::search(conn, query, kinds, &[], &[], None, root)
 }

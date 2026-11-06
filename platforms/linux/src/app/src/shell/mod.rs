@@ -29,6 +29,7 @@ pub enum Action {
     FocusSearch,
     ToggleChat,
     DismissNote,
+    ChooseScope(Option<i64>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -120,7 +120,7 @@ fn semantic_hybrid_scope_exclusions_and_changed_sources_are_real() {
             .collect::<Vec<_>>(),
         vec![3]
     );
-    assert!(crate::commands::catalog::search(&index.writer.lock(), "birthday", &[])
+    assert!(crate::commands::catalog::search(&index.writer.lock(), "birthday", &[], None)
         .unwrap()
         .iter()
         .all(|h| h.evidence_id.is_none()));

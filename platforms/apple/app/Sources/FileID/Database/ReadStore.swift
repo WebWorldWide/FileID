@@ -41,6 +41,32 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var hasNamedPerson = false
     public private(set) var hasCaptions = false
     public private(set) var lastError: String?
+    /// The Library's counters inside the chosen location (`scope`); the whole catalog under
+    /// "All locations".
+    public private(set) var scopedTotalFiles: Int = 0
+    public private(set) var scopedUnreadableFiles: Int = 0
+    public private(set) var scopedOtherFiles: Int = 0
+    /// Bumps when the scope changes so the Library reloads.
+    public private(set) var scopeEpoch: Int = 0
+    @ObservationIgnored private let scopeLock = NSLock()
+    @ObservationIgnored private var _scope: LibraryScope?
+    /// The location the Library lists; nil for "All locations".
+    var scope: LibraryScope? {
+        scopeLock.lock(); defer { scopeLock.unlock() }
+        return _scope
+    }
+
+    @MainActor
+    func setScope(_ next: LibraryScope?) {
+        let changed = scopeLock.withLock { () -> Bool in
+            guard _scope != next else { return false }
+            _scope = next
+            return true
+        }
+        guard changed else { return }
+        scopeEpoch &+= 1
+        refreshCounters()
+    }
 
     // `lastError` is read by SwiftUI on the main actor but reported from
     // off-main reads, so every write hops to the main actor.
@@ -111,6 +137,9 @@ public final class ReadStore: @unchecked Sendable {
         let totalImages: Int
         let unreadableFiles: Int
         let otherFiles: Int
+        let scopedTotalFiles: Int
+        let scopedUnreadableFiles: Int
+        let scopedOtherFiles: Int
         let totalDuplicateGroups: Int
         let totalReclaimableMB: Double
         let hasFacePrints: Bool
@@ -177,12 +206,20 @@ public final class ReadStore: @unchecked Sendable {
 
     private func computeCounters() -> CounterResult {
         guard let q = queue else { return .noDatabase }
+        let scope = self.scope
         do {
             return try q.read { db -> CounterResult in
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
+                var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
+                if let scope {
+                    let within = LibraryScope.sql("path_text")
+                    scoped = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(within)", arguments: [scope.param]) ?? 0,
+                              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(within)", arguments: [scope.param]) ?? 0,
+                              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0 AND \(within)", arguments: [scope.param]) ?? 0)
+                }
 
                 // Fast stored-hash candidate metrics for Settings only. Cleanup itself
                 // performs bounded live full-file verification before display and Trash.
@@ -213,6 +250,9 @@ public final class ReadStore: @unchecked Sendable {
                     totalImages: totalImages,
                     unreadableFiles: unreadableFiles,
                     otherFiles: otherFiles,
+                    scopedTotalFiles: scoped.total,
+                    scopedUnreadableFiles: scoped.unreadable,
+                    scopedOtherFiles: scoped.other,
                     totalDuplicateGroups: groups,
                     totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
                     hasFacePrints: hasFacePrints,
@@ -231,6 +271,9 @@ public final class ReadStore: @unchecked Sendable {
         self.totalImages = snapshot.totalImages
         self.unreadableFiles = snapshot.unreadableFiles
         self.otherFiles = snapshot.otherFiles
+        self.scopedTotalFiles = snapshot.scopedTotalFiles
+        self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles
+        self.scopedOtherFiles = snapshot.scopedOtherFiles
         self.totalDuplicateGroups = snapshot.totalDuplicateGroups
         self.totalReclaimableMB = snapshot.totalReclaimableMB
         self.hasFacePrints = snapshot.hasFacePrints
@@ -249,6 +292,7 @@ public final class ReadStore: @unchecked Sendable {
                       search: String = "",
                       kindFilter: String? = nil) -> [FileRow] {
         guard let q = queue else { return [] }
+        let scope = self.scope
         do {
             return try q.read { db in
                 let unreadable = kindFilter == Self.unreadableFilter
@@ -301,6 +345,10 @@ public final class ReadStore: @unchecked Sendable {
                     sql += " AND kind = ?"
                     args += [k]
                 }
+                if let scope {
+                    sql += " AND " + LibraryScope.sql("path_text")
+                    args += [scope.param]
+                }
                 sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
                 args += [limit, offset]
                 let rows = try Row.fetchAll(db, sql: sql, arguments: args)
@@ -331,6 +379,7 @@ public final class ReadStore: @unchecked Sendable {
 
     public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {
         guard !ids.isEmpty, ids.count <= 100, let q = queue else { return [] }
+        let scope = self.scope
         return await Task.detached(priority: .userInitiated) {
             (try? q.read { db in
                 let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
@@ -338,7 +387,8 @@ public final class ReadStore: @unchecked Sendable {
                 let byID = Dictionary(uniqueKeysWithValues: rows.map { (($0["id"] as Int64), Self.toFileRow($0)) })
                 var seen = Set<Int64>()
                 return ids.compactMap { id -> FileRow? in
-                    guard seen.insert(id).inserted, let row = byID[id], kindFilter == nil || row.kind == kindFilter else { return nil }
+                    guard seen.insert(id).inserted, let row = byID[id], kindFilter == nil || row.kind == kindFilter,
+                          scope?.contains(row.pathText) ?? true else { return nil }
                     return row
                 }
             }) ?? []

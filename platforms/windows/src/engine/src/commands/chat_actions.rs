@@ -27,6 +27,7 @@ pub(crate) struct Context<'a> {
     pub request_id: &'a str,
     pub text: &'a str,
     pub chat: Option<&'a ChatContext>,
+    pub root: Option<&'a super::roots::RootScope>,
     pub people: &'a KnownPeople,
     pub events: &'a KnownEvents,
     pub source: &'a str,
@@ -175,6 +176,7 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         folder: question.folder.clone(),
         undescribed: question.undescribed,
         extensions: question.formats.clone().unwrap_or_default(),
+        root: context.root.cloned(),
         ..Filter::default()
     };
     if explicit {
@@ -190,7 +192,7 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         .collect::<Vec<_>>()
         .join(" ");
     if !query.is_empty() {
-        let mut ids: Vec<i64> = super::catalog_retrieval::search(conn, &query, &plan.kinds, &plan.person_ids, &[], None)?
+        let mut ids: Vec<i64> = super::catalog_retrieval::search(conn, &query, &plan.kinds, &plan.person_ids, &[], None, context.root)?
             .into_iter()
             .map(|hit| hit.file_id)
             .collect();
@@ -296,7 +298,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
         "search" | "findMoments" => {
             let query = intent.query.clone().unwrap_or_default();
             let kinds = if intent.kind == "findMoments" { vec!["video".to_owned()] } else { vec![] };
-            let hits = if query.is_empty() { vec![] } else { super::catalog_retrieval::search(conn, &query, &kinds, &[], &[], None)? };
+            let hits = if query.is_empty() { vec![] } else { super::catalog_retrieval::search(conn, &query, &kinds, &[], &[], None, context.root)? };
             let (title, detail) = if intent.kind == "search" {
                 (format!("Search Library for “{query}”"), "Opens Library with this search.".to_owned())
             } else {
@@ -732,7 +734,7 @@ mod tests {
     use crate::ipc::ChatContext;
 
     fn context<'a>(chat: Option<&'a ChatContext>, people: &'a KnownPeople, events: &'a KnownEvents, text: &'a str) -> Context<'a> {
-        Context { request_id: "r", text, chat, people, events, source: "parser" }
+        Context { request_id: "r", text, chat, root: None, people, events, source: "parser" }
     }
 
     #[test]

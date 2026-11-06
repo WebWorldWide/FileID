@@ -124,7 +124,7 @@ struct Sidebar: View {
                 let total = max(p.total, p.discovered)
                 return (total > 0 ? "\(Int(Double(p.processed) / Double(total) * 100))%" : "…", Theme.gold)
             }
-            return store.totalFiles > 0 ? (compact(store.totalFiles), Theme.text3) : nil
+            return store.scopedTotalFiles > 0 ? (compact(store.scopedTotalFiles), Theme.text3) : nil
         case .people:
             if engine.faceClusteringInFlight { return ("…", Theme.ai) }
             if let r = engine.lastFaceClustering, r.personCount > 0 { return (compact(r.personCount), Theme.text3) }

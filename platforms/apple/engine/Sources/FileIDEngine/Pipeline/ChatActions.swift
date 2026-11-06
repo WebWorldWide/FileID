@@ -23,6 +23,7 @@ enum ChatActions {
         let knownPeople: [ChatSearchPlan.KnownPerson]
         let knownEvents: [ChatSearchPlan.KnownEvent]
         let source: String
+        var root: LibraryRoots.Scope? = nil
     }
 
     struct Resolution {
@@ -127,14 +128,14 @@ enum ChatActions {
         let plan = ChatSearchPlan.resolve(question.reduced, previous: nil, knownPeople: context.knownPeople, knownEvents: context.knownEvents)
         var filter = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
                                       date: question.date, folder: question.folder, undescribed: question.undescribed,
-                                      extensions: question.formats ?? [])
+                                      extensions: question.formats ?? [], root: context.root)
         if explicit {
             guard let ids = context.chat?.fileIDs, !ids.isEmpty else { return .failure(Message("Select files in Library first, then ask again.")) }
             filter.ids = ids
         }
         let query = ChatIntent.split(plan.query).filter { !scopeNoise.contains(ChatIntent.clean($0)) }.joined(separator: " ")
         if !query.isEmpty {
-            var ids = try CatalogStore.search(db, query: query, kinds: plan.kinds, personIDs: plan.personIDs).map(\.fileID)
+            var ids = try CatalogStore.search(db, query: query, kinds: plan.kinds, personIDs: plan.personIDs, root: context.root).map(\.fileID)
             if let selected = filter.ids { ids = ids.filter(selected.contains) }
             filter.ids = Array(Set(ids)).sorted()
         }
@@ -212,7 +213,7 @@ enum ChatActions {
             return finish(proposed)
         case "search", "findMoments":
             let query = intent.query ?? ""
-            let hits = query.isEmpty ? [] : try CatalogStore.search(db, query: query, kinds: intent.kind == "findMoments" ? ["video"] : [])
+            let hits = query.isEmpty ? [] : try CatalogStore.search(db, query: query, kinds: intent.kind == "findMoments" ? ["video"] : [], root: context.root)
             var proposed = intent.kind == "search"
                 ? action(context, "search", "Search Library for “\(query)”", "Opens Library with this search.")
                 : action(context, "findMoments", "Open Search & Moments", "Searches inside videos for “\(query)” in Search & Moments.")

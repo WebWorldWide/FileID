@@ -46,6 +46,25 @@ Minimum hit target 28.
 | Job row | title Archivo 13 medium; state Archivo 12 semibold (running gold, paused text3, completed pink, failed/cancelled danger); percent mono 11.5; Pause secondary, Resume accent, Retry secondary, Cancel ghost (all 28); 4 pt grained bar in the state tone; padding 14 / 10. |
 | Timecode | m:ss, h:mm:ss past an hour; spoken "N minutes N seconds". |
 
+## Location scope (title bar folder switcher)
+
+"All locations" or one library location scopes Library, Search & Moments and Chat. Everything else (People, Cleanup, Deep Analyze, Best Takes, Restructure, File Tools, Settings, Activity) and the folder actions (Rescan, Close folder, Start over) keep working on the whole catalog and the current folder.
+
+- Switcher button, unchanged frame: 30 tall, black 0.28, radius 6, 1 pt white 0.16 stroke (gold while open), 10 h padding; "FileID" serif 18, 14 pt hairline, label Archivo 13.5 semibold (max 180, middle-truncated), "▾" mono 11 text3. Label: the chosen location's name; "All locations" when nothing is chosen and the catalog has a location; with no locations yet, the folder name or "Choose a folder" in text3. A label change cross-fades from 0.4 opacity on the tight spring (Reduce Motion: instant). Spoken "Location: Camera", hint "Chooses which location Library, Search & Moments and Chat show". Tooltip "Choose which location to show, or add, rescan or close a folder".
+- Popover 360 wide on `#161618`, radius 10. The SHOW section comes first and only when `listRoots` returns at least one location:
+  - "SHOW" section label, padding 12 h, 10 top, 6 bottom.
+  - Rail rows (inset 6 h, spacing 2, padding 10 h, radius 8): selected row gold 0.12 fill and gold 0.45 stroke, Selected trait. 14 pt leading column with an 11 pt semibold gold check on the selected row, which fades in on the tight spring.
+  - "All locations": 36 tall, Archivo 13.5 semibold text1, trailing "N locations" meta 12 text2.
+  - One row per location in `listRoots` order: 44 tall; name Archivo 13.5 semibold over the path in mono 11 text3 (head-truncated, spacing 2); trailing OFFLINE status pill (warning) when offline, then "N files" meta 12 text2 from `fileCount` ("1 file"). Tooltip = path. Spoken "Camera, 1,204 files, offline", hint "Shows only this location in Library, Search & Moments and Chat".
+  - 8 bottom padding, then the existing FOLDERS section with a hairlineStrong rule above it.
+- Picking a row closes the popover and applies at once. Opening the popover refreshes `listRoots`.
+- Keyboard and screen readers: rows are buttons in the popover's focus chain (Tab, plus arrow keys on WinUI and GTK); Space or Return picks; Esc closes. Rows carry the 2 pt gold focus ring. WinUI adds position-in-set and item status "Selected"; GTK sets the Selected state.
+- Library: listing, paging, the "N of M shown" and kind counts, the Unreadable count, the page meta ("N files in Camera") and the sidebar badge count only the chosen location. Visual and find-similar searches send `rootID`.
+- Search & Moments: every search sends `rootID`. On macOS changing the location re-runs the current search.
+- Chat: every send carries `context.rootID`; answers, counts, lists and proposed actions cover that location only.
+- Membership: a file belongs to the most specific location whose path holds it (the `OfflineRoots` rule), so `/Camera` never matches `/Camera2`, and a location nested inside another owns its own files. A parent's `fileCount` can therefore be larger than what its scope shows.
+- The choice persists per app: macOS `UserDefaults` `libraryScopeRootID` (0 = all), WinUI and GTK `app-settings.json` `libraryScopeRootId`. It is kept while the location list loads and falls back to "All locations" once its location is gone. An unknown `rootID` is an engine error ("That location is no longer in the library.").
+
 ## Search & Moments
 
 - 300 pt left pane (pane fill), vertical hairline, scroll area (padding 26 / 20, spacing 16).

@@ -15,6 +15,58 @@ enum LibraryRoots {
         return (trimmed, trimmed + String(separator), trimmed + (windows ? "]" : "0"))
     }
 
+    /// The files one location holds: its path and everything under it, minus any deeper
+    /// location, because the most specific location owns a file (the apps' `OfflineRoots`
+    /// rule). Mirrors Rust `roots::RootScope`.
+    struct Scope: Sendable, Equatable {
+        let bounds: [String]
+        let deeper: [[String]]
+        let param: String
+
+        init(root: String, others: [String]) {
+            let own = LibraryRoots.subtreeBounds(root)
+            let nested = Set(others.map(LibraryRoots.subtreeBounds)
+                .filter { $0.exact != own.exact && Scope.within([own.exact, own.low, own.high], $0.exact) }
+                .map { [$0.exact, $0.low, $0.high] })
+            bounds = [own.exact, own.low, own.high]
+            deeper = nested.sorted { $0.lexicographicallyPrecedes($1) }
+            let payload: [Any] = bounds + [deeper]
+            param = String(decoding: (try? JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])) ?? Data("[]".utf8), as: UTF8.self)
+        }
+
+        /// nil without an id; throws for an id the catalog doesn't know.
+        static func load(_ db: GRDB.Database, id: Int64?) throws -> Scope? {
+            guard let id else { return nil }
+            guard id > 0 else { throw UnknownRoot() }
+            let rows = try Row.fetchAll(db, sql: "SELECT id,path FROM library_roots")
+            guard let root = rows.first(where: { ($0["id"] as Int64) == id }) else { throw UnknownRoot() }
+            return Scope(root: root["path"], others: rows.filter { ($0["id"] as Int64) != id }.map { $0["path"] })
+        }
+
+        func contains(_ path: String) -> Bool {
+            Scope.within(bounds, path) && !deeper.contains { Scope.within($0, path) }
+        }
+
+        /// SQLite compares paths byte by byte, so these do too.
+        private static func within(_ bounds: [String], _ path: String) -> Bool {
+            path.utf8.elementsEqual(bounds[0].utf8)
+                || (!path.utf8.lexicographicallyPrecedes(bounds[1].utf8) && path.utf8.lexicographicallyPrecedes(bounds[2].utf8))
+        }
+    }
+
+    struct UnknownRoot: Error, LocalizedError {
+        var errorDescription: String? { "That location is no longer in the library." }
+    }
+
+    /// SQL that is true when `column` lies in the scope bound to the one `?` it contains
+    /// (a `Scope.param`), or when that value is NULL. Mirrors Rust `roots::clause`.
+    static func scopeSQL(_ column: String) -> String {
+        func inside(_ bounds: String) -> String {
+            "(\(column)=json_extract(\(bounds),'$[0]') OR (\(column)>=json_extract(\(bounds),'$[1]') AND \(column)<json_extract(\(bounds),'$[2]')))"
+        }
+        return "(SELECT s.v IS NULL OR (\(inside("s.v")) AND NOT EXISTS (SELECT 1 FROM json_each(s.v,'$[3]') d WHERE \(inside("d.value")))) FROM (SELECT ? AS v) s)"
+    }
+
     /// Scans record the full path as the display name; show the folder's own name instead.
     static func displayName(path: String, stored: String) -> String {
         guard stored == path else { return stored }

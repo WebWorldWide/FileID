@@ -93,6 +93,7 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         limit: Some(100),
         captured_from: None,
         captured_to: None,
+        root_id: None,
         result_scope: None,
         event: None,
         event_id: None,

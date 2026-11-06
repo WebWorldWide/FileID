@@ -10,6 +10,7 @@ pub mod file_tools;
 pub mod library;
 mod library_pane;
 mod library_selection;
+pub mod library_scope;
 mod locations;
 mod model_catalog;
 mod naming;

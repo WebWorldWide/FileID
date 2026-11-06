@@ -178,6 +178,10 @@ struct LibraryView: View {
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
             refreshBulkState()
         }
+        .onChange(of: store.scopeEpoch) { _, _ in
+            listedQuery = nil
+            reload()
+        }
         // Terminal reload: the 1 s batch throttle above can swallow the FINAL
         // scan batch (it advances lastSeenBatchIndex before the throttle guard,
         // so the last batch never triggers a reload if it lands within 1 s).
@@ -607,12 +611,12 @@ struct LibraryView: View {
 
     /// Files the current listing draws from: unreadable files appear only under their own filter.
     private var shownTotal: Int {
-        kindFilter == ReadStore.unreadableFilter ? store.unreadableFiles : max(0, store.totalFiles - store.unreadableFiles)
+        kindFilter == ReadStore.unreadableFilter ? store.scopedUnreadableFiles : max(0, store.scopedTotalFiles - store.scopedUnreadableFiles)
     }
 
     private var unreadableKind: [(label: String, value: String?)] {
-        guard store.unreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
-        return [(label: "Unreadable \(store.unreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
+        guard store.scopedUnreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
+        return [(label: "Unreadable \(store.scopedUnreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
     }
 
     @ViewBuilder
@@ -624,7 +628,7 @@ struct LibraryView: View {
             ("Docs",     "doc"),
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
-        ] + (store.otherFiles > 0 || kindFilter == "other" ? [(label: "Other", value: "other")] : []) + unreadableKind
+        ] + (store.scopedOtherFiles > 0 || kindFilter == "other" ? [(label: "Other", value: "other")] : []) + unreadableKind
         HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
@@ -766,7 +770,7 @@ struct LibraryView: View {
             var pageable = false
             if let seed {
                 visualSearchPending = true
-                if let response = await engine.searchCatalog(seedID: seed.id), response.status == "ok" {
+                if let response = await catalogSearch(seedID: seed.id), response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                 } else { newRows = [] }
             } else {
@@ -777,7 +781,7 @@ struct LibraryView: View {
                     guard !Task.isCancelled else { return }
                     rows = newRows
                     visualSearchPending = true
-                    if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
+                    if let response = await catalogSearch(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                         pageable = false
                     }
@@ -796,6 +800,20 @@ struct LibraryView: View {
             canLoadMore = pageable
             listedQuery = seed == nil ? (query, kind) : nil
         }
+    }
+
+    /// The engine's visual search, kept to the chosen location before its cut.
+    private func catalogSearch(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil) async -> CatalogResponse? {
+        guard let rootID = store.scope?.root.id else { return await engine.searchCatalog(query: query, vector: vector, seedID: seedID) }
+        for _ in 0..<120 {
+            let request = CatalogRequest(requestID: UUID().uuidString, action: "search", query: query, fileID: seedID,
+                                         searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: 60, rootID: rootID, resultScope: "files")
+            guard let response = await TakeRequests.send(engine, request, timeout: 10) else { return nil }
+            if response.status != "indexing" { return response }
+            do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
+        }
+        return nil
     }
 
     private func loadMore() {

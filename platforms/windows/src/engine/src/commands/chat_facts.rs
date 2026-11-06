@@ -3,6 +3,7 @@
 //! constant with bound parameters.
 
 use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question};
+use super::roots::RootScope;
 use crate::ipc::CatalogHit;
 use anyhow::Result;
 use rusqlite::{types::Value, Connection};
@@ -48,6 +49,8 @@ pub(crate) struct Filter {
     /// Exclusive byte bounds.
     pub min_bytes: Option<i64>,
     pub max_bytes: Option<i64>,
+    /// The library location the app is scoped to (`rootID`).
+    pub root: Option<RootScope>,
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Value {
@@ -152,6 +155,10 @@ impl Filter {
         }
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
+        }
+        if let Some(root) = &self.root {
+            parts.push(super::roots::clause("f.path_text", "?"));
+            args.push(Value::Text(root.param().to_owned()));
         }
         parts.join(" AND ")
     }
@@ -323,12 +330,13 @@ pub(crate) struct FolderTotal {
 
 /// Folders holding the most files (or bytes), from the stored paths. Both path
 /// separators are folded so a catalog scanned on Windows reads the same.
-pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64) -> Result<Vec<FolderTotal>> {
+pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option<&RootScope>) -> Result<Vec<FolderTotal>> {
     let path = "replace(f.path_text,char(92),'/')";
     let order = if by_size { "b DESC,c DESC" } else { "c DESC,b DESC" };
-    let sql = format!("SELECT rtrim({path},replace({path},'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY {order},dir ASC LIMIT ?1");
+    let within = super::roots::clause("f.path_text", "?2");
+    let sql = format!("SELECT rtrim({path},replace({path},'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 AND {within} GROUP BY dir ORDER BY {order},dir ASC LIMIT ?1");
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([limit], |row| {
+    let rows = statement.query_map(rusqlite::params![limit, root.map(RootScope::param)], |row| {
         let mut dir: String = row.get(0)?;
         while dir.len() > 1 && dir.ends_with('/') {
             dir.pop();
@@ -360,8 +368,10 @@ fn folder_phrase(folder: &FolderTotal) -> String {
     format!("{} ({} {}, {})", folder.name, count_label(folder.count), if folder.count == 1 { "file" } else { "files" }, bytes_label(folder.bytes))
 }
 
-fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec<CatalogHit>)> {
-    let everything = Filter::default();
+fn library_answer(conn: &Connection, question: &Question, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let everything = Filter { root: root.cloned(), ..Filter::default() };
+    let within = super::roots::clause("f.path_text", "?1");
+    let param = [root.map(RootScope::param)];
     let (count, bytes) = totals(conn, &everything)?;
     let hits = listed(conn, &everything, "newest", SHOWN, count)?;
     if count == 0 {
@@ -369,17 +379,17 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
     }
     if question.measure == "folders" {
         let by_size = question.order == "largest";
-        let top = folders(conn, by_size, 5)?;
+        let top = folders(conn, by_size, 5, root)?;
         let list = top.iter().map(folder_phrase).collect::<Vec<_>>().join(", ");
         return Ok((format!("{}: {list}.", if by_size { "Biggest folders" } else { "Folders with the most files" }), hits));
     }
     if question.measure == "formats" {
-        let mut statement = conn.prepare(
-            "SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0 \
-             GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC",
-        )?;
+        let mut statement = conn.prepare(&format!(
+            "SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0 AND {within} \
+             GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC"
+        ))?;
         let formats = statement
-            .query_map([], |row| {
+            .query_map(param, |row| {
                 let (ext, n): (String, i64) = (row.get(0)?, row.get(1)?);
                 Ok(format!("{} {ext}", count_label(n)))
             })?
@@ -397,9 +407,9 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
             hits,
         ));
     }
-    let mut statement = conn.prepare("SELECT f.kind,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,f.kind ASC")?;
+    let mut statement = conn.prepare(&format!("SELECT f.kind,COUNT(*) AS c FROM files f WHERE f.failed=0 AND {within} GROUP BY f.kind ORDER BY c DESC,f.kind ASC"))?;
     let kinds = statement
-        .query_map([], |row| {
+        .query_map(param, |row| {
             let (kind, n): (String, i64) = (row.get(0)?, row.get(1)?);
             Ok(format!("{} {}", count_label(n), noun(&[kind], n)))
         })?
@@ -412,8 +422,8 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
         kinds.join(", ")
     );
     let range: (Option<String>, Option<String>) = conn.query_row(
-        &format!("SELECT strftime('%Y-%m-%d',MIN({TAKEN}),'unixepoch','localtime'),strftime('%Y-%m-%d',MAX({TAKEN}),'unixepoch','localtime') FROM files f WHERE f.failed=0"),
-        [],
+        &format!("SELECT strftime('%Y-%m-%d',MIN({TAKEN}),'unixepoch','localtime'),strftime('%Y-%m-%d',MAX({TAKEN}),'unixepoch','localtime') FROM files f WHERE f.failed=0 AND {within}"),
+        param,
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if let (Some(lo), Some(hi)) = range {
@@ -422,7 +432,7 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
             let _ = if lo == hi { write!(message, " Taken on {lo}.") } else { write!(message, " Dates run from {lo} to {hi}.") };
         }
     }
-    let top = folders(conn, false, 3)?;
+    let top = folders(conn, false, 3, root)?;
     if !top.is_empty() {
         {
             use std::fmt::Write;
@@ -435,7 +445,7 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
     if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
-        return library_answer(conn, question);
+        return library_answer(conn, question, filter.root.as_ref());
     }
     let qualifiers = filter.qualifiers();
     if question.duplicates {
@@ -662,7 +672,7 @@ mod tests {
         for (id, path) in [(1, "/a/Videos/Downloads/x.mov"), (2, "/a/Videos/Downloads/y.mov"), (3, "/a/Photos/Downloads/z.jpg"), (4, "/a/Docs/n.txt")] {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'image','x')", rusqlite::params![id, path]).unwrap();
         }
-        let names: Vec<String> = folders(&conn, false, 5).unwrap().into_iter().map(|folder| folder.name).collect();
+        let names: Vec<String> = folders(&conn, false, 5, None).unwrap().into_iter().map(|folder| folder.name).collect();
         assert_eq!(names, vec!["Videos/Downloads", "Docs", "Photos/Downloads"]);
     }
 
@@ -671,7 +681,7 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'C:\\a\\b.txt',1,5,0,'doc','txt')", []).unwrap();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(2,'C:/a/c.txt',2,5,0,'doc','txt')", []).unwrap();
-        let found = folders(&conn, false, 5).unwrap();
+        let found = folders(&conn, false, 5, None).unwrap();
         assert_eq!((found.len(), found[0].count, found[0].bytes), (1, 2, 10));
         let path = "replace(f.path_text,char(92),'/')";
         let plan: Vec<String> = conn
@@ -691,7 +701,7 @@ mod tests {
         for (id, path) in [(1, "/a/2019/Videos/Downloads/x.mov"), (2, "/a/2019/Videos/Downloads/y.mov"), (3, "/a/2020/Videos/Downloads/z.mov")] {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'video','x')", rusqlite::params![id, path]).unwrap();
         }
-        let names: Vec<String> = folders(&conn, false, 5).unwrap().into_iter().map(|folder| folder.name).collect();
+        let names: Vec<String> = folders(&conn, false, 5, None).unwrap().into_iter().map(|folder| folder.name).collect();
         assert_eq!(names, vec!["2019/Videos/Downloads", "2020/Videos/Downloads"]);
     }
 
