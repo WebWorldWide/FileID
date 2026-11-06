@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-05 (night, latest) — Smart-name style UI on Mac, WinUI and GTK
+
+- **All three apps** (agent): Describe Files has a "Name style" section (Short / Descriptive / Date first, 4–120 characters, Add confirmed people / Add event / Add date; Add date is off for Date first), saved per app (Mac `@AppStorage naming.*`, WinUI `AppSettings.Naming*`, GTK the shared `app-settings.json` keys); defaults short, 40, people and event on, date off. "Preview names" asks `proposeNames` for the Library selection (or the files with suggested names) and re-runs 300 ms after a change, dropping stale replies. Rows show the current name, an editable gold proposed name, a lavender reason chip and a checkbox; rows without a name are greyed out with their reason. Rename sends the edited names through `renameFiles` with no app-side `_N`; Undo is the existing rename Undo on each app. Rows spring in and appear without motion under Reduce Motion.
+- Checks: Swift 796 tests (serial), GTK 182 and clippy clean, WinUI type-check and analyzer clean for the new code plus 18 policy tests; none of the three apps has been seen running, and the WinUI XAML host has not been through the real XAML compiler yet (this PR's Windows CI is its first build).
+
 ## 2026-11-05 (night, later) — Mac engine serves its last four stubbed commands
 
 - **Smart names** (agent, both engines, IPC 1.19): new catalog action `proposeNames` with a `CatalogNaming` style (short `sam-baseball-hit`, descriptive, date-first `2023-07-04 sam-baseball-hit`), a 4–120 character budget and optional people/event/date tokens. Names come only from stored evidence (a reviewed chapter, the stored AI name or description, tags, a user event); no model call and nothing is renamed. A person appears only when a user-named person is confirmed on the file by a current compatible face or a user observation, and every other People name is removed from the wording; words are never cut to fit; taken names get `_2`…`_99`. 23 shared cases and conformance `names-styles-budget-and-confirmed-tokens` pass on both engines, byte for byte.
