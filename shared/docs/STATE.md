@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-06 — Labelled People and timeline evals; scene cuts at cosine 0.85; speech no longer kills a bare engine
+
+- **Eval sets** (agent, owner's request): private labelled sets in `~/Library/Developer/FileIDEval` (copied from Adlon read-only; never in the repo), scripts in `shared/scripts/eval/`. People: 366 photos, 335 identity faces across 37 anonymous ids (14 with 5+ faces), split into tune and held-out halves by event. Timeline: 14 videos, 103 labelled intervals (13 fast actions) and 30 cuts.
+- **People baseline** (Swift, tune / held-out): detection 0.645 / 0.753, pairwise precision 0.998 / 0.979, recall 0.372 / 0.336, B-cubed F1 0.530 / 0.670; small faces 4 of 49 / 2 of 28. Threshold sweeps gave no held-out gain, so nothing changed; a four-tile Vision pass lifted detection to 0.94 but cut held-out precision to 0.93–0.95 and was not adopted. Detection on the whole frame is the limit.
+- **Timeline** (Swift, Qwen3-VL 2B): the scene cut cosine is now 0.85 in both engines (was 0.80): held-out scene recall 0.27 → 0.42, precision 0.50 → 0.62, median cut error 4.4 s → 0.45 s; moments unchanged (recall 0.37 / 0.51, precision 0.63 / 0.78). The model misses 8 of 13 fast actions even though activity windows cover all of them.
+- **Fixes found by the evals:** a bare engine run outside FileID.app was killed by macOS when the timeline job asked for speech permission; it now asks only when the bundle declares a speech usage description (unchanged inside the app). At 59.94 fps the frame pool kept near-duplicate frames 0.02 s apart; fixed. The Rust engine wasn't evaluated (no YuNet, no GGUF VLM here).
+
 ## 2026-11-06 — "All locations" scope (Library, Search & Moments, Chat)
 
 - **Both engines and all three apps** (agent, IPC 1.20): the title-bar folder switcher has a SHOW section — All locations, then each `listRoots` location with its file count and OFFLINE pill. Picking one scopes Library (listing, paging, counts), Search & Moments (a location change re-runs the current search on Mac and WinUI) and Chat; the title bar shows the location's name and the choice persists per app. Optional `rootID` on `CatalogRequest` and `ChatContext`; a file belongs to its most specific location (`/Camera` never matches `/Camera2`), applied before the 100-candidate cut, the capture window and the subject fill; an unknown id is an error. `listRoots` counts files and bytes by the same rule, so every count (switcher, Locations card) equals what its scope shows. Layout in DESIGN_V3_PORT.md "Location scope".
