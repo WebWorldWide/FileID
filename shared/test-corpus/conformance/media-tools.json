@@ -1,7 +1,7 @@
 [
   {
     "name": "media-tools-recipe-validation-and-refusals",
-    "description": "Trim, remux, audio, proxy and rotate recipes are validated identically on both engines before any file is opened, and every refusal leaves no plan and no output. The Mac engine runs these recipes with AVFoundation; the shared Rust engine reports them unavailable until a reviewed FFmpeg media launcher exists, and refuses valid recipes with that reason.",
+    "description": "Trim, remux, audio, proxy and rotate recipes are validated identically on both engines before any file is opened, and every refusal leaves no plan and no output. The Mac engine runs these recipes with AVFoundation; the shared Rust engine runs them through the vetted LGPL FFmpeg runtime and, where that runtime is not installed (as in conformance runs), reports them unavailable and refuses valid recipes with that reason.",
     "tree": [
       {"path": "Clip.mp4", "content": "not decoded: recipes are refused before the source is read", "row": {"id": 1, "kind": "video"}},
       {"path": "Notes.txt", "content": "not media", "row": {"id": 2, "kind": "doc"}}
@@ -31,7 +31,7 @@
       {"label": "media fields on photo", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "trimMode": "exact"}}, "expect": {"status": "error"}},
       {"label": "valid recipe, non-media source", "tool": {"action": "preview", "fileIDs": [2], "destination": "{root}", "recipe": {"kind": "remux", "format": "mov", "maxDimension": 1920}}, "expect": {"status": "error", "message": {"$engine": {
         "swift": "Media tools accept MP4, MOV or M4V inputs.",
-        "rust": "Trim, remux, audio, proxy and rotate need a reviewed FFmpeg media launcher that this engine does not include yet. Nothing was created."
+        "rust": "Trim, remux, audio, proxy and rotate need the vetted FFmpeg runtime (LGPL, OpenH264, no network), which is not installed with this engine. Nothing was created."
       }}}},
       {"label": "nothing written", "fs": {"absent": ["Clip - Trim.mp4", "Clip - Trim.mov", "Clip - Remux.mov", "Clip - Audio.m4a", "Clip - Proxy.mp4", "Clip - Rotated 90.mp4", "Notes - Remux.mov"], "sha256": {"Clip.mp4": "{sha256:Clip.mp4}"}}},
       {"label": "no plans", "db": "SELECT COUNT(*) FROM catalog_operations", "expect": [[0]]},

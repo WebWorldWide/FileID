@@ -128,7 +128,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/thumbnail.rs": "b45ae1e8953defb4d2dbc73687f61fb942d77758666824f3493cc5c7fcff6b4f",
   "platforms/windows/src/engine/src/models/native_process.rs": "495e360aab90eb0c42c78de1bdd87e0ecf87c35b5deaac01522a1a2c6a9674c7",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "fa983d18f910b15e830adc64f18040039f49d06301607c622fc0f61c38ae51f7",
-  "platforms/windows/src/engine/src/commands/video_export.rs": "dc22bf91b64e09dc3a4ecec7fbba1a6d374f709b57df4e6e1330f736a67c0771",
+  "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "d9025805828e2eb5c66afd4784bf39e044644f9d630d53d0c2066510a4461be0",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "3b8b478d359961d572d9dd858fd067ff45e3044d2896164c74925105c55b1fa1",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f3aab36fc0df8cf19f9661dfcb29a410c7636a322ce20729a04b40d905b1e2fd",

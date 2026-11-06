@@ -9,7 +9,7 @@ use std::{
 
 pub(super) const KINDS: [&str; 5] = ["trim", "remux", "audio", "proxy", "rotate"];
 
-pub(super) const UNAVAILABLE: &str = "Trim, remux, audio, proxy and rotate need a reviewed FFmpeg media launcher that this engine does not include yet. Nothing was created.";
+pub(super) const UNAVAILABLE: &str = "Trim, remux, audio, proxy and rotate need the vetted FFmpeg runtime (LGPL, OpenH264, no network), which is not installed with this engine. Nothing was created.";
 
 pub(super) mod message {
     pub const VIDEO_ONLY_FIELDS: &str = "Upscaling, framing and stabilization apply only to video export.";
@@ -33,7 +33,6 @@ pub(super) mod message {
     pub const COPY_CODECS: &str = "Lossless copy supports H.264 or HEVC video with AAC audio; these codecs would need re-encoding, which this recipe does not do.";
     pub const TRIM_PAST_END: &str = "The trim end is after the end of this video.";
     pub const HDR: &str = "HDR sources need a color-managed adapter; this recipe would re-encode them to SDR.";
-    #[cfg_attr(not(test), expect(dead_code, reason = "ffprobe parsing serves the reviewed media launcher, which is not wired yet"))]
     pub const LIMITS: &str = "Unsupported media duration or dimensions.";
     pub fn already_container(format: &str) -> String {
         format!("This file is already {}; remuxing would only copy it.", format.to_uppercase())
@@ -134,12 +133,10 @@ pub(super) struct MediaProbe {
     pub(super) hdr: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "ffprobe parsing serves the reviewed media launcher, which is not wired yet"))]
 fn number(value: &Value) -> Option<f64> {
     value.as_f64().or_else(|| value.as_str()?.parse().ok()).filter(|value: &f64| value.is_finite())
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "ffprobe parsing serves the reviewed media launcher, which is not wired yet"))]
 pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
     let document: Value = serde_json::from_slice(data).context("Invalid media metadata")?;
     let streams = document["streams"].as_array().context("Missing media streams")?;
@@ -304,7 +301,12 @@ pub(super) fn verify(recipe: &ToolRecipe, source: &MediaProbe, output: &MediaPro
         let extra = (output.duration - length).max(0.0);
         let synced = if keyframe_trim { offset >= expected - 0.1 && offset <= expected + extra + 0.1 } else { (offset - expected).abs() <= 0.1 };
         let expected_length = expected_audio_duration(recipe, source).unwrap_or(out_length);
-        ensure!(synced && (out_length - expected_length).abs() <= 0.25, "Output validation rejected audio/video sync.");
+        let audio_length = if keyframe_trim {
+            out_length >= expected_length - 0.25 && out_length <= expected_length + extra + 0.25
+        } else {
+            (out_length - expected_length).abs() <= 0.25
+        };
+        ensure!(synced && audio_length, "Output validation rejected audio/video sync.");
     }
     let rotation = if recipe.kind == "rotate" { (source.rotation + recipe.rotation_degrees.unwrap_or(0)) % 360 } else { source.rotation };
     let quarter_turn = (rotation + 360 - source.rotation) % 180 == 90;
@@ -341,12 +343,26 @@ thread_local! {
     pub(super) static TEST_RUNTIME: std::cell::RefCell<Option<Arc<dyn MediaRuntime>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The reviewed launcher in `video_export`: the vetted LGPL/OpenH264 build
+/// with networking compiled out, run in the engine's lifetime job.
+struct VettedRuntime;
+
+impl MediaRuntime for VettedRuntime {
+    fn probe(&self, path: &Path) -> Result<MediaProbe> {
+        parse_probe(&super::video_export::probe_json(path)?)
+    }
+
+    fn run(&self, args: &[String], stage: &File, cancelled: &AtomicBool) -> Result<()> {
+        super::video_export::run_to_stage(args, stage, cancelled)
+    }
+}
+
 pub(super) fn runtime() -> Option<Arc<dyn MediaRuntime>> {
     #[cfg(test)]
     if let Some(runtime) = TEST_RUNTIME.with(|slot| slot.borrow().clone()) {
         return Some(runtime);
     }
-    None
+    super::video_export::available().then(|| Arc::new(VettedRuntime) as Arc<dyn MediaRuntime>)
 }
 
 pub(super) fn preview(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, source: &Path) -> Result<&'static str> {
@@ -508,6 +524,10 @@ mod tests {
         let keyframe = trim(Some(1.0), Some(2.5), Some("keyframe"), "mp4");
         verify(&keyframe, &source, &MediaProbe { duration: 2.0, video_start: Some(0.0), audio_start: Some(0.5), ..trimmed.clone() }).unwrap();
         assert!(verify(&keyframe, &source, &MediaProbe { duration: 2.0, audio_start: Some(1.2), ..trimmed.clone() }).is_err());
+        let from_keyframe = MediaProbe { duration: 2.5, video_start: Some(0.0), audio_start: Some(0.0), audio_duration: Some(2.5), ..trimmed.clone() };
+        verify(&keyframe, &source, &from_keyframe).unwrap();
+        assert!(verify(&keyframe, &source, &MediaProbe { audio_duration: Some(3.0), ..from_keyframe.clone() }).is_err());
+        assert!(verify(&exact, &source, &MediaProbe { duration: 1.5, audio_duration: Some(2.5), ..from_keyframe }).is_err());
         let proxy = ToolRecipe { max_dimension: 640, ..recipe("proxy", "mp4") };
         let portrait = MediaProbe { rotation: 90, width: 1080.0, height: 1920.0, ..source.clone() };
         verify(&proxy, &portrait, &MediaProbe { rotation: 0, width: 360.0, height: 640.0, ..portrait.clone() }).unwrap();
@@ -517,5 +537,104 @@ mod tests {
         let extracted = MediaProbe { video_count: 0, video_codec: None, video_start: None, ..source.clone() };
         verify(&audio, &source, &extracted).unwrap();
         assert!(verify(&audio, &source, &MediaProbe { audio_duration: Some(2.0), ..extracted }).is_err());
+    }
+
+    fn vetted() -> VettedRuntime {
+        assert!(
+            super::super::video_export::available(),
+            "FILEID_FFMPEG_DIR must point at the vetted LGPL FFmpeg 9.0.2/OpenH264 runtime (Homebrew's GPL build is refused)"
+        );
+        VettedRuntime
+    }
+
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("fileid-media-recipes-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn run_recipe(runtime: &VettedRuntime, recipe: &ToolRecipe, source: &Path, stage: &Path) -> MediaProbe {
+        let file = File::create(stage).unwrap();
+        let before = export(runtime, recipe, source, &file, &AtomicBool::new(false)).unwrap_or_else(|error| panic!("{recipe:?}: {error}"));
+        drop(file);
+        verify_stage(runtime, recipe, &before, stage).unwrap_or_else(|error| panic!("{recipe:?}: {error}"));
+        runtime.probe(stage).unwrap()
+    }
+
+    #[test]
+    #[ignore = "generated clips: needs FILEID_FFMPEG_DIR set to the vetted LGPL FFmpeg 9.0.2/OpenH264 runtime; run with -- --ignored"]
+    fn vetted_runtime_runs_every_recipe_and_verifies_its_output() {
+        let runtime = vetted();
+        let scratch = Scratch::new();
+        let source = scratch.0.join("Portrait.mp4");
+        super::super::video_export::generate_test_video(&source);
+        let original = std::fs::read(&source).unwrap();
+        let before = runtime.probe(&source).unwrap();
+        assert_eq!((before.video_codec.as_deref(), before.audio_codec.as_deref()), (Some("h264"), Some("aac")));
+        let cases = [
+            recipe("remux", "mov"),
+            trim(Some(0.5), Some(1.5), Some("keyframe"), "mp4"),
+            trim(Some(0.5), Some(1.5), Some("exact"), "mp4"),
+            recipe("audio", "m4a"),
+            ToolRecipe { max_dimension: 640, ..recipe("proxy", "mp4") },
+            ToolRecipe { rotation_degrees: Some(90), ..recipe("rotate", "mp4") },
+        ];
+        for (index, recipe) in cases.iter().enumerate() {
+            let stage = scratch.0.join(format!(".FileIDExport-{index}.part"));
+            let after = run_recipe(&runtime, recipe, &source, &stage);
+            match recipe.kind.as_str() {
+                "audio" => assert_eq!((after.video_count, after.audio_codec.as_deref()), (0, Some("aac"))),
+                "proxy" => assert_eq!((after.width, after.height), (before.width, before.height), "smaller sources are not enlarged"),
+                "rotate" => assert_eq!((after.rotation, after.width, after.height), (90, before.height, before.width)),
+                _ => assert_eq!((after.rotation, after.width, after.height), (0, before.width, before.height)),
+            }
+            let metadata = String::from_utf8_lossy(&super::super::video_export::probe_json(&stage).unwrap()).into_owned();
+            assert!(!metadata.contains("private-"), "{recipe:?} kept container metadata");
+            assert_eq!(std::fs::read(&source).unwrap(), original, "{recipe:?} changed the source");
+        }
+        let error = preview(&runtime, &recipe("remux", "mp4"), &source).unwrap_err();
+        assert_eq!(error.to_string(), message::already_container("mp4"));
+        let error = preview(&runtime, &trim(Some(1.0), Some(9.0), Some("keyframe"), "mp4"), &source).unwrap_err();
+        assert_eq!(error.to_string(), message::TRIM_PAST_END);
+    }
+
+    #[test]
+    #[ignore = "generated clips: needs FILEID_FFMPEG_DIR set to the vetted LGPL FFmpeg 9.0.2/OpenH264 runtime; run with -- --ignored"]
+    fn vetted_runtime_turns_the_picture_clockwise() {
+        use super::super::video_export::frame_rgb;
+        let runtime = vetted();
+        let scratch = Scratch::new();
+        let source = scratch.0.join("Portrait.mp4");
+        super::super::video_export::generate_test_video(&source);
+        let stage = scratch.0.join(".FileIDExport-rotate.part");
+        let rotated = scratch.0.join("Rotated.mp4");
+        run_recipe(&runtime, &ToolRecipe { rotation_degrees: Some(90), ..recipe("rotate", "mp4") }, &source, &stage);
+        std::fs::rename(&stage, &rotated).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let (width, height) = (180usize, 320usize);
+        let before = frame_rgb(&source, 0.5, width as u32, height as u32, &cancelled).unwrap();
+        let after = frame_rgb(&rotated, 0.5, height as u32, width as u32, &cancelled).unwrap();
+        let difference = |clockwise: bool| {
+            let mut total = 0u64;
+            for y in 0..width {
+                for x in 0..height {
+                    let (sx, sy) = if clockwise { (y, height - 1 - x) } else { (width - 1 - y, x) };
+                    for channel in 0..3 {
+                        total += u64::from(after[(y * height + x) * 3 + channel].abs_diff(before[(sy * width + sx) * 3 + channel]));
+                    }
+                }
+            }
+            total as f64 / (width * height * 3) as f64
+        };
+        let (clockwise, counter_clockwise) = (difference(true), difference(false));
+        assert!(clockwise < 32.0 && clockwise * 4.0 < counter_clockwise, "clockwise {clockwise:.2}, counter-clockwise {counter_clockwise:.2}");
     }
 }

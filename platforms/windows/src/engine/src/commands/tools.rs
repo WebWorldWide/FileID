@@ -1824,7 +1824,11 @@ mod tests {
     }
 
     #[test]
-    fn media_recipes_refuse_before_any_output_without_a_reviewed_launcher() {
+    fn media_recipes_refuse_before_any_output_without_the_vetted_runtime() {
+        if super::super::video_export::available() {
+            eprintln!("the vetted FFmpeg runtime is installed; the unavailable path cannot be exercised");
+            return;
+        }
         let mut fixture = media_fixture();
         let invalid = ToolRecipe { rotation_degrees: Some(45), ..media_recipe("rotate", "mov") };
         let request = media_request(&fixture, invalid);
