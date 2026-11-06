@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-05 (night, later) — Mac engine serves its last four stubbed commands
+
+- **Mac engine** (agent): `findMergeSuggestions`, `embedTextQuery`, `embedImageQuery` and `generateVideoThumbnail` now answer like the shared Rust engine instead of `not_implemented_yet`. Merge ranking (`PersonMergeSuggestions`) and the CLIP text encoder moved into FileIDShared, so the app and engine share one implementation; FileIDShared now links GRDB and ONNX Runtime, which both binaries already used (DECISIONS). People merge suggestions on the Mac now rank like Windows/Linux (corroborated fragments first, the smaller person as the source, face counts shown) and no longer return nothing above 200,000 faces. Video thumbnails come from the engine's 25% keyframe extractor (192 px JPEG). 5 shared conformance cases (`queries.json`): Swift 41 pass, Rust 35 pass, one known divergence each. Swift 785 tests (serial).
+
 ## 2026-11-05 (late night) — Rust goal ranking for Best Takes; Describe hands the model to Chat; GTK Locations over IPC; CI memory fix
 
 - **Owner approved the `deep_analyze.rs` and `engine_client.rs` digest refreshes.** Only `engine_client.rs` changed; the two Rust items below fit in unlocked files.
