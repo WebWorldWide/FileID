@@ -12,6 +12,7 @@ mod library_pane;
 mod library_selection;
 mod locations;
 mod model_catalog;
+mod offline_roots;
 pub mod moments;
 mod moments_dates;
 mod moments_timeline;
@@ -27,6 +28,7 @@ mod takes_groups_model;
 mod takes_model;
 mod takes_widgets;
 pub(crate) mod util;
+mod vlm_picker;
 
 mod workbench_state;
 pub mod workbenches;

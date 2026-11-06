@@ -632,11 +632,7 @@ fn collapsible_sources(header: &gtk::Box, pane: &gtk::Box) -> gtk::Box {
     toggle.update_property(&[gtk::accessible::Property::Label("Sources")]);
     toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
     section.append(&toggle);
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideUp)
-        .transition_duration(if crate::spring::animations_enabled() { 220 } else { 0 })
-        .child(pane)
-        .build();
+    let revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Up, pane);
     section.append(&revealer);
     let animation: Rc<RefCell<Option<adw::SpringAnimation>>> = Rc::new(RefCell::new(None));
     toggle.connect_clicked(move |toggle| {

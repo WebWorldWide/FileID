@@ -14,6 +14,7 @@ mod engine_client;
 mod fonts;
 mod lavalamp;
 mod model_license;
+mod motion;
 mod shell;
 mod spring;
 mod v3;

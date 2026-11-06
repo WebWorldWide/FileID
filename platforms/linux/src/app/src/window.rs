@@ -76,7 +76,7 @@ struct Shell {
     current: Cell<&'static str>,
     counting: Cell<bool>,
     scan_when_ready: Cell<bool>,
-    inspector: gtk::Revealer,
+    inspector: crate::motion::SpringRevealer,
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -152,10 +152,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .show_sidebar(crate::app_settings::sidebar_visible())
         .build();
     split.set_sidebar(Some(&sidebar.root));
-    let inspector = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .transition_duration(if crate::spring::animations_enabled() { 240 } else { 0 })
-        .build();
+    let inspector = crate::motion::SpringRevealer::new(crate::motion::Slide::Left);
     let close_slot = slot.clone();
     inspector.set_child(Some(&crate::tabs::chat::inspector(
         engine.clone(),
@@ -169,7 +166,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     content.append(&stack);
     content.append(&inspector);
     let detail = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
         .hexpand(true)
         .vexpand(true)
         .build();
@@ -561,9 +557,7 @@ impl Shell {
         } else {
             "pages"
         };
-        if self.detail.visible_child_name().as_deref() != Some(page) {
-            self.detail.set_visible_child_name(page);
-        }
+        crate::motion::show_child(&self.detail, page);
         for (id, header) in &self.headers {
             header.set_meta(&status.page_meta(id));
         }

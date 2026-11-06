@@ -24,6 +24,7 @@ use gtk::glib::BoxedAnyObject;
 
 use super::library_pane::SelectedPane;
 use super::library_selection::{self as picking, PaneView};
+use super::offline_roots::{self, OfflineRoots};
 use super::util::{fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
@@ -46,6 +47,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     let model = gio::ListStore::new::<BoxedAnyObject>();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
+    let offline = Rc::new(RefCell::new(OfflineRoots::default()));
 
     // ── Grid factory ─────────────────────────────────────────────────────────
     let factory = gtk::SignalListItemFactory::new();
@@ -57,14 +59,17 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     factory.connect_bind(clone!(
         #[strong]
         engine,
+        #[strong]
+        offline,
         move |_, list_item| {
             if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
-                bind_tile(&engine, li);
+                bind_tile(&engine, li, &offline.borrow());
             }
         }
     ));
     factory.connect_unbind(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+            BOUND_TILES.with_borrow_mut(|tiles| tiles.remove(&tile_token_key(li)));
             cancel_tile_token(li);
             if let Some(tile) = li.child() {
                 clear_tile(&tile);
@@ -124,7 +129,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 selection.unselect_all();
             }
         ));
-        SelectedPane::new(engine.clone(), on_preview, on_close)
+        SelectedPane::new(engine.clone(), offline.clone(), on_preview, on_close)
     };
     selection.connect_selection_changed(clone!(
         #[strong]
@@ -264,6 +269,39 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
+    let refresh_offline: Rc<dyn Fn()> = {
+        let generation = Rc::new(Cell::new(0u64));
+        let offline = offline.clone();
+        let pane = Rc::downgrade(&pane);
+        Rc::new(move || {
+            let current = generation.get().wrapping_add(1);
+            generation.set(current);
+            let rx = offline_roots::read();
+            let (generation, offline, pane) = (generation.clone(), offline.clone(), pane.clone());
+            glib::MainContext::default().spawn_local(async move {
+                let Ok(roots) = rx.recv().await else { return };
+                if generation.get() != current || *offline.borrow() == roots {
+                    return;
+                }
+                offline.replace(roots);
+                refresh_offline_badges(&offline.borrow());
+                if let Some(pane) = pane.upgrade() {
+                    pane.apply_offline();
+                }
+            });
+        })
+    };
+    let volumes = gio::VolumeMonitor::get();
+    for signal in ["mount-added", "mount-removed"] {
+        let refresh = Rc::downgrade(&refresh_offline);
+        volumes.connect_local(signal, false, move |_| {
+            if let Some(refresh) = refresh.upgrade() {
+                refresh();
+            }
+            None
+        });
+    }
+
     // Live-scan reloads: throttle on batches, final reload on completion.
     let ev_rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
@@ -271,6 +309,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         reload,
         #[strong]
         pane,
+        #[strong]
+        refresh_offline,
         async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
@@ -284,6 +324,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::ScanComplete(_) => {
                         reload();
                         refresh_pane_details(&pane);
+                        refresh_offline();
                     }
                     _ => {}
                 }
@@ -293,6 +334,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Initial fill.
     reload();
+    refresh_offline();
 
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -312,7 +354,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // open, and renames/deletes done from other tabs must show on return.
     {
         let reload = reload.clone();
-        root.connect_map(move |_| reload());
+        root.connect_map(move |_| {
+            reload();
+            refresh_offline();
+        });
     }
     root.upcast()
 }
@@ -542,6 +587,16 @@ fn build_tile() -> gtk::Box {
         .css_classes(["video-play-badge"])
         .build();
     overlay.add_overlay(&play);
+    let offline = gtk::Label::builder()
+        .label("OFFLINE")
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .margin_start(6)
+        .margin_top(6)
+        .visible(false)
+        .css_classes(["v3-pill", "tone-warning", "tile-offline"])
+        .build();
+    overlay.add_overlay(&offline);
     let name = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -557,15 +612,29 @@ fn build_tile() -> gtk::Box {
     vbox
 }
 
-/// Resolve the fixed tile-widget structure built by `build_tile`:
-/// `(picture, play-badge, name, caption)`.
-fn tile_parts(vbox: &gtk::Box) -> Option<(gtk::Picture, gtk::Image, gtk::Label, gtk::Label)> {
+struct TileParts {
+    pic: gtk::Picture,
+    play: gtk::Image,
+    offline: gtk::Label,
+    name: gtk::Label,
+    caption: gtk::Label,
+}
+
+/// Resolve the fixed tile-widget structure built by `build_tile`.
+fn tile_parts(vbox: &gtk::Box) -> Option<TileParts> {
     let overlay = vbox.first_child()?.downcast::<gtk::Overlay>().ok()?;
     let pic = overlay.child()?.downcast::<gtk::Picture>().ok()?;
     let play = pic.next_sibling()?.downcast::<gtk::Image>().ok()?;
+    let offline = play.next_sibling()?.downcast::<gtk::Label>().ok()?;
     let name = overlay.next_sibling()?.downcast::<gtk::Label>().ok()?;
     let caption = name.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    Some((pic, play, name, caption))
+    Some(TileParts {
+        pic,
+        play,
+        offline,
+        name,
+        caption,
+    })
 }
 
 const THUMB_CACHE_CAP: usize = 512;
@@ -618,7 +687,7 @@ fn thumb_cache_put(key: ThumbCacheKey, texture: gtk::gdk::Texture) {
     });
 }
 
-fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
+fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offline: &OfflineRoots) {
     let Some(obj) = list_item.item() else { return };
     let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else {
         return;
@@ -631,9 +700,18 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     else {
         return;
     };
-    let Some((pic, play, name, caption)) = tile_parts(&vbox) else {
+    let Some(TileParts {
+        pic,
+        play,
+        offline: offline_badge,
+        name,
+        caption,
+    }) = tile_parts(&vbox)
+    else {
         return;
     };
+    BOUND_TILES.with_borrow_mut(|tiles| tiles.insert(tile_token_key(list_item), list_item.downgrade()));
+    offline_badge.set_visible(offline.is_offline(&row.path));
 
     // Filename — the suggested name in gold when present (macOS parity).
     name.remove_css_class("gold-accent");
@@ -685,6 +763,28 @@ struct TileRequest {
 
 thread_local! {
     static TILE_TOKENS: RefCell<HashMap<usize, CancelToken>> = RefCell::new(HashMap::new());
+    static BOUND_TILES: RefCell<HashMap<usize, glib::WeakRef<gtk::ListItem>>> = RefCell::new(HashMap::new());
+}
+
+/// Shows or hides the OFFLINE badge on every bound tile in place, so a drive
+/// coming or going never reloads the grid, its pages or its thumbnails.
+fn refresh_offline_badges(offline: &OfflineRoots) {
+    BOUND_TILES.with_borrow_mut(|tiles| {
+        tiles.retain(|_, weak| {
+            let Some(list_item) = weak.upgrade() else {
+                return false;
+            };
+            let row = list_item
+                .item()
+                .and_downcast::<BoxedAnyObject>()
+                .map(|boxed| boxed.borrow::<FileRow>().path.clone());
+            let parts = list_item.child().and_downcast::<gtk::Box>().and_then(|vbox| tile_parts(&vbox));
+            if let (Some(path), Some(parts)) = (row, parts) {
+                parts.offline.set_visible(offline.is_offline(&path));
+            }
+            true
+        });
+    });
 }
 
 fn tile_token_key(list_item: &gtk::ListItem) -> usize {
@@ -744,9 +844,10 @@ fn clear_tile(tile: &gtk::Widget) {
     let Some(vbox) = tile.downcast_ref::<gtk::Box>() else {
         return;
     };
-    if let Some((pic, play, _, _)) = tile_parts(vbox) {
-        pic.set_paintable(None::<&gtk::gdk::Texture>);
-        play.set_visible(false);
+    if let Some(parts) = tile_parts(vbox) {
+        parts.pic.set_paintable(None::<&gtk::gdk::Texture>);
+        parts.play.set_visible(false);
+        parts.offline.set_visible(false);
     }
 }
 

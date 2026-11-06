@@ -165,7 +165,7 @@ button {
     padding: 6px 14px;
     min-height: 20px;
     box-shadow: none;
-    transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+    transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
 }
 button:hover { background-color: alpha(#FFFFFF, 0.13); border-color: alpha(#FFFFFF, 0.18); }
 button:active, button:checked { background-color: alpha(#FFFFFF, 0.18); }
@@ -265,7 +265,7 @@ spinner { color: @fileid_gold; }
     color: alpha(#FFFFFF, 0.78);
     font-weight: 500;
     box-shadow: none;
-    transition: background-color 130ms ease, color 130ms ease;
+    transition: background-color 140ms ease-out, color 140ms ease-out;
 }
 .pill:hover { background-color: alpha(#FFFFFF, 0.12); }
 .pill-active {
@@ -566,6 +566,7 @@ button.v3-icon:hover { background-color: alpha(#FFFFFF, 0.045); }
 .v3-pill.tone-ai { border-color: alpha(@fileid_lavender, 0.6); }
 .v3-pill.tone-done { border-color: alpha(@fileid_pink, 0.6); }
 .v3-pill.tone-warning { border-color: alpha(@fileid_warning, 0.6); }
+.tile-offline { background-color: alpha(#000000, 0.55); }
 .v3-pill.tone-danger { border-color: alpha(@fileid_danger, 0.6); }
 entry.v3-field { min-height: 30px; padding: 0 8px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); border-radius: 6px; font-size: 13.5px; }
 entry.v3-field.h28 { min-height: 28px; }
@@ -608,9 +609,9 @@ button.v3-play-circle {
 }
 button.v3-play-circle:hover { background-color: #FFD84D; }
 .v3-filmstrip { padding: 4px; border-radius: 8px; }
-.v3-take-tile { margin: 1px; border-radius: 8px; border: 1px solid alpha(#FFFFFF, 0.14); transition: transform 200ms ease-out; }
+.v3-take-tile { margin: 1px; border-radius: 8px; border: 1px solid alpha(#FFFFFF, 0.14); }
 .v3-take-tile.best { margin: 0; border: 2px solid @fileid_gold; }
-.v3-take-tile.focused { margin: 0; border: 2px solid @fileid_text1; transform: scale(1.04); }
+.v3-take-tile.focused { margin: 0; border: 2px solid @fileid_text1; }
 .v3-take-badge { padding: 1px 5px; border-radius: 3px; background-color: alpha(#000000, 0.6); color: @fileid_text1; }
 .v3-take-badge.best { background-color: @fileid_gold; color: #141414; }
 .v3-take-check { min-width: 15px; min-height: 15px; border-radius: 99px; background-color: @fileid_pink; color: #141414; font-size: 9px; font-weight: 800; }
@@ -708,7 +709,7 @@ button.v3-staying-header:hover { background-color: alpha(#FFFFFF, 0.04); }
 button.v3-map-node {
     padding: 4px 10px; border-radius: 8px; box-shadow: 0 1px 2.5px alpha(#000000, 0.22);
     background-color: alpha(#18181B, 0.9); border: 1px solid alpha(#FFFFFF, 0.14);
-    transition: border-color 180ms ease-out, background-color 180ms ease-out;
+    transition: border-color 140ms ease-out, background-color 140ms ease-out;
 }
 button.v3-map-node:hover, button.v3-map-node.lit { border-color: alpha(@fileid_gold, 0.95); background-color: alpha(@fileid_gold, 0.10); }
 .v3-map-node-name { font-size: 12px; font-weight: 600; color: @fileid_text1; }
@@ -724,7 +725,7 @@ button.v3-map-node:hover, button.v3-map-node.lit { border-color: alpha(@fileid_g
 .v3-title-12 { font-size: 12px; font-weight: 600; color: @fileid_text1; }
 .v3-tree-row, button.v3-tree-row {
     min-height: 28px; padding: 3px 8px; border-radius: 6px; box-shadow: none;
-    border: 1px solid transparent; transition: background-color 180ms ease-out;
+    border: 1px solid transparent; transition: background-color 140ms ease-out;
 }
 .v3-tree-row.tone-done { background-color: alpha(@fileid_pink, 0.06); }
 .v3-tree-row.tone-warning { background-color: alpha(@fileid_warning, 0.06); }

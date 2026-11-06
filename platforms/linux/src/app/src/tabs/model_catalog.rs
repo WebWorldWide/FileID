@@ -92,6 +92,30 @@ pub(crate) fn benchmark_summary(benchmark: &ModelBenchmark) -> String {
     format!("Measured here: {}", parts.join(" · "))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TermsGate {
+    Open,
+    Prompt(&'static str),
+    Refuse,
+}
+
+/// Separately accepted terms are shown before a download starts; a model
+/// that claims terms FileID has no reviewed policy for never downloads.
+pub(crate) fn terms_gate_kind(model: &ModelCatalogItem) -> TermsGate {
+    let policy = fileid_engine::models::license::policy_for(&model.id).is_some();
+    let kind = fileid_engine::models::catalog::find(&model.id)
+        .map(|entry| entry.id.as_str())
+        .or_else(|| match fileid_engine::models::registry::lookup_full(&model.id) {
+            fileid_engine::models::registry::LookupResult::Found(found) => Some(found.id),
+            fileid_engine::models::registry::LookupResult::Unknown => None,
+        });
+    match (model.terms_required || policy, policy, kind) {
+        (false, _, _) => TermsGate::Open,
+        (true, true, Some(kind)) => TermsGate::Prompt(kind),
+        _ => TermsGate::Refuse,
+    }
+}
+
 struct Catalog {
     engine: Rc<RefCell<EngineClient>>,
     list: gtk::Box,
@@ -175,7 +199,13 @@ impl Catalog {
             if model.runnable && !model.installed {
                 let install = gtk::Button::with_label("Download");
                 let (catalog, id) = (Rc::downgrade(self), model.id.clone());
-                install.connect_clicked(move |_| {
+                let terms_kind = terms_gate_kind(model);
+                install.connect_clicked(move |button| {
+                    match terms_kind {
+                        TermsGate::Prompt(kind) if !crate::model_license::ensure_or_prompt(button, kind) => return,
+                        TermsGate::Refuse => return,
+                        _ => {}
+                    }
                     if let Some(catalog) = catalog.upgrade() {
                         let sent = catalog.engine.borrow_mut().prewarm_model(&id);
                         catalog.status.set_label(&match sent {
@@ -459,5 +489,33 @@ mod tests {
             ..model("g", true, "candidate", 4.0, None)
         };
         assert!(summary(&gemma).ends_with("terms shown before install"));
+    }
+
+    #[test]
+    fn downloads_with_separate_terms_prompt_first_and_unknown_terms_refuse() {
+        let open = model("qwen2_5_vl_7b", true, "curated", 6.0, None);
+        assert_eq!(terms_gate_kind(&open), TermsGate::Open);
+        let curated_gemma = ModelCatalogItem {
+            license: "Gemma".into(),
+            terms_required: true,
+            ..model("gemma_3_4b", true, "curated", 5.0, None)
+        };
+        assert_eq!(terms_gate_kind(&curated_gemma), TermsGate::Prompt("gemma_3_4b"));
+        let entry = fileid_engine::models::catalog::entries()
+            .iter()
+            .find(|entry| entry.terms_required)
+            .unwrap();
+        let catalog_gemma = ModelCatalogItem {
+            license: entry.license.clone(),
+            terms_required: true,
+            ..model(&entry.id, true, "candidate", 3.0, None)
+        };
+        assert_eq!(terms_gate_kind(&catalog_gemma), TermsGate::Prompt(entry.id.as_str()));
+        let unknown = ModelCatalogItem {
+            license: "Other".into(),
+            terms_required: true,
+            ..model("not_in_any_catalog", true, "candidate", 3.0, None)
+        };
+        assert_eq!(terms_gate_kind(&unknown), TermsGate::Refuse);
     }
 }
