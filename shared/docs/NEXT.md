@@ -34,7 +34,7 @@ Safety and quick wins:
 
 Locations (schema first): `v29` `library_roots`; IPC list/add/remove/rescan roots and `rootID` on scan events; mount check before scans; soft-hide in place of delete on Mac; Mac "All locations" scope (unspecified in DESIGN_V3.md), per-root bookmarks; OFFLINE tile badge done on Mac (2026-11-05); WinUI/GTK ports; root filter chip in Search/Chat/Moments.
 
-Search and Moments: from/to capture-time filters (Mac UI 2026-11-05; both engines now fill a dated search from every matching file, not only the hundred best); automatic event grouping (needs owner thresholds); rank moment chapters above frame captions; populated-panel and playback checks on Mac and Windows.
+Search and Moments: from/to capture-time filters (Mac UI 2026-11-05; both engines now fill a dated search from every matching file, not only the hundred best); automatic event grouping (needs owner thresholds); chapters rank above frame captions in both engines (2026-11-05); populated-panel and playback checks on Mac and Windows.
 
 Performance (needs a quiet Mac / the Windows GPU PC; `analyzeSequence` already runs the greedy loop with JSON early stop, and moments/goals use the frame pool): A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; measure BGE text model parking on a machine with BGE installed; the CLIP HNSW graph cache is not parked; Windows streaming + early stop and `cache_prompt` check; charge VRAM in the Rust scheduler from measured numbers.
 
