@@ -330,7 +330,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         await UI(SynchronizeSend, ct);
         await Engine.WaitForReadyAsync(TimeSpan.FromSeconds(30), ct);
         var generation = Engine.SpawnGeneration;
-        var context = action == "send" ? ChatActionPolicy.Context(SelectionRegistry.Instance.LibrarySelection, AppViewModel.Instance.FolderPath) : null;
+        var context = action == "send" ? ChatActionPolicy.Context(SelectionRegistry.Instance.LibrarySelection, AppViewModel.Instance.FolderPath, PersonSelectionRegistry.Instance.Selection) : null;
         var request = new ChatRequest(Guid.NewGuid().ToString(), id, action, text, UseModel: action == "send" && ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true), Context: context);
         if (action == "history" && _request.HasActiveSend)
         {

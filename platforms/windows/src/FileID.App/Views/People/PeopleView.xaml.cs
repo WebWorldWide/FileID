@@ -303,6 +303,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
             ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
             foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
+            PublishCheckedPeople();
             UpdateCheckboxVisibility();
             UpdateSelectionCountText();
         });
@@ -311,6 +312,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
+        PersonSelectionRegistry.Instance.Clear();
         Unloaded -= OnUnloaded;
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
@@ -398,6 +400,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (ViewModel.IsSelectMode) return;
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
+        PersonSelectionRegistry.Instance.OpenPerson(pc.ClusterId);
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -414,7 +417,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             if (!ok) args.Cancel = true;
             deferral.Complete();
         };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        try { await dialog.ShowAsync(); }
+        catch { /* dialog already open */ }
+        finally { PersonSelectionRegistry.Instance.ClosePerson(pc.ClusterId); }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }
 
@@ -586,6 +591,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
+        PersonSelectionRegistry.Instance.OpenPerson(pc.ClusterId);
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -602,7 +608,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             if (!ok) args2.Cancel = true;
             deferral.Complete();
         };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        try { await dialog.ShowAsync(); }
+        catch { /* dialog already open */ }
+        finally { PersonSelectionRegistry.Instance.ClosePerson(pc.ClusterId); }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }
 
@@ -745,6 +753,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         BulkActionBar.Visibility = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
         // Toggling either direction resets selection — keep the id set in step.
         _selectedClusterIds.Clear();
+        PublishCheckedPeople();
         // Show/hide every per-card checkbox via tag-walk. ItemsRepeater
         // doesn't ItemContainerStyle, so we walk realized children. The
         // initial state of newly-realized cards is Collapsed (XAML default);
@@ -780,9 +789,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
             else _selectedClusterIds.Remove(pc.ClusterId);
+            PublishCheckedPeople();
         }
         UpdateSelectionCountText();
     }
+
+    private void PublishCheckedPeople() =>
+        PersonSelectionRegistry.Instance.SetChecked(ViewModel.Clusters.Where(c => c.IsSelected).Select(c => (long)c.ClusterId));
 
     // Re-project id-keyed selection onto the supplied cluster instances. Pulled
     // out as a static so the survives-an-instance-replacing-refresh behavior is
@@ -948,6 +961,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             // Exit select mode + refresh.
             ViewModel.IsSelectMode = false;
             _selectedClusterIds.Clear();
+            PublishCheckedPeople();
             BulkActionBar.Visibility = Visibility.Collapsed;
             SelectButtonText.Text = "Select";
             UpdateCheckboxVisibility();
@@ -999,6 +1013,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             }
             ViewModel.IsSelectMode = false;
             _selectedClusterIds.Clear();
+            PublishCheckedPeople();
             BulkActionBar.Visibility = Visibility.Collapsed;
             SelectButtonText.Text = "Select";
             UpdateCheckboxVisibility();
