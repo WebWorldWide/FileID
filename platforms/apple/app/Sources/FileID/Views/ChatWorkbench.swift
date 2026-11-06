@@ -351,9 +351,8 @@ struct ChatWorkbench: View {
         busy = true
         Task {
             // The engine fuses CLIP picture matches with keyword evidence when the
-            // app's text encoder is loaded; it never loads or downloads one here.
-            let vector = CLIPTextEncoder.shared.isReady
-                ? await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(text) }.value : nil
+            // Search by description model is installed; nothing is downloaded here.
+            let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
             guard activeRequest == requestID else { return }
             let request = ChatRequest(requestID: requestID, conversationID: conversationID, action: "send", text: text, useModel: useModel,
                                       modelKind: chatModelKind, context: handoff.context, queryVector: vector,

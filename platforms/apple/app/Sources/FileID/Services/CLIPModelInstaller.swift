@@ -22,9 +22,9 @@ final class CLIPModelInstaller: ModelInstalling {
     /// FileManager.fileExists in its row builder, so an active download no longer
     /// fires a stat() syscall on the main thread on every progress tick.
     private(set) var presentFilePaths: Set<String> = []
-    /// Flips once the text encoder's ORT session finishes its
-    /// multi-second build — Library observes it to drop the
-    /// keyword-only hint and re-run the active search.
+    /// True once the CLIP files are on disk, so the engine can embed search
+    /// text — Library observes it to drop the keyword-only hint and re-run
+    /// the active search.
     private(set) var textEncoderReady = false
     private var task: Task<Void, Never>?
     /// True only while a hub fetch is actively running. Progress ticks
@@ -40,7 +40,7 @@ final class CLIPModelInstaller: ModelInstalling {
     // MARK: - Required files
 
     /// Files the installer must produce on disk for both the image
-    /// embedder (engine) and the text encoder (app) to be usable.
+    /// embedder and the text encoder (both run in the engine) to be usable.
     static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
@@ -170,10 +170,8 @@ final class CLIPModelInstaller: ModelInstalling {
         for d in dirs {
             try? FileManager.default.removeItem(at: d)
         }
-        // The text encoder's ORT session is now backed by deleted weights.
         // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
-        // and falls back to keyword-only search instead of a stale semantic path
-        // that would fail on the next query. (Install→Remove leaked it true.)
+        // and falls back to keyword-only search. (Install→Remove leaked it true.)
         textEncoderReady = false
         refreshStatus()
     }
@@ -244,12 +242,8 @@ final class CLIPModelInstaller: ModelInstalling {
             }
         }
 
-        // Eager text-encoder load so search activates without restart.
-        Task.detached(priority: .utility) {
-            if CLIPTextEncoder.shared.load() {
-                await Self.shared.markTextEncoderReady()
-            }
-        }
+        // The engine embeds search text; marking ready lets search use it now.
+        markTextEncoderReady()
         refreshStatus()
     }
 
@@ -508,11 +502,7 @@ final class CLIPModelInstaller: ModelInstalling {
         if deleteZipAfter {
             try? FileManager.default.removeItem(at: zipURL)
         }
-        Task.detached(priority: .utility) {
-            if CLIPTextEncoder.shared.load() {
-                await Self.shared.markTextEncoderReady()
-            }
-        }
+        markTextEncoderReady()
         refreshStatus()
     }
 

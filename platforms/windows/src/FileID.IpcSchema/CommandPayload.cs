@@ -207,12 +207,14 @@ public sealed record RevertMergeCommand(
 public sealed record WipeLibraryCommand : CommandPayload;
 
 /// <summary>Ask the engine to render a video keyframe out-of-process and
-/// return it as a base64 192px JPEG via the `thumbnailGenerated` event.
+/// return it as a base64 JPEG via the `thumbnailGenerated` event.
 /// <c>ModifiedAt</c> (file modified-unix time, f64 seconds) is echoed back so
-/// the app can write the result under its (path, modifiedAt) cache key.</summary>
+/// the app can write the result under its (path, modifiedAt) cache key.
+/// <c>MaxPixelSize</c> is the long side, clamped to 64-2048; null means 192.</summary>
 public sealed record GenerateVideoThumbnailCommand(
     string Path,
-    double? ModifiedAt) : CommandPayload;
+    double? ModifiedAt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaxPixelSize = null) : CommandPayload;
 
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.

@@ -248,6 +248,7 @@ public class SchemaConformanceTests
         new MarkPersonsDifferentCommand(1, 2, 10, 20),
         new EmbedImageQueryCommand(1, "q-2"),
         new GenerateVideoThumbnailCommand(@"C:\Users\adam\Videos\clip.mp4", 1_700_000_000.0),
+        new GenerateVideoThumbnailCommand(@"C:\Users\adam\Videos\clip.mp4", null, 512),
         new RestoreFromTrashCommand("00000000-0000-0000-0000-000000000000"),
         new RevertMergeCommand(1, 2, _exampleFaceIds),
         new WipeLibraryCommand(),

@@ -12,6 +12,7 @@ enum QueryCommands {
     })
 
     static let thumbnailLongSide = 192
+    static let thumbnailLongSideRange = 64...2048
     private static let thumbnailGate = AsyncSemaphore(value: 2)
 
     static func mergeSuggestions(database: Database) async -> IPCEvent.Payload {
@@ -44,9 +45,9 @@ enum QueryCommands {
 
     /// Nil when the video can't be decoded; the caller then emits nothing and
     /// the app keeps its placeholder, as the Rust engine does.
-    static func videoThumbnail(path: String, modifiedAt: Double?) async -> IPCEvent.Payload? {
+    static func videoThumbnail(path: String, modifiedAt: Double?, maxPixelSize: Int? = nil) async -> IPCEvent.Payload? {
         await thumbnailGate.wait()
-        let jpeg = await videoThumbnailJPEG(url: URL(fileURLWithPath: path))
+        let jpeg = await videoThumbnailJPEG(url: URL(fileURLWithPath: path), longSide: thumbnailLongSide(for: maxPixelSize))
         await thumbnailGate.signal()
         guard let jpeg else {
             JSONLog.shared.warn(ev: "video_thumbnail_failed", path: redactPathForLog(path))
@@ -55,9 +56,14 @@ enum QueryCommands {
         return .thumbnailGenerated(ThumbnailGenerated(path: path, modifiedAt: modifiedAt, bytes: jpeg.base64EncodedString()))
     }
 
-    static func videoThumbnailJPEG(url: URL) async -> Data? {
+    static func thumbnailLongSide(for requested: Int?) -> Int {
+        guard let requested else { return thumbnailLongSide }
+        return min(max(requested, thumbnailLongSideRange.lowerBound), thumbnailLongSideRange.upperBound)
+    }
+
+    static func videoThumbnailJPEG(url: URL, longSide: Int = thumbnailLongSide) async -> Data? {
         guard FileManager.default.isReadableFile(atPath: url.path),
-              let frame = await DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: thumbnailLongSide)
+              let frame = await DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: longSide)
         else { return nil }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }

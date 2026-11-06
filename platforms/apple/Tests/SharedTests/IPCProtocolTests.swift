@@ -224,6 +224,7 @@ struct IPCProtocolTests {
             .embedImageQuery(fileID: 42, queryID: "iq-1"),
             .generateVideoThumbnail(path: "/Users/x/Movies/clip.mp4", modifiedAt: 1_700_000_000.5),
             .generateVideoThumbnail(path: "/Users/x/Movies/clip.mp4", modifiedAt: nil),
+            .generateVideoThumbnail(path: "/Users/x/Movies/clip.mp4", modifiedAt: nil, maxPixelSize: 1024),
             .restoreFromTrash(batchID: "batch-uuid"),
             .revertMerge(sourcePersonID: 4, destinationPersonID: 7, faceIDsToRevert: [11, 12]),
             .verifyCudaPack,

@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.19.0",
+  "version": "1.20.0",
 
   "$defs": {
     "IPCCommand": {
@@ -325,10 +325,11 @@
         { "type": "object", "required": ["generateVideoThumbnail"], "additionalProperties": false,
           "properties": { "generateVideoThumbnail": { "type": "object", "additionalProperties": false,
             "required": ["path"],
-            "description": "Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
+            "description": "Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never upscaled past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
             "properties": {
               "path": { "type": "string", "description": "Absolute filesystem path to the video file." },
-              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." }
+              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." },
+              "maxPixelSize": { "type": ["integer", "null"], "description": "Long side of the thumbnail in pixels (schema 1.20.0). Engines clamp it to 64-2048; omitted or null means 192. Optional." }
             } } } },
         { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
           "properties": { "restoreFromTrash": { "type": "object", "additionalProperties": false,
@@ -1176,7 +1177,7 @@
         }
       },
       "ThumbnailGenerated": {
-        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved, long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
+        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],

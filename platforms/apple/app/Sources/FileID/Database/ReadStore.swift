@@ -325,10 +325,6 @@ public final class ReadStore: @unchecked Sendable {
         }.value
     }
 
-    public func semanticVectorAsync(query: String) async -> [Float]? {
-        await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(query) }.value
-    }
-
     public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {
         guard !ids.isEmpty, ids.count <= 100, let q = queue else { return [] }
         return await Task.detached(priority: .userInitiated) {

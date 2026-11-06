@@ -255,15 +255,14 @@ struct LibraryView: View {
     /// Non-nil when the user has typed a non-trivial query but semantic
     /// search is degraded to keyword search: either the CLIP text encoder
     /// was never installed (point at Settings), or its files exist and
-    /// the ORT session is still compiling after launch / install (the
-    /// grid re-runs the search automatically once it's ready).
+    /// an install is still finishing (the grid re-runs the search
+    /// automatically once it's ready).
     private var clipSearchHint: CLIPSearchHint? {
         if visualSearchPending { return .preparing }
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3, similarSeed == nil,
-              !CLIPModelInstaller.shared.textEncoderReady,
-              !CLIPTextEncoder.shared.isReady else { return nil }
-        return CLIPTextEncoder.shared.isInstalled ? .preparing : .install
+              !CLIPModelInstaller.shared.textEncoderReady else { return nil }
+        return FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path) ? .preparing : .install
     }
 
     /// One-line keyword-fallback banner: missing → points the user at
@@ -753,7 +752,7 @@ struct LibraryView: View {
         let seed = similarSeed
         let query = searchText
         let kind = kindFilter
-        let encoderReady = CLIPTextEncoder.shared.isReady
+        let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
         let want = sameListing ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
         reloadTask?.cancel()
@@ -773,11 +772,12 @@ struct LibraryView: View {
                 newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
                 pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter, let vector = await store.semanticVectorAsync(query: trimmed) {
+                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
                     guard !Task.isCancelled else { return }
                     rows = newRows
                     visualSearchPending = true
-                    if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
+                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled,
+                       let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                         pageable = false
                     }
