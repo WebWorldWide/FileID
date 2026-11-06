@@ -116,6 +116,13 @@ struct VideoSceneSelectionTests {
         #expect(scenes[1].frames.contains(scenes[1].representative))
     }
 
+    @Test func cutsBetweenShotsOfOneSubjectButNotWithinAHandheldShot() {
+        let edited = (0..<18).map { frame(Double($0) * 0.5, $0 < 12 ? 0 : 0.62) }
+        #expect(VideoSceneSelection.scenes(edited, duration: 9).count == 2)
+        let handheld = (0..<12).map { frame(Double($0) * 0.5, $0 % 2 == 0 ? 0 : 0.4) }
+        #expect(VideoSceneSelection.scenes(handheld, duration: 6).count == 1)
+    }
+
     @Test func ignoresAFlashShorterThanTheMinimumScene() {
         let frames = [frame(0, 0), frame(0.5, 1.5), frame(1.0, 0), frame(1.5, 0), frame(2.0, 0)]
         #expect(VideoSceneSelection.scenes(frames, duration: 2.5).count <= 2)

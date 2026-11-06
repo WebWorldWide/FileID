@@ -6,8 +6,9 @@ use super::near_duplicate_grouping::cosine;
 
 pub const POOL_INTERVAL: f64 = 0.5;
 /// A frame starts a new scene when it and the next frame are both less similar
-/// than this to the running mean of the current scene.
-pub const CUT_COSINE: f32 = 0.80;
+/// than this to the running mean of the current scene. 0.85 rather than 0.80: edited
+/// clips that keep one subject and grade cut between shots at 0.80-0.85.
+pub const CUT_COSINE: f32 = 0.85;
 /// A slow pan or walk that drifts this far from the scene's first frame also cuts.
 pub const DRIFT_COSINE: f32 = 0.70;
 pub const CONFIRM_FRAMES: usize = 2;
@@ -197,6 +198,14 @@ mod tests {
         assert_eq!((found[0].start, found[0].end), (0.0, 3.0));
         assert_eq!((found[1].start, found[1].end), (3.0, 6.0));
         assert!(found.iter().all(|s| s.frames.contains(&s.representative)));
+    }
+
+    #[test]
+    fn cuts_between_shots_of_one_subject_but_not_within_a_handheld_shot() {
+        let edited: Vec<Frame> = (0..18).map(|i| frame(i as f64 * 0.5, if i < 12 { 0.0 } else { 0.62 }, 0.0)).collect();
+        assert_eq!(scenes(&edited, 9.0).len(), 2);
+        let handheld: Vec<Frame> = (0..12).map(|i| frame(i as f64 * 0.5, if i % 2 == 0 { 0.0 } else { 0.4 }, 0.0)).collect();
+        assert_eq!(scenes(&handheld, 6.0).len(), 1);
     }
 
     #[test]
