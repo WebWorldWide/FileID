@@ -28,6 +28,7 @@ mod takes_groups_model;
 mod takes_model;
 mod takes_widgets;
 pub(crate) mod util;
+mod vlm_picker;
 
 mod workbench_state;
 pub mod workbenches;

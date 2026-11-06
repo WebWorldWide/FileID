@@ -33,7 +33,7 @@ fn policy_key(model_kind: &str) -> Option<&'static str> {
         // The ORT CUDA pack and CUDA llama runtime carry CUDA Toolkit
         // redistributables, so the CUDA EULA governs them.
         "ort_cuda_x64" | "llama_runtime_cuda_x64" => Some("NVIDIA-CUDA"),
-        _ => None,
+        _ => super::catalog::find(model_kind).filter(|entry| entry.terms_required).map(|entry| entry.license.as_str()),
     }
 }
 
@@ -138,6 +138,18 @@ mod tests {
         for open in ["qwen2_5_vl_7b", "arcface", "mobileclip_s2", ""] {
             assert!(policy_for(open).is_none(), "{open}");
         }
+    }
+
+    #[test]
+    fn catalog_models_with_separate_terms_use_their_manifest_policy() {
+        let gemma = policy_for("gemma_3_4b").unwrap();
+        let restricted: Vec<_> = crate::models::catalog::entries().iter().filter(|entry| entry.terms_required).collect();
+        assert!(!restricted.is_empty());
+        for entry in restricted {
+            assert_eq!(policy_for(&entry.id), Some(gemma), "{}", entry.id);
+        }
+        let open = crate::models::catalog::entries().iter().find(|entry| !entry.terms_required).unwrap();
+        assert!(policy_for(&open.id).is_none());
     }
 
     #[test]
