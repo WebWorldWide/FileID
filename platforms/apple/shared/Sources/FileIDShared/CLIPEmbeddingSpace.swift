@@ -39,4 +39,23 @@ public enum ModelArtifactVerification {
               properties.isRegularFile == true, (properties.fileSize ?? 0) > 0 else { return false }
         return (try? sha256HexOfFile(at: url)) == sha256
     }
+
+    /// Runs `load` while `check` hashes the weights on another thread, and
+    /// returns the loaded value only when the check passed.
+    public static func load<T>(verifiedBy check: @escaping @Sendable () -> Bool, _ load: () throws -> T) throws -> T? {
+        let passed = CheckResult()
+        let group = DispatchGroup()
+        DispatchQueue.global(qos: .userInitiated).async(group: group) { passed.set(check()) }
+        let value: T
+        do { value = try load() } catch { group.wait(); throw error }
+        group.wait()
+        return passed.value ? value : nil
+    }
+}
+
+private final class CheckResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool { lock.withLock { stored } }
+    func set(_ passed: Bool) { lock.withLock { stored = passed } }
 }

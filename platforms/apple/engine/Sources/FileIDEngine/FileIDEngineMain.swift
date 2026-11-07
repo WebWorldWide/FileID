@@ -135,6 +135,7 @@ struct FileIDEngineMain {
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
         AccurateOCRWarmup.shared.startWhenIdle()
+        QueryCommands.prewarmTextEncoder()
 
         // Capability check: Deep Analyze needs mlx.metallib next to the
         // engine binary (run.sh copies it in from .build/cache). Without

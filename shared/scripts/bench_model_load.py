@@ -14,7 +14,7 @@ Installed weights are only read: each run copies the files it needs into the
 scratch folder (`--scratch`), and the engine's catalog, logs, caches and model
 lookups are pointed there.
 
-    bench_model_load.py --engine <FileIDEngine or fileid-engine> --scratch <dir>
+    bench_model_load.py --engine <FileIDEngine> [--flavor swift|rust] --scratch <dir>
         [--models clip_text,clip_image,sface,qwen3vl2b,qwen3vl4b] [--rounds 3]
         (scan_none and cluster_none time the same scan/clustering with no model,
         so clip_image minus scan_none and sface minus cluster_none isolate the model)
@@ -59,8 +59,8 @@ RUST_MODELS = {
 }
 BASELINES = {"scan_none": "clip_image", "cluster_none": "sface"}
 VLMS = {
-    "qwen3vl2b": ("qwen3vl2b", "mlx-community/Qwen3-VL-2B-Instruct-4bit"),
-    "qwen3vl4b": ("qwen3vl4b", "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"),
+    "qwen3vl2b": ("qwen3_vl_2b", "mlx-community/Qwen3-VL-2B-Instruct-4bit"),
+    "qwen3vl4b": ("qwen3_vl_4b", "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"),
 }
 
 
@@ -207,8 +207,11 @@ def cluster(engine):
 
 def prewarm(engine, kind):
     sent = engine.send({"prewarmModel": {"modelKind": kind}})
-    done, _ = engine.wait(lambda n, v: (n == "modelDownloadProgress" and v.get("fraction", 0) >= 1.0 and v.get("modelKind") == kind)
-                          or (n == "error" and v.get("kind") in {"prewarm_failed", "model_integrity_failed"}), 900)
+    done, value = engine.wait(lambda n, v: (n == "modelDownloadProgress" and v.get("modelKind") == kind and v.get("fraction", 0) >= 1.0
+                                            and str(v.get("message", "")).endswith("ready."))
+                              or n == "error", 900)
+    if engine.last_was("error"):
+        raise RuntimeError(f"prewarm failed: {value}")
     return done - sent
 
 
@@ -260,11 +263,11 @@ def run_once(binary, flavor, model, state, photos, round_index):
             row["first"], row["total"] = scan(engine, photos / f"round{round_index}")
         elif model in ("sface", "cluster_none"):
             row["first"], value = cluster(engine)
-            row["note"] = f"{value.get('totalFaces', value.get('faces', '?'))} faces"
+            row["note"] = f"{value.get('faceCount', '?')} faces, {value.get('personCount', '?')} people"
         elif model in VLMS:
             kind = VLMS[model][0]
             row["first"] = prewarm(engine, kind)
-            ttft, total, status, message = chat(engine, kind, "what is in these photos?")
+            ttft, total, status, message = chat(engine, kind, "grass photos")
             row["second"], row["total"] = ttft, total
             row["note"] = f"chat {status}: {message[:60]!r}"
         current, peak = footprint_mb(engine.process.pid)
@@ -289,10 +292,11 @@ def main():
     parser.add_argument("--models", default="clip_text,clip_image,sface,qwen3vl2b,qwen3vl4b")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--photos", type=Path, help="folder of JPEGs; portraits give SFace faces to embed")
-    parser.add_argument("--flavor", choices=["swift", "rust"], help="default: guessed from the binary name")
+    parser.add_argument("--flavor", choices=["swift", "rust"], default="swift",
+                        help="engine type: the macOS Swift FileIDEngine or the shared Rust engine (both binaries share a name)")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
-    flavor = args.flavor or ("rust" if "fileid-engine" in args.engine.name else "swift")
+    flavor = args.flavor
     scratch = args.scratch.resolve()
     if any(str(scratch).lower().startswith(p) for p in ("/volumes/adlon", str(APP_MODELS.parent).lower())):
         raise SystemExit("scratch must not be inside the live FileID folder")
@@ -312,7 +316,7 @@ def main():
         state = scratch / f"{flavor}-{model}"
         shutil.rmtree(state, ignore_errors=True)
         state.mkdir(parents=True)
-        role = BASELINES.get(model, model)
+        role = "sface" if model in VLMS else BASELINES.get(model, model)
         photos = state / "photos"
         if args.photos:
             for index in range(args.rounds):
@@ -328,7 +332,8 @@ def main():
                 print(f"skip {model}: needs --photos", file=sys.stderr)
                 continue
             seed_faces(args.engine, flavor, state, photos / "faces")
-            shutil.copyfile(state / "FileID/fileid.sqlite", state / "seed.sqlite")
+            with sqlite3.connect(state / "FileID/fileid.sqlite") as source, sqlite3.connect(state / "seed.sqlite") as seed:
+                source.backup(seed)
         install(flavor, model, state)
         for index in range(args.rounds):
             if role == "sface":

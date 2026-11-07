@@ -11,6 +11,19 @@ enum QueryCommands {
         JSONLog.shared.warn(ev: "clip_text", error: message)
     })
 
+    /// Loads the search text model soon after launch, so the first search or
+    /// Chat question does not wait for it. Skipped when memory is tight; the
+    /// first query then loads it as before.
+    static func prewarmTextEncoder(availableMB: @escaping @Sendable () -> Int = Hardware.availableMemoryMB) {
+        guard clipText.isInstalled else { return }
+        Task.detached(priority: .utility) {
+            guard availableMB() >= textEncoderPrewarmMB else { return }
+            _ = clipText.load()
+        }
+    }
+
+    static let textEncoderPrewarmMB = 2048
+
     static let thumbnailLongSide = 192
     static let thumbnailLongSideRange = 64...2048
     private static let thumbnailGate = AsyncSemaphore(value: 2)
