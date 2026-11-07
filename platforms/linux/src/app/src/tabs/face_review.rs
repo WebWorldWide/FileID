@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent, ThumbReply};
+use crate::engine_client::{EngineClient, EngineEvent, ThumbReply, texture_from_decoded};
 use fileid_engine::ipc::{
-    CommandPayload, FaceReviewItem, FaceReviewPage, ListFaceReviewPayload, ResolveFaceReviewPayload,
-    UndoFaceReviewPayload,
+    CommandPayload, FaceReviewItem, FaceReviewPage, ListFaceReviewPayload,
+    ResolveFaceReviewPayload, UndoFaceReviewPayload,
 };
 
 pub(super) const PAGE_SIZE: i64 = 50;
@@ -27,11 +27,17 @@ pub(super) fn request_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
         .unwrap_or_default();
-    format!("review-{}-{millis}-{}", std::process::id(), NEXT_REQUEST.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "review-{}-{millis}-{}",
+        std::process::id(),
+        NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 pub(super) fn person_name(name: Option<&str>) -> String {
-    name.map(str::trim).filter(|name| !name.is_empty()).map_or_else(|| UNNAMED.to_string(), str::to_string)
+    name.map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| UNNAMED.to_string(), str::to_string)
 }
 
 pub(super) fn percent(score: f64) -> i64 {
@@ -61,7 +67,10 @@ pub(super) fn face_label(item: &FaceReviewItem) -> String {
 }
 
 pub(super) fn accept_label(item: &FaceReviewItem) -> String {
-    format!("Accept: this is {}", person_name(item.person_name.as_deref()))
+    format!(
+        "Accept: this is {}",
+        person_name(item.person_name.as_deref())
+    )
 }
 
 pub(super) fn reject_label(item: &FaceReviewItem) -> String {
@@ -93,7 +102,9 @@ pub(super) fn resolved_text(resolution: &str, item: &FaceReviewItem) -> String {
 }
 
 pub(super) fn refusal_text(page: &FaceReviewPage) -> String {
-    page.message.clone().unwrap_or_else(|| "FileID couldn't do that. Try again.".to_string())
+    page.message
+        .clone()
+        .unwrap_or_else(|| "FileID couldn't do that. Try again.".to_string())
 }
 
 #[derive(Debug, Default)]
@@ -136,7 +147,10 @@ impl ReviewPaging {
 enum Pending {
     Reload,
     More,
-    Resolve { item: FaceReviewItem, resolution: &'static str },
+    Resolve {
+        item: FaceReviewItem,
+        resolution: &'static str,
+    },
     Undo,
 }
 
@@ -157,12 +171,35 @@ pub(super) struct ReviewPanel {
 
 impl ReviewPanel {
     pub fn new(engine: Rc<RefCell<EngineClient>>, person: Option<i64>) -> Rc<Self> {
-        let header = gtk::Label::builder().xalign(0.0).css_classes(["heading"]).build();
-        let message = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).css_classes(["error"]).build();
-        let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
-        let empty = gtk::Label::builder().label(EMPTY_TEXT).xalign(0.0).visible(false).css_classes(["dim-label"]).build();
-        let more = gtk::Button::builder().label("Show more").halign(gtk::Align::Start).visible(false).build();
-        let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+        let header = gtk::Label::builder()
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build();
+        let message = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .css_classes(["error"])
+            .build();
+        let list = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .build();
+        let empty = gtk::Label::builder()
+            .label(EMPTY_TEXT)
+            .xalign(0.0)
+            .visible(false)
+            .css_classes(["dim-label"])
+            .build();
+        let more = gtk::Button::builder()
+            .label("Show more")
+            .halign(gtk::Align::Start)
+            .visible(false)
+            .build();
+        let body = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .build();
         body.append(&header);
         body.append(&message);
         body.append(&list);
@@ -262,19 +299,31 @@ impl ReviewPanel {
             person_id: item.person_id,
             resolution: resolution.to_string(),
         });
-        if self.send(payload, id, Pending::Resolve { item: item.clone(), resolution }) {
+        if self.send(
+            payload,
+            id,
+            Pending::Resolve {
+                item: item.clone(),
+                resolution,
+            },
+        ) {
             self.set_busy(true);
         }
     }
 
     fn undo(&self, operation: String) {
         let id = request_id();
-        let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload { request_id: id.clone(), operation_id: operation });
+        let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload {
+            request_id: id.clone(),
+            operation_id: operation,
+        });
         self.send(payload, id, Pending::Undo);
     }
 
     fn on_page(self: &Rc<Self>, page: FaceReviewPage) {
-        let Some(pending) = self.pending.borrow_mut().remove(&page.request_id) else { return };
+        let Some(pending) = self.pending.borrow_mut().remove(&page.request_id) else {
+            return;
+        };
         let ok = page.status == "ok";
         if !ok {
             self.show_message(&refusal_text(&page));
@@ -304,7 +353,11 @@ impl ReviewPanel {
     }
 
     fn toast(self: &Rc<Self>, title: &str, operation: Option<String>) {
-        let toast = adw::Toast::builder().title(title).use_markup(false).timeout(10).build();
+        let toast = adw::Toast::builder()
+            .title(title)
+            .use_markup(false)
+            .timeout(10)
+            .build();
         if let Some(operation) = operation {
             toast.set_button_label(Some("Undo"));
             let weak = Rc::downgrade(self);
@@ -349,9 +402,18 @@ impl ReviewPanel {
     fn build_row(self: &Rc<Self>, item: &FaceReviewItem) -> gtk::Box {
         let face = crop_picture(&face_label(item));
         let candidate = crop_picture(&person_name(item.person_name.as_deref()));
-        load_face(&self.engine, &face, Some(item.face_id), Some((item.path.clone(), Some(item.bbox.clone()))));
+        load_face(
+            &self.engine,
+            &face,
+            Some(item.face_id),
+            Some((item.path.clone(), Some(item.bbox.clone()))),
+        );
         load_face(&self.engine, &candidate, item.representative_face_id, None);
-        let reason = gtk::Label::builder().label(reason_sentence(item)).xalign(0.0).wrap(true).build();
+        let reason = gtk::Label::builder()
+            .label(reason_sentence(item))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
         let file = gtk::Label::builder()
             .label(file_label(&item.path))
             .xalign(0.0)
@@ -366,11 +428,19 @@ impl ReviewPanel {
         if item.person_name.is_some() {
             name.add_css_class("gold-accent");
         }
-        let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
+        let text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .hexpand(true)
+            .build();
         text.append(&name);
         text.append(&reason);
         text.append(&file);
-        let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).valign(gtk::Align::Center).build();
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .build();
         for (title, resolution, label, gold) in [
             ("Ignore", "ignore", IGNORE_LABEL.to_string(), false),
             ("Not this person", "reject", reject_label(item), false),
@@ -418,7 +488,12 @@ fn crop_picture(label: &str) -> gtk::Picture {
     picture
 }
 
-fn load_face(engine: &Rc<RefCell<EngineClient>>, picture: &gtk::Picture, face: Option<i64>, source: Option<(String, Option<String>)>) {
+fn load_face(
+    engine: &Rc<RefCell<EngineClient>>,
+    picture: &gtk::Picture,
+    face: Option<i64>,
+    source: Option<(String, Option<String>)>,
+) {
     let picture_weak = picture.downgrade();
     let engine = engine.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -455,11 +530,17 @@ fn load_face(engine: &Rc<RefCell<EngineClient>>, picture: &gtk::Picture, face: O
 fn reveal(row: &gtk::Box) {
     row.set_opacity(0.0);
     let weak = row.downgrade();
-    crate::spring::animate_with(crate::spring::Spring::Standard, row, 0.0, 1.0, move |value| {
-        if let Some(row) = weak.upgrade() {
-            row.set_opacity(value.clamp(0.0, 1.0));
-        }
-    });
+    crate::spring::animate_with(
+        crate::spring::Spring::Standard,
+        row,
+        0.0,
+        1.0,
+        move |value| {
+            if let Some(row) = weak.upgrade() {
+                row.set_opacity(value.clamp(0.0, 1.0));
+            }
+        },
+    );
 }
 
 /// Asks for the number of waiting suggestions (every person's) and hands it to `done`.
@@ -495,7 +576,12 @@ pub(super) fn count_waiting(engine: &Rc<RefCell<EngineClient>>, done: impl Fn(i6
 mod tests {
     use super::*;
 
-    fn item(reason: &str, name: Option<&str>, runner_id: Option<i64>, runner: Option<&str>) -> FaceReviewItem {
+    fn item(
+        reason: &str,
+        name: Option<&str>,
+        runner_id: Option<i64>,
+        runner: Option<&str>,
+    ) -> FaceReviewItem {
         FaceReviewItem {
             face_id: 7,
             file_id: 3,
@@ -530,7 +616,10 @@ mod tests {
 
     #[test]
     fn reasons_follow_the_shared_wording() {
-        assert_eq!(reason_sentence(&item("suggested", Some("Alex"), None, None)), "Looks like Alex (62% match).");
+        assert_eq!(
+            reason_sentence(&item("suggested", Some("Alex"), None, None)),
+            "Looks like Alex (62% match)."
+        );
         assert_eq!(
             reason_sentence(&item("uncertain", None, None, None)),
             "Might be an unnamed person, but the match is weak (62%)."
@@ -543,7 +632,10 @@ mod tests {
             reason_sentence(&item("ambiguous", Some("Alex"), Some(4), None)),
             "Could be Alex or an unnamed person; both look about as close."
         );
-        assert_eq!(reason_sentence(&item("ambiguous", Some("Alex"), None, None)), "Could be Alex, but it's a close call.");
+        assert_eq!(
+            reason_sentence(&item("ambiguous", Some("Alex"), None, None)),
+            "Could be Alex, but it's a close call."
+        );
         assert_eq!(person_name(Some("  ")), "an unnamed person");
         assert_eq!(percent(0.554), 55);
     }
@@ -554,7 +646,10 @@ mod tests {
         assert_eq!(face_label(&alex), "Face in Beach Day.jpg");
         assert_eq!(accept_label(&alex), "Accept: this is Alex");
         assert_eq!(reject_label(&alex), "Not Alex");
-        assert_eq!(row_label(&alex), "Looks like Alex (62% match). In Beach Day.jpg.");
+        assert_eq!(
+            row_label(&alex),
+            "Looks like Alex (62% match). In Beach Day.jpg."
+        );
         assert_eq!(header_text(3), "Review suggestions, 3 waiting");
         assert_eq!(button_text(3), "Review suggestions (3)");
     }
@@ -582,6 +677,10 @@ mod tests {
         let a = request_id();
         let b = request_id();
         assert_ne!(a, b);
-        assert!(a.len() <= 128 && a.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+        assert!(
+            a.len() <= 128
+                && a.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        );
     }
 }
