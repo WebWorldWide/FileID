@@ -169,6 +169,36 @@ pub fn activity_windows(frames: &[Frame], duration: f64) -> Vec<Window> {
     windows
 }
 
+/// Pool frames from luma signatures alone, for callers without CLIP vectors;
+/// activity windows read only `change`.
+pub fn activity_frames(signatures: &[(f64, Vec<u8>)]) -> Vec<Frame> {
+    signatures
+        .iter()
+        .enumerate()
+        .map(|(i, (seconds, pixels))| Frame {
+            seconds: *seconds,
+            embedding: Vec::new(),
+            change: if i == 0 { 0.0 } else { luma_change(&signatures[i - 1].1, pixels) },
+        })
+        .collect()
+}
+
+/// The parts of `[0, duration]` that no activity window covers.
+pub fn still_spans(windows: &[Window], duration: f64) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0.0_f64;
+    for window in windows {
+        if window.start > cursor + 0.001 {
+            spans.push((cursor, window.start));
+        }
+        cursor = cursor.max(window.end);
+    }
+    if duration > cursor + 0.001 {
+        spans.push((cursor, duration));
+    }
+    spans
+}
+
 fn add(value: &[f32], sum: &mut [f32]) {
     if value.len() == sum.len() {
         for (s, v) in sum.iter_mut().zip(value) {
@@ -248,6 +278,23 @@ mod tests {
             let pool: Vec<f64> = frames.iter().map(|f| f.seconds).filter(|t| *t >= window.start && *t <= window.end).collect();
             assert_eq!(window.times, pool);
         }
+    }
+
+    #[test]
+    fn luma_signatures_alone_drive_activity_windows_and_still_spans() {
+        let signatures: Vec<(f64, Vec<u8>)> =
+            (0..24usize).map(|i| (i as f64 * 0.5, vec![if (8..12).contains(&i) { (i * 40 % 256) as u8 } else { 10 }; 4])).collect();
+        let frames = activity_frames(&signatures);
+        assert!(frames[0].change.abs() < 1e-12);
+        assert_eq!(frames.iter().map(|f| f.embedding.len()).max(), Some(0));
+        let windows = activity_windows(&frames, 12.0);
+        assert_eq!(windows.len(), 2);
+        assert!((windows[0].start - 3.0).abs() < 1e-9 && (windows[1].end - 6.5).abs() < 1e-9);
+        let still = still_spans(&windows, 12.0);
+        assert_eq!(still.len(), 2);
+        assert!(still[0].0.abs() < 1e-9 && (still[0].1 - 3.0).abs() < 1e-9);
+        assert!((still[1].0 - 6.5).abs() < 1e-9 && (still[1].1 - 12.0).abs() < 1e-9);
+        assert_eq!(still_spans(&[], 4.0), vec![(0.0, 4.0)]);
     }
 
     #[test]

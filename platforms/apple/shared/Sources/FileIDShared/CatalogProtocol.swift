@@ -190,13 +190,17 @@ public struct CatalogTakeAutoGroup: Codable, Sendable, Equatable, Identifiable {
     public var capturedAt: Double
     public var similarity: Double
     public var shots: [CatalogTakeShot]
+    public var relation: String?
+    public var evidence: [String]?
     public var id: String { groupKey }
     public var fileIDs: [Int64] { shots.flatMap(\.fileIDs) }
-    public init(groupKey: String, kind: String, status: String, capturedAt: Double, similarity: Double, shots: [CatalogTakeShot]) {
+    public init(groupKey: String, kind: String, status: String, capturedAt: Double, similarity: Double, shots: [CatalogTakeShot],
+                relation: String? = nil, evidence: [String]? = nil) {
         self.groupKey = groupKey; self.kind = kind; self.status = status
         self.capturedAt = capturedAt; self.similarity = similarity; self.shots = shots
+        self.relation = relation; self.evidence = evidence
     }
-    private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots }
+    private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots, relation, evidence }
 }
 
 public struct CatalogTakeQuality: Codable, Sendable, Equatable {
@@ -256,9 +260,10 @@ public struct CatalogNaming: Codable, Sendable, Equatable {
     public var includePeople: Bool
     public var includeEvent: Bool
     public var includeDate: Bool
-    public init(style: String, maxLength: Int, includePeople: Bool = false, includeEvent: Bool = false, includeDate: Bool = false) {
+    public var learn: Bool
+    public init(style: String, maxLength: Int, includePeople: Bool = false, includeEvent: Bool = false, includeDate: Bool = false, learn: Bool = false) {
         self.style = style; self.maxLength = maxLength
-        self.includePeople = includePeople; self.includeEvent = includeEvent; self.includeDate = includeDate
+        self.includePeople = includePeople; self.includeEvent = includeEvent; self.includeDate = includeDate; self.learn = learn
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -267,6 +272,16 @@ public struct CatalogNaming: Codable, Sendable, Equatable {
         includePeople = try c.decodeIfPresent(Bool.self, forKey: .includePeople) ?? false
         includeEvent = try c.decodeIfPresent(Bool.self, forKey: .includeEvent) ?? false
         includeDate = try c.decodeIfPresent(Bool.self, forKey: .includeDate) ?? false
+        learn = try c.decodeIfPresent(Bool.self, forKey: .learn) ?? false
+    }
+}
+
+public struct CatalogNameEdit: Codable, Sendable, Equatable {
+    public var fileID: Int64
+    public var proposed: String
+    public var applied: String
+    public init(fileID: Int64, proposed: String, applied: String) {
+        self.fileID = fileID; self.proposed = proposed; self.applied = applied
     }
 }
 
@@ -293,7 +308,8 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var takeFeedback: CatalogTakeFeedback?
     public var takeDecision: CatalogTakeDecision?
     public var naming: CatalogNaming?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, rootID: Int64? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil) {
+    public var nameEdits: [CatalogNameEdit]?
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, rootID: Int64? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil, nameEdits: [CatalogNameEdit]? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -316,6 +332,7 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.takeFeedback = takeFeedback
         self.takeDecision = takeDecision
         self.naming = naming
+        self.nameEdits = nameEdits
     }
 }
 

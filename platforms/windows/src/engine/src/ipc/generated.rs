@@ -694,7 +694,32 @@ pub struct CatalogRequest {
     /// .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles
     /// carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that
     /// stem in the folder is in the batch, and when one member of a group fails it puts the others
-    /// back and reports the whole group failed.
+    /// back and reports the whole group failed. enqueueTakeGrouping (schema 1.21.0) queues the
+    /// library-wide related-take job (kind takeGrouping, one job per library): it proposes groups
+    /// of related tries from capture sessions, CLIP similarity and user-named people, never touches
+    /// files, saved events or Keep all / Skip choices, and on a rerun reprocesses only capture
+    /// sessions whose files were added, changed or removed. It replies with the job in jobs; a
+    /// queued or running job is left as is, and a completed, cancelled, failed or paused one is
+    /// queued again. pauseJob, resumeJob and cancelJob control it; an interrupted run comes back
+    /// paused and resumes without redoing finished sessions. takeGroupProposals (schema 1.21.0)
+    /// reads the stored proposals as takeGroups with relation and evidence, ranked like
+    /// autoTakeGroups and limited by limit (default 100), and returns the job in jobs. Proposals
+    /// overlapping a saved event are left out and Keep all / Skip choices apply as for
+    /// autoTakeGroups. Schema 1.21.0 adds local learning of style corrections: learnNames records,
+    /// for each nameEdits entry, the name the user applied after a proposeNames preview (naming is
+    /// the style the preview used); the engine stores it with the unlearned name it would propose
+    /// for that file, keeps the newest 200 and never sends them anywhere. namePreferences lists
+    /// what the newest 50 show and resetNamePreferences forgets them all; both learnNames and these
+    /// reply with hits of kind namePreference (fileID 0, path empty, evidenceID the preference:
+    /// separator, case, leadingDate, trailingDate, dateFormat, people, words or dropWords, text its
+    /// value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the
+    /// number of stored samples. proposeNames applies them only when naming.learn is true;
+    /// evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'),
+    /// naming the preferences that changed that file's name. Schema 1.22.0 adds unlearnNames: after
+    /// the user undoes renames that learnNames recorded, it deletes, for each nameEdits entry, the
+    /// newest stored sample for that fileID whose applied name equals applied (proposed is not
+    /// compared; an entry with no match is ignored), so a reversed rename stops teaching a style,
+    /// then replies like namePreferences.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -743,6 +768,11 @@ pub struct CatalogRequest {
     pub take_decision: Option<CatalogTakeDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming: Option<CatalogNaming>,
+    /// learnNames and unlearnNames only (schema 1.21.0; unlearnNames 1.22.0): the names the user
+    /// applied after a proposeNames preview, one per renamed file (a companion group's leader
+    /// only). unlearnNames sends the same entries back after the renames are undone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_edits: Option<Vec<CatalogNameEdit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -817,6 +847,21 @@ pub struct CatalogNaming {
     /// leads with it. Omitted means false. Files without a capture date get no date.
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_date: bool,
+    /// proposeNames only (schema 1.21.0): apply the preferences learned from learnNames samples.
+    /// Omitted means false, so evaluations and older apps get the unlearned names.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub learn: bool,
+}
+
+/// One applied smart name for learnNames: proposed is the file name the preview showed and applied
+/// the file name the user renamed it to (the same text when accepted unedited).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogNameEdit {
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub proposed: String,
+    pub applied: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1527,7 +1572,8 @@ pub struct CatalogTakeGroupMember {
 }
 
 /// A suggested group of tries of the same shot, found from capture time and look. status skipped
-/// means the person chose Skip group.
+/// means the person chose Skip group. relation and evidence (schema 1.21.0) are set only on
+/// takeGroupProposals results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogTakeAutoGroup {
@@ -1537,6 +1583,17 @@ pub struct CatalogTakeAutoGroup {
     pub captured_at: f64,
     pub similarity: f64,
     pub shots: Vec<CatalogTakeShot>,
+    /// Schema 1.21.0. repeatedAttempts: one camera captured the tries one after another.
+    /// alternateViews: different cameras captured the same moment, so the files are other angles or
+    /// copies rather than separate tries. uncertain: camera details are missing or mixed, so the
+    /// evidence cannot tell them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    /// Schema 1.21.0. Evidence codes behind the proposal, in this order when present.
+    /// captureSession and visualSimilarity are always present; time alone never forms a group.
+    /// sharedSubject means every try shows at least one common user-named person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Vec<String>>,
 }
 
 /// One try: every file of one shot (a RAW and its JPEG share a shot). primaryFileID is the file
@@ -1619,8 +1676,8 @@ pub struct CatalogTakeGoalRanking {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogJob {
     pub id: String,
-    /// Worker kind, including timelineSample and catalogIndex. Resume requires a supported worker;
-    /// catalogIndex permits explicit retry after failure or cancellation.
+    /// Worker kind, including timelineSample, catalogIndex and takeGrouping. Resume requires a
+    /// supported worker; catalogIndex permits explicit retry after failure or cancellation.
     pub kind: String,
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,

@@ -81,6 +81,13 @@ enum CatalogTakeAuto {
                     similarity: TakeScoring.round4(Double(max(0, min(1, similarity)))), shots: Array(shots.prefix(100))))
             }
         }
+        let visible = try applyDecisions(db, groups)
+        let newest = visible.map(\.capturedAt).max() ?? 0
+        return Array(rank(visible, newest: newest).prefix(limit))
+    }
+
+    /// Drops groups inside a Keep all choice and marks those inside a Skip choice.
+    static func applyDecisions(_ db: GRDB.Database, _ groups: [CatalogTakeAutoGroup]) throws -> [CatalogTakeAutoGroup] {
         let decisions = try Row.fetchAll(db, sql: "SELECT decision,file_ids_json FROM take_group_decisions").compactMap { row -> (String, Set<Int64>)? in
             let json: String = row["file_ids_json"]
             guard let ids = try? JSONDecoder().decode([Int64].self, from: Data(json.utf8)) else { return nil }
@@ -93,8 +100,7 @@ enum CatalogTakeAuto {
             if decisions.contains(where: { $0.0 == "skip" && ids.isSubset(of: $0.1) }) { group.status = "skipped" }
             visible.append(group)
         }
-        let newest = visible.map(\.capturedAt).max() ?? 0
-        return Array(rank(visible, newest: newest).prefix(limit))
+        return visible
     }
 
     /// Bigger and more recent groups first: 0.6 × size (saturating at 12 tries)

@@ -1,0 +1,93 @@
+[
+  {"name":"underscores and title case","samples":[
+    {"base":"beach-sunset","applied":"Beach_Sunset.jpg"},
+    {"base":"dog-park","applied":"Dog_Park.jpg"},
+    {"base":"red-barn-field","applied":"Red_Barn_Field.jpg"}],
+   "learned":{"separator":"_","case":"title"},
+   "proposals":[
+    {"style":"short","maxLength":40,"original":"IMG_0001","storedName":"kids playing soccer","expected":"Kids_Playing_Soccer","reason":"proposedName","learned":["separator","case"]},
+    {"style":"short","maxLength":40,"includeDate":true,"original":"IMG_0002","storedName":"kids playing soccer","date":"2023-07-04","expected":"Kids_Playing_Soccer_2023-07-04","reason":"proposedName","learned":["separator","case"]},
+    {"style":"short","maxLength":40,"original":"Kids_Playing_Soccer","storedName":"kids playing soccer","expected":null,"reason":"unchanged","learned":["separator"]}]},
+  {"name":"accepted names outvote one edit","samples":[
+    {"base":"beach-sunset","applied":"beach-sunset.jpg"},
+    {"base":"dog-park","applied":"dog-park_2.jpg"},
+    {"base":"red-barn","applied":"red-barn.JPG"},
+    {"base":"snow-day","applied":"Snow_Day.jpg"}],
+   "learned":{},
+   "proposals":[
+    {"style":"short","maxLength":40,"original":"IMG_0001","storedName":"kids playing soccer","expected":"kids-playing-soccer","reason":"proposedName"}]},
+  {"name":"two samples are not enough","samples":[
+    {"base":"beach-sunset","applied":"Beach_Sunset.jpg"},
+    {"base":"dog-park","applied":"Dog_Park.jpg"}],
+   "learned":{}},
+  {"name":"leading dates moved to the end in compact form","samples":[
+    {"base":"2023-07-04 beach-sunset","applied":"beach-sunset-20230704.jpg"},
+    {"base":"2023-08-01 dog-park","applied":"dog-park-20230801.jpg"},
+    {"base":"2024-01-02 snow-day","applied":"snow-day-20240102.JPG"}],
+   "learned":{"leadingDate":"end","dateFormat":"compact"},
+   "proposals":[
+    {"style":"dateFirst","maxLength":40,"original":"IMG_0001","storedName":"kids playing soccer","date":"2023-07-04","expected":"kids-playing-soccer-20230704","reason":"proposedName","learned":["leadingDate","dateFormat"]},
+    {"style":"short","maxLength":40,"includeDate":true,"original":"IMG_0002","storedName":"kids playing soccer","date":"2023-07-04","expected":"kids-playing-soccer-20230704","reason":"proposedName","learned":["dateFormat"]},
+    {"style":"short","maxLength":40,"original":"IMG_0003","storedName":"kids playing soccer","date":"2023-07-04","expected":"kids-playing-soccer","reason":"proposedName"}]},
+  {"name":"trailing dates removed; a corrected date is no vote","samples":[
+    {"base":"beach-sunset-2023-07-04","applied":"beach-sunset.jpg"},
+    {"base":"dog-park-2023-08-01","applied":"dog-park.jpg"},
+    {"base":"snow-day-2024-01-02","applied":"snow-day.jpg"},
+    {"base":"red-barn-2023-07-04","applied":"red-barn-2023-07-05.jpg"}],
+   "learned":{"trailingDate":"none"},
+   "proposals":[
+    {"style":"short","maxLength":40,"includeDate":true,"original":"IMG_0001","storedName":"kids playing soccer","date":"2023-07-04","expected":"kids-playing-soccer","reason":"proposedName","learned":["trailingDate"]},
+    {"style":"dateFirst","maxLength":40,"original":"IMG_0002","storedName":"kids playing soccer","date":"2023-07-04","expected":"2023-07-04 kids-playing-soccer","reason":"proposedName"}]},
+  {"name":"a generic word deleted twice is dropped","samples":[
+    {"base":"beach-outdoor-sunset","applied":"beach-sunset.jpg"},
+    {"base":"dog-outdoor-park","applied":"dog-park.jpg"},
+    {"base":"red-barn","applied":"red-barn.jpg"}],
+   "learned":{"dropWords":["outdoor"]},
+   "proposals":[
+    {"style":"short","maxLength":40,"original":"IMG_0001","storedName":"kids outdoor soccer","expected":"kids-soccer","reason":"proposedName","learned":["dropWords"]},
+    {"style":"short","maxLength":40,"original":"IMG_0002","storedName":"outdoor","tags":["lake","trees"],"expected":"lake-trees","reason":"tags","learned":["dropWords"]}]},
+  {"name":"names cut to two words","samples":[
+    {"base":"kids-playing-soccer","applied":"kids-playing.jpg"},
+    {"base":"beach-sunset-waves","applied":"beach-sunset.jpg"},
+    {"base":"dog-chasing-ball","applied":"dog-chasing.jpg"},
+    {"base":"red-barn","applied":"red-barn.jpg"}],
+   "learned":{"words":2},
+   "proposals":[
+    {"style":"short","maxLength":40,"includeEvent":true,"original":"IMG_0001","storedName":"kids playing soccer","event":"Summer Camp","expected":"kids-playing","reason":"proposedName","learned":["words"]},
+    {"style":"short","maxLength":40,"includePeople":true,"original":"IMG_0002","storedName":"Sam - Baseball Hit Fence","personNames":["Sam"],"people":["sam"],"expected":"sam-baseball-hit","reason":"proposedName","learned":["words"]}]},
+  {"name":"confirmed people removed","samples":[
+    {"base":"sam-baseball-hit","applied":"baseball-hit.jpg","people":["sam"]},
+    {"base":"mira-birthday-cake","applied":"birthday-cake.jpg","people":["mira"]},
+    {"base":"sam-beach","applied":"beach.jpg","people":["sam"]},
+    {"base":"kai-dog-park","applied":"kai-dog-park.jpg","people":["kai"]}],
+   "learned":{"omitPeople":true},
+   "proposals":[
+    {"style":"short","maxLength":40,"includePeople":true,"original":"IMG_0001","storedName":"Sam - Baseball Hit","personNames":["Sam"],"people":["sam"],"expected":"baseball-hit","reason":"proposedName","learned":["people"]}]},
+  {"name":"upper case with spaces; reserved names stay refused","samples":[
+    {"base":"beach-sunset","applied":"BEACH SUNSET.jpg"},
+    {"base":"dog-park","applied":"DOG PARK.jpg"},
+    {"base":"2023-07-04 snow-day","applied":"2023-07-04 SNOW DAY.jpg"}],
+   "learned":{"separator":" ","case":"upper"},
+   "proposals":[
+    {"style":"dateFirst","maxLength":40,"original":"IMG_0001","storedName":"kids playing soccer","date":"2023-07-04","expected":"2023-07-04 KIDS PLAYING SOCCER","reason":"proposedName","learned":["separator","case"]},
+    {"style":"short","maxLength":40,"original":"IMG_0002","storedName":"con","expected":null,"reason":"reserved"}]},
+  {"name":"mixed case gives no vote","samples":[
+    {"base":"beach-sunset","applied":"beach-SUNSET.jpg"},
+    {"base":"dog-park","applied":"dog-PARK.jpg"},
+    {"base":"red-barn","applied":"iPhone-barn.jpg"}],
+   "learned":{}},
+  {"name":"month-only dates with underscores","samples":[
+    {"base":"beach-sunset-2023-07-04","applied":"beach_sunset_2023-07.jpg"},
+    {"base":"dog-park-2023-08-01","applied":"dog_park_2023-08.jpg"},
+    {"base":"snow-day-2024-01-02","applied":"snow_day_2024-01_2.jpg"}],
+   "learned":{"dateFormat":"month","separator":"_"},
+   "proposals":[
+    {"style":"short","maxLength":40,"includeDate":true,"original":"IMG_0001","storedName":"kids playing soccer","date":"2023-07-04","expected":"kids_playing_soccer_2023-07","reason":"proposedName","learned":["dateFormat","separator"]}]},
+  {"name":"unicode title case","samples":[
+    {"base":"graduación-regalo","applied":"Graduación-Regalo.jpg"},
+    {"base":"élan-vital","applied":"Élan-Vital.jpg"},
+    {"base":"день-рождения","applied":"День-Рождения.jpg"}],
+   "learned":{"case":"title"},
+   "proposals":[
+    {"style":"short","maxLength":40,"original":"IMG_0001","storedName":"über straße","expected":"Über-Straße","reason":"proposedName","learned":["case"]}]}
+]

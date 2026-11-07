@@ -100,6 +100,7 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         take_feedback: None,
         take_decision: None,
         naming: None,
+        name_edits: None,
     }
 }
 

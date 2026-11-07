@@ -12,6 +12,7 @@ internal static class NameStylePolicy
     public const bool DefaultIncludePeople = true;
     public const bool DefaultIncludeEvent = true;
     public const bool DefaultIncludeDate = false;
+    public const bool DefaultLearn = true;
     public const int MinLength = 4;
     public const int MaxLength = 120;
     public const int MaxFiles = 1000;
@@ -29,11 +30,11 @@ internal static class NameStylePolicy
 
     public static bool DateToggleEnabled(string style) => style != "dateFirst";
 
-    public static CatalogNaming Naming(string style, int maxLength, bool includePeople, bool includeEvent, bool includeDate)
+    public static CatalogNaming Naming(string style, int maxLength, bool includePeople, bool includeEvent, bool includeDate, bool learn = false)
     {
         style = SanitizeStyle(style);
         return new CatalogNaming(style, Math.Clamp(maxLength, MinLength, MaxLength), includePeople, includeEvent,
-            includeDate && DateToggleEnabled(style));
+            includeDate && DateToggleEnabled(style), learn);
     }
 
     /// <summary>The Library selection when there is one, otherwise <paramref name="fallback"/>;
@@ -61,6 +62,98 @@ internal static class NameStylePolicy
 
     public const string UnscannedCompanion = "unscannedCompanion";
     private const string GroupMarker = "|group:";
+    private const string LearnedMarker = "|learned:";
+
+    /// <summary>Splits the learned preferences ("proposedName|learned:case,separator") off a
+    /// reason that <see cref="ParseReason"/> returned.</summary>
+    public static (string Reason, IReadOnlyList<string> Learned) SplitLearned(string reason)
+    {
+        var marker = reason.IndexOf(LearnedMarker, StringComparison.Ordinal);
+        if (marker < 0) return (reason, Array.Empty<string>());
+        return (reason[..marker], reason[(marker + LearnedMarker.Length)..].Split(',', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    public static string ReasonChip(NameProposalRow row) =>
+        row.Learned.Count == 0 ? ReasonLabel(row.Reason) : ReasonLabel(row.Reason) + " · your style";
+
+    /// <summary>What the learned preferences named in a proposeNames reason did to this name.</summary>
+    public static string? LearnedHelp(IReadOnlyList<string> keys)
+    {
+        var parts = keys.Select(key => key switch
+        {
+            "dropWords" => "leaves out words you remove",
+            "people" => "leaves out people's names",
+            "words" => "keeps it as short as you do",
+            "leadingDate" or "trailingDate" => "puts the date where you do",
+            "dateFormat" => "writes the date your way",
+            "separator" => "uses your word separator",
+            "case" => "uses your capitals",
+            _ => null,
+        }).OfType<string>().ToArray();
+        return parts.Length == 0 ? null : "Learned from your renames: " + string.Join(", ", parts);
+    }
+
+    public static string? PreferenceLabel(string key, string value) => (key, value) switch
+    {
+        ("separator", "_") => "underscores between words",
+        ("separator", " ") => "spaces between words",
+        ("case", "title") => "Capitalised Words",
+        ("case", "upper") => "CAPITALS",
+        ("leadingDate", "end") => "the date at the end",
+        ("trailingDate", "start") => "the date first",
+        ("leadingDate" or "trailingDate", "none") => "no date",
+        ("dateFormat", "compact") => "dates like 20230704",
+        ("dateFormat", "underscore") => "dates like 2023_07_04",
+        ("dateFormat", "dotted") => "dates like 2023.07.04",
+        ("dateFormat", "month") => "dates like 2023-07",
+        ("people", _) => "no people's names",
+        ("words", _) => $"at most {value} {(value == "1" ? "word" : "words")}",
+        ("dropWords", _) => $"without \u201C{value}\u201D",
+        _ => null,
+    };
+
+    /// <summary>The Name style card's line about what FileID learned, from a learnNames or
+    /// namePreferences reply, and the number of stored samples.</summary>
+    public static (string Text, long Samples) LearnedSummary(IEnumerable<CatalogHit> hits, bool enabled)
+    {
+        var list = hits as IReadOnlyList<CatalogHit> ?? hits.ToArray();
+        var samples = list.Where(h => h.Kind == "nameSamples")
+            .Select(h => long.TryParse(h.Text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0)
+            .FirstOrDefault();
+        if (!enabled) return ("Names follow the style above only.", samples);
+        if (samples == 0) return ("Edit names before you rename them and FileID will follow your style.", 0);
+        var count = $"{samples.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)} rename{(samples == 1 ? "" : "s")}";
+        var items = list.Where(h => h.Kind == "namePreference")
+            .Select(h => PreferenceLabel(h.EvidenceID ?? string.Empty, h.Text)).OfType<string>().ToArray();
+        return (items.Length == 0 ? $"No clear preference yet from {count}." : $"From {count}: {string.Join(", ", items)}.", samples);
+    }
+
+    /// <summary>One sample per renamed file the user saw in the preview: singles and group
+    /// leaders, never followers, whose rename landed.</summary>
+    public static IReadOnlyList<CatalogNameEdit> Edits(IEnumerable<NameProposalRow> rows, IEnumerable<long> renamed)
+    {
+        var landed = renamed.ToHashSet();
+        return rows.Where(r => r.Checked && r.CanCheck && !r.IsFollower && landed.Contains(r.FileId))
+            .Select(r => (Row: r, Name: ValidName(r.Edited)))
+            .Where(x => x.Name is not null)
+            .Select(x => new CatalogNameEdit(x.Row.FileId, x.Row.Proposed, x.Name!))
+            .ToArray();
+    }
+
+    public static CatalogRequest LearnRequest(string requestId, IReadOnlyList<CatalogNameEdit> edits, CatalogNaming naming) =>
+        new(requestId, "learnNames", null, null, null, null, null, null, Naming: naming, NameEdits: edits);
+
+    /// <summary>After an Undo puts names back, the learned samples to forget: the edits whose
+    /// file is among those renamed back, or null when there are none.</summary>
+    public static CatalogRequest? UnlearnRequest(string requestId, IEnumerable<CatalogNameEdit> edits, IEnumerable<long> putBack)
+    {
+        var back = putBack.ToHashSet();
+        var undone = edits.Where(e => back.Contains(e.FileID)).ToArray();
+        return undone.Length == 0 ? null : new(requestId, "unlearnNames", null, null, null, null, null, null, NameEdits: undone);
+    }
+
+    public static CatalogRequest PreferencesRequest(string requestId, bool reset) =>
+        new(requestId, reset ? "resetNamePreferences" : "namePreferences", null, null, null, null, null, null);
 
     /// <summary>Splits a proposeNames evidenceID into its reason and the companion group's
     /// leader file ID ("proposedName|group:11"), matching both engines.</summary>
@@ -81,10 +174,12 @@ internal static class NameStylePolicy
         var rows = hits.Where(h => h.Kind == "proposedName")
             .Select(h =>
             {
-                var (reason, group) = ParseReason(h.EvidenceID);
+                var (tagged, group) = ParseReason(h.EvidenceID);
+                var (reason, learned) = SplitLearned(tagged);
                 return new NameProposalRow(h.FileID, h.Path, h.Text, reason)
                 {
                     Group = group,
+                    Learned = learned,
                     Edited = h.Text,
                     Checked = h.Text.Length > 0 && !unticked.Contains(group ?? h.FileID),
                 };
@@ -176,7 +271,7 @@ internal static class NameStylePolicy
 
     public static string AccessibleName(NameProposalRow row, IReadOnlyList<NameProposalRow>? rows = null)
     {
-        var reason = ReasonLabel(row.Reason);
+        var reason = ReasonChip(row);
         var because = char.ToLowerInvariant(reason[0]) + reason[1..];
         var others = row.Group is { } group && rows is not null
             ? rows.Where(r => r.Group == group && r.FileId != row.FileId).Select(r => r.CurrentName).ToArray()
@@ -193,6 +288,7 @@ internal sealed record NameProposalRow(long FileId, string Path, string Proposed
     public string Edited { get; set; } = string.Empty;
     public bool Checked { get; set; }
     public long? Group { get; init; }
+    public IReadOnlyList<string> Learned { get; init; } = Array.Empty<string>();
     public string Suffix { get; set; } = string.Empty;
     public bool CanCheck => Proposed.Length > 0;
     public long GroupKey => Group ?? FileId;

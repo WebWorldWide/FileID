@@ -177,5 +177,606 @@
         }
       }
     ]
+  },
+  {
+    "name": "takes-grouping-proposes-related-tries",
+    "description": "enqueueTakeGrouping runs the durable library-wide takeGrouping job. Tries group only when capture time and CLIP similarity agree (a close-in-time but different picture stays out); one camera one try after another is repeatedAttempts, two cameras at the same moment are alternateViews, and missing camera details leave the relation uncertain. Proposals never create events; Keep all hides one without deleting it; saving an event over a proposal's files reprocesses only that capture session on the next run.",
+    "tree": [
+      {
+        "path": "shoot/a1.jpg",
+        "content": "take 1",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1000,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "shoot/a2.jpg",
+        "content": "take 2",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1030,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "shoot/a3.jpg",
+        "content": "take 3",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1060,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "party/b1.jpg",
+        "content": "take 4",
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 9000,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "party/b2.jpg",
+        "content": "take 5",
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 9001,
+          "camera_model": "Camera B"
+        }
+      },
+      {
+        "path": "walk/c1.jpg",
+        "content": "take 6",
+        "row": {
+          "id": 6,
+          "kind": "image",
+          "created_at": 20000
+        }
+      },
+      {
+        "path": "walk/c2.jpg",
+        "content": "take 7",
+        "row": {
+          "id": 7,
+          "kind": "image",
+          "created_at": 20040,
+          "camera_model": "Phone A"
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(1,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(2,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}'),(3,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(5,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}'),(6,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(7,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}')"
+    ],
+    "steps": [
+      {
+        "label": "nothing before the job",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": [],
+          "jobs": []
+        }
+      },
+      {
+        "label": "enqueue",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "fileIDs": []
+            }
+          ]
+        }
+      },
+      {
+        "label": "proposals after the job",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": [
+            {
+              "kind": "photos",
+              "status": "open",
+              "relation": "uncertain",
+              "evidence": [
+                "captureSession",
+                "visualSimilarity",
+                "cameraDetailsMissing"
+              ],
+              "shots": [
+                {
+                  "primaryFileID": 6,
+                  "fileIDs": [
+                    6
+                  ],
+                  "path": "{path:walk/c1.jpg}"
+                },
+                {
+                  "primaryFileID": 7,
+                  "fileIDs": [
+                    7
+                  ],
+                  "path": "{path:walk/c2.jpg}"
+                }
+              ]
+            },
+            {
+              "kind": "photos",
+              "status": "open",
+              "relation": "alternateViews",
+              "evidence": [
+                "captureSession",
+                "visualSimilarity",
+                "simultaneousCameras"
+              ],
+              "shots": [
+                {
+                  "primaryFileID": 4,
+                  "fileIDs": [
+                    4
+                  ],
+                  "path": "{path:party/b1.jpg}"
+                },
+                {
+                  "primaryFileID": 5,
+                  "fileIDs": [
+                    5
+                  ],
+                  "path": "{path:party/b2.jpg}"
+                }
+              ]
+            },
+            {
+              "kind": "photos",
+              "status": "open",
+              "relation": "repeatedAttempts",
+              "evidence": [
+                "captureSession",
+                "visualSimilarity",
+                "sameCamera"
+              ],
+              "shots": [
+                {
+                  "primaryFileID": 1,
+                  "fileIDs": [
+                    1
+                  ],
+                  "path": "{path:shoot/a1.jpg}"
+                },
+                {
+                  "primaryFileID": 2,
+                  "fileIDs": [
+                    2
+                  ],
+                  "path": "{path:shoot/a2.jpg}"
+                }
+              ]
+            }
+          ]
+        },
+        "save": [
+          {
+            "name": "shoot",
+            "path": "takeGroups.2.groupKey"
+          }
+        ]
+      },
+      {
+        "label": "stored proposals",
+        "db": "SELECT relation,file_ids_json,evidence_json FROM take_proposals ORDER BY file_ids_json",
+        "expect": [
+          [
+            "repeatedAttempts",
+            "[1,2]",
+            "[\"captureSession\",\"visualSimilarity\",\"sameCamera\"]"
+          ],
+          [
+            "alternateViews",
+            "[4,5]",
+            "[\"captureSession\",\"visualSimilarity\",\"simultaneousCameras\"]"
+          ],
+          [
+            "uncertain",
+            "[6,7]",
+            "[\"captureSession\",\"visualSimilarity\",\"cameraDetailsMissing\"]"
+          ]
+        ]
+      },
+      {
+        "label": "party stamp",
+        "db": "SELECT proposed_at FROM take_proposals WHERE file_ids_json='[4,5]'",
+        "save": [
+          {
+            "name": "party",
+            "path": "0.0"
+          }
+        ]
+      },
+      {
+        "label": "no events or file changes",
+        "db": "SELECT (SELECT COUNT(*) FROM catalog_events),(SELECT COUNT(*) FROM files)",
+        "expect": [
+          [
+            0,
+            7
+          ]
+        ]
+      },
+      {
+        "label": "keep all",
+        "catalog": {
+          "action": "decideTakeGroup",
+          "takeDecision": {
+            "groupKey": {
+              "$var": "shoot"
+            },
+            "decision": "keepAll",
+            "fileIDs": [
+              1,
+              2
+            ]
+          }
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "save an event over the walk tries",
+        "catalog": {
+          "action": "saveEvent",
+          "event": {
+            "id": "walk",
+            "title": "Walk",
+            "goal": "best look",
+            "fileIDs": [
+              6,
+              7
+            ],
+            "userEdited": true
+          }
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "hidden at once",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": [
+            {
+              "kind": "photos",
+              "status": "open",
+              "relation": "alternateViews",
+              "evidence": [
+                "captureSession",
+                "visualSimilarity",
+                "simultaneousCameras"
+              ],
+              "shots": [
+                {
+                  "primaryFileID": 4,
+                  "fileIDs": [
+                    4
+                  ],
+                  "path": "{path:party/b1.jpg}"
+                },
+                {
+                  "primaryFileID": 5,
+                  "fileIDs": [
+                    5
+                  ],
+                  "path": "{path:party/b2.jpg}"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "rerun",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "rerun finishes",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": [
+            {
+              "kind": "photos",
+              "status": "open",
+              "relation": "alternateViews",
+              "evidence": [
+                "captureSession",
+                "visualSimilarity",
+                "simultaneousCameras"
+              ],
+              "shots": [
+                {
+                  "primaryFileID": 4,
+                  "fileIDs": [
+                    4
+                  ],
+                  "path": "{path:party/b1.jpg}"
+                },
+                {
+                  "primaryFileID": 5,
+                  "fileIDs": [
+                    5
+                  ],
+                  "path": "{path:party/b2.jpg}"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "only the changed session was redone",
+        "db": "SELECT file_ids_json FROM take_proposals ORDER BY file_ids_json",
+        "expect": [
+          [
+            "[1,2]"
+          ],
+          [
+            "[4,5]"
+          ]
+        ]
+      },
+      {
+        "label": "untouched session kept its proposal",
+        "db": "SELECT proposed_at FROM take_proposals WHERE file_ids_json='[4,5]'",
+        "expect": [
+          [
+            {
+              "$var": "party"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "choices and events kept",
+        "db": "SELECT (SELECT decision FROM take_group_decisions),(SELECT COUNT(*) FROM catalog_event_files WHERE event_id='walk')",
+        "expect": [
+          [
+            "keepAll",
+            2
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "takes-grouping-resumes-after-interruption",
+    "description": "A takeGrouping job left running by a crashed engine comes back paused with its progress, resumes to completion through resumeJob, and an unchanged rerun keeps every proposal as it was.",
+    "tree": [
+      {
+        "path": "shoot/a1.jpg",
+        "content": "take 1",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1000,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "shoot/a2.jpg",
+        "content": "take 2",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1030,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "shoot/a3.jpg",
+        "content": "take 3",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1060,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "party/b1.jpg",
+        "content": "take 4",
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 9000,
+          "camera_model": "Phone A"
+        }
+      },
+      {
+        "path": "party/b2.jpg",
+        "content": "take 5",
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 9001,
+          "camera_model": "Camera B"
+        }
+      },
+      {
+        "path": "walk/c1.jpg",
+        "content": "take 6",
+        "row": {
+          "id": 6,
+          "kind": "image",
+          "created_at": 20000
+        }
+      },
+      {
+        "path": "walk/c2.jpg",
+        "content": "take 7",
+        "row": {
+          "id": 7,
+          "kind": "image",
+          "created_at": 20040,
+          "camera_model": "Phone A"
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(1,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(2,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}'),(3,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(5,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}'),(6,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(7,CAST(X'8fc2753f295c8f3e'||zeroblob(2040) AS BLOB),'{clip_model}')",
+      "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,progress,created_at,updated_at) VALUES('take-grouping','takeGrouping','[]','{}','running',0,0.4,1,1)"
+    ],
+    "steps": [
+      {
+        "label": "interrupted job is paused",
+        "catalog": {
+          "action": "jobs"
+        },
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "paused",
+              "progress": 0.4,
+              "error": {
+                "$tol": "present"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "resume",
+        "catalog": {
+          "action": "resumeJob",
+          "jobID": "take-grouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "resumed job finishes",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": {
+            "$tol": "count",
+            "value": 3
+          }
+        }
+      },
+      {
+        "label": "stamps",
+        "db": "SELECT group_key,proposed_at FROM take_proposals ORDER BY group_key",
+        "save": "stamps"
+      },
+      {
+        "label": "completed jobs cannot be cancelled",
+        "catalog": {
+          "action": "cancelJob",
+          "jobID": "take-grouping"
+        },
+        "expect": {
+          "status": "error"
+        }
+      },
+      {
+        "label": "rerun",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "rerun finishes",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": {
+            "$tol": "count",
+            "value": 3
+          }
+        }
+      },
+      {
+        "label": "nothing was redone",
+        "db": "SELECT group_key,proposed_at FROM take_proposals ORDER BY group_key",
+        "expect": {
+          "$var": "stamps"
+        }
+      }
+    ]
   }
 ]

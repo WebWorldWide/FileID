@@ -34,8 +34,14 @@ struct TakeWorkbench: View {
     @State private var autoLoaded = false
     @State private var selectedAutoKey: String?
     @State private var manual = false
+    @State private var proposals: [CatalogTakeAutoGroup] = []
+    @State private var proposalsLoaded = false
+    @State private var proposalsLoading = false
+    @State private var selectedProposalKey: String?
+    @State private var groupingJob: CatalogJob?
 
     private var selectedAuto: CatalogTakeAutoGroup? { autoGroups.first { $0.groupKey == selectedAutoKey } }
+    private var selectedProposal: CatalogTakeAutoGroup? { proposals.first { $0.groupKey == selectedProposalKey } }
 
     private var goalJob: CatalogJob? {
         engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
@@ -76,7 +82,11 @@ struct TakeWorkbench: View {
                     .focusSection()
                 VHairline()
                 Group {
-                    if let group = selectedAuto {
+                    if let group = selectedProposal {
+                        TakeReview(engine: engine, group: group, onResolved: { reloadProposals(after: group.groupKey) },
+                                   onSaveAsGroup: { saveAsGroup(group) })
+                            .id("proposal-" + group.groupKey)
+                    } else if let group = selectedAuto {
                         TakeReview(engine: engine, group: group) { reloadAuto(after: group.groupKey) }
                             .id(group.groupKey)
                     } else if selectedEvent != nil || manual {
@@ -102,10 +112,10 @@ struct TakeWorkbench: View {
         }
         .frame(minWidth: inline ? nil : 960, minHeight: inline ? nil : 680)
         .tint(Theme.gold)
-        .task { send("listEvents"); reloadAuto(after: nil) }
+        .task { send("listEvents"); reloadAuto(after: nil); reloadProposals(after: nil) }
         .onChange(of: engine.lastTerminalEventAt) { _, _ in reloadAuto(after: nil) }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
-        .onChange(of: engine.catalogJobs) { _, _ in refreshGoalJob() }
+        .onChange(of: engine.catalogJobs) { _, jobs in refreshGoalJob(); refreshGrouping(jobs) }
         .onDisappear { player?.pause() }
     }
 
@@ -115,6 +125,9 @@ struct TakeWorkbench: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
+                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
+                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     HStack(spacing: 6) {
                         SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
                         Spacer(minLength: 4)
@@ -137,7 +150,7 @@ struct TakeWorkbench: View {
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
-                        RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil, action: { open(event) }) {
+                        RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil && selectedProposalKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
                                 Text("\(event.fileIDs.count) clips · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
@@ -356,13 +369,87 @@ struct TakeWorkbench: View {
     private func openAuto(_ group: CatalogTakeAutoGroup) {
         withAnimation(Theme.springStandard) {
             selectedAutoKey = group.groupKey
+            selectedProposalKey = nil
+            selectedEvent = nil
+            manual = false
+        }
+    }
+
+    private func openProposal(_ group: CatalogTakeAutoGroup) {
+        withAnimation(Theme.springStandard) {
+            selectedProposalKey = group.groupKey
+            selectedAutoKey = nil
             selectedEvent = nil
             manual = false
         }
     }
 
     private func startManual() {
-        withAnimation(Theme.springStandard) { selectedAutoKey = nil; manual = true }
+        withAnimation(Theme.springStandard) { selectedAutoKey = nil; selectedProposalKey = nil; manual = true }
+    }
+
+    private func findRelated() {
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.enqueueRequest(id: UUID().uuidString), timeout: 30)
+            guard let response else { ToastCenter.shared.show("FileID is still getting ready. Try again in a moment."); return }
+            if let message = response.message, !message.isEmpty { ToastCenter.shared.show(message) }
+            if response.status == "ok" { withAnimation(Theme.springStandard) { groupingJob = TakeProposals.job(response.jobs) } }
+        }
+    }
+
+    private func controlGrouping(_ action: String) {
+        guard let job = groupingJob else { return }
+        Task {
+            let request = CatalogRequest(requestID: UUID().uuidString, action: action, jobID: job.id)
+            guard let response = await TakeRequests.send(engine, request, timeout: 30), response.status == "ok" else {
+                ToastCenter.shared.show("That didn't work. Try again.")
+                return
+            }
+            if let next = TakeProposals.job(response.jobs) { withAnimation(Theme.springStandard) { groupingJob = next } }
+        }
+    }
+
+    private func refreshGrouping(_ jobs: [CatalogJob]) {
+        guard let current = TakeProposals.job(jobs) else { return }
+        let previous = groupingJob
+        withAnimation(Theme.springStandard) { groupingJob = current }
+        if TakeProposals.finished(previous: previous, current: current) { reloadProposals(after: nil) }
+    }
+
+    /// Reads the stored proposals. After `resolved` is handled, opens the
+    /// proposal that followed it so review flows on.
+    private func reloadProposals(after resolved: String?) {
+        guard !proposalsLoading else { return }
+        proposalsLoading = true
+        let position = resolved.flatMap { key in proposals.firstIndex { $0.groupKey == key } }
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.proposalsRequest(id: UUID().uuidString), timeout: 60)
+            proposalsLoading = false
+            proposalsLoaded = true
+            guard let response, response.status == "ok" else { return }
+            let groups = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                proposals = groups
+                if let job = TakeProposals.job(response.jobs) { groupingJob = job }
+                if let resolved, selectedProposalKey == resolved {
+                    let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
+                    selectedProposalKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
+                } else if let key = selectedProposalKey, !groups.contains(where: { $0.groupKey == key }) {
+                    selectedProposalKey = nil
+                }
+            }
+            if resolved != nil { reloadAuto(after: nil) }
+        }
+    }
+
+    private func saveAsGroup(_ group: CatalogTakeAutoGroup) {
+        startManual()
+        newGroup()
+        let hits = TakeProposals.saveHits(group)
+        foundClips.append(contentsOf: hits)
+        selectedIDs = Set(hits.map(\.fileID))
+        title = TakeReview.dateText(group.capturedAt)
+        ToastCenter.shared.show("Name the group and describe the outcome, then save")
     }
 
     /// Refreshes the suggested groups. After `resolved` is handled, opens the
@@ -382,7 +469,7 @@ struct TakeWorkbench: View {
                 if let resolved, selectedAutoKey == resolved || selectedAutoKey == nil {
                     let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
                     selectedAutoKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
-                } else if selectedAutoKey == nil, selectedEvent == nil, !manual {
+                } else if selectedAutoKey == nil, selectedProposalKey == nil, selectedEvent == nil, !manual {
                     selectedAutoKey = groups.first { $0.status == "open" }?.groupKey
                 } else if let key = selectedAutoKey, !groups.contains(where: { $0.groupKey == key }) {
                     selectedAutoKey = groups.first { $0.status == "open" }?.groupKey
@@ -393,6 +480,7 @@ struct TakeWorkbench: View {
 
     private func open(_ event: CatalogEvent) {
         selectedAutoKey = nil
+        selectedProposalKey = nil
         manual = false
         selectedEvent = event
         lastDeletedEventID = nil
@@ -527,6 +615,7 @@ struct TakeWorkbench: View {
         if ["saveEvent", "deleteEvent", "undoEventEdit"].contains(action) {
             if action == "undoEventEdit" { lastDeletedEventID = nil }
             send("listEvents")
+            reloadProposals(after: nil)
         }
     }
 }
@@ -542,19 +631,7 @@ private struct AutoGroupRow: View {
         let noun = group.kind == "videos" ? "clips" : "photos"
         RailRow(selected: selected, action: action) {
             HStack(spacing: 10) {
-                // A fanned stack in a fixed-width slot, so names line up whether a group shows 2 or 3 shots.
-                ZStack(alignment: .leading) {
-                    ForEach(Array(group.shots.prefix(3).enumerated()), id: \.element.primaryFileID) { index, shot in
-                        AsyncThumbnail(url: URL(fileURLWithPath: shot.path), size: 96) { Color.white.opacity(0.05) }
-                            .frame(width: 28, height: 28)
-                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Theme.bg1, lineWidth: 1.5))
-                            .offset(x: CGFloat(index) * 16)
-                            .zIndex(Double(-index))
-                    }
-                }
-                .frame(width: 60, height: 28, alignment: .leading)
-                .accessibilityHidden(true)
+                ShotFan(shots: group.shots)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
                         .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)

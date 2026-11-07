@@ -160,7 +160,7 @@ pub fn remember_welcome_sheet_seen() {
 
 /// Describe Files ▸ Name style, stored under the Windows `naming*` keys
 /// (macOS `naming.*`). Defaults: short, 40 characters, people and event on,
-/// date off.
+/// date off, learning from renames on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamingSettings {
     pub style: String,
@@ -168,6 +168,7 @@ pub struct NamingSettings {
     pub include_people: bool,
     pub include_event: bool,
     pub include_date: bool,
+    pub learn: bool,
 }
 
 impl Default for NamingSettings {
@@ -178,6 +179,7 @@ impl Default for NamingSettings {
             include_people: true,
             include_event: true,
             include_date: false,
+            learn: true,
         }
     }
 }
@@ -199,6 +201,7 @@ fn naming_from_map(map: &Map<String, Value>) -> NamingSettings {
         include_people: flag("namingIncludePeople", defaults.include_people),
         include_event: flag("namingIncludeEvent", defaults.include_event),
         include_date: flag("namingIncludeDate", defaults.include_date),
+        learn: flag("namingLearn", defaults.learn),
     }
 }
 
@@ -213,6 +216,7 @@ pub fn remember_naming(naming: &NamingSettings) {
         ("namingIncludePeople", Value::Bool(naming.include_people)),
         ("namingIncludeEvent", Value::Bool(naming.include_event)),
         ("namingIncludeDate", Value::Bool(naming.include_date)),
+        ("namingLearn", Value::Bool(naming.learn)),
     ]);
 }
 
@@ -324,7 +328,7 @@ mod tests {
         assert_eq!(naming_from_map(&Map::new()), NamingSettings::default());
         let Value::Object(map) = serde_json::json!({
             "namingStyle": "dateFirst", "namingMaxLength": 64, "namingIncludePeople": false,
-            "namingIncludeEvent": false, "namingIncludeDate": true
+            "namingIncludeEvent": false, "namingIncludeDate": true, "namingLearn": false
         }) else { unreachable!() };
         assert_eq!(
             naming_from_map(&map),
@@ -333,7 +337,8 @@ mod tests {
                 max_length: 64,
                 include_people: false,
                 include_event: false,
-                include_date: true
+                include_date: true,
+                learn: false
             }
         );
         let Value::Object(bad) = serde_json::json!({"namingStyle": "loud", "namingMaxLength": 900})

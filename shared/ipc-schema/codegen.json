@@ -224,7 +224,8 @@
           "eventID",
           "takeFeedback",
           "takeDecision",
-          "naming"
+          "naming",
+          "nameEdits"
         ],
         "fields": {
           "queryVector": {
@@ -251,6 +252,9 @@
         "derive": [
           "PartialEq"
         ],
+        "deny_unknown_fields": true
+      },
+      "CatalogNameEdit": {
         "deny_unknown_fields": true
       },
       "ChatRequestPayload": {
@@ -708,6 +712,9 @@
             "mode": "skip_false"
           },
           "includeDate": {
+            "mode": "skip_false"
+          },
+          "learn": {
             "mode": "skip_false"
           }
         }

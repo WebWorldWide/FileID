@@ -84,7 +84,9 @@ public sealed record CatalogTakeAutoGroup(
     string Status,
     double CapturedAt,
     double Similarity,
-    IReadOnlyList<CatalogTakeShot> Shots);
+    IReadOnlyList<CatalogTakeShot> Shots,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Relation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Evidence = null);
 
 public sealed record CatalogTakeQuality(
     long PrimaryFileID,
@@ -121,7 +123,10 @@ public sealed record CatalogNaming(
     int MaxLength,
     bool IncludePeople = false,
     bool IncludeEvent = false,
-    bool IncludeDate = false);
+    bool IncludeDate = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Learn = false);
+
+public sealed record CatalogNameEdit(long FileID, string Proposed, string Applied);
 
 public sealed record CatalogRequest(
     string RequestID,
@@ -146,7 +151,8 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedTo = null,
 
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? RootID = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogNaming? Naming = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogNaming? Naming = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogNameEdit>? NameEdits = null);
 
 public sealed record CatalogResponse(
     string RequestID,

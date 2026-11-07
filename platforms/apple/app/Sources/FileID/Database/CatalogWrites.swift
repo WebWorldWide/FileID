@@ -294,21 +294,32 @@ enum CatalogWrites {
                                      uniquingKeysWith: { first, _ in first })
             return outcomes.reversed().filter { undoBlocker($0, catalogPath: current[$0.fileID]) == nil }
         }.value
-        var undone = 0, failed = 0
+        var undone = 0, failed = 0, putBack = Set<Int64>()
         for start in stride(from: 0, to: ready.count, by: renameChunk) {
             let chunk = Array(ready[start..<min(start + renameChunk, ready.count)])
             let result = await request(engine, .renameFiles(renames: chunk.map { RenameEntry(fileID: $0.fileID, newName: URL(fileURLWithPath: $0.oldPath).lastPathComponent) }),
                                        action: "renameFiles", id: chunk[0].fileID, timeout: 60 + Double(chunk.count) / 4)
             let ids = Set(chunk.map(\.fileID))
-            let back = Set(result.messages.filter(\.ok).compactMap(\.fileID)).intersection(ids).count
-            undone += back
-            failed += chunk.count - back
+            let back = Set(result.messages.filter(\.ok).compactMap(\.fileID)).intersection(ids)
+            putBack.formUnion(back)
+            undone += back.count
+            failed += chunk.count - back.count
             if !answered(result) {
                 failed += ready.count - start - chunk.count
                 break
             }
         }
         store.notifyChanged()
+        await forgetLearned(ready, putBack: putBack, engine: engine)
         return (undone, outcomes.count - ready.count, failed)
+    }
+
+    /// A rename the user reversed shouldn't teach a name style.
+    private static func forgetLearned(_ outcomes: [ReadStore.RenameOutcome], putBack: Set<Int64>, engine: EngineClient) async {
+        let split = NameStyle.undone(NameStyle.storedLearned(), outcomes: outcomes, putBack: putBack)
+        guard !split.forget.isEmpty else { return }
+        let request = NameStyle.unlearnRequest(id: "names-unlearn-" + UUID().uuidString, edits: split.forget)
+        guard let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" else { return }
+        if let data = try? JSONEncoder().encode(split.keep) { UserDefaults.standard.set(data, forKey: NameStyle.learnedEditsKey) }
     }
 }
