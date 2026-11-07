@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
+use super::face_review;
 use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
 use fileid_engine::ipc::{
     BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
@@ -393,6 +394,7 @@ struct Ui {
     footer: gtk::Box,
     footer_label: gtk::Label,
     footer_button: gtk::Button,
+    review_button: gtk::Button,
     anchor: gtk::Box,
 }
 
@@ -413,8 +415,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
+    let review_button = gtk::Button::builder()
+        .label(face_review::button_text(0))
+        .visible(false)
+        .css_classes(["gold-button"])
+        .build();
     title_row.append(&count_label);
     title_row.append(&title_spacer);
+    title_row.append(&review_button);
     title_row.append(&actions_box);
 
     let status_label = gtk::Label::builder()
@@ -566,8 +574,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         footer: footer.clone(),
         footer_label: footer_label.clone(),
         footer_button: footer_button.clone(),
+        review_button: review_button.clone(),
         anchor: root.clone(),
     });
+    {
+        let ui = ui.clone();
+        review_button.connect_clicked(move |_| open_face_review(&ui));
+    }
 
     {
         let ui = ui.clone();
@@ -605,6 +618,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::Ready => {
                         ui.face_clustering.borrow_mut().on_ready();
                         refresh_view(&ui);
+                        refresh_review_count(&ui);
                     }
                     EngineEvent::BatchLanded(_) => {
                         if last.elapsed() >= Duration::from_millis(1200) {
@@ -617,6 +631,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         ui.face_clustering.borrow_mut().finish_active();
                         set_status(&ui, face_grouping_status(&result));
                         reload(&ui);
+                        refresh_review_count(&ui);
                     }
                     EngineEvent::FaceClusteringFailed(message) => {
                         ui.face_clustering.borrow_mut().finish_active();
@@ -701,7 +716,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // finished on another tab must show up on switch — not only on scan events.
     {
         let ui = ui.clone();
-        root.connect_map(move |_| reload(&ui));
+        root.connect_map(move |_| {
+            reload(&ui);
+            refresh_review_count(&ui);
+        });
     }
     root.upcast()
 }
@@ -1247,6 +1265,77 @@ fn set_status(ui: &Rc<Ui>, msg: String) {
     ui.status_label.set_visible(true);
 }
 
+// ── Face review ───────────────────────────────────────────────────────────────
+
+fn show_review_count(ui: &Ui, waiting: i64) {
+    ui.review_button.set_label(&face_review::button_text(waiting));
+    ui.review_button.update_property(&[gtk::accessible::Property::Label(&face_review::header_text(waiting))]);
+    ui.review_button.set_visible(waiting > 0);
+}
+
+fn refresh_review_count(ui: &Rc<Ui>) {
+    if !ui.engine.borrow().is_ready() {
+        return;
+    }
+    let weak = Rc::downgrade(ui);
+    face_review::count_waiting(&ui.engine, move |waiting| {
+        if let Some(ui) = weak.upgrade() {
+            show_review_count(&ui, waiting);
+        }
+    });
+}
+
+fn review_panel(ui: &Rc<Ui>, person: Option<i64>) -> Rc<face_review::ReviewPanel> {
+    let panel = face_review::ReviewPanel::new(ui.engine.clone(), person);
+    let weak = Rc::downgrade(ui);
+    let panel_weak = Rc::downgrade(&panel);
+    let last = Cell::new(None::<i64>);
+    panel.set_on_total(move |total| {
+        let changed = last.replace(Some(total)).is_some_and(|previous| previous != total);
+        if let Some(panel) = panel_weak.upgrade()
+            && person.is_some()
+        {
+            panel.root.set_visible(total > 0);
+        }
+        if changed && let Some(ui) = weak.upgrade() {
+            refresh_review_count(&ui);
+            schedule_reload_burst(&ui);
+        }
+    });
+    panel.reload();
+    panel
+}
+
+fn open_face_review(ui: &Rc<Ui>) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Review suggestions");
+    dialog.set_content_width(760);
+    dialog.set_content_height(620);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    let panel = review_panel(ui, None);
+    let scroll = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .child(&panel.root)
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+    toolbar.set_content(Some(&scroll));
+    dialog.set_child(Some(&toolbar));
+    let keep = RefCell::new(Some(panel));
+    let weak = Rc::downgrade(ui);
+    dialog.connect_closed(move |_| {
+        keep.borrow_mut().take();
+        if let Some(ui) = weak.upgrade() {
+            refresh_review_count(&ui);
+        }
+    });
+    dialog.present(Some(&ui.anchor));
+}
+
 // ── Clustering ────────────────────────────────────────────────────────────────
 
 fn start_clustering(ui: &Rc<Ui>) {
@@ -1298,7 +1387,10 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     let dialog = adw::Dialog::new();
     publish_selection(ui, Some(pid));
     let closing = Rc::downgrade(ui);
+    let review_slot: Rc<RefCell<Option<Rc<face_review::ReviewPanel>>>> = Rc::new(RefCell::new(None));
+    let review_keep = review_slot.clone();
     dialog.connect_closed(move |_| {
+        review_keep.borrow_mut().take();
         if let Some(ui) = closing.upgrade() {
             publish_selection(&ui, None);
         }
@@ -1383,6 +1475,10 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     btn_row.append(&discard_btn);
     btn_row.append(&done_btn);
     body.append(&btn_row);
+    let review = review_panel(ui, Some(pid));
+    review.root.set_visible(false);
+    body.append(&review.root);
+    *review_slot.borrow_mut() = Some(review);
 
     // A virtualized grid: only tiles on screen exist, and a recycled tile
     // drops its pending crop and bitmap (a person can have 500 photos).
@@ -2448,7 +2544,7 @@ fn read_person_files_at_path(
 /// full-res is required because the bbox is in the original image's pixel space
 /// and the DB stores no dimensions to normalize against. Any failure falls back
 /// to the uncropped frame, then to `None` (icon placeholder).
-fn face_thumbnail_source(
+pub(super) fn face_thumbnail_source(
     face_id: Option<i64>,
     source_path: &str,
     bbox: Option<&str>,
@@ -2475,7 +2571,7 @@ fn face_thumbnail_source_in(
 
 /// Face crops decode on the engine client's bounded thumbnail workers, and a
 /// tile's pending crop is dropped once the picture is disposed.
-fn request_face_thumbnail(
+pub(super) fn request_face_thumbnail(
     engine: &Rc<RefCell<EngineClient>>,
     pic: &gtk::Picture,
     path: String,
@@ -2714,6 +2810,7 @@ mod tests {
             unmatched_faces: 0,
             duration_seconds: 0.0,
             deferred_faces: Some(3),
+            review_queued: None,
         };
         assert_eq!(super::face_grouping_status(&result),"Processed 1 face. 7 people in library. 3 faces await analysis; existing assignments were kept.");
         result.deferred_faces = None;
