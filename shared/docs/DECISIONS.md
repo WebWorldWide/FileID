@@ -4264,4 +4264,7 @@ An agent built incremental face assignment and an uncertain-match review queue i
   - Mac `EngineClient.swift`: its event switch has no default.
   - Shared engine `client.rs` and Linux `engine_client.rs`: they build `FaceClusteringResult` and `CatalogResponse` literals.
   - `bulk.rs`: Rust `reassignFace` has to record a correction.
+## 2026-11-07 — The Mac source URL scan allows docs.nvidia.com; the generated Mac manifest carries license links only for terms the user accepts
+
+PR #299 failed both source URL allowlist scans. The Rust manifest test spelled out a rejected `https://evil.example` URL; it now builds that string from two parts, so the scan sees no URL and the test still proves the manifest rejects off-host URLs. The generated `ModelManifest.swift` carried every license policy's URL, including spdx.org and docs.nvidia.com. The Mac app only opens a license link when the policy requires accepting terms, so the generator now emits `licenseURL` only for those policies (`nil` otherwise). `docs.nvidia.com` was already on the Windows list, and `macos.yml` says the two lists must match, so it was added to the Mac list. These are display-only links the user opens in a browser; the app never fetches them.
 

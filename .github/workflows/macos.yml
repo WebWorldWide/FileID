@@ -235,6 +235,7 @@ jobs:
             "github.com"
             "developer.download.nvidia.com"
             "developer.nvidia.com"
+            "docs.nvidia.com"
             "schemas.microsoft.com"
             "schemas.openxmlformats.org"
             "ai.google.dev"

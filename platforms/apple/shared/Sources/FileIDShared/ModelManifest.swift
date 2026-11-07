@@ -20,7 +20,7 @@ public struct VLMRepoPin: Sendable, Equatable {
 
 public struct ModelLicensePolicy: Sendable, Equatable {
     public let spdx: String
-    public let licenseURL: String
+    public let licenseURL: String?
     public let termsRequired: Bool
     public let reviewedAt: String
 }
@@ -30,7 +30,7 @@ public enum ModelManifest {
     public static let licensePolicies: [String: ModelLicensePolicy] = [
         "Apache-2.0": ModelLicensePolicy(
             spdx: "Apache-2.0",
-            licenseURL: "https://spdx.org/licenses/Apache-2.0.html",
+            licenseURL: nil,
             termsRequired: false,
             reviewedAt: "2026-07-16"),
         "Gemma": ModelLicensePolicy(
@@ -40,7 +40,7 @@ public enum ModelManifest {
             reviewedAt: "2026-07-16"),
         "MIT": ModelLicensePolicy(
             spdx: "MIT",
-            licenseURL: "https://spdx.org/licenses/MIT.html",
+            licenseURL: nil,
             termsRequired: false,
             reviewedAt: "2026-07-16"),
         "NVIDIA-CUDA": ModelLicensePolicy(
