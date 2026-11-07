@@ -1163,5 +1163,444 @@
         }
       }
     ]
+  },
+  {
+    "name": "names-learned-style-corrections",
+    "description": "learnNames stores each applied name with the unlearned name the engine would propose for that file (dateFirst here, so '2023-07-04 beach-sunset'), and both engines derive the same preferences from those samples: the date moved to the end in compact form, underscores and title case. proposeNames applies them only with naming.learn, names the preferences that changed each file in evidenceID before any companion group marker, and resetNamePreferences forgets every sample. Nothing on disk changes.",
+    "tree": [
+      {
+        "path": "learn/IMG_0001.jpg",
+        "content": "learn/IMG_0001.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 41,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Beach Sunset"
+        }
+      },
+      {
+        "path": "learn/IMG_0002.jpg",
+        "content": "learn/IMG_0002.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 42,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Dog Park"
+        }
+      },
+      {
+        "path": "learn/IMG_0003.jpg",
+        "content": "learn/IMG_0003.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 43,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Snow Day"
+        }
+      },
+      {
+        "path": "learn/IMG_0004.jpg",
+        "content": "learn/IMG_0004.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 44,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Kids Playing Soccer"
+        }
+      },
+      {
+        "path": "learn/DSC_0005.ARW",
+        "content": "raw",
+        "mtime": 1000,
+        "row": {
+          "id": 45,
+          "kind": "image",
+          "created_at": 1688472000
+        }
+      },
+      {
+        "path": "learn/DSC_0005.JPG",
+        "content": "learn/DSC_0005.JPG",
+        "mtime": 1000,
+        "row": {
+          "id": 46,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Red Barn"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "two samples are not enough",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 41,
+              "proposed": "2023-07-04 beach-sunset.jpg",
+              "applied": "Beach_Sunset_20230704.jpg"
+            },
+            {
+              "fileID": 42,
+              "proposed": "2023-07-04 dog-park.jpg",
+              "applied": "Dog_Park_20230704.jpg"
+            },
+            {
+              "fileID": 999,
+              "proposed": "x.jpg",
+              "applied": "y.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "a third sample makes a majority",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 43,
+              "proposed": "2023-07-04 snow-day.jpg",
+              "applied": "Snow_Day_20230704.JPG"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "end",
+                "evidenceID": "leadingDate"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "compact",
+                "evidenceID": "dateFormat"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "samples keep the unlearned base",
+        "db": "SELECT file_id,kind,json_extract(before_json,'$.base'),json_extract(before_json,'$.style'),json_extract(after_json,'$.applied') FROM catalog_corrections WHERE kind='nameStyle' ORDER BY rowid",
+        "expect": [
+          [
+            41,
+            "nameStyle",
+            "2023-07-04 beach-sunset",
+            "dateFirst",
+            "Beach_Sunset_20230704.jpg"
+          ],
+          [
+            42,
+            "nameStyle",
+            "2023-07-04 dog-park",
+            "dateFirst",
+            "Dog_Park_20230704.jpg"
+          ],
+          [
+            43,
+            "nameStyle",
+            "2023-07-04 snow-day",
+            "dateFirst",
+            "Snow_Day_20230704.JPG"
+          ]
+        ]
+      },
+      {
+        "label": "learned names with a companion group",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            44,
+            46
+          ],
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 44,
+                "path": "{path:learn/IMG_0004.jpg}",
+                "kind": "proposedName",
+                "text": "Kids_Playing_Soccer_20230704.jpg",
+                "evidenceID": "proposedName|learned:leadingDate,dateFormat,separator,case"
+              },
+              {
+                "fileID": 46,
+                "path": "{path:learn/DSC_0005.JPG}",
+                "kind": "proposedName",
+                "text": "Red_Barn_20230704.JPG",
+                "evidenceID": "proposedName|learned:leadingDate,dateFormat,separator,case|group:46"
+              },
+              {
+                "fileID": 45,
+                "path": "{path:learn/DSC_0005.ARW}",
+                "kind": "proposedName",
+                "text": "Red_Barn_20230704.ARW",
+                "evidenceID": "proposedName|learned:leadingDate,dateFormat,separator,case|group:46"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "short with a date: only the format and the look apply",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            44
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40,
+            "includeDate": true,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 44,
+                "path": "{path:learn/IMG_0004.jpg}",
+                "kind": "proposedName",
+                "text": "Kids_Playing_Soccer_20230704.jpg",
+                "evidenceID": "proposedName|learned:dateFormat,separator,case"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "without learn the names are unchanged",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            44
+          ],
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 44,
+                "path": "{path:learn/IMG_0004.jpg}",
+                "kind": "proposedName",
+                "text": "2023-07-04 kids-playing-soccer.jpg",
+                "evidenceID": "proposedName"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "preferences listed",
+        "catalog": {
+          "action": "namePreferences"
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "end",
+                "evidenceID": "leadingDate"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "compact",
+                "evidenceID": "dateFormat"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "invalid edits are refused",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 41,
+              "proposed": " ",
+              "applied": "a.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "error"
+        }
+      },
+      {
+        "label": "reset forgets every sample",
+        "catalog": {
+          "action": "resetNamePreferences"
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "0"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "no samples left",
+        "db": "SELECT COUNT(*) FROM catalog_corrections WHERE kind='nameStyle'",
+        "expect": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "label": "learned names gone after reset",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            44
+          ],
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 44,
+                "path": "{path:learn/IMG_0004.jpg}",
+                "kind": "proposedName",
+                "text": "2023-07-04 kids-playing-soccer.jpg",
+                "evidenceID": "proposedName"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "files unchanged",
+        "fs": {
+          "exists": [
+            "learn/IMG_0001.jpg",
+            "learn/IMG_0004.jpg",
+            "learn/DSC_0005.ARW",
+            "learn/DSC_0005.JPG"
+          ]
+        }
+      }
+    ]
   }
 ]
