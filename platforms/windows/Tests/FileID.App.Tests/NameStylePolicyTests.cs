@@ -225,6 +225,19 @@ public sealed class NameStylePolicyTests
     }
 
     [Fact]
+    public void UndoForgetsOnlyTheRenamesPutBack()
+    {
+        var edits = new[] { new CatalogNameEdit(1, "a.jpg", "A.jpg"), new CatalogNameEdit(3, "b.jpg", "B.jpg") };
+        var request = NameStylePolicy.UnlearnRequest("u", edits, new long[] { 3, 9 });
+        Assert.NotNull(request);
+        Assert.Equal("unlearnNames", request.Action);
+        Assert.Equal(new[] { new CatalogNameEdit(3, "b.jpg", "B.jpg") }, request.NameEdits);
+        Assert.Null(request.Naming);
+        Assert.Null(NameStylePolicy.UnlearnRequest("u", edits, Array.Empty<long>()));
+        Assert.Null(NameStylePolicy.UnlearnRequest("u", Array.Empty<CatalogNameEdit>(), new long[] { 1 }));
+    }
+
+    [Fact]
     public void LearnedSummaryReadsPreferences()
     {
         static CatalogHit Pref(string key, string text) => new(0, "", "namePreference", text, key, null, null);

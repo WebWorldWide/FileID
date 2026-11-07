@@ -143,6 +143,15 @@ internal static class NameStylePolicy
     public static CatalogRequest LearnRequest(string requestId, IReadOnlyList<CatalogNameEdit> edits, CatalogNaming naming) =>
         new(requestId, "learnNames", null, null, null, null, null, null, Naming: naming, NameEdits: edits);
 
+    /// <summary>After an Undo puts names back, the learned samples to forget: the edits whose
+    /// file is among those renamed back, or null when there are none.</summary>
+    public static CatalogRequest? UnlearnRequest(string requestId, IEnumerable<CatalogNameEdit> edits, IEnumerable<long> putBack)
+    {
+        var back = putBack.ToHashSet();
+        var undone = edits.Where(e => back.Contains(e.FileID)).ToArray();
+        return undone.Length == 0 ? null : new(requestId, "unlearnNames", null, null, null, null, null, null, NameEdits: undone);
+    }
+
     public static CatalogRequest PreferencesRequest(string requestId, bool reset) =>
         new(requestId, reset ? "resetNamePreferences" : "namePreferences", null, null, null, null, null, null);
 

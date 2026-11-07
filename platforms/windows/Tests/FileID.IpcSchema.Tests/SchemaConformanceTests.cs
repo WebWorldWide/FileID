@@ -209,6 +209,7 @@ public class SchemaConformanceTests
         new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 }, TimelineMode: "moments")),
         new CatalogRequestCommand(new CatalogRequest("r2", "proposeNames", null, null, null, null, null, new long[] { 42 }, Naming: new CatalogNaming("dateFirst", 40, IncludePeople: true))),
         new CatalogRequestCommand(new CatalogRequest("r3", "learnNames", null, null, null, null, null, null, Naming: new CatalogNaming("short", 40, Learn: true), NameEdits: [new CatalogNameEdit(42, "beach-sunset.jpg", "Beach_Sunset.jpg")])),
+        new CatalogRequestCommand(new CatalogRequest("r3u", "unlearnNames", null, null, null, null, null, null, NameEdits: [new CatalogNameEdit(42, "beach-sunset.jpg", "Beach_Sunset.jpg")])),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true, RootBookmark: "AQID", ExcludedPaths: [@"C:\Users\adam\Pictures\.cache"]),
         new PauseScanCommand(),
         new ResumeScanCommand(),
