@@ -158,6 +158,56 @@ class ExtendedCatalogPolicyTests(unittest.TestCase):
             ),
         )
 
+    def test_safety_stripped_and_vendor_named_models_fail(self) -> None:
+        for name, family, upstream, repo in [
+            ("Qwen3.6-27B-Uncensored-Heretic", "Qwen3.6", "Qwen/Qwen3.6-27B", "mlx-community/Qwen3.6-27B-Uncensored-Heretic-4bit"),
+            ("Qwen2.5-7B-Instruct-abliterated", "Qwen2.5", "Qwen/Qwen2.5-7B-Instruct",
+             "bartowski/Qwen2.5-7B-Instruct-abliterated-GGUF"),
+            ("Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled", "Qwen3.5", "Qwen/Qwen3.5-27B",
+             "mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-4bit"),
+            ("DeepSeek-V4-Pro-Qwen3.5-4B", "DeepSeek-V4-Pro-Qwen3.5", "Jackrong/DeepSeek-V4-Pro-Qwen3.5-4B",
+             "mlx-community/DeepSeek-V4-Pro-Qwen3.5-4B-4bit"),
+        ]:
+            with self.subTest(name=name):
+                self.assert_fails(
+                    "denylisted model",
+                    catalog_entry(id="x", name=name, family=family, upstream=upstream, repo=repo),
+                )
+
+    def test_image_generation_and_tts_are_not_offered(self) -> None:
+        self.assert_fails(
+            "image-generation or text-to-speech",
+            catalog_entry(
+                id="qwen_image_gguf_q4_k_m", name="Qwen-Image", family="Qwen-Image", upstream="Qwen/Qwen-Image",
+                repo="unsloth/Qwen-Image-GGUF", role="text",
+            ),
+        )
+        self.assert_fails(
+            "image-generation or text-to-speech",
+            catalog_entry(
+                id="voxcpm2_mlx_8bit", name="VoxCPM2", family="VoxCPM2", upstream="openbmb/VoxCPM2",
+                repo="mlx-community/VoxCPM2-8bit", role="text",
+            ),
+        )
+
+    def test_mac_catalog_denylist(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = Path(temporary) / "catalog.json"
+            catalog.write_text(json.dumps({"entries": [catalog_entry()]}), encoding="utf-8")
+            mac = Path(temporary) / "model-catalog.json"
+            mac.write_text(json.dumps({"entries": [{
+                "repo": "mlx-community/Josiefied-Qwen2.5-7B-Instruct-abliterated-v2-4-bit",
+                "bases": [{"repo": "Qwen/Qwen2.5-7B"}], "files": [],
+            }]}), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(repository / "shared/scripts/check_model_license_policy.py"),
+                 "--catalog", str(catalog), "--mac-catalog", str(mac)],
+                capture_output=True, text=True, check=False, cwd=repository,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Mac catalog mlx-community/Josiefied", result.stdout)
+
     def test_unknown_license_fails(self) -> None:
         self.assert_fails("is not allowed", catalog_entry(license="Qwen-Research"))
 

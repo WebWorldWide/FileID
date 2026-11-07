@@ -92,13 +92,42 @@ class LicenseReferenceTests(unittest.TestCase):
 
     def test_denylist_covers_llama_distills_and_restricted_lines(self) -> None:
         for name in ["deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen2-VL-72B-Instruct",
-                     "apple/FastVLM-1.5B", "LiquidAI/LFM2-VL-450M", "google/embeddinggemma-2"]:
+                     "apple/FastVLM-1.5B", "LiquidAI/LFM2-VL-450M", "google/embeddinggemma-2",
+                     "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated", "OBLITERATUS/Qwen3.8-27B-OBLITERATED",
+                     "cognitivecomputations/Dolphin-Mistral-24B-Venice-Edition", "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1"]:
             with self.subTest(name=name):
                 self.assertIsNotNone(catalog.restricted_reason(name))
         for name in ["Qwen/Qwen2.5-32B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct", "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-                     "google/embeddinggemma-300m", "mistralai/Devstral-Small-2-24B-Instruct-2512"]:
+                     "google/embeddinggemma-300m", "mistralai/Devstral-Small-2-24B-Instruct-2512",
+                     "openai/gpt-oss-20b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", "NousResearch/Hermes-2-Pro-Mistral-7B"]:
             with self.subTest(name=name):
                 self.assertIsNone(catalog.restricted_reason(name))
+
+
+class LanguageModelTests(unittest.TestCase):
+    def test_image_generators_and_tts_are_not_language_models(self) -> None:
+        cases = [
+            ({"id": "unsloth/Qwen-Image-GGUF", "gguf": {"architecture": "qwen_image"}}, "Qwen/Qwen-Image", {}),
+            ({"id": "unsloth/ERNIE-Image-Turbo-GGUF", "gguf": {"architecture": "wan"}}, "baidu/ERNIE-Image-Turbo", {}),
+            ({"id": "mlx-community/Qwen-Image-2512-8bit", "library_name": "mflux"}, "Qwen/Qwen-Image-2512", {}),
+            ({"id": "mlx-community/VoxCPM2-8bit", "config": {"model_type": "voxcpm2"}}, "openbmb/VoxCPM2", {}),
+            ({"id": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"}, "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+             {"pipeline_tag": "text-to-speech"}),
+        ]
+        for info, base, base_info in cases:
+            with self.subTest(repo=info["id"]):
+                self.assertTrue(catalog.not_language_model(info, base, base_info))
+
+    def test_language_and_speech_recognition_models_pass(self) -> None:
+        for info, base in [
+            ({"id": "ggml-org/Qwen3-VL-2B-Instruct-GGUF", "gguf": {"architecture": "qwen3vl"}}, "Qwen/Qwen3-VL-2B-Instruct"),
+            ({"id": "ggml-org/Qwen3-ASR-0.6B-GGUF", "pipeline_tag": "automatic-speech-recognition"}, "Qwen/Qwen3-ASR-0.6B"),
+        ]:
+            with self.subTest(repo=info["id"]):
+                self.assertFalse(catalog.not_language_model(info, base, {}))
+
+    def test_frognano_is_never_offered_as_vision(self) -> None:
+        self.assertEqual(catalog.ROLE_OVERRIDES["microsoft/FrogNano-4B-2609"], "text")
 
 
 if __name__ == "__main__":

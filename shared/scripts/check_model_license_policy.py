@@ -28,8 +28,20 @@ RESTRICTED_MODELS = (
     (r"(^|[^a-z])lfm[0-9]|liquidai/", "LFM Open License (revenue threshold)"),
     (r"codestral-22b|mistral-large|pixtral-large|ministral-8b-instruct-2410|devstral-2-123b",
      "Mistral Research or revenue-capped license"),
-    (r"embeddinggemma-2", "card requires the Gemma Prohibited Use Policy; held for owner review"),
+    (r"embeddinggemma-2", "card requires the Gemma Prohibited Use Policy (owner decision 2026-11-06)"),
+    (r"abliterat|uncensor|heretic|obliterat|dolphin-(\d|mistral|llama|qwen|mixtral|yi|phi)|cognitivecomputations/",
+     "safety training removed"),
+    (r"claude|(^|[^a-z])(opus|sonnet|haiku|fable|composer)-?\d|gpt-?[45]|gemini|(^|[^a-z])grok-?\d|deepseek-v\d+-pro|fuseo1",
+     "named after another vendor's model (unclear provenance)"),
 )
+
+# Generators that are not language models. Nothing in FileID consumes an
+# image-generation or text-to-speech role, so the catalog leaves them out.
+NON_LLM_MODEL = re.compile(
+    r"qwen-image|ernie-image|z-image|flux|stable-diffusion|sdxl|(^|[^a-z])sd-?3|(^|[^a-z])wan-?2|hunyuan-?(image|video)"
+    r"|(^|[^a-z0-9])tts([^a-z]|$)|voxcpm|kokoro|chatterbox|cosyvoice|musicgen|text-to-speech|text-to-image"
+)
+NON_LLM_FILE = re.compile(r"(^|/)(transformer|vae|text_encoder|unet|scheduler)/")
 
 # Gemma lines Google released under plain Apache-2.0
 # (https://ai.google.dev/gemma/docs/gemma_4_license, checked 2026-11-06).
@@ -88,6 +100,25 @@ def gemma_terms_error(name: str, repo: str, license_name: str, terms_required: b
     return None
 
 
+def non_llm(name: str, repo: str, upstream: str, paths: list[str]) -> bool:
+    return any(NON_LLM_MODEL.search(_normalized(text)) for text in (name, repo, upstream)) \
+        or any(NON_LLM_FILE.search(path) for path in paths)
+
+
+def mac_catalog_errors(catalog_path: Path) -> list[str]:
+    """The Mac MLX catalog has no generator; the denylist guards it here."""
+    document = json.loads(catalog_path.read_text(encoding="utf-8"))
+    errors = []
+    for entry in document.get("entries", []):
+        lineage = [entry.get("repo", ""), *(base.get("repo", "") for base in entry.get("bases", []))]
+        reason = restricted_reason(*lineage)
+        if reason:
+            errors.append(f"Mac catalog {entry.get('repo')}: denylisted model ({reason})")
+        if non_llm(lineage[0], lineage[0], lineage[-1], [f.get("path", "") for f in entry.get("files", [])]):
+            errors.append(f"Mac catalog {entry.get('repo')}: image-generation or text-to-speech model is not offered")
+    return errors
+
+
 def catalog_errors(catalog_path: Path) -> list[str]:
     document = json.loads(catalog_path.read_text(encoding="utf-8"))
     errors: list[str] = []
@@ -113,6 +144,8 @@ def catalog_errors(catalog_path: Path) -> list[str]:
         gemma = gemma_terms_error(name, repo, license_name, terms_required)
         if gemma:
             errors.append(f"catalog {entry_id}: {gemma}")
+        if non_llm(name, repo, upstream, [f.get("path", "") for f in entry.get("files", [])]):
+            errors.append(f"catalog {entry_id}: image-generation or text-to-speech model is not offered (role {entry.get('role')!r})")
     return errors
 
 
@@ -130,13 +163,21 @@ def main() -> int:
         type=Path,
         help="extended model catalog to check (shared/models/catalog.json)",
     )
+    parser.add_argument(
+        "--mac-catalog",
+        default=Path(__file__).resolve().parents[2] / "platforms/apple/shared/Sources/FileIDShared/Resources/model-catalog.json",
+        type=Path,
+        help="Mac MLX model catalog to check against the denylist",
+    )
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     errors: list[str] = []
+    parser_mac = args.mac_catalog
     try:
         errors.extend(catalog_errors(args.catalog))
+        errors.extend(mac_catalog_errors(parser_mac))
     except (ValueError, OSError, AttributeError) as error:
-        errors.append(f"Extended model catalog {args.catalog}: {error}")
+        errors.append(f"Model catalog: {error}")
 
     policies = manifest.get("licensePolicies", {})
     if set(policies) != set(ALLOWED_POLICIES):
