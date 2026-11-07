@@ -48,6 +48,7 @@ struct MigrationParityTests {
         "v29_library_roots",
         "v30_files_dir_index",
         "v31_take_proposals",
+        "v32_face_review",
     ]
 
     @Test("Registered migration identifiers match the canonical cross-platform list")

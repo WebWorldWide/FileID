@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.22.0",
+  "version": "1.23.0",
 
   "$defs": {
     "IPCCommand": {
@@ -456,6 +456,61 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["listFaceReview"],
+          "properties": {
+            "listFaceReview": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Schema 1.23.0. Read one page of pending face review suggestions: faces runFaceClustering compared with person centroids in their own model and processing space and queued instead of assigning. Read-only. Replies faceReview with action list.",
+              "required": ["requestID"],
+              "properties": {
+                "requestID": { "$ref": "#/$defs/HealthRequestID" },
+                "personID": { "type": ["integer", "null"], "description": "Only suggestions for this person. Omitted or null lists every person's." },
+                "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resolveFaceReview"],
+          "properties": {
+            "resolveFaceReview": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Schema 1.23.0. Resolve one pending suggestion. accept assigns the face to personID and is refused when that person is already in the same photo; reject records that the face is not this person (against the person's representative face, by file and box, so it survives reclustering); ignore files the face under a new Unknown person. personID must match the pending suggestion, otherwise the reply is refused. Each resolution is one catalog operation (catalog_corrections kind face_review). Replies faceReview with action resolve and the operationID to undo.",
+              "required": ["requestID", "faceID", "personID", "resolution"],
+              "properties": {
+                "requestID": { "$ref": "#/$defs/HealthRequestID" },
+                "faceID": { "type": "integer" },
+                "personID": { "type": "integer" },
+                "resolution": { "type": "string", "enum": ["accept", "reject", "ignore"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["undoFaceReview"],
+          "properties": {
+            "undoFaceReview": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the suggestion is pending again. Refused when the face changed since. Replies faceReview with action undo.",
+              "required": ["requestID", "operationID"],
+              "properties": {
+                "requestID": { "$ref": "#/$defs/HealthRequestID" },
+                "operationID": { "type": "string", "minLength": 1, "maxLength": 128 }
+              }
+            }
+          }
         }
       ]
     },
@@ -599,7 +654,8 @@
               }
             }
           }
-        }
+        },
+        { "type": "object", "required": ["faceReview"], "additionalProperties": false, "properties": { "faceReview": { "type": "object", "additionalProperties": false, "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/FaceReviewPage" } } } } }
       ]
     },
     "HealthRequestID": {
@@ -621,6 +677,44 @@
         "totalBytes": { "type": "integer", "minimum": 0, "description": "Bytes of the files counted in fileCount." },
         "lastScanAt": { "type": ["number", "null"], "description": "Unix seconds of the last finished scan." },
         "lastStatus": { "type": ["string", "null"] }
+      }
+    },
+    "FaceReviewItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["faceID", "fileID", "path", "bbox", "personID", "score", "reason", "createdAt"],
+      "properties": {
+        "faceID": { "type": "integer" },
+        "fileID": { "type": "integer" },
+        "path": { "type": "string", "description": "The photo the face is in." },
+        "bbox": { "type": "string", "description": "The face box as the engine stores it (face_prints.bbox)." },
+        "personID": { "type": "integer", "description": "The suggested person." },
+        "personName": { "type": ["string", "null"], "description": "The suggested person's display name; null when unnamed." },
+        "representativeFaceID": { "type": ["integer", "null"], "description": "The suggested person's representative face, to show beside this face." },
+        "score": { "type": "number", "description": "Cosine similarity between the face and the person's centroid." },
+        "reason": { "type": "string", "enum": ["suggested", "uncertain", "ambiguous"], "description": "suggested: close to this person and clearly closer than to anyone else; uncertain: only moderately close; ambiguous: about as close to another person." },
+        "runnerUpPersonID": { "type": ["integer", "null"], "description": "The next closest person, when there is one." },
+        "runnerUpName": { "type": ["string", "null"] },
+        "runnerUpScore": { "type": ["number", "null"] },
+        "createdAt": { "type": "number", "description": "Unix seconds when the suggestion was made." }
+      }
+    },
+    "FaceReviewPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).",
+      "required": ["requestID", "action", "status", "total", "offset", "items"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "action": { "type": "string", "enum": ["list", "resolve", "undo"] },
+        "status": { "type": "string", "enum": ["ok", "refused", "failed"], "description": "refused: the request was understood but the catalog no longer allows it (the suggestion or face changed, or the person is already in the photo); nothing changed." },
+        "message": { "type": ["string", "null"], "description": "Plain-language reason when status is not ok." },
+        "operationID": { "type": ["string", "null"], "description": "resolve: the operation to pass to undoFaceReview. undo: the operation undone." },
+        "faceID": { "type": ["integer", "null"], "description": "resolve and undo: the face changed." },
+        "personID": { "type": ["integer", "null"], "description": "resolve: the person the face now belongs to (accept: the suggested person; ignore: the new Unknown person; reject: null)." },
+        "total": { "type": "integer", "minimum": 0, "description": "Pending suggestions matching the list filter (for resolve and undo: all pending suggestions)." },
+        "offset": { "type": "integer", "minimum": 0 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/FaceReviewItem" }, "description": "list: the page, best score first. Empty for resolve and undo." }
       }
     },
     "RootsList": {
@@ -883,6 +977,11 @@
                 "type": "integer",
                 "minimum": 0,
                 "description": "Optional coverage count of active faces deferred from this pass because selected-model evidence is unavailable, incompatible or invalid; their existing identities and corrections are retained. Omitted means this engine does not report coverage."
+              },
+              "reviewQueued": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Schema 1.23.0. Pending face review suggestions after this pass (listFaceReview). New faces are compared with existing people and queued for review rather than assigned. Omitted by engines that do not report it."
               }
             }
           }
