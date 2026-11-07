@@ -35,6 +35,28 @@ struct NameStyleTests {
         #expect(request.action == "proposeNames" && request.fileIDs == [3, 4] && request.naming == naming)
     }
 
+    @Test func undoForgetsTheNewestMatchingLearnedRename() throws {
+        let suite = "fileid-names-learned-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        NameStyle.rememberLearned([CatalogNameEdit(fileID: 1, proposed: "a.jpg", applied: "A.jpg"),
+                                   CatalogNameEdit(fileID: 2, proposed: "b.jpg", applied: "B.jpg")], defaults: defaults)
+        NameStyle.rememberLearned([CatalogNameEdit(fileID: 1, proposed: "a.jpg", applied: "A.jpg")], defaults: defaults)
+        NameStyle.rememberLearned([], defaults: defaults)
+        let stored = NameStyle.storedLearned(defaults)
+        #expect(stored.map(\.fileID) == [1, 2, 1])
+        let outcomes = [ReadStore.RenameOutcome(fileID: 1, oldPath: "/n/IMG_1.jpg", newPath: "/n/A.jpg"),
+                        ReadStore.RenameOutcome(fileID: 2, oldPath: "/n/IMG_2.jpg", newPath: "/n/B.jpg"),
+                        ReadStore.RenameOutcome(fileID: 3, oldPath: "/n/IMG_3.jpg", newPath: "/n/C.jpg")]
+        let split = NameStyle.undone(stored, outcomes: outcomes, putBack: [1, 3])
+        #expect(split.forget == [CatalogNameEdit(fileID: 1, proposed: "a.jpg", applied: "A.jpg")])
+        #expect(split.keep.map(\.fileID) == [1, 2])
+        #expect(NameStyle.undone(stored, outcomes: [ReadStore.RenameOutcome(fileID: 2, oldPath: "/n/IMG_2.jpg", newPath: "/n/Other.jpg")],
+                                 putBack: [2]).forget.isEmpty)
+        let request = NameStyle.unlearnRequest(id: "u", edits: split.forget)
+        #expect(request.action == "unlearnNames" && request.nameEdits == split.forget && request.naming == nil)
+    }
+
     @Test func dateFirstDisablesAddDate() {
         #expect(!NameStyle.dateToggleEnabled(style: "dateFirst"))
         #expect(NameStyle.dateToggleEnabled(style: "short") && NameStyle.dateToggleEnabled(style: "descriptive"))

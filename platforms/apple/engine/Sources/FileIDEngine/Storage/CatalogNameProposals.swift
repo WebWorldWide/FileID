@@ -61,6 +61,21 @@ enum CatalogNameProposals {
         return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
     }
 
+    /// unlearnNames: after renames are undone, deletes for each edit the newest
+    /// sample for that file whose applied name matches, then replies with the preferences.
+    static func unlearn(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        guard let edits = request.nameEdits, !edits.isEmpty, edits.count <= maxFiles,
+              edits.allSatisfy({ $0.applied.unicodeScalars.count <= maxEditScalars }) else { throw CatalogStore.InvalidRequest() }
+        let hits = try await database.pool.write { db in
+            for edit in edits {
+                try db.execute(sql: "DELETE FROM catalog_corrections WHERE rowid=(SELECT rowid FROM catalog_corrections WHERE kind=? AND file_id=? AND json_extract(after_json,'$.applied')=? ORDER BY rowid DESC LIMIT 1)",
+                               arguments: [sampleKind, edit.fileID, edit.applied])
+            }
+            return try preferences(db)
+        }
+        return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+    }
+
     static func preferences(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
         let reset = request.action == "resetNamePreferences"
         let hits = try await database.pool.write { db in

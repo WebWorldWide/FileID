@@ -13,6 +13,8 @@ struct TakeReview: View {
     /// Called after the group is resolved (trashed, kept or skipped) so the
     /// page can refresh its list and open the next group.
     let onResolved: () -> Void
+    /// Set for a related-take proposal: opens the group editor with these tries.
+    var onSaveAsGroup: (() -> Void)? = nil
 
     @State private var qualities: [CatalogTakeQuality] = []
     @State private var loading = true
@@ -73,6 +75,7 @@ struct TakeReview: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("\(group.shots.count) \(noun.many)").font(Theme.Font.display(28)).foregroundStyle(Theme.text1)
                 MetaText(Self.dateText(group.capturedAt), color: Theme.text2, size: 13)
+                RelationChip(relation: group.relation)
                 if group.status == "skipped" {
                     Text("SKIPPED").font(Theme.Font.body(10.5, .semibold)).foregroundStyle(Theme.text3)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -80,7 +83,7 @@ struct TakeReview: View {
                 }
                 Spacer(minLength: 0)
             }
-            MetaText("Tries of the same shot, taken moments apart. FileID starred the one that looks best. Check it, then keep it and clear out the rest.", size: 13)
+            MetaText(summary, size: 13)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Button(primaryTitle) { confirmTrash = true }
@@ -96,9 +99,24 @@ struct TakeReview: View {
                     .buttonStyle(.dsGhost)
                     .disabled(loading || trashing || group.status == "skipped")
                     .help("Decide later. Skipped groups move to the bottom of the list.")
+                if let onSaveAsGroup {
+                    Button("Save as group", action: onSaveAsGroup)
+                        .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.control))
+                        .disabled(loading || trashing)
+                        .help("Keep these \(noun.many) together as a group with a name and a goal")
+                        .accessibilityLabel("Save these \(noun.many) as a group")
+                }
                 if trashing { IndeterminateBar().frame(width: 60) }
             }
         }
+    }
+
+    private var summary: String {
+        let pick = "FileID starred the one that looks best. Check it, then keep it and clear out the rest."
+        guard group.relation != nil else { return "Tries of the same shot, taken moments apart. " + pick }
+        let evidence = TakeProposals.evidenceText(group.evidence)
+        let help = TakeProposals.relationHelp(group.relation) ?? ""
+        return [evidence, help, pick].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     private var primaryTitle: String {

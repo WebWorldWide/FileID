@@ -269,11 +269,9 @@ internal sealed class NameStyleCard : UserControl
         _reset.IsEnabled = samples > 0;
     }
 
-    private async Task LearnFromAsync(IReadOnlyList<NameProposalRow> rows, IReadOnlyCollection<long> confirmed, CatalogNaming naming)
+    private async Task LearnFromAsync(IReadOnlyList<CatalogNameEdit> edits, CatalogNaming naming)
     {
-        if (!naming.Learn) return;
-        var edits = NameStylePolicy.Edits(rows, confirmed);
-        if (edits.Count == 0) return;
+        if (!naming.Learn || edits.Count == 0) return;
         try
         {
             var response = await EngineClient.Instance.CatalogAsync(
@@ -283,6 +281,27 @@ internal sealed class NameStyleCard : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("NameStyleCard learning from renames failed: " + ex.Message);
+        }
+    }
+
+    private async Task UnlearnAsync(EngineClient engine, Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        IReadOnlyList<CatalogNameEdit> edits, IReadOnlyList<long> putBack)
+    {
+        var request = NameStylePolicy.UnlearnRequest("names-unlearn-" + Guid.NewGuid().ToString("N"), edits, putBack);
+        if (request is null) return;
+        try
+        {
+            var response = await engine.CatalogAsync(request).ConfigureAwait(false);
+            if (response.Status != "ok") return;
+            var hits = response.Hits;
+            dispatcher.TryEnqueue(() =>
+            {
+                if (!_unloaded) ShowLearned(hits);
+            });
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("NameStyleCard forgetting undone renames failed: " + ex.Message);
         }
     }
 
@@ -523,6 +542,8 @@ internal sealed class NameStyleCard : UserControl
                 "renameFiles", () => engine.RenameFilesAsync(entries), TimeSpan.FromSeconds(30 + entries.Count / 4.0));
             var confirmed = BulkActionResultTruth.ConfirmedSuccessfulFileIds(result, entries.Select(e => e.FileId));
             var inverse = NameStylePolicy.UndoEntries(rows, entries, confirmed);
+            IReadOnlyList<CatalogNameEdit> edits = naming.Learn ? NameStylePolicy.Edits(rows, confirmed) : [];
+            var dispatcher = DispatcherQueue;
             if (inverse.Count > 0)
             {
                 UndoStack.Instance.Push($"rename {inverse.Count} file{(inverse.Count == 1 ? "" : "s")}", async () =>
@@ -531,8 +552,10 @@ internal sealed class NameStyleCard : UserControl
                     {
                         var back = await engine.WaitForBulkActionResultAsync(
                             "renameFiles", () => engine.RenameFilesAsync(inverse), TimeSpan.FromSeconds(30 + inverse.Count / 4.0)).ConfigureAwait(false);
-                        return back.Action == "renameFiles"
-                            && BulkActionResultTruth.ConfirmsExactSuccess(back, inverse.Select(e => e.FileId).ToArray());
+                        if (back.Action != "renameFiles") return false;
+                        var putBack = BulkActionResultTruth.ConfirmedSuccessfulFileIds(back, inverse.Select(e => e.FileId));
+                        await UnlearnAsync(engine, dispatcher, edits, putBack).ConfigureAwait(false);
+                        return BulkActionResultTruth.ConfirmsExactSuccess(back, inverse.Select(e => e.FileId).ToArray());
                     }
                     catch (Exception ex)
                     {
@@ -541,7 +564,7 @@ internal sealed class NameStyleCard : UserControl
                     }
                 });
             }
-            await LearnFromAsync(rows, confirmed, naming);
+            await LearnFromAsync(edits, naming);
             var failed = entries.Count - confirmed.Count;
             var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message;
             var text = $"Renamed {confirmed.Count:N0} file{(confirmed.Count == 1 ? "" : "s")}"

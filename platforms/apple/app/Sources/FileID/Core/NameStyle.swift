@@ -223,6 +223,39 @@ enum NameStyle {
         CatalogRequest(requestID: id, action: "learnNames", naming: naming, nameEdits: edits)
     }
 
+    static let learnedEditsKey = "naming.learnedEdits"
+    static let learnedEditsKeep = 1000
+
+    /// The samples learnNames recorded, newest last, so an Undo from any
+    /// surface can tell the engine which ones to forget.
+    nonisolated static func rememberLearned(_ edits: [CatalogNameEdit], defaults: UserDefaults = .standard) {
+        guard !edits.isEmpty else { return }
+        let all = (storedLearned(defaults) + edits).suffix(learnedEditsKeep)
+        if let data = try? JSONEncoder().encode(Array(all)) { defaults.set(data, forKey: learnedEditsKey) }
+    }
+
+    nonisolated static func storedLearned(_ defaults: UserDefaults = .standard) -> [CatalogNameEdit] {
+        defaults.data(forKey: learnedEditsKey).flatMap { try? JSONDecoder().decode([CatalogNameEdit].self, from: $0) } ?? []
+    }
+
+    /// Splits the stored samples after an Undo: for each rename put back, the
+    /// newest stored sample of that file whose applied name is the name it was
+    /// undone from is forgotten; everything else stays.
+    nonisolated static func undone(_ stored: [CatalogNameEdit], outcomes: [ReadStore.RenameOutcome],
+                                   putBack: Set<Int64>) -> (forget: [CatalogNameEdit], keep: [CatalogNameEdit]) {
+        var keep = stored, forget: [CatalogNameEdit] = []
+        for outcome in outcomes where putBack.contains(outcome.fileID) {
+            let name = URL(fileURLWithPath: outcome.newPath).lastPathComponent
+            guard let index = keep.lastIndex(where: { $0.fileID == outcome.fileID && $0.applied == name }) else { continue }
+            forget.append(keep.remove(at: index))
+        }
+        return (forget, keep)
+    }
+
+    static func unlearnRequest(id: String, edits: [CatalogNameEdit]) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: "unlearnNames", nameEdits: edits)
+    }
+
     static func preferencesRequest(id: String, reset: Bool) -> CatalogRequest {
         CatalogRequest(requestID: id, action: reset ? "resetNamePreferences" : "namePreferences")
     }

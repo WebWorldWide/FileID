@@ -715,7 +715,11 @@ pub struct CatalogRequest {
     /// value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the
     /// number of stored samples. proposeNames applies them only when naming.learn is true;
     /// evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'),
-    /// naming the preferences that changed that file's name.
+    /// naming the preferences that changed that file's name. Schema 1.22.0 adds unlearnNames: after
+    /// the user undoes renames that learnNames recorded, it deletes, for each nameEdits entry, the
+    /// newest stored sample for that fileID whose applied name equals applied (proposed is not
+    /// compared; an entry with no match is ignored), so a reversed rename stops teaching a style,
+    /// then replies like namePreferences.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -764,8 +768,9 @@ pub struct CatalogRequest {
     pub take_decision: Option<CatalogTakeDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming: Option<CatalogNaming>,
-    /// learnNames only (schema 1.21.0): the names the user applied after a proposeNames preview,
-    /// one per renamed file (a companion group's leader only).
+    /// learnNames and unlearnNames only (schema 1.21.0; unlearnNames 1.22.0): the names the user
+    /// applied after a proposeNames preview, one per renamed file (a companion group's leader
+    /// only). unlearnNames sends the same entries back after the renames are undone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_edits: Option<Vec<CatalogNameEdit>>,
 }

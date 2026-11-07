@@ -146,15 +146,19 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var manualPane = BuildManualPane();
-        Grid.SetRow(intro, 1);
-        Grid.SetRow(_groupsEmpty, 2);
-        Grid.SetRow(_groupList, 3);
-        Grid.SetRow(manualPane, 4);
-        Grid.SetRow(_deletedFooter, 5);
+        var proposalPane = BuildProposalPane();
+        Grid.SetRow(header, 1);
+        Grid.SetRow(intro, 2);
+        Grid.SetRow(_groupsEmpty, 3);
+        Grid.SetRow(_groupList, 4);
+        Grid.SetRow(manualPane, 5);
+        Grid.SetRow(_deletedFooter, 6);
+        pane.Children.Add(proposalPane);
         pane.Children.Add(header);
         pane.Children.Add(intro);
         pane.Children.Add(_groupsEmpty);
@@ -173,8 +177,9 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             if (_rendering || _groupList.SelectedIndex < 0 || _groupList.SelectedIndex >= _groups.Count) return;
             var group = _groups[_groupList.SelectedIndex];
-            if (_current?.GroupKey == group.GroupKey) return;
+            if (_current?.GroupKey == group.GroupKey && _proposalKey is null) return;
             LeaveManual();
+            ClearProposalSelection();
             Run(ct => ScoreAsync(group, focusStrip: false, ct));
         });
 
@@ -227,14 +232,13 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
         heading.Children.Add(_title);
         heading.Children.Add(_date);
+        heading.Children.Add(_relationPill);
         heading.Children.Add(_skipped);
         _review.Children.Add(heading);
-        var reviewIntro = Meta("Tries of the same shot, taken moments apart. FileID starred the one that looks best. Check it, then keep it and clear out the rest.");
-        reviewIntro.FontSize = 13;
-        _review.Children.Add(reviewIntro);
+        _review.Children.Add(_reviewIntro);
         ToolTipService.SetToolTip(_keepAll, "Keep every one here and stop suggesting this group");
         ToolTipService.SetToolTip(_skip, "Decide later. Skipped groups move to the bottom of the list.");
-        var actions = Row(_trash, _keepAll, _skip, _trashBar);
+        var actions = Row(_trash, _keepAll, _skip, _saveAsGroup, _trashBar);
         actions.VerticalAlignment = VerticalAlignment.Center;
         _review.Children.Add(actions);
 
@@ -319,6 +323,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             await ListEventsAsync(ct);
             await LoadGroupsAsync(keepCurrent: true, ct);
+            await LoadProposalsAsync(null, ct);
         });
     }
 
@@ -337,6 +342,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("TakesWorkbench.OnEngineChanged", () =>
         {
+            OnProposalEngineChanged(e);
             if (e.PropertyName != nameof(EngineClient.Phase) || Engine.Phase != ScanPhase.Completed) return;
             DebugLog.Debug($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=Completed");
             DispatcherQueue.TryEnqueue(() =>
@@ -351,6 +357,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     protected override void UpdateControls()
     {
         RunQueuedManual();
+        RunStaleProposals();
         if (!_focusStripWhenReady || _filmstrip.Visibility != Visibility.Visible) return;
         _focusStripWhenReady = false;
         _stripHost.Focus(FocusState.Programmatic);
@@ -414,6 +421,11 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
                 var row = GroupRow(groups[i]);
                 _groupList.Items.Add(row);
                 if (i < EagerRowThumbnails) LoadRowThumbs(row);
+            }
+            if (_proposalKey is not null)
+            {
+                _groupList.SelectedIndex = -1;
+                return null;
             }
             var currentKey = _current?.GroupKey;
             for (var i = 0; i < groups.Count; i++)
@@ -590,6 +602,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _title.Text = TakeReviewPolicy.GroupTitle(group);
         _date.Text = TakeReviewPolicy.DateText(group.CapturedAt);
         _skipped.Visibility = TakeReviewPolicy.IsOpen(group) ? Visibility.Collapsed : Visibility.Visible;
+        RenderProposalHeader(group);
     }
 
     private void RenderReview(CatalogTakeAutoGroup group, IReadOnlyList<CatalogTakeQuality> qualities)
@@ -632,6 +645,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _trash.IsEnabled = ready && reason is null;
         ToolTipService.SetToolTip(_trash, group is null ? null : TakeReviewPolicy.PrimaryHelp(group, _qualities, _keep));
         _keepAll.IsEnabled = ready;
+        _saveAsGroup.IsEnabled = group is not null && !_trashing;
         _skip.IsEnabled = ready && TakeReviewPolicy.IsOpen(group!);
         if (group is not null && _qualities.Count > 0)
         {
@@ -1371,7 +1385,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
                 _trashBar.Visibility = Visibility.Collapsed;
             }, ct);
         }
-        await LoadGroupsAsync(keepCurrent: false, ct);
+        await AfterResolveAsync(group.GroupKey, ct);
     }
 
     private async Task UndoTrashAsync(string batch, int files, CatalogTakeDecision? reopen, CancellationToken ct)
@@ -1382,7 +1396,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             TakeReviewPolicy.PutBackText(restored ? (uint)files : 0, restored ? null : "Some files couldn't be put back. Check the Trash."),
             null,
             PlainToastWindow), ct);
-        await LoadGroupsAsync(keepCurrent: false, ct);
+        await AfterResolveAsync(null, ct);
     }
 
     private async Task DecideAsync(string kind, CancellationToken ct)
@@ -1397,13 +1411,13 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         var reopen = TakeReviewPolicy.Decision(group, "reopen");
         var text = kind == "keepAll" ? TakeReviewPolicy.KeptAllText(group) : TakeReviewPolicy.SkippedText;
         await UI(() => ShowToast(text, c => ReopenAsync(reopen, c), DecisionUndoWindow), ct);
-        await LoadGroupsAsync(keepCurrent: false, ct);
+        await AfterResolveAsync(group.GroupKey, ct);
     }
 
     private async Task ReopenAsync(CatalogTakeDecision reopen, CancellationToken ct)
     {
         await Engine.CatalogAsync(Request("decideTakeGroup", decision: reopen), ct);
-        await LoadGroupsAsync(keepCurrent: false, ct);
+        await AfterResolveAsync(null, ct);
     }
 
     // ---- Pieces ---------------------------------------------------------------
