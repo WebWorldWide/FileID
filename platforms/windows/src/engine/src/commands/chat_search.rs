@@ -70,6 +70,18 @@ mod tests {
     }
 
     #[test]
+    fn pronouns_narrow_the_last_search() {
+        let people = vec![(1, vec!["Alex".into()]), (2, vec!["Blake".into()])];
+        let orchard = SearchPlan::resolve_known("orchard photos", None, &people, &[], false);
+        let them = SearchPlan::resolve_known("which of them show Alex", Some(&orchard), &people, &[], false);
+        assert_eq!((them.query.as_str(), them.kinds.clone(), them.person_ids.clone()), ("orchard", vec!["image".to_owned()], vec![1]));
+        let blake = SearchPlan::resolve_known("photos of Blake", None, &people, &[], false);
+        let wearing = SearchPlan::resolve_known("what is he wearing", Some(&blake), &people, &[], false);
+        assert_eq!((wearing.query.as_str(), wearing.person_ids.clone()), ("wearing", vec![2]));
+        assert!(SearchPlan::resolve_known("what is he wearing", None, &people, &[], false).person_ids.is_empty());
+    }
+
+    #[test]
     fn shared_plans_preserve_subjects_and_explicit_filters() {
         #[derive(serde::Deserialize)]
         struct Fixture {
@@ -165,12 +177,17 @@ impl SearchPlan {
             "of", "my", "files", "file", "with", "in", "all", "only", "just", "now", "these", "those", "instead",
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
             "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
-            "regarding", "ones", "them", "they", "it", "its", "taken",
+            "regarding", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
         ];
+        // "how many of them show Alex?" and "what is he wearing?" point back at the last search.
         let refinement = follow_up
-            || normalized
-                .iter()
-                .any(|word| ["only", "just", "now", "these", "those", "instead", "also", "and"].contains(&word.as_str()));
+            || normalized.iter().any(|word| {
+                [
+                    "only", "just", "now", "these", "those", "instead", "also", "and", "them", "they", "ones", "he", "she",
+                    "him", "her", "his", "their",
+                ]
+                .contains(&word.as_str())
+            });
         let mut kinds: Vec<String> = if negative {
             vec![]
         } else {

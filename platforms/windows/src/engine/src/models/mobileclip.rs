@@ -51,8 +51,9 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
-        super::clip_space::verify(path, "mobileclip_s2", 0)?;
-        let (session, input_name) = commit_chain_session("MobileCLIP image", path)?;
+        let (session, input_name) = super::clip_space::load_verified(&[(path, "mobileclip_s2", 0)], || {
+            commit_chain_session("MobileCLIP image", path)
+        })?;
         // Warmup with a zero 224×224 frame so first-call kernel compile
         // happens during load.
         let mut model = Self { session, input_name, input_size: 224 };
