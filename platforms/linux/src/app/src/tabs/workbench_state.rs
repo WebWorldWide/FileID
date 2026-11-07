@@ -93,6 +93,7 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         limit: Some(100),
         captured_from: None,
         captured_to: None,
+        root_id: None,
         result_scope: None,
         event: None,
         event_id: None,
@@ -265,6 +266,10 @@ mod tests {
             video_aspect_ratio: None,
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         };
         assert!(!s.supports(&recipe));
         s.capabilities.push(ToolCapability {

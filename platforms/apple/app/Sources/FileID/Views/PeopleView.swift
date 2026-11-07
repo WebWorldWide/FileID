@@ -224,10 +224,12 @@ struct PeopleView: View {
             Button {
                 suggestionsLoading = true
                 Task {
-                    let result = await Task.detached(priority: .userInitiated) {
-                        (try? PersonMergeSuggestions.find(dbPath: ReadStore.defaultDBURL.path)) ?? []
-                    }.value
+                    let reply = await engine.findMergeSuggestions()
                     suggestionsLoading = false
+                    guard let result = reply else {
+                        mergeStatus = "Couldn't look for likely merges right now. Try again in a moment."
+                        return
+                    }
                     // The scan is multi-second; don't preempt whatever the
                     // user navigated to while it ran. Only surface the sheet
                     // if they're still on a neutral People view — no sheet

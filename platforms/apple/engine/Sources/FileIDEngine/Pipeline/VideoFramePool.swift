@@ -148,9 +148,16 @@ enum VideoFramePool {
             try writeJPEG(cg, to: output.appendingPathComponent(name))
             frames.append(Frame(seconds: seconds, file: name, signature: try signature(cg)))
             index += 1
-            next = (floor(seconds / interval) + 1) * interval
+            next = nextSampleTime(after: seconds, interval: interval)
         }
         return reader.status == .completed ? frames : []
+    }
+
+    /// The next pool time after a kept frame. A frame a hair before a step (15.9993 s
+    /// at 59.94 fps) counts as that step, so the next target is the step after it,
+    /// not the same step again (which kept 16.00 and 16.02 both).
+    static func nextSampleTime(after seconds: Double, interval: Double) -> Double {
+        (floor((seconds + 0.001) / interval) + 1) * interval
     }
 
     private static func seekEach(asset: AVURLAsset, duration: Double, interval: Double, maxPixel: Int, output: URL) async throws -> [Frame] {
@@ -165,7 +172,7 @@ enum VideoFramePool {
         for (index, seconds) in VideoSceneSelection.poolTimes(duration: duration, interval: interval).enumerated() {
             guard !Task.isCancelled else { return [] }
             guard let (image, actual) = await generate(ref, seconds: seconds) else { continue }
-            if let last = frames.last, abs(last.seconds - actual) < 0.001 { continue }
+            if let last = frames.last, abs(last.seconds - actual) < interval / 2 { continue }
             let name = String(format: "frame-%05d.jpg", index)
             try writeJPEG(image, to: output.appendingPathComponent(name))
             frames.append(Frame(seconds: actual, file: name, signature: try signature(image)))

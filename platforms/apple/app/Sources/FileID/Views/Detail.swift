@@ -41,7 +41,7 @@ struct Detail: View {
 
     private var pageMeta: String {
         switch activeTab {
-        case .library: return store.totalFiles > 0 ? "\(store.totalFiles.formatted()) files" : ""
+        case .library: return store.scopedTotalFiles > 0 ? "\(store.scopedTotalFiles.formatted()) files" + (store.scope.map { " in \($0.root.display)" } ?? "") : ""
         case .deep:
             if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
             return ""

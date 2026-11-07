@@ -92,6 +92,33 @@ struct QueryCommandsTests {
         #expect(await QueryCommands.videoThumbnail(path: root.appendingPathComponent("missing.mp4").path, modifiedAt: nil) == nil)
     }
 
+    @Test("generateVideoThumbnail honours a requested size, clamped to 64-2048 and never upscaled")
+    func videoThumbnailRequestedSize() async throws {
+        #expect(QueryCommands.thumbnailLongSide(for: nil) == 192)
+        #expect(QueryCommands.thumbnailLongSide(for: 1024) == 1024)
+        #expect(QueryCommands.thumbnailLongSide(for: 8) == 64)
+        #expect(QueryCommands.thumbnailLongSide(for: 100_000) == 2048)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDVideoThumbSize-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let movie = root.appendingPathComponent("clip.mov")
+        try await writeMovie(to: movie, width: 1280, height: 720)
+
+        func longSide(_ requested: Int?) async throws -> Int {
+            let reply = await QueryCommands.videoThumbnail(path: movie.path, modifiedAt: nil, maxPixelSize: requested)
+            guard case .thumbnailGenerated(let thumbnail) = reply else { throw CancellationError() }
+            let jpeg = try #require(Data(base64Encoded: thumbnail.bytes))
+            let source = try #require(CGImageSourceCreateWithData(jpeg as CFData, nil))
+            let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            return max(image.width, image.height)
+        }
+        #expect(try await longSide(nil) == 192)
+        #expect(try await longSide(1024) == 1024)
+        #expect(try await longSide(8) == 64)
+        #expect(try await longSide(4096) == 1280)
+    }
+
     private func writeMovie(to url: URL, width: Int, height: Int) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [

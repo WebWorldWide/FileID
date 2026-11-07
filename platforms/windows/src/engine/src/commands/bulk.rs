@@ -380,219 +380,361 @@ fn applies_proposed_name(proposed: &str, new_name: &str, original_extension: &st
         .is_some_and(|bump| (2..=99).contains(&bump))
 }
 
+type RenameMove<'a> =
+    &'a dyn Fn(&std::path::Path, &std::path::Path, crate::platform::FileIdentity) -> anyhow::Result<()>;
+type CompanionKey = (PathBuf, String);
+
+struct PlannedRename {
+    slot: usize,
+    file_id: i64,
+    src: PathBuf,
+    dest: PathBuf,
+    identity: crate::platform::FileIdentity,
+    applied_suggestion: Option<String>,
+    sidecars: Vec<(PathBuf, String)>,
+}
+
+fn file_name_of(path: &std::path::Path) -> String {
+    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Same folder and same lowercased companion stem, plus whether the file is a
+/// RAW, JPEG/HEIC or MOV rather than an `.xmp`/`.aae` sidecar.
+fn companion_key(path: &std::path::Path) -> Option<(CompanionKey, bool)> {
+    use crate::util::smart_name_companions::{base, Role};
+    let (stem, _, role) = base(&file_name_of(path))?;
+    let key = (path.parent()?.to_path_buf(), crate::util::smart_name_style::lower(&stem));
+    Some((key, role != Role::Sidecar))
+}
+
+fn plan_rename(
+    conn: &rusqlite::Connection,
+    slot: usize,
+    entry: &ipc::RenameEntry,
+) -> Result<PlannedRename, (String, Option<PathBuf>)> {
+    let row = conn
+        .query_row(
+            "SELECT path_text, file_ref, vlm_proposed_name FROM files WHERE id = ?1",
+            rusqlite::params![entry.file_id],
+            |r| {
+                Ok((
+                    PathBuf::from(r.get::<_, String>(0)?),
+                    r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        );
+    // Reject anything that isn't a single Normal path component.
+    if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
+        return Err((
+            "new name must be a single filename (no slashes, no '..', no '.', no drive)".into(),
+            row.ok().map(|(path, _, _)| path),
+        ));
+    }
+    let (path, file_ref, proposed) = row.map_err(|err| (format!("not found: {err}"), None))?;
+    let refuse = |message: &str| Err((message.to_string(), Some(path.clone())));
+    let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else {
+        return refuse("source has no parent");
+    };
+    let Some(expected_ref) = file_ref else {
+        return refuse("source identity is unavailable; rescan before renaming");
+    };
+    let Some(identity) = crate::platform::file_identity(&path) else {
+        return refuse("source identity could not be verified; retry or rescan");
+    };
+    if identity.file != expected_ref {
+        return refuse("source was replaced after indexing; rescan before renaming");
+    }
+    let dest = dir.join(&entry.new_name);
+    let original_extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let applied_suggestion =
+        proposed.filter(|proposed| applies_proposed_name(proposed, &entry.new_name, &original_extension));
+    Ok(PlannedRename {
+        slot,
+        file_id: entry.file_id,
+        src: path,
+        dest,
+        identity,
+        applied_suggestion,
+        sidecars: Vec::new(),
+    })
+}
+
+/// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see
+/// `smart_name_companions::following_sidecars`). Each folder is read once.
+fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRename]) {
+    use crate::util::smart_name_companions::{self as companions, Role};
+    let mut folders: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    let mut folder_index: HashMap<PathBuf, usize> = HashMap::new();
+    for (index, p) in planned.iter().enumerate() {
+        let Some(dir) = p.src.parent() else { continue };
+        let slot = *folder_index.entry(dir.to_path_buf()).or_insert_with(|| {
+            folders.push((dir.to_path_buf(), Vec::new()));
+            folders.len() - 1
+        });
+        folders[slot].1.push(index);
+    }
+    for (dir, members) in folders {
+        let names: Vec<String> = members.iter().map(|&index| file_name_of(&planned[index].src)).collect();
+        if !names.iter().any(|name| companions::base(name).is_some_and(|(_, _, role)| role != Role::Sidecar)) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let listing: Vec<String> =
+            entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        for (owner, name, suffix) in companions::following_sidecars(&names, &listing) {
+            let path = dir.join(&name);
+            if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                continue;
+            }
+            let row = conn
+                .query_row("SELECT 1 FROM files WHERE path_text = ?1", [path.to_string_lossy()], |_| Ok(()))
+                .optional();
+            if matches!(row, Ok(None)) {
+                planned[members[owner]].sidecars.push((path, suffix));
+            }
+        }
+    }
+}
+
+/// Moves each sidecar planned for `p` to `<new stem><its old suffix>`.
+/// Best-effort: an occupied target or an error leaves it in place and returns a note.
+fn move_following_sidecars(p: &PlannedRename) -> Vec<String> {
+    let Some(dir) = p.dest.parent() else { return Vec::new() };
+    let (stem, _) = crate::util::smart_name_style::split_name(&file_name_of(&p.dest));
+    let mut notes = Vec::new();
+    for (sidecar, suffix) in &p.sidecars {
+        let target = dir.join(format!("{stem}{suffix}"));
+        if target == *sidecar {
+            continue;
+        }
+        let moved = crate::util::read_only::require_source_mutation(sidecar)
+            .and_then(|()| crate::util::read_only::require_source_mutation(&target))
+            .and_then(|()| crate::util::path_safety::rename_no_replace(sidecar, &target));
+        if let Err(err) = moved {
+            let (old, new) = (file_name_of(sidecar), file_name_of(&target));
+            notes.push(if err.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("{old} kept its name because {new} already exists")
+            } else {
+                format!("{old} kept its name: {err}")
+            });
+        }
+    }
+    notes
+}
+
+/// Records a landed move: follows the tags sidecar (and, unless a group
+/// rollback left this file behind, the planned `.xmp`/`.aae` sidecars), then
+/// writes the row in its own autocommit statement, taking the writer lock only
+/// for that UPDATE, so a kill mid-batch leaves at most the in-flight group out
+/// of step.
+fn commit_rename(
+    db: &parking_lot::Mutex<rusqlite::Connection>,
+    p: &PlannedRename,
+    mut notes: Vec<String>,
+    follow_sidecars: bool,
+) -> BulkActionItem {
+    // Move the on-disk tags sidecar to follow the renamed file (#27).
+    // Best-effort: a missing sidecar (the common case) or any error is
+    // ignored so it never turns a successful rename into a failure.
+    crate::shell::tags::move_sidecar(&p.src, &p.dest);
+    if follow_sidecars {
+        notes.extend(move_following_sidecars(p));
+    }
+    let noted = |message: String| {
+        if notes.is_empty() { message } else { format!("{message}; {}", notes.join("; ")) }
+    };
+    let src_text = p.src.to_string_lossy().to_string();
+    let dest_text = p.dest.to_string_lossy().to_string();
+    // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
+    // on it). ENG-92: a file renamed on disk whose DB write failed is
+    // reported as failed and recorded for recovery (the next scan's
+    // rename-heal also rebinds it via content_hash/file_ref).
+    let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
+    let updated = db.lock().execute(
+        // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
+        // renamed/moved file stays findable by its accented name. (audit parity)
+        // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE,
+        // so a PLAIN update colliding with a LIVE row already at dest (a
+        // check→rename TOCTOU on non-Windows, or an external desync) would
+        // silently REPLACE-delete that row + cascade its user metadata. OR
+        // ABORT raises instead, routing into the Err arm below (record +
+        // report failed) rather than losing data. (audit 2026-07 sibling)
+        // An applied suggestion is cleared only if it is still the one
+        // validated above, so a newer Deep Analyze proposal survives.
+        "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, \
+         vlm_proposed_name = CASE WHEN ?6 IS NOT NULL AND vlm_proposed_name IS ?6 THEN NULL ELSE vlm_proposed_name END \
+         WHERE id = ?3",
+        rusqlite::params![
+            dest_text,
+            dest_hash,
+            p.file_id,
+            crate::pipeline::dbwriter::nfc_path_search(&dest_text),
+            renamed_extension(&dest_text),
+            p.applied_suggestion
+        ],
+    );
+    let (ok, message) = match updated {
+        Ok(1) => (true, dest_text),
+        Ok(changed) => {
+            record_rename_recovery(p.file_id, &src_text, &dest_text);
+            (false, format!("renamed on disk but DB update affected {changed} rows (expected 1)"))
+        }
+        Err(err) => {
+            record_rename_recovery(p.file_id, &src_text, &dest_text);
+            (false, format!("renamed on disk but DB update failed: {err}"))
+        }
+    };
+    BulkActionItem { file_id: Some(p.file_id), ok, message: Some(noted(message)) }
+}
+
+fn failed_item(file_id: i64, message: String) -> Option<BulkActionItem> {
+    Some(BulkActionItem { file_id: Some(file_id), ok: false, message: Some(message) })
+}
+
+fn rename_files_blocking(
+    db: &parking_lot::Mutex<rusqlite::Connection>,
+    payload: &ipc::RenameFilesPayload,
+    rename: RenameMove<'_>,
+) -> BulkActionResult {
+    let mut results: Vec<Option<BulkActionItem>> = vec![None; payload.renames.len()];
+    let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
+    let mut rejected: Vec<(PathBuf, String)> = Vec::new();
+
+    // Phase 1 — resolve + validate every rename under a short writer-lock
+    // scope (read-only SELECTs). Collect the moves so the per-file
+    // filesystem work below runs with NO lock held: a large batch must not
+    // wedge the engine's only writer (and any concurrent scan flush) across
+    // every MoveFileExW — the pathology the apply-tags P0 fix removed.
+    // (audit 2026-07-08)
+    let conn = db.lock();
+    for (slot, entry) in payload.renames.iter().enumerate() {
+        match plan_rename(&conn, slot, entry) {
+            Ok(p) => planned.push(p),
+            Err((message, path)) => {
+                if let Some(path) = path {
+                    rejected.push((path, message.clone()));
+                }
+                results[slot] = failed_item(entry.file_id, message);
+            }
+        }
+    }
+
+    // A companion group is re-derived from the batch: two or more members in
+    // one folder sharing a stem, at least one a RAW, JPEG/HEIC or MOV.
+    let mut stems: HashMap<CompanionKey, (usize, bool)> = HashMap::new();
+    for path in planned.iter().map(|p| &p.src).chain(rejected.iter().map(|(path, _)| path)) {
+        if let Some((key, primary)) = companion_key(path) {
+            let stem = stems.entry(key).or_default();
+            stem.0 += 1;
+            stem.1 |= primary;
+        }
+    }
+    let group_of = |path: &std::path::Path| {
+        companion_key(path)
+            .map(|(key, _)| key)
+            .filter(|key| stems.get(key).is_some_and(|&(count, primary)| count >= 2 && primary))
+    };
+    let mut blocked: HashMap<CompanionKey, String> = HashMap::new();
+    for (path, reason) in &rejected {
+        if let Some(key) = group_of(path) {
+            blocked.entry(key).or_insert_with(|| format!("{} couldn't be renamed ({reason})", file_name_of(path)));
+        }
+    }
+    planned.retain(|p| {
+        let Some(why) = group_of(&p.src).and_then(|key| blocked.get(&key)) else { return true };
+        results[p.slot] = failed_item(p.file_id, format!("not renamed: {why}, so its group keeps its names"));
+        false
+    });
+    plan_following_sidecars(&conn, &mut planned);
+    drop(conn);
+
+    let mut units: Vec<Vec<usize>> = Vec::new();
+    let mut unit_of: HashMap<CompanionKey, usize> = HashMap::new();
+    for (index, p) in planned.iter().enumerate() {
+        match group_of(&p.src) {
+            Some(key) => {
+                let unit = *unit_of.entry(key).or_insert_with(|| {
+                    units.push(Vec::new());
+                    units.len() - 1
+                });
+                units[unit].push(index);
+            }
+            None => units.push(vec![index]),
+        }
+    }
+
+    // Phase 2 — each move is a no-clobber MoveFileExW (no
+    // MOVEFILE_REPLACE_EXISTING): the kernel re-checks the destination inside
+    // the move, so an occupied destination fails (failed++) instead of being
+    // overwritten. The un-prefixed dest is used for DB path_text + user
+    // messages so stored paths stay normal-form (#29). Mirrors
+    // restructure_apply.rs::move_file (B3). A group moves together: when one
+    // member's move fails, the members already moved are put back and the
+    // whole group is reported failed.
+    for unit in units {
+        let mut moved = Vec::new();
+        let mut failure = None;
+        for &index in &unit {
+            let p = &planned[index];
+            match rename(&p.src, &p.dest, p.identity) {
+                Ok(()) => moved.push(index),
+                Err(err) => {
+                    failure = Some((index, err));
+                    break;
+                }
+            }
+        }
+        let Some((bad, err)) = failure else {
+            for &index in &unit {
+                results[planned[index].slot] = Some(commit_rename(db, &planned[index], Vec::new(), true));
+            }
+            continue;
+        };
+        let p = &planned[bad];
+        let grouped = if unit.len() > 1 { "; its group keeps its names" } else { "" };
+        results[p.slot] = failed_item(p.file_id, format!("rename failed: {err}{grouped}"));
+        let why = format!("not renamed: {} couldn't be renamed ({err}), so its group keeps its names", file_name_of(&p.src));
+        for &index in moved.iter().rev() {
+            let p = &planned[index];
+            results[p.slot] = match crate::util::path_safety::rename_no_replace(&p.dest, &p.src) {
+                Ok(()) => failed_item(p.file_id, why.clone()),
+                Err(back) => Some(commit_rename(
+                    db,
+                    p,
+                    vec![format!("couldn't be put back after {} failed: {back}", file_name_of(&planned[bad].src))],
+                    false,
+                )),
+            };
+        }
+        for &index in &unit {
+            let p = &planned[index];
+            if results[p.slot].is_none() {
+                results[p.slot] = failed_item(p.file_id, why.clone());
+            }
+        }
+    }
+
+    let messages: Vec<BulkActionItem> = results.into_iter().flatten().collect();
+    let succeeded = messages.iter().filter(|item| item.ok).count() as u32;
+    BulkActionResult {
+        action: "renameFiles".into(),
+        succeeded,
+        failed: messages.len() as u32 - succeeded,
+        messages,
+    }
+}
+
 pub(crate) async fn handle_rename_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::RenameFilesPayload,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        let mut succeeded = 0u32;
-        let mut failed = 0u32;
-        let mut messages = Vec::new();
-
-        // Phase 1 — resolve + validate every rename under a short writer-lock
-        // scope (read-only SELECTs). Collect the moves so the per-file
-        // filesystem work below runs with NO lock held: a large batch must not
-        // wedge the engine's only writer (and any concurrent scan flush) across
-        // every MoveFileExW — the pathology the apply-tags P0 fix removed.
-        // (audit 2026-07-08)
-        struct PlannedRename {
-            file_id: i64,
-            src: PathBuf,
-            dest: PathBuf,
-            identity: crate::platform::FileIdentity,
-            applied_suggestion: Option<String>,
-        }
-        let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
-        {
-            let conn = db.lock();
-            for entry in &payload.renames {
-                // Reject anything that isn't a single Normal path component.
-                if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some(
-                            "new name must be a single filename (no slashes, no '..', no '.', no drive)"
-                                .into(),
-                        ),
-                    });
-                    continue;
-                }
-                let identity: Result<(String, Option<u64>, Option<String>), _> = conn.query_row(
-                    "SELECT path_text, file_ref, vlm_proposed_name FROM files WHERE id = ?1",
-                    rusqlite::params![entry.file_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
-                            r.get::<_, Option<String>>(2)?,
-                        ))
-                    },
-                );
-                let (path, file_ref, proposed) = match identity {
-                    Ok((path, file_ref, proposed)) => (PathBuf::from(path), file_ref, proposed),
-                    Err(err) => {
-                        failed += 1;
-                        messages.push(BulkActionItem {
-                            file_id: Some(entry.file_id),
-                            ok: false,
-                            message: Some(format!("not found: {err}")),
-                        });
-                        continue;
-                    }
-                };
-                let dir = match path.parent() {
-                    Some(d) => d.to_path_buf(),
-                    None => {
-                        failed += 1;
-                        messages.push(BulkActionItem {
-                            file_id: Some(entry.file_id),
-                            ok: false,
-                            message: Some("source has no parent".into()),
-                        });
-                        continue;
-                    }
-                };
-                let Some(expected_ref) = file_ref else {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some("source identity is unavailable; rescan before renaming".into()),
-                    });
-                    continue;
-                };
-                let Some(identity) = crate::platform::file_identity(&path) else {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some("source identity could not be verified; retry or rescan".into()),
-                    });
-                    continue;
-                };
-                if identity.file != expected_ref {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some("source was replaced after indexing; rescan before renaming".into()),
-                    });
-                    continue;
-                }
-                let dest = dir.join(&entry.new_name);
-                let original_extension = path
-                    .extension()
-                    .map(|extension| extension.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let applied_suggestion = proposed.filter(|proposed| {
-                    applies_proposed_name(proposed, &entry.new_name, &original_extension)
-                });
-                planned.push(PlannedRename {
-                    file_id: entry.file_id,
-                    src: path,
-                    dest,
-                    identity,
-                    applied_suggestion,
-                });
-            }
-        }
-
-        // Phase 2 — each move is a no-clobber MoveFileExW (no
-        // MOVEFILE_REPLACE_EXISTING): the kernel re-checks the destination inside
-        // the move, so an occupied destination fails (failed++) instead of being
-        // overwritten. The un-prefixed dest is used for DB path_text + user
-        // messages so stored paths stay normal-form (#29). Mirrors
-        // restructure_apply.rs::move_file (B3).
-        //
-        // Each landed move's row is written right away in its own autocommit
-        // statement, taking the writer lock only for that UPDATE: a kill mid-batch
-        // leaves at most the in-flight file out of step instead of every file
-        // renamed so far (one end-of-batch transaction left them all stale and
-        // refused rename-back until a rescan).
-        for p in &planned {
-            if let Err(err) = no_clobber_rename_bound(&p.src, &p.dest, p.identity) {
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(p.file_id),
-                    ok: false,
-                    message: Some(format!("rename failed: {err}")),
-                });
-                continue;
-            }
-            // Move the on-disk tags sidecar to follow the renamed file (#27).
-            // Best-effort: a missing sidecar (the common case) or any error is
-            // ignored so it never turns a successful rename into a failure.
-            crate::shell::tags::move_sidecar(&p.src, &p.dest);
-            let src_text = p.src.to_string_lossy().to_string();
-            let dest_text = p.dest.to_string_lossy().to_string();
-            // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
-            // on it). ENG-92: a file renamed on disk whose DB write failed is
-            // reported as failed and recorded for recovery (the next scan's
-            // rename-heal also rebinds it via content_hash/file_ref).
-            let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
-            let updated = db.lock().execute(
-                // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
-                // renamed/moved file stays findable by its accented name. (audit parity)
-                // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE,
-                // so a PLAIN update colliding with a LIVE row already at dest (a
-                // check→rename TOCTOU on non-Windows, or an external desync) would
-                // silently REPLACE-delete that row + cascade its user metadata. OR
-                // ABORT raises instead, routing into the Err arm below (record +
-                // report failed) rather than losing data. (audit 2026-07 sibling)
-                // An applied suggestion is cleared only if it is still the one
-                // validated above, so a newer Deep Analyze proposal survives.
-                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, \
-                 vlm_proposed_name = CASE WHEN ?6 IS NOT NULL AND vlm_proposed_name IS ?6 THEN NULL ELSE vlm_proposed_name END \
-                 WHERE id = ?3",
-                rusqlite::params![
-                    dest_text,
-                    dest_hash,
-                    p.file_id,
-                    crate::pipeline::dbwriter::nfc_path_search(&dest_text),
-                    renamed_extension(&dest_text),
-                    p.applied_suggestion
-                ],
-            );
-            match updated {
-                Ok(1) => {
-                    succeeded += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(p.file_id),
-                        ok: true,
-                        message: Some(dest_text),
-                    });
-                }
-                Ok(changed) => {
-                    record_rename_recovery(p.file_id, &src_text, &dest_text);
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(p.file_id),
-                        ok: false,
-                        message: Some(format!(
-                            "renamed on disk but DB update affected {changed} rows (expected 1)"
-                        )),
-                    });
-                }
-                Err(err) => {
-                    record_rename_recovery(p.file_id, &src_text, &dest_text);
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(p.file_id),
-                        ok: false,
-                        message: Some(format!("renamed on disk but DB update failed: {err}")),
-                    });
-                }
-            }
-        }
-        Ok(BulkActionResult {
-            action: "renameFiles".into(),
-            succeeded,
-            failed,
-            messages,
-        })
+        Ok(rename_files_blocking(&db, &payload, &no_clobber_rename_bound))
     })
     .await;
 
@@ -3476,6 +3618,115 @@ mod tests {
         assert_eq!(path_of(2), directory.join("b.txt").to_string_lossy());
         assert_eq!(path_of(3), directory.join("c2.txt").to_string_lossy());
         assert!(directory.join("a2.txt").exists() && directory.join("b.txt").exists());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    fn rename_fixture(tag: &str, files: &[(i64, &str)]) -> (PathBuf, parking_lot::Mutex<rusqlite::Connection>) {
+        let directory = std::env::temp_dir().join(format!(
+            "fileid-rename-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for (id, name) in files {
+            let path = directory.join(name);
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            let file_ref = crate::platform::file_identity(&path).unwrap().file as i64;
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref) \
+                 VALUES(?1,?2,?1,5,0,'image','jpg',?3)",
+                rusqlite::params![id, path.to_string_lossy(), file_ref],
+            )
+            .unwrap();
+        }
+        (directory, parking_lot::Mutex::new(conn))
+    }
+
+    fn renames(entries: &[(i64, &str)]) -> ipc::RenameFilesPayload {
+        ipc::RenameFilesPayload {
+            renames: entries
+                .iter()
+                .map(|(file_id, new_name)| ipc::RenameEntry { file_id: *file_id, new_name: (*new_name).into() })
+                .collect(),
+        }
+    }
+
+    fn listed(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn message_of(result: &BulkActionResult, file_id: i64) -> (bool, String) {
+        let item = result.messages.iter().find(|item| item.file_id == Some(file_id)).unwrap();
+        (item.ok, item.message.clone().unwrap_or_default())
+    }
+
+    #[test]
+    fn uncatalogued_sidecars_follow_a_complete_group_and_come_back_on_undo() {
+        let (directory, db) =
+            rename_fixture("sidecars", &[(1, "IMG_1.JPG"), (2, "IMG_1.ARW"), (3, "IMG_2.JPG"), (4, "IMG_9.JPG")]);
+        for name in ["IMG_1.xmp", "IMG_1.ARW.xmp", ".IMG_1.xmp", "IMG_2.ARW", "IMG_2.xmp", "IMG_9.xmp", "taken.xmp"] {
+            std::fs::write(directory.join(name), name.as_bytes()).unwrap();
+        }
+        let result = rename_files_blocking(
+            &db,
+            &renames(&[(1, "beach.JPG"), (2, "beach.ARW"), (3, "lone.JPG"), (4, "taken.JPG")]),
+            &no_clobber_rename_bound,
+        );
+        assert_eq!((result.succeeded, result.failed), (4, 0), "{:?}", result.messages);
+        assert_eq!(
+            listed(&directory),
+            [".IMG_1.xmp", "IMG_2.ARW", "IMG_2.xmp", "IMG_9.xmp", "beach.ARW", "beach.ARW.xmp", "beach.JPG", "beach.xmp", "lone.JPG", "taken.JPG", "taken.xmp"]
+        );
+        assert_eq!(std::fs::read(directory.join("beach.xmp")).unwrap(), b"IMG_1.xmp");
+        let (ok, message) = message_of(&result, 4);
+        assert!(ok && message.ends_with("; IMG_9.xmp kept its name because taken.xmp already exists"), "{message}");
+        assert_eq!(message_of(&result, 1).1, directory.join("beach.JPG").to_string_lossy());
+
+        let undo = rename_files_blocking(&db, &renames(&[(1, "IMG_1.JPG"), (2, "IMG_1.ARW")]), &no_clobber_rename_bound);
+        assert_eq!((undo.succeeded, undo.failed), (2, 0), "{:?}", undo.messages);
+        let names = listed(&directory);
+        for name in ["IMG_1.JPG", "IMG_1.ARW", "IMG_1.xmp", "IMG_1.ARW.xmp"] {
+            assert!(names.iter().any(|listed| listed == name), "{names:?}");
+        }
+        assert!(!names.iter().any(|name| name.starts_with("beach")), "{names:?}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_failed_member_rolls_back_its_group() {
+        let (directory, db) = rename_fixture("rollback", &[(1, "IMG_5.JPG"), (2, "IMG_5.ARW"), (3, "solo.txt")]);
+        std::fs::write(directory.join("IMG_5.xmp"), b"x").unwrap();
+        let failing = |src: &std::path::Path, dst: &std::path::Path, identity| {
+            anyhow::ensure!(src.file_name() != Some(std::ffi::OsStr::new("IMG_5.ARW")), "injected failure");
+            no_clobber_rename_bound(src, dst, identity)
+        };
+        let result =
+            rename_files_blocking(&db, &renames(&[(1, "sun.JPG"), (2, "sun.ARW"), (3, "solo2.txt")]), &failing);
+        assert_eq!((result.succeeded, result.failed), (1, 2), "{:?}", result.messages);
+        assert_eq!(listed(&directory), ["IMG_5.ARW", "IMG_5.JPG", "IMG_5.xmp", "solo2.txt"]);
+        let (ok, message) = message_of(&result, 1);
+        assert!(!ok && message.contains("IMG_5.ARW couldn't be renamed (injected failure)"), "{message}");
+        let (ok, message) = message_of(&result, 2);
+        assert!(!ok && message.starts_with("rename failed: injected failure"), "{message}");
+        let path_of = |id: i64| -> String {
+            db.lock().query_row("SELECT path_text FROM files WHERE id=?1", [id], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(path_of(1), directory.join("IMG_5.JPG").to_string_lossy());
+        assert_eq!(path_of(3), directory.join("solo2.txt").to_string_lossy());
+
+        db.lock().execute("UPDATE files SET file_ref = file_ref + 1 WHERE id = 2", []).unwrap();
+        let refused =
+            rename_files_blocking(&db, &renames(&[(1, "sun.JPG"), (2, "sun.ARW")]), &no_clobber_rename_bound);
+        assert_eq!((refused.succeeded, refused.failed), (0, 2), "{:?}", refused.messages);
+        assert!(message_of(&refused, 1).1.contains("IMG_5.ARW couldn't be renamed (source was replaced"));
+        assert_eq!(listed(&directory), ["IMG_5.ARW", "IMG_5.JPG", "IMG_5.xmp", "solo2.txt"]);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

@@ -160,8 +160,12 @@ impl CatalogIndex {
         Ok(())
     }
     pub fn search(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
+        let root = match request.root_id {
+            Some(id) => crate::commands::roots::RootScope::load(&db::open_read(&self.database)?, Some(id))?,
+            None => None,
+        };
         if request.captured_from.is_none() && request.captured_to.is_none() {
-            return self.search_unfiltered(request);
+            return self.search_unfiltered(request, root.as_ref());
         }
         let from = request.captured_from.unwrap_or(0.0);
         let to = request.captured_to.unwrap_or(f64::MAX);
@@ -174,7 +178,7 @@ impl CatalogIndex {
         }
         let mut wide = request.clone();
         wide.limit = Some(100);
-        let mut response = self.search_unfiltered(&wide)?;
+        let mut response = self.search_unfiltered(&wide, root.as_ref())?;
         let conn = db::open_read(&self.database)?;
         let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
         let mut inside = std::collections::HashSet::new();
@@ -201,10 +205,12 @@ impl CatalogIndex {
                 let wanted = serde_json::to_string(&subject)?;
                 let mut more = conn.prepare(
                     "SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files
-                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3
-                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?4",
+                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3 AND {}
+                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?4"
+                        .replace("{}", &crate::commands::roots::clause("path_text", "?5"))
+                        .as_str(),
                 )?;
-                let rows = more.query_map(rusqlite::params![wanted, from, to, (limit + seen.len()) as i64], |row| {
+                let rows = more.query_map(rusqlite::params![wanted, from, to, (limit + seen.len()) as i64, root.as_ref().map(|root| root.param())], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
                 })?;
                 for row in rows {
@@ -222,7 +228,7 @@ impl CatalogIndex {
         Ok(response)
     }
 
-    fn search_unfiltered(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
+    fn search_unfiltered(self: &Arc<Self>, request: &CatalogRequest, root: Option<&crate::commands::roots::RootScope>) -> Result<CatalogResponse> {
         let (mode, query, limit, files_only) = crate::commands::catalog_search::validate(request)?;
         let retrieval_lease = if mode == "semantic" {
             None
@@ -242,7 +248,7 @@ impl CatalogIndex {
         let keyword = if mode == "semantic" {
             vec![]
         } else {
-            crate::commands::catalog::search(&tx, query, &[])?
+            crate::commands::catalog::search(&tx, query, &[], root)?
         };
         let mut response = CatalogResponse {
             request_id: request.request_id.clone(),
@@ -297,7 +303,8 @@ impl CatalogIndex {
         } else {
             None
         };
-        let mut candidates = Searcher::default().top_k(&cache.graph, &query_vector, (limit * 4 + 1).min(1000));
+        let wanted = if root.is_some() { 1000 } else { (limit * 4 + 1).min(1000) };
+        let mut candidates = Searcher::default().top_k(&cache.graph, &query_vector, wanted);
         candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
         let mut visual = Vec::new();
         let mut stmt = tx.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.id=?1 AND f.failed=0 AND e.model=?2")?;
@@ -322,6 +329,7 @@ impl CatalogIndex {
                 })
                 .optional()?;
             if let Some((hit, blob)) = found
+                && root.is_none_or(|root| root.contains(&hit.path))
                 && clip_space::digest(&blob) == entry.fingerprint && clip_space::decode(&blob).is_some() {
                     visual.push(hit);
                 }

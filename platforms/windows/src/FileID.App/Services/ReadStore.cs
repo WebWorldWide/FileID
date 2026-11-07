@@ -67,6 +67,23 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
 
     public bool IsOpen => _connection?.State == System.Data.ConnectionState.Open;
 
+    private volatile ViewModels.LibraryScope? _scope;
+
+    /// <summary>The location the Library lists, counts and pages; null for "All locations".</summary>
+    public ViewModels.LibraryScope? Scope
+    {
+        get => _scope;
+        set => _scope = value;
+    }
+
+    private static string ScopeClause(string column, ViewModels.LibraryScope? scope) =>
+        scope is null ? "" : " AND " + ViewModels.LibraryScope.Sql(column, "$scope");
+
+    private static void BindScope(SqliteCommand cmd, ViewModels.LibraryScope? scope)
+    {
+        if (scope is not null) cmd.Parameters.AddWithValue("$scope", scope.Param);
+    }
+
     public async Task OpenAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -199,6 +216,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var hasMatch = !string.IsNullOrEmpty(match);
             // PAR-116: filter kind in SQL (before LIMIT) so a kind-restricted grid fills.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+            var scope = _scope;
+            kindClause += ScopeClause("f.path_text", scope);
+            BindScope(cmd, scope);
 
             cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
@@ -230,7 +250,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             }
             cmd.Parameters.AddWithValue("$like", like);
             cmd.Parameters.AddWithValue("$limit", limit);
-            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
+            if (!string.IsNullOrEmpty(kind) && kind != "all") cmd.Parameters.AddWithValue("$kind", kind);
 
             using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
@@ -268,11 +288,14 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             // unreadable / permission-denied) don't leak into the default grid as
             // broken placeholder tiles and inflate the count-vs-grid mismatch.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND kind = $kind";
+            var scope = _scope;
+            var scopeClause = ScopeClause("path_text", scope);
+            BindScope(cmd, scope);
             cmd.CommandText = $"""
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
-                FROM files WHERE failed = 0{kindClause}
+                FROM files WHERE failed = 0{kindClause}{scopeClause}
                 ORDER BY scanned_at DESC, id DESC LIMIT $limit OFFSET $offset
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
@@ -313,6 +336,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             // kind in SQL so a kind-restricted grid isn't under-filled by the
             // post-fetch C# filter.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+            var scope = _scope;
+            var scopeClause = ScopeClause("f.path_text", scope);
+            BindScope(cmd, scope);
             cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text,
@@ -321,7 +347,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                    e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
-            WHERE f.failed = 0{kindClause}
+            WHERE f.failed = 0{kindClause}{scopeClause}
             """;
             if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -399,8 +425,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var heap = new PriorityQueue<long, float>(limit);
             using (var cmd = _connection.CreateCommand())
             {
-                cmd.CommandText = "SELECT file_id, embedding FROM clip_embeddings WHERE file_id != $seedId";
+                var scope = _scope;
+                cmd.CommandText = scope is null
+                    ? "SELECT file_id, embedding FROM clip_embeddings WHERE file_id != $seedId"
+                    : "SELECT e.file_id, e.embedding FROM clip_embeddings e JOIN files f ON f.id = e.file_id WHERE e.file_id != $seedId" + ScopeClause("f.path_text", scope);
                 cmd.Parameters.AddWithValue("$seedId", seedId);
+                BindScope(cmd, scope);
                 using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
@@ -831,7 +861,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return new Dictionary<string, int>();
             var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT kind, COUNT(*) FROM files WHERE failed = 0 GROUP BY kind";
+            var scope = _scope;
+            cmd.CommandText = "SELECT kind, COUNT(*) FROM files WHERE failed = 0" + ScopeClause("path_text", scope) + " GROUP BY kind";
+            BindScope(cmd, scope);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {

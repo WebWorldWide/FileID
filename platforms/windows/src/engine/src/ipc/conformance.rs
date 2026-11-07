@@ -449,6 +449,7 @@ pub(crate) fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {
             path: r"C:\Users\adam\Videos\clip.mp4".into(),
             modified_at: Some(1_700_000_000.0),
+            max_pixel_size: Some(512),
         }),
     ]
 }

@@ -303,7 +303,7 @@
   },
   {
     "name": "names-companions-share-one-stem",
-    "description": "proposeNames keeps companions on one stem: a RAW+JPEG pair with its .xmp, and a Live Photo HEIC+MOV, come back together, leader first (the image with the best evidence), each member with its own extension and evidenceID '<reason>|group:<leader fileID>'. A companion on disk but not in the catalog holds the whole group (unscannedCompanion). Names taken in the folder bump every member together (_2); when no shared bump is free for one member the whole group keeps its names (collision). A lone RAW and hidden tag sidecars are not grouped. renameFiles applies and undoes the group in one batch.",
+    "description": "proposeNames keeps companions on one stem: a RAW+JPEG pair with its .xmp, and a Live Photo HEIC+MOV, come back together, leader first (the image with the best evidence), each member with its own extension and evidenceID '<reason>|group:<leader fileID>'. A RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not, because renameFiles carries it along. Names taken in the folder bump every member together (_2); when no shared bump is free for one member the whole group keeps its names (collision). A lone RAW and hidden tag sidecars are not grouped. renameFiles applies and undoes the group in one batch.",
     "tree": [
       {
         "path": "pairs/DSC_0012.ARW",
@@ -357,6 +357,11 @@
           "kind": "video",
           "vlm_proposed_name": "dog running"
         }
+      },
+      {
+        "path": "live/IMG_0001.AAE",
+        "content": "IMG_0001.AAE",
+        "mtime": 1000
       },
       {
         "path": "live/IMG_0002.HEIC",

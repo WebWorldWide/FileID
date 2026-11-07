@@ -286,13 +286,14 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var limit: Int?
     public var capturedFrom: Double?
     public var capturedTo: Double?
+    public var rootID: Int64?
     public var timelineMode: String?
     public var event: CatalogEvent?
     public var eventID: String?
     public var takeFeedback: CatalogTakeFeedback?
     public var takeDecision: CatalogTakeDecision?
     public var naming: CatalogNaming?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil) {
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, rootID: Int64? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -308,6 +309,7 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.limit = limit
         self.capturedFrom = capturedFrom
         self.capturedTo = capturedTo
+        self.rootID = rootID
         self.timelineMode = timelineMode
         self.event = event
         self.eventID = eventID

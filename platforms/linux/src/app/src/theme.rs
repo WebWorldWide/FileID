@@ -386,6 +386,9 @@ popover.fileid-popover > contents {
     padding: 0;
 }
 .pop-head { padding: 10px 12px 6px 12px; }
+.pop-head-rule { border-top: 1px solid alpha(#FFFFFF, 0.14); }
+button.v3-rail.scope-row { padding: 0 10px; margin: 0; }
+.scope-check { font-size: 11px; font-weight: 600; }
 .pop-row { padding: 9px 12px; border-top: 1px solid alpha(#FFFFFF, 0.06); }
 .pop-actions { padding: 10px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.14); }
 .pop-footer { padding: 8px 10px; border-top: 1px solid alpha(#FFFFFF, 0.06); }

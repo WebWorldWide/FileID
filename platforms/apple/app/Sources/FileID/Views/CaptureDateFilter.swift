@@ -35,9 +35,9 @@ struct CaptureWindow: Equatable, Sendable {
         }
     }
 
-    func searchRequest(id: String, query: String, calendar: Calendar = .current) -> CatalogRequest {
+    func searchRequest(id: String, query: String, rootID: Int64? = nil, calendar: Calendar = .current) -> CatalogRequest {
         let window = bounds(calendar: calendar)
-        return CatalogRequest(requestID: id, action: "search", query: query, capturedFrom: window.from, capturedTo: window.to)
+        return CatalogRequest(requestID: id, action: "search", query: query, capturedFrom: window.from, capturedTo: window.to, rootID: rootID)
     }
 }
 

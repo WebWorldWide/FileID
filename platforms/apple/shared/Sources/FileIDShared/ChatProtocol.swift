@@ -16,8 +16,9 @@ public struct ChatContext: Codable, Sendable, Equatable {
     public var personIDs: [Int64]?
     public var folder: String?
     public var libraryRoot: String?
-    public init(page: String? = nil, fileIDs: [Int64]? = nil, personIDs: [Int64]? = nil, folder: String? = nil, libraryRoot: String? = nil) {
-        self.page = page; self.fileIDs = fileIDs; self.personIDs = personIDs; self.folder = folder; self.libraryRoot = libraryRoot
+    public var rootID: Int64?
+    public init(page: String? = nil, fileIDs: [Int64]? = nil, personIDs: [Int64]? = nil, folder: String? = nil, libraryRoot: String? = nil, rootID: Int64? = nil) {
+        self.page = page; self.fileIDs = fileIDs; self.personIDs = personIDs; self.folder = folder; self.libraryRoot = libraryRoot; self.rootID = rootID
     }
 }
 

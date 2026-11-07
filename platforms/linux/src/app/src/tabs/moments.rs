@@ -81,6 +81,7 @@ impl CatalogUi {
             };
             request.captured_from = from;
             request.captured_to = to;
+            request.root_id = super::library_scope::current_id();
         }
         if slot == "mutation" {
             *self.mutation_file_id.borrow_mut() = request

@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.19.0",
+  "version": "1.20.0",
 
   "$defs": {
     "IPCCommand": {
@@ -325,10 +325,11 @@
         { "type": "object", "required": ["generateVideoThumbnail"], "additionalProperties": false,
           "properties": { "generateVideoThumbnail": { "type": "object", "additionalProperties": false,
             "required": ["path"],
-            "description": "Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
+            "description": "Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never upscaled past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
             "properties": {
               "path": { "type": "string", "description": "Absolute filesystem path to the video file." },
-              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." }
+              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." },
+              "maxPixelSize": { "type": ["integer", "null"], "description": "Long side of the thumbnail in pixels (schema 1.20.0). Engines clamp it to 64-2048; omitted or null means 192. Optional." }
             } } } },
         { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
           "properties": { "restoreFromTrash": { "type": "object", "additionalProperties": false,
@@ -616,8 +617,8 @@
         "kind": { "type": "string", "enum": ["internal", "external", "network"] },
         "enabled": { "type": "boolean" },
         "online": { "type": "boolean", "description": "True when the folder exists and is not empty right now. An unplugged drive reads as offline, and its catalog rows are kept." },
-        "fileCount": { "type": "integer", "minimum": 0, "description": "Cataloged files (failed=0) under this location." },
-        "totalBytes": { "type": "integer", "minimum": 0 },
+        "fileCount": { "type": "integer", "minimum": 0, "description": "Cataloged files (failed=0) whose most specific location is this one (schema 1.20.0): a location nested inside this one counts its own files, so counts never overlap and match what rootID shows." },
+        "totalBytes": { "type": "integer", "minimum": 0, "description": "Bytes of the files counted in fileCount." },
         "lastScanAt": { "type": ["number", "null"], "description": "Unix seconds of the last finished scan." },
         "lastStatus": { "type": ["string", "null"] }
       }
@@ -1176,7 +1177,7 @@
         }
       },
       "ThumbnailGenerated": {
-        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved, long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
+        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
@@ -1512,6 +1513,7 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
         "capturedFrom": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time (created_at, else modified_at) is at or after this Unix time in seconds. Applied to the top 100 candidates." },
         "capturedTo": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time is at or before this Unix time in seconds. Must be >= capturedFrom." },
+        "rootID": { "type": "integer", "minimum": 1, "description": "Search only (schema 1.20.0): keep files whose most specific library location (a listRoots id) is this one: the location's path or anything under it, never a sibling that shares its prefix (/Camera never matches /Camera2) and never a deeper location of its own. Applied before the 100-candidate cut, the capture window and the subject fill. An unknown id is an error." },
         "requestID": {
           "type": "string"
         },
@@ -1542,7 +1544,7 @@
             "decideTakeGroup",
             "proposeNames"
           ],
-          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a companion on disk but not in the catalog holds the whole group (unscannedCompanion). Apply with renameFiles, every member in one batch."
+          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed."
         },
         "query": {
           "type": "string",
@@ -1746,7 +1748,8 @@
         "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
         "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
         "folder": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 }
+        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "rootID": { "type": "integer", "minimum": 1, "description": "Schema 1.20.0: the library location (a listRoots id) the app is scoped to. Every search, count and list in the answer, and the files a proposed action covers, keep only files of that location by the CatalogRequest.rootID rule. Omitted means every location. An unknown id is an error." }
       }
     },
     "ChatPage": {
@@ -1866,8 +1869,14 @@
           "enum": [
             "photo",
             "chapters",
-            "video"
-          ]
+            "video",
+            "trim",
+            "remux",
+            "audio",
+            "proxy",
+            "rotate"
+          ],
+          "description": "trim, remux, audio, proxy and rotate are the common-media recipes (schema 1.20.0). trim keeps trimStartSeconds..trimEndSeconds as MP4 or MOV. remux moves H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. audio writes the single audio track as AAC in M4A. proxy writes a small H.264/AAC MP4 linked to its source with the catalog role proxy. rotate changes the display orientation by rotationDegrees without re-encoding. Every output is reopened and checked for streams, duration, audio/video sync and orientation before publication. An engine that cannot perform a recipe faithfully must refuse it before creating any output, never substitute a different operation."
         },
         "format": {
           "type": "string",
@@ -1877,13 +1886,36 @@
             "tiff",
             "json",
             "vtt",
-            "mp4"
+            "mp4",
+            "mov",
+            "m4a"
           ]
         },
         "maxDimension": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8192
+          "maximum": 8192,
+          "description": "Longest output side in pixels. proxy accepts 640 or 960. trim, remux, audio and rotate do not resize and ignore this value."
+        },
+        "trimStartSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "For trim only (schema 1.20.0). Start of the kept interval in source seconds."
+        },
+        "trimEndSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "For trim only (schema 1.20.0). End of the kept interval in source seconds; at least 0.1 seconds after trimStartSeconds and no later than the source end."
+        },
+        "trimMode": {
+          "type": "string",
+          "enum": ["keyframe", "exact"],
+          "description": "For trim only (schema 1.20.0); required. keyframe copies streams without re-encoding, so the output may begin at the keyframe at or before trimStartSeconds. exact re-encodes to H.264/AAC MP4 for a frame-accurate cut and refuses HDR sources."
+        },
+        "rotationDegrees": {
+          "type": "integer",
+          "enum": [90, 180, 270],
+          "description": "For rotate only (schema 1.20.0); required. Clockwise rotation added to the displayed picture. Streams are copied; only the orientation matrix changes."
         },
         "allowUpscale": {
           "type": "boolean",

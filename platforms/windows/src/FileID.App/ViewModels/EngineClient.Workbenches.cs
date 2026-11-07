@@ -124,7 +124,10 @@ internal sealed partial class EngineClient
     public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, CancellationToken ct = default) =>
         await CatalogSearchAsync(query, mode, null, null, ct).ConfigureAwait(false);
 
-    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, double? capturedFrom, double? capturedTo, CancellationToken ct = default)
+    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, double? capturedFrom, double? capturedTo, CancellationToken ct = default) =>
+        await CatalogSearchAsync(query, mode, capturedFrom, capturedTo, null, ct).ConfigureAwait(false);
+
+    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, double? capturedFrom, double? capturedTo, long? rootId, CancellationToken ct = default)
     {
         await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         var generation = SpawnGeneration;
@@ -138,7 +141,7 @@ internal sealed partial class EngineClient
                 throw new InvalidOperationException("The engine changed while embedding this query. Retry, or use keyword search.");
             vector = embedding.Embedding;
         }
-        var request = CatalogEmbeddingSpace.SearchRequest(query, mode, vector, capturedFrom, capturedTo);
+        var request = CatalogEmbeddingSpace.SearchRequest(query, mode, vector, capturedFrom, capturedTo, rootId);
         return await CatalogAsync(request, ct).ConfigureAwait(false);
     }
 

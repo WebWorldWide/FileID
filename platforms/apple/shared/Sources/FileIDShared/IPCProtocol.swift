@@ -106,11 +106,12 @@ public struct IPCCommand: Codable, Sendable {
         case markPersonsAsUnknown(personIDs: [Int64])
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)
-        /// Generate a 192px JPEG thumbnail for a video on demand; the engine
+        /// Generate a JPEG thumbnail for a video on demand; the engine
         /// replies with a `thumbnailGenerated` event, or with nothing when the
         /// video can't be decoded. `modifiedAt` (optional) is echoed on the
-        /// reply for cache keying.
-        case generateVideoThumbnail(path: String, modifiedAt: Double?)
+        /// reply for cache keying. `maxPixelSize` is the long side, clamped to
+        /// 64–2048; nil means 192.
+        case generateVideoThumbnail(path: String, modifiedAt: Double?, maxPixelSize: Int? = nil)
         case restoreFromTrash(batchID: String)
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
         /// Record a user "different people" verdict for a suggested pair so
@@ -1119,8 +1120,9 @@ public struct LibraryWiped: Codable, Sendable {
     }
 }
 
-/// Reply to `generateVideoThumbnail`. `bytes` is a base64-encoded 192px JPEG
-/// (aspect-preserved, long side = 192) — a base64 String, NOT a number array.
+/// Reply to `generateVideoThumbnail`. `bytes` is a base64-encoded JPEG
+/// (aspect-preserved, long side = the requested size, 192 by default) — a
+/// base64 String, NOT a number array.
 public struct ThumbnailGenerated: Codable, Sendable {
     public let path: String
     public let modifiedAt: Double?

@@ -1055,9 +1055,9 @@ struct FileIDEngineMain {
             Task.detached(priority: .userInitiated) {
                 await sink.emit(await QueryCommands.imageEmbedding(database: database, fileID: fileID, queryID: queryID))
             }
-        case .generateVideoThumbnail(let path, let modifiedAt):
+        case .generateVideoThumbnail(let path, let modifiedAt, let maxPixelSize):
             Task.detached(priority: .utility) {
-                if let event = await QueryCommands.videoThumbnail(path: path, modifiedAt: modifiedAt) {
+                if let event = await QueryCommands.videoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: maxPixelSize) {
                     await sink.emit(event)
                 }
             }
@@ -1147,11 +1147,27 @@ struct FileIDEngineMain {
         }
     }
 
+    struct PlannedRename: Sendable {
+        let slot: Int
+        let fileID: Int64
+        let oldURL: URL
+        let newURL: URL
+        let newName: String
+        var sidecars: [(url: URL, suffix: String)] = []
+    }
+
     static func renameFiles(database: Database, renames: [RenameEntry]) async -> BulkActionResult {
+        await renameFiles(database: database, renames: renames) { try FileManager.default.moveItem(at: $0, to: $1) }
+    }
+
+    /// Renames each file in place. Companions in the batch (same folder, same
+    /// stem, at least one RAW, JPEG/HEIC or MOV) move together: when one member
+    /// can't be renamed, the members already moved are put back and the whole
+    /// group is reported failed. Uncatalogued `.xmp`/`.aae` sidecars follow.
+    static func renameFiles(database: Database, renames: [RenameEntry], move: (URL, URL) throws -> Void) async -> BulkActionResult {
         SleepGuard.shared.begin(reason: "Bulk rename")
         defer { SleepGuard.shared.end() }
-        var messages: [BulkActionItem] = []
-        var states: [Int64: BulkFileState]
+        let states: [Int64: BulkFileState]
         do {
             states = try await fetchBulkStates(database: database,
                                                fileIDs: renames.map(\.fileID))
@@ -1160,57 +1176,208 @@ struct FileIDEngineMain {
                 action: "renameFiles", succeeded: 0, failed: renames.count,
                 messages: renames.map { item($0.fileID, ok: false, error.localizedDescription) })
         }
-        for rename in renames {
-            let trimmed = rename.newName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("\0") else {
-                messages.append(item(rename.fileID, ok: false, "Invalid filename."))
-                continue
-            }
-            guard let state = states[rename.fileID] else {
-                messages.append(item(rename.fileID, ok: false, "File row not found."))
-                continue
-            }
-            let oldURL = URL(fileURLWithPath: state.path)
-            guard state.fileRef != nil else {
-                messages.append(item(rename.fileID, ok: false, "Source identity is unavailable; rescan before renaming."))
-                continue
-            }
-            guard !Restructure.fileRefSwapped(
-                dbRef: state.fileRef, currentRef: Discovery.inode(of: oldURL)) else {
-                messages.append(item(rename.fileID, ok: false, "File changed since it was indexed."))
-                continue
-            }
-            let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
-            guard newURL.path != oldURL.path, !FileManager.default.fileExists(atPath: newURL.path)
-                    || isCaseOnlyRename(from: oldURL, to: newURL) else {
-                messages.append(item(rename.fileID, ok: false, "Destination already exists."))
-                continue
-            }
-            do {
-                try ReadOnlyLocations.requireSourceMutation(oldURL)
-                try ReadOnlyLocations.requireSourceMutation(newURL)
-                let intent = PathMoveJournal.begin(fileID: rename.fileID, from: state.path, to: newURL.path, fileRef: Discovery.inode(of: oldURL))
-                defer { PathMoveJournal.finish(intent) }
-                try FileManager.default.moveItem(at: oldURL, to: newURL)
-                let oldExtension = oldURL.pathExtension
-                try await database.pool.write { db in
-                    try PathMoveJournal.updatePath(db, fileID: rename.fileID, from: state.path, to: newURL.path)
-                    guard db.changesCount == 1 else {
-                        throw CocoaError(.fileWriteUnknown)
-                    }
-                    if let proposed = try String.fetchOne(db, sql: "SELECT vlm_proposed_name FROM files WHERE id = ?", arguments: [rename.fileID]),
-                       appliesProposedName(proposed, newName: trimmed, originalExtension: oldExtension) {
-                        try db.execute(sql: "UPDATE files SET vlm_proposed_name = NULL WHERE id = ?", arguments: [rename.fileID])
-                    }
-                }
-                states[rename.fileID] = BulkFileState(
-                    path: newURL.path, fileRef: state.fileRef)
-                messages.append(item(rename.fileID, ok: true))
-            } catch {
-                messages.append(item(rename.fileID, ok: false, error.localizedDescription))
+        var results = [BulkActionItem?](repeating: nil, count: renames.count)
+        var planned: [PlannedRename] = []
+        var rejected: [(url: URL, reason: String)] = []
+        for (slot, rename) in renames.enumerated() {
+            switch planRename(rename, slot: slot, state: states[rename.fileID]) {
+            case .success(let plan): planned.append(plan)
+            case .failure(let refusal):
+                results[slot] = item(rename.fileID, ok: false, refusal.message)
+                if let state = states[rename.fileID] { rejected.append((URL(fileURLWithPath: state.path), refusal.message)) }
             }
         }
+
+        var counts: [SmartNameStyle.Key: (count: Int, primary: Bool)] = [:]
+        for url in planned.map(\.oldURL) + rejected.map(\.url) {
+            guard let (key, primary) = companionKey(url) else { continue }
+            let known = counts[key] ?? (0, false)
+            counts[key] = (known.count + 1, known.primary || primary)
+        }
+        let stems = counts
+        func groupOf(_ url: URL) -> SmartNameStyle.Key? {
+            guard let key = companionKey(url)?.key, let stem = stems[key], stem.count >= 2, stem.primary else { return nil }
+            return key
+        }
+        var blocked: [SmartNameStyle.Key: String] = [:]
+        for (url, reason) in rejected {
+            if let key = groupOf(url), blocked[key] == nil {
+                blocked[key] = "Not renamed: \(url.lastPathComponent) couldn't be renamed, so the group keeps its names. \(reason)"
+            }
+        }
+        planned.removeAll { plan in
+            guard let key = groupOf(plan.oldURL), let why = blocked[key] else { return false }
+            results[plan.slot] = item(plan.fileID, ok: false, why)
+            return true
+        }
+        await planFollowingSidecars(database: database, planned: &planned)
+
+        var units: [[Int]] = []
+        var unitOf: [SmartNameStyle.Key: Int] = [:]
+        for (index, plan) in planned.enumerated() {
+            guard let key = groupOf(plan.oldURL) else { units.append([index]); continue }
+            if let unit = unitOf[key] { units[unit].append(index) } else { unitOf[key] = units.count; units.append([index]) }
+        }
+        for unit in units {
+            var moved: [(index: Int, intent: String)] = []
+            var failure: (index: Int, message: String)?
+            for index in unit {
+                do { moved.append((index, try moveRenamed(planned[index], move: move))) } catch {
+                    failure = (index, (error as? BulkRefusal)?.message ?? error.localizedDescription)
+                    break
+                }
+            }
+            guard let failure else {
+                for (index, intent) in moved {
+                    results[planned[index].slot] = await commitRename(database: database, planned[index], intent: intent, notes: [], followSidecars: true)
+                }
+                continue
+            }
+            let bad = planned[failure.index]
+            results[bad.slot] = item(bad.fileID, ok: false, unit.count > 1 ? "\(failure.message) The group keeps its names." : failure.message)
+            let why = "Not renamed: \(bad.oldURL.lastPathComponent) couldn't be renamed, so the group keeps its names. \(failure.message)"
+            for (index, intent) in moved.reversed() {
+                let plan = planned[index]
+                do {
+                    try FileManager.default.moveItem(at: plan.newURL, to: plan.oldURL)
+                    PathMoveJournal.finish(intent)
+                    results[plan.slot] = item(plan.fileID, ok: false, why)
+                } catch {
+                    let note = "Couldn't be put back after \(bad.oldURL.lastPathComponent) failed: \(error.localizedDescription)"
+                    results[plan.slot] = await commitRename(database: database, plan, intent: intent, notes: [note], followSidecars: false)
+                }
+            }
+            for index in unit where results[planned[index].slot] == nil {
+                results[planned[index].slot] = item(planned[index].fileID, ok: false, why)
+            }
+        }
+        let messages = results.compactMap { $0 }
         return BulkActionResult(action: "renameFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    static func planRename(_ rename: RenameEntry, slot: Int, state: BulkFileState?) -> Result<PlannedRename, BulkRefusal> {
+        let trimmed = rename.newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("\0") else { return .failure(BulkRefusal("Invalid filename.")) }
+        guard let state else { return .failure(BulkRefusal("File row not found.")) }
+        let oldURL = URL(fileURLWithPath: state.path)
+        guard state.fileRef != nil else { return .failure(BulkRefusal("Source identity is unavailable; rescan before renaming.")) }
+        guard !Restructure.fileRefSwapped(dbRef: state.fileRef, currentRef: Discovery.inode(of: oldURL)) else {
+            return .failure(BulkRefusal("File changed since it was indexed."))
+        }
+        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
+        guard newURL.path != oldURL.path else { return .failure(BulkRefusal("Destination already exists.")) }
+        return .success(PlannedRename(slot: slot, fileID: rename.fileID, oldURL: oldURL, newURL: newURL, newName: trimmed))
+    }
+
+    /// Same folder and same lowercased companion stem, plus whether the file is
+    /// a RAW, JPEG/HEIC or MOV rather than an `.xmp`/`.aae` sidecar.
+    static func companionKey(_ url: URL) -> (key: SmartNameStyle.Key, primary: Bool)? {
+        guard let parts = SmartNameCompanions.base(url.lastPathComponent) else { return nil }
+        return (SmartNameStyle.key(url.deletingLastPathComponent().path + "\u{0}" + SmartNameStyle.lower(parts.stem)), parts.role != .sidecar)
+    }
+
+    /// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see
+    /// `SmartNameCompanions.followingSidecars`). Each folder is read once.
+    static func planFollowingSidecars(database: Database, planned: inout [PlannedRename]) async {
+        var folders: [(dir: URL, members: [Int])] = []
+        var folderIndex: [String: Int] = [:]
+        for (index, plan) in planned.enumerated() {
+            let dir = plan.oldURL.deletingLastPathComponent()
+            if let at = folderIndex[dir.path] { folders[at].members.append(index) } else {
+                folderIndex[dir.path] = folders.count
+                folders.append((dir, [index]))
+            }
+        }
+        var candidates: [(owner: Int, url: URL, suffix: String)] = []
+        for folder in folders {
+            let names = folder.members.map { planned[$0].oldURL.lastPathComponent }
+            guard names.contains(where: { SmartNameCompanions.base($0).map { $0.role != .sidecar } ?? false }),
+                  let listing = try? FileManager.default.contentsOfDirectory(atPath: folder.dir.path) else { continue }
+            for found in SmartNameCompanions.followingSidecars(planned: names, listing: listing) {
+                let url = folder.dir.appendingPathComponent(found.name)
+                var info = stat()
+                guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { continue }
+                candidates.append((folder.members[found.owner], url, found.suffix))
+            }
+        }
+        guard !candidates.isEmpty else { return }
+        let paths = candidates.map(\.url.path)
+        guard let catalogued = try? await database.pool.read({ db in
+            Set(try String.fetchAll(db, sql: "SELECT path_text FROM files WHERE path_text IN (\(paths.map { _ in "?" }.joined(separator: ",")))",
+                                    arguments: StatementArguments(paths)))
+        }) else { return }
+        for candidate in candidates where !catalogued.contains(candidate.url.path) {
+            planned[candidate.owner].sidecars.append((candidate.url, candidate.suffix))
+        }
+    }
+
+    static func moveRenamed(_ plan: PlannedRename, move: (URL, URL) throws -> Void) throws -> String {
+        guard !FileManager.default.fileExists(atPath: plan.newURL.path) || isCaseOnlyRename(from: plan.oldURL, to: plan.newURL) else {
+            throw BulkRefusal("Destination already exists.")
+        }
+        try ReadOnlyLocations.requireSourceMutation(plan.oldURL)
+        try ReadOnlyLocations.requireSourceMutation(plan.newURL)
+        let intent = PathMoveJournal.begin(fileID: plan.fileID, from: plan.oldURL.path, to: plan.newURL.path, fileRef: Discovery.inode(of: plan.oldURL))
+        do { try move(plan.oldURL, plan.newURL) } catch {
+            PathMoveJournal.finish(intent)
+            throw error
+        }
+        return intent
+    }
+
+    static func commitRename(database: Database, _ plan: PlannedRename, intent: String, notes: [String], followSidecars: Bool) async -> BulkActionItem {
+        defer { PathMoveJournal.finish(intent) }
+        let notes = notes + (followSidecars ? moveFollowingSidecars(plan) : [])
+        let note = notes.isEmpty ? nil : notes.joined(separator: " ")
+        let (fileID, from, to, newName, oldExtension) = (plan.fileID, plan.oldURL.path, plan.newURL.path, plan.newName, plan.oldURL.pathExtension)
+        do {
+            try await database.pool.write { db in
+                try PathMoveJournal.updatePath(db, fileID: fileID, from: from, to: to)
+                guard db.changesCount == 1 else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                if let proposed = try String.fetchOne(db, sql: "SELECT vlm_proposed_name FROM files WHERE id = ?", arguments: [fileID]),
+                   appliesProposedName(proposed, newName: newName, originalExtension: oldExtension) {
+                    try db.execute(sql: "UPDATE files SET vlm_proposed_name = NULL WHERE id = ?", arguments: [fileID])
+                }
+            }
+            return item(fileID, ok: true, note)
+        } catch {
+            return item(fileID, ok: false, [error.localizedDescription, note].compactMap { $0 }.joined(separator: " "))
+        }
+    }
+
+    /// Moves each sidecar planned for `plan` to `<new stem><its old suffix>`.
+    /// Best-effort: an occupied target or an error leaves it in place and returns a note.
+    static func moveFollowingSidecars(_ plan: PlannedRename) -> [String] {
+        let stem = SmartNameStyle.splitName(plan.newURL.lastPathComponent).stem
+        let dir = plan.newURL.deletingLastPathComponent()
+        var notes: [String] = []
+        for sidecar in plan.sidecars {
+            let target = dir.appendingPathComponent(stem + sidecar.suffix)
+            guard target.path != sidecar.url.path else { continue }
+            let (old, new) = (sidecar.url.lastPathComponent, target.lastPathComponent)
+            do {
+                try ReadOnlyLocations.requireSourceMutation(sidecar.url)
+                try ReadOnlyLocations.requireSourceMutation(target)
+                try renameNoReplace(sidecar.url, target)
+            } catch let error as POSIXError where error.code == .EEXIST {
+                notes.append("\(old) kept its name because \(new) already exists.")
+            } catch {
+                notes.append("\(old) kept its name: \(error.localizedDescription)")
+            }
+        }
+        return notes
+    }
+
+    /// `rename` that never replaces an existing file; volumes without
+    /// RENAME_EXCL (exFAT, SMB) fall back to a checked move.
+    static func renameNoReplace(_ source: URL, _ target: URL) throws {
+        if renamex_np(source.path, target.path, UInt32(RENAME_EXCL)) == 0 { return }
+        let code = errno
+        guard code == ENOTSUP || code == EINVAL else { throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
+        guard !FileManager.default.fileExists(atPath: target.path) || isCaseOnlyRename(from: source, to: target) else { throw POSIXError(.EEXIST) }
+        try FileManager.default.moveItem(at: source, to: target)
     }
 
     /// On a case-insensitive volume the destination of `Beach.jpg → beach.jpg`

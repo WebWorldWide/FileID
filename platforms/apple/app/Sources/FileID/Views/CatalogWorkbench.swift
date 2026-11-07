@@ -109,6 +109,7 @@ struct CatalogWorkbench: View {
                 DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
                 CaptureDateFilter(window: $captureWindow)
                     .onChange(of: captureWindow) { _, _ in search() }
+                    .onChange(of: store?.scopeEpoch ?? 0) { _, _ in search() }
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
@@ -486,7 +487,7 @@ struct CatalogWorkbench: View {
 
     private func search() {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        send(captureWindow.searchRequest(id: UUID().uuidString, query: query))
+        send(captureWindow.searchRequest(id: UUID().uuidString, query: query, rootID: store?.scope?.root.id))
     }
 
     private func send(_ request: CatalogRequest) {

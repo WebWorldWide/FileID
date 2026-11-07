@@ -96,9 +96,10 @@ pub enum CommandPayload {
     MarkPersonsDifferent(MarkPersonsDifferentPayload),
     #[serde(rename = "embedImageQuery")]
     EmbedImageQuery(EmbedImageQueryPayload),
-    /// Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration
-    /// keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and
-    /// replies with a thumbnailGenerated event.
+    /// Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
+    /// resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never
+    /// upscaled past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated
+    /// event.
     #[serde(rename = "generateVideoThumbnail")]
     GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
     #[serde(rename = "restoreFromTrash")]
@@ -208,9 +209,10 @@ pub enum EventPayload {
     /// failure so the app can fall back to its own wipe path.
     #[serde(rename = "libraryWiped")]
     LibraryWiped(Wrap<LibraryWiped>),
-    /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved,
-    /// long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the
-    /// request so the app can write the bytes under its (path, modifiedAt) cache key.
+    /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long
+    /// side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array.
+    /// `modifiedAt` is echoed from the request so the app can write the bytes under its (path,
+    /// modifiedAt) cache key.
     #[serde(rename = "thumbnailGenerated")]
     ThumbnailGenerated(Wrap<ThumbnailGenerated>),
     #[serde(rename = "catalogResponse")]
@@ -264,9 +266,35 @@ pub struct ToolRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolRecipe {
+    /// trim, remux, audio, proxy and rotate are the common-media recipes (schema 1.20.0). trim
+    /// keeps trimStartSeconds..trimEndSeconds as MP4 or MOV. remux moves H.264/HEVC video and AAC
+    /// audio between MP4 and MOV without re-encoding. audio writes the single audio track as AAC in
+    /// M4A. proxy writes a small H.264/AAC MP4 linked to its source with the catalog role proxy.
+    /// rotate changes the display orientation by rotationDegrees without re-encoding. Every output
+    /// is reopened and checked for streams, duration, audio/video sync and orientation before
+    /// publication. An engine that cannot perform a recipe faithfully must refuse it before
+    /// creating any output, never substitute a different operation.
     pub kind: String,
     pub format: String,
+    /// Longest output side in pixels. proxy accepts 640 or 960. trim, remux, audio and rotate do
+    /// not resize and ignore this value.
     pub max_dimension: u32,
+    /// For trim only (schema 1.20.0). Start of the kept interval in source seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_start_seconds: Option<f64>,
+    /// For trim only (schema 1.20.0). End of the kept interval in source seconds; at least 0.1
+    /// seconds after trimStartSeconds and no later than the source end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_end_seconds: Option<f64>,
+    /// For trim only (schema 1.20.0); required. keyframe copies streams without re-encoding, so the
+    /// output may begin at the keyframe at or before trimStartSeconds. exact re-encodes to
+    /// H.264/AAC MP4 for a frame-accurate cut and refuses HDR sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_mode: Option<String>,
+    /// For rotate only (schema 1.20.0); required. Clockwise rotation added to the displayed
+    /// picture. Streams are copied; only the orientation matrix changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_degrees: Option<u32>,
     /// For photo or video conversion. True permits conventional enlargement to the requested
     /// maximum dimension. This increases pixels without recovering detail; it is not AI
     /// super-resolution.
@@ -596,9 +624,9 @@ pub struct EmbedImageQueryPayload {
     pub query_id: String,
 }
 
-/// Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
-/// resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a
-/// thumbnailGenerated event.
+/// Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
+/// resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never upscaled
+/// past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateVideoThumbnailPayload {
@@ -608,6 +636,10 @@ pub struct GenerateVideoThumbnailPayload {
     /// (path, modifiedAt) thumbnail cache. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<f64>,
+    /// Long side of the thumbnail in pixels (schema 1.20.0). Engines clamp it to 64-2048; omitted
+    /// or null means 192. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pixel_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,9 +689,12 @@ pub struct CatalogRequest {
     /// come back together, catalogued members added even when not requested, leader first (the
     /// member with the best evidence, preferring the image), each with its own extension and
     /// evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump
-    /// is free every member keeps its name (collision), and a companion on disk but not in the
-    /// catalog holds the whole group (unscannedCompanion). Apply with renameFiles, every member in
-    /// one batch.
+    /// is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on
+    /// disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued
+    /// .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles
+    /// carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that
+    /// stem in the folder is in the batch, and when one member of a group fails it puts the others
+    /// back and reports the whole group failed.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -691,6 +726,13 @@ pub struct CatalogRequest {
     /// be >= capturedFrom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_to: Option<f64>,
+    /// Search only (schema 1.20.0): keep files whose most specific library location (a listRoots
+    /// id) is this one: the location's path or anything under it, never a sibling that shares its
+    /// prefix (/Camera never matches /Camera2) and never a deeper location of its own. Applied
+    /// before the 100-candidate cut, the capture window and the subject fill. An unknown id is an
+    /// error.
+    #[serde(rename = "rootID", default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<CatalogEvent>,
     #[serde(rename = "eventID", default, skip_serializing_if = "Option::is_none")]
@@ -824,6 +866,12 @@ pub struct ChatContext {
     pub folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_root: Option<String>,
+    /// Schema 1.20.0: the library location (a listRoots id) the app is scoped to. Every search,
+    /// count and list in the answer, and the files a proposed action covers, keep only files of
+    /// that location by the CatalogRequest.rootID rule. Omitted means every location. An unknown id
+    /// is an error.
+    #[serde(rename = "rootID", default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<i64>,
 }
 
 /// Move one face to another person, or to a new person when createNewPerson is true. Replies with a
@@ -954,8 +1002,11 @@ pub struct LibraryRoot {
     /// True when the folder exists and is not empty right now. An unplugged drive reads as offline,
     /// and its catalog rows are kept.
     pub online: bool,
-    /// Cataloged files (failed=0) under this location.
+    /// Cataloged files (failed=0) whose most specific location is this one (schema 1.20.0): a
+    /// location nested inside this one counts its own files, so counts never overlap and match what
+    /// rootID shows.
     pub file_count: i64,
+    /// Bytes of the files counted in fileCount.
     pub total_bytes: i64,
     /// Unix seconds of the last finished scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]

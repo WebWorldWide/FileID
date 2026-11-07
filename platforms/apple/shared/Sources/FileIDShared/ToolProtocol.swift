@@ -8,8 +8,13 @@ public struct ToolRecipe: Codable, Sendable, Equatable {
     public var videoAspectRatio: String?
     public var videoFraming: String?
     public var videoStabilization: Bool?
-    public init(kind: String, format: String, maxDimension: Int = 4096, allowUpscale: Bool? = nil, videoAspectRatio: String? = nil, videoFraming: String? = nil, videoStabilization: Bool? = nil) {
+    public var trimStartSeconds: Double?
+    public var trimEndSeconds: Double?
+    public var trimMode: String?
+    public var rotationDegrees: Int?
+    public init(kind: String, format: String, maxDimension: Int = 4096, allowUpscale: Bool? = nil, videoAspectRatio: String? = nil, videoFraming: String? = nil, videoStabilization: Bool? = nil, trimStartSeconds: Double? = nil, trimEndSeconds: Double? = nil, trimMode: String? = nil, rotationDegrees: Int? = nil) {
         self.kind = kind; self.format = format; self.maxDimension = maxDimension; self.allowUpscale = allowUpscale; self.videoAspectRatio = videoAspectRatio; self.videoFraming = videoFraming; self.videoStabilization = videoStabilization
+        self.trimStartSeconds = trimStartSeconds; self.trimEndSeconds = trimEndSeconds; self.trimMode = trimMode; self.rotationDegrees = rotationDegrees
     }
 }
 

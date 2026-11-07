@@ -232,6 +232,18 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     };
 
     let pills = build_pills(kind_filter.clone(), reload.clone());
+    {
+        let shown = Cell::new(super::library_scope::current_id());
+        let reload = Rc::downgrade(&reload);
+        super::library_scope::subscribe(Rc::new(move || {
+            let now = super::library_scope::current_id();
+            if shown.replace(now) != now
+                && let Some(reload) = reload.upgrade()
+            {
+                reload();
+            }
+        }));
+    }
 
     let action_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -277,6 +289,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             let current = generation.get().wrapping_add(1);
             generation.set(current);
             let rx = offline_roots::read();
+            super::library_scope::refresh();
             let (generation, offline, pane) = (generation.clone(), offline.clone(), pane.clone());
             glib::MainContext::default().spawn_local(async move {
                 let Ok(roots) = rx.recv().await else { return };
@@ -378,7 +391,7 @@ fn load_more(ctx: &Rc<ReloadCtx>) {
         offset,
         ..QuerySpec::default()
     };
-    let rx = ctx.engine.borrow().query_files(spec);
+    let rx = super::library_scope::query_files(&ctx.engine, spec);
     let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = rx.recv().await;
@@ -448,7 +461,7 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
     ctx.has_more.set(false);
     let searched = spec.search.trim().to_string();
     let filtered = !searched.is_empty() || spec.kind.is_some();
-    let rx = ctx.engine.borrow().query_files(spec);
+    let rx = super::library_scope::query_files(&ctx.engine, spec);
     let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = rx.recv().await;

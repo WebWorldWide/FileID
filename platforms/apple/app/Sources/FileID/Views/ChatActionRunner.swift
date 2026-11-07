@@ -18,6 +18,7 @@ final class ChatHandoff {
     var momentsQuery: String?
     var activeTab: MainWindow.Tab = .library
     var libraryRoot: URL?
+    var rootID: Int64?
     @ObservationIgnored var navigate: (MainWindow.Tab) -> Void = { _ in }
     @ObservationIgnored var chooseFolder: (URL) -> Void = { _ in }
     @ObservationIgnored var store: ReadStore?
@@ -38,7 +39,7 @@ final class ChatHandoff {
         return ChatContext(page: page,
                            fileIDs: selectedFileIDs.isEmpty ? nil : Array(selectedFileIDs.prefix(10_000)),
                            personIDs: selectedPersonIDs.isEmpty ? nil : Array(selectedPersonIDs.prefix(50)),
-                           folder: libraryRoot?.path, libraryRoot: libraryRoot?.path)
+                           folder: libraryRoot?.path, libraryRoot: libraryRoot?.path, rootID: rootID)
     }
 
     static func tab(for page: String) -> MainWindow.Tab {

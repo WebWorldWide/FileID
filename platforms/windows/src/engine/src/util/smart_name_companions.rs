@@ -33,7 +33,7 @@ pub fn role(extension: &str) -> Option<Role> {
     }
 }
 
-fn base(name: &str) -> Option<(String, String, Role)> {
+pub fn base(name: &str) -> Option<(String, String, Role)> {
     if name.starts_with('.') {
         return None;
     }
@@ -102,6 +102,45 @@ pub fn shared_names(
     })
 }
 
+/// Sidecars in `listing` that follow a rename of a `planned` RAW, JPEG/HEIC or
+/// MOV: `<stem>.xmp`/`.aae` or `<name>.xmp` (extension in any case), not hidden
+/// and not planned themselves. One is kept only when every same-stem RAW,
+/// JPEG/HEIC or MOV in the folder is planned, and goes to the first planned
+/// member with that stem as `(planned index, sidecar name, suffix after the stem)`.
+pub fn following_sidecars(planned: &[String], listing: &[String]) -> Vec<(usize, String, String)> {
+    let planned_names: HashSet<&str> = planned.iter().map(String::as_str).collect();
+    let primary = |name: &str| base(name).filter(|(_, _, role)| *role != Role::Sidecar).map(|(stem, _, _)| stem);
+    let mut taken: HashSet<&str> = HashSet::new();
+    let mut found = Vec::new();
+    for (index, name) in planned.iter().enumerate() {
+        let Some(stem) = primary(name) else { continue };
+        let key = lower(&stem);
+        let complete = listing
+            .iter()
+            .all(|other| planned_names.contains(other.as_str()) || primary(other).is_none_or(|other| lower(&other) != key));
+        if !complete {
+            continue;
+        }
+        let owner = planned.iter().position(|other| primary(other).as_deref() == Some(stem.as_str())).unwrap_or(index);
+        let named = |candidate: &str, prefix: &str, extensions: &[&str]| {
+            candidate
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|extension| extensions.iter().any(|allowed| extension.eq_ignore_ascii_case(allowed)))
+        };
+        for candidate in listing {
+            if candidate.starts_with('.') || planned_names.contains(candidate.as_str()) || taken.contains(candidate.as_str()) {
+                continue;
+            }
+            if named(candidate, &stem, &["xmp", "aae"]) || named(candidate, name, &["xmp"]) {
+                taken.insert(candidate);
+                found.push((owner, candidate.clone(), candidate[stem.len()..].to_string()));
+            }
+        }
+    }
+    found
+}
+
 /// Lower is better evidence, in the order `propose` reads its sources.
 pub fn source_rank(source: &str, style: Style) -> u8 {
     match source {
@@ -162,6 +201,28 @@ mod tests {
         assert_eq!(shared_names("beach", &members, &full, &none), None);
         let twins = vec![(".JPG".to_string(), "a.jpg".to_string()), (".jpg".to_string(), "a.jpg".to_string())];
         assert_eq!(shared_names("beach", &twins, &none, &none), None);
+    }
+
+    #[test]
+    fn sidecars_follow_only_a_complete_group() {
+        let folder = listing(&[
+            "IMG_1.JPG", "IMG_1.ARW", "IMG_1.xmp", "IMG_1.ARW.XMP", "IMG_1.aae", ".IMG_1.xmp", "IMG_1.txt.xmp", "img_1.jpg.xmp",
+            "IMG_2.HEIC", "IMG_2.AAE", "IMG_3.JPG", "IMG_3.xmp",
+        ]);
+        let pair = listing(&["IMG_1.JPG", "IMG_1.ARW", "IMG_2.HEIC"]);
+        assert_eq!(
+            following_sidecars(&pair, &folder),
+            [
+                (0, "IMG_1.xmp".to_string(), ".xmp".to_string()),
+                (0, "IMG_1.aae".to_string(), ".aae".to_string()),
+                (0, "IMG_1.ARW.XMP".to_string(), ".ARW.XMP".to_string()),
+                (2, "IMG_2.AAE".to_string(), ".AAE".to_string()),
+            ]
+        );
+        assert!(following_sidecars(&listing(&["IMG_1.JPG"]), &folder).is_empty());
+        assert_eq!(following_sidecars(&listing(&["IMG_3.JPG"]), &folder), [(0, "IMG_3.xmp".to_string(), ".xmp".to_string())]);
+        assert!(following_sidecars(&listing(&["IMG_3.JPG", "IMG_3.xmp"]), &folder).is_empty());
+        assert!(following_sidecars(&listing(&["IMG_3.xmp"]), &folder).is_empty());
     }
 
     #[test]

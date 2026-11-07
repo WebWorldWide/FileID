@@ -57,7 +57,7 @@
                     BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
                     AutomationProperties.Name="Choose a folder"
-                    ToolTipService.ToolTip="Choose, rescan or close the folder FileID is working on">
+                    ToolTipService.ToolTip="Choose which location to show, or add, rescan or close a folder">
                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <TextBlock Text="FileID"
                                FontFamily="{StaticResource DisplayFontFamily}"

@@ -103,6 +103,89 @@ struct LibraryView: View {
     }
 
     var body: some View {
+        lifecycle(content)
+            .onChange(of: searchText) { _, _ in
+                similarSeed = nil   // typing exits similarity mode
+                // Debounce: cancel any pending reload, schedule a new one.
+                // The DB hit + optional CLIP encode is ~50-100ms; without
+                // debounce, fast typers stutter their own keystrokes.
+                searchDebounce?.cancel()
+                searchDebounce = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else { return }
+                    reload()
+                }
+            }
+            .onChange(of: kindFilterRaw) { _, _ in reload() }
+            .onChange(of: similarSeed?.id) { _, _ in reload() }
+            .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
+            // Keep the tile-refresh epoch tracking store.version while idle so a
+            // tag edit / undo refreshes the dots, but leave it frozen during a
+            // scan (the per-second counter bump must not re-task every tile).
+            .onChange(of: store.version) { _, v in
+                if !scanActive { frozenTileVersion = v }
+            }
+            // The encoder's ORT session takes seconds to build after launch /
+            // install; without this the first search silently stays keyword-only.
+            .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
+                if ready { reload() }
+            }
+            // Surface the undo outcome (renames or tags, incl. partial/total
+            // failures) — it was written to `undoStatus` but never shown, so
+            // failures were silent.
+            .alert("Undo", isPresented: Binding(
+                get: { undoStatus != nil },
+                set: { if !$0 { undoStatus = nil } }
+            )) {
+                Button("OK", role: .cancel) { undoStatus = nil }
+            } message: {
+                Text(undoStatus ?? "")
+            }
+    }
+
+    /// Scan, mount and location hooks, split from `body` so the type checker
+    /// does not time out on one long modifier chain.
+    private func lifecycle<V: View>(_ view: V) -> some View {
+        view
+            .onAppear {
+                store.openIfPossible()
+                reload()
+                refreshBulkState()
+                engine.refreshLibraryRoots()
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
+            .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
+                if new != lastSeenBatchIndex {
+                    lastSeenBatchIndex = new
+                    guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
+                    lastReloadAt = Date()
+                    store.notifyChanged()
+                    reload()
+                    refreshBulkState()
+                }
+            }
+            .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+                refreshBulkState()
+            }
+            .onChange(of: store.scopeEpoch) { _, _ in
+                listedQuery = nil
+                reload()
+            }
+            // Terminal reload: the 1 s batch throttle above can swallow the FINAL
+            // scan batch (it advances lastSeenBatchIndex before the throttle guard,
+            // so the last batch never triggers a reload if it lands within 1 s).
+            // Reloading on any terminal event guarantees the grid ends complete.
+            .onChange(of: engine.lastTerminalEventAt) { _, _ in
+                store.notifyChanged()
+                refreshOpenPreview()
+                reload()
+                refreshBulkState()
+                engine.refreshLibraryRoots()
+            }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -157,75 +240,6 @@ struct LibraryView: View {
                 .opacity(0)
                 .frame(width: 0, height: 0)
         )
-        .onAppear {
-            store.openIfPossible()
-            reload()
-            refreshBulkState()
-            engine.refreshLibraryRoots()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
-        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-            if new != lastSeenBatchIndex {
-                lastSeenBatchIndex = new
-                guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
-                lastReloadAt = Date()
-                store.notifyChanged()
-                reload()
-                refreshBulkState()
-            }
-        }
-        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
-            refreshBulkState()
-        }
-        // Terminal reload: the 1 s batch throttle above can swallow the FINAL
-        // scan batch (it advances lastSeenBatchIndex before the throttle guard,
-        // so the last batch never triggers a reload if it lands within 1 s).
-        // Reloading on any terminal event guarantees the grid ends complete.
-        .onChange(of: engine.lastTerminalEventAt) { _, _ in
-            store.notifyChanged()
-            refreshOpenPreview()
-            reload()
-            refreshBulkState()
-            engine.refreshLibraryRoots()
-        }
-        .onChange(of: searchText) { _, _ in
-            similarSeed = nil   // typing exits similarity mode
-            // Debounce: cancel any pending reload, schedule a new one.
-            // The DB hit + optional CLIP encode is ~50-100ms; without
-            // debounce, fast typers stutter their own keystrokes.
-            searchDebounce?.cancel()
-            searchDebounce = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard !Task.isCancelled else { return }
-                reload()
-            }
-        }
-        .onChange(of: kindFilterRaw) { _, _ in reload() }
-        .onChange(of: similarSeed?.id) { _, _ in reload() }
-        .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
-        // Keep the tile-refresh epoch tracking store.version while idle so a
-        // tag edit / undo refreshes the dots, but leave it frozen during a
-        // scan (the per-second counter bump must not re-task every tile).
-        .onChange(of: store.version) { _, v in
-            if !scanActive { frozenTileVersion = v }
-        }
-        // The encoder's ORT session takes seconds to build after launch /
-        // install; without this the first search silently stays keyword-only.
-        .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
-            if ready { reload() }
-        }
-        // Surface the undo outcome (renames or tags, incl. partial/total
-        // failures) — it was written to `undoStatus` but never shown, so
-        // failures were silent.
-        .alert("Undo", isPresented: Binding(
-            get: { undoStatus != nil },
-            set: { if !$0 { undoStatus = nil } }
-        )) {
-            Button("OK", role: .cancel) { undoStatus = nil }
-        } message: {
-            Text(undoStatus ?? "")
-        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and
@@ -255,15 +269,14 @@ struct LibraryView: View {
     /// Non-nil when the user has typed a non-trivial query but semantic
     /// search is degraded to keyword search: either the CLIP text encoder
     /// was never installed (point at Settings), or its files exist and
-    /// the ORT session is still compiling after launch / install (the
-    /// grid re-runs the search automatically once it's ready).
+    /// an install is still finishing (the grid re-runs the search
+    /// automatically once it's ready).
     private var clipSearchHint: CLIPSearchHint? {
         if visualSearchPending { return .preparing }
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3, similarSeed == nil,
-              !CLIPModelInstaller.shared.textEncoderReady,
-              !CLIPTextEncoder.shared.isReady else { return nil }
-        return CLIPTextEncoder.shared.isInstalled ? .preparing : .install
+              !CLIPModelInstaller.shared.textEncoderReady else { return nil }
+        return FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path) ? .preparing : .install
     }
 
     /// One-line keyword-fallback banner: missing → points the user at
@@ -607,12 +620,12 @@ struct LibraryView: View {
 
     /// Files the current listing draws from: unreadable files appear only under their own filter.
     private var shownTotal: Int {
-        kindFilter == ReadStore.unreadableFilter ? store.unreadableFiles : max(0, store.totalFiles - store.unreadableFiles)
+        kindFilter == ReadStore.unreadableFilter ? store.scopedUnreadableFiles : max(0, store.scopedTotalFiles - store.scopedUnreadableFiles)
     }
 
     private var unreadableKind: [(label: String, value: String?)] {
-        guard store.unreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
-        return [(label: "Unreadable \(store.unreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
+        guard store.scopedUnreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
+        return [(label: "Unreadable \(store.scopedUnreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
     }
 
     @ViewBuilder
@@ -624,7 +637,7 @@ struct LibraryView: View {
             ("Docs",     "doc"),
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
-        ] + (store.otherFiles > 0 || kindFilter == "other" ? [(label: "Other", value: "other")] : []) + unreadableKind
+        ] + (store.scopedOtherFiles > 0 || kindFilter == "other" ? [(label: "Other", value: "other")] : []) + unreadableKind
         HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
@@ -753,7 +766,7 @@ struct LibraryView: View {
         let seed = similarSeed
         let query = searchText
         let kind = kindFilter
-        let encoderReady = CLIPTextEncoder.shared.isReady
+        let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
         let want = sameListing ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
         reloadTask?.cancel()
@@ -766,18 +779,19 @@ struct LibraryView: View {
             var pageable = false
             if let seed {
                 visualSearchPending = true
-                if let response = await engine.searchCatalog(seedID: seed.id), response.status == "ok" {
+                if let response = await catalogSearch(seedID: seed.id), response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                 } else { newRows = [] }
             } else {
                 newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
                 pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter, let vector = await store.semanticVectorAsync(query: trimmed) {
+                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
                     guard !Task.isCancelled else { return }
                     rows = newRows
                     visualSearchPending = true
-                    if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
+                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled,
+                       let response = await catalogSearch(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                         pageable = false
                     }
@@ -796,6 +810,20 @@ struct LibraryView: View {
             canLoadMore = pageable
             listedQuery = seed == nil ? (query, kind) : nil
         }
+    }
+
+    /// The engine's visual search, kept to the chosen location before its cut.
+    private func catalogSearch(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil) async -> CatalogResponse? {
+        guard let rootID = store.scope?.root.id else { return await engine.searchCatalog(query: query, vector: vector, seedID: seedID) }
+        for _ in 0..<120 {
+            let request = CatalogRequest(requestID: UUID().uuidString, action: "search", query: query, fileID: seedID,
+                                         searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: 60, rootID: rootID, resultScope: "files")
+            guard let response = await TakeRequests.send(engine, request, timeout: 10) else { return nil }
+            if response.status != "indexing" { return response }
+            do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
+        }
+        return nil
     }
 
     private func loadMore() {

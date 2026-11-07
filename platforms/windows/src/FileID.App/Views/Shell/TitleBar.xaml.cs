@@ -115,6 +115,8 @@ public sealed partial class TitleBar : UserControl
                 case nameof(AppViewModel.FolderPath):
                 case nameof(AppViewModel.FolderDisplay):
                 case nameof(AppViewModel.HasFolder):
+                case nameof(AppViewModel.Scope):
+                case nameof(AppViewModel.LibraryRoots):
                     DispatcherQueue.TryEnqueue(SyncFolder);
                     break;
                 case nameof(AppViewModel.ActiveTab):
@@ -126,6 +128,11 @@ public sealed partial class TitleBar : UserControl
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("TitleBar.OnEngineChanged", () =>
         {
+            if (e.PropertyName == nameof(EngineClient.State) && EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
+            {
+                DebugLog.Debug($"[ENGINE-SUB:TitleBar] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(() => _ = DebugLog.SafeRunAsync("TitleBar.RefreshRoots", () => AppViewModel.Instance.RefreshRootsAsync()));
+            }
             if (e.PropertyName is nameof(EngineClient.LastProgress)
                               or nameof(EngineClient.Phase)
                               or nameof(EngineClient.IsPaused)
@@ -160,9 +167,20 @@ public sealed partial class TitleBar : UserControl
     private void SyncFolder()
     {
         var vm = AppViewModel.Instance;
-        FolderNameText.Text = vm.HasFolder ? vm.FolderDisplay ?? vm.FolderPath ?? string.Empty : "Choose a folder";
-        FolderNameText.Foreground = vm.HasFolder ? _text1 : _text3;
-        AutomationProperties.SetName(FolderButton, vm.HasFolder ? $"Folder {FolderNameText.Text}" : "Choose a folder");
+        var title = LibraryScope.Title(vm.Scope, vm.LibraryRoots, vm.HasFolder ? vm.FolderDisplay ?? vm.FolderPath : null);
+        var changed = FolderNameText.Text != title;
+        FolderNameText.Text = title;
+        FolderNameText.Foreground = title == "Choose a folder" ? _text3 : _text1;
+        AutomationProperties.SetName(FolderButton, title == "Choose a folder" ? title : $"Location: {title}");
+        AutomationProperties.SetHelpText(FolderButton, "Chooses which location Library, Search & Moments and Chat show");
+        if (changed && IsLoaded)
+        {
+            FileID.Theme.Motion.SpringEasing.SetScalar(FolderNameText, "Opacity", 0.4f);
+            if (FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
+                FileID.Theme.Motion.SpringEasing.SetScalar(FolderNameText, "Opacity", 1f);
+            else
+                FileID.Theme.Motion.SpringEasing.AnimateOpacity(FolderNameText, 1f, FileID.Theme.Motion.SpringEasing.Tokens.Tight.Response, FileID.Theme.Motion.SpringEasing.Tokens.Tight.DampingFraction);
+        }
     }
 
     private void SyncPageButtons()

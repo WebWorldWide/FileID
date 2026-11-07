@@ -34,6 +34,8 @@ enum ChatFacts {
         /// Exclusive byte bounds.
         var minBytes: Int64?
         var maxBytes: Int64?
+        /// The library location the app is scoped to (`rootID`).
+        var root: LibraryRoots.Scope?
 
         var effectiveKinds: [String] { kinds.isEmpty && undescribed ? ChatFacts.analyzable : kinds }
 
@@ -89,6 +91,7 @@ enum ChatFacts {
                 }
             }
             if undescribed { parts.append("(f.vlm_description IS NULL OR trim(f.vlm_description)='')") }
+            if let root { parts.append(LibraryRoots.scopeSQL("f.path_text")); args.append(root.param) }
             return parts.joined(separator: " AND ")
         }
 
@@ -211,10 +214,10 @@ enum ChatFacts {
 
     /// Folders holding the most files (or bytes), from the stored paths. Both path
     /// separators are folded so a catalog scanned on Windows reads the same.
-    static func folders(_ db: GRDB.Database, bySize: Bool, limit: Int) throws -> [FolderTotal] {
+    static func folders(_ db: GRDB.Database, bySize: Bool, limit: Int, root: LibraryRoots.Scope? = nil) throws -> [FolderTotal] {
         let path = "replace(f.path_text,char(92),'/')"
         let order = bySize ? "b DESC,c DESC" : "c DESC,b DESC"
-        var found = try Row.fetchAll(db, sql: "SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY \(order),dir ASC LIMIT ?", arguments: [limit]).map { row -> FolderTotal in
+        var found = try Row.fetchAll(db, sql: "SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 AND \(LibraryRoots.scopeSQL("f.path_text")) GROUP BY dir ORDER BY \(order),dir ASC LIMIT ?", arguments: [root?.param, limit]).map { row -> FolderTotal in
             var dir: String = row["dir"]
             while dir.count > 1, dir.hasSuffix("/") { dir.removeLast() }
             return FolderTotal(name: dir.split(separator: "/").last.map(String.init) ?? dir, path: dir, count: row["c"], bytes: row["b"])
@@ -237,21 +240,22 @@ enum ChatFacts {
         "\(folder.name) (\(ChatIntent.countLabel(folder.count)) \(folder.count == 1 ? "file" : "files"), \(ChatIntent.bytesLabel(folder.bytes)))"
     }
 
-    private static func libraryAnswer(_ db: GRDB.Database, _ question: ChatIntent.Question) throws -> (String, [CatalogHit]) {
-        let everything = Filter()
+    private static func libraryAnswer(_ db: GRDB.Database, _ question: ChatIntent.Question, root: LibraryRoots.Scope?) throws -> (String, [CatalogHit]) {
+        let everything = Filter(root: root)
+        let scoped: StatementArguments = [root?.param]
         let (count, bytes) = try totals(db, everything)
         let hits = try listed(db, everything, order: "newest", limit: shown, count: count)
         guard count > 0 else { return ("Your library is empty. Scan a folder to get started.", hits) }
         if question.measure == "folders" {
             let bySize = question.order == "largest"
-            let top = try folders(db, bySize: bySize, limit: 5)
+            let top = try folders(db, bySize: bySize, limit: 5, root: root)
             return ("\(bySize ? "Biggest folders" : "Folders with the most files"): \(top.map(folderPhrase).joined(separator: ", ")).", hits)
         }
         if question.measure == "formats" {
             let formats = try Row.fetchAll(db, sql: """
-                SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0
+                SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0 AND \(LibraryRoots.scopeSQL("f.path_text"))
                 GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC
-                """).map { row -> String in
+                """, arguments: scoped).map { row -> String in
                     let n: Int64 = row["c"]
                     let ext: String = row["e"]
                     return "\(ChatIntent.countLabel(n)) \(ext)"
@@ -259,25 +263,25 @@ enum ChatFacts {
             let more = formats.count > 10 ? " and \(formats.count - 10) more" : ""
             return ("Your \(ChatIntent.countLabel(count)) \(count == 1 ? "file uses" : "files use") \(formats.count) \(formats.count == 1 ? "format" : "formats"): \(formats.prefix(10).joined(separator: ", "))\(more).", hits)
         }
-        let kinds = try Row.fetchAll(db, sql: "SELECT f.kind AS k,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,k ASC")
+        let kinds = try Row.fetchAll(db, sql: "SELECT f.kind AS k,COUNT(*) AS c FROM files f WHERE f.failed=0 AND \(LibraryRoots.scopeSQL("f.path_text")) GROUP BY f.kind ORDER BY c DESC,k ASC", arguments: scoped)
             .map { row -> String in
                 let n: Int64 = row["c"]
                 let kind: String = row["k"]
                 return "\(ChatIntent.countLabel(n)) \(ChatIntent.noun([kind], n))"
             }
         var message = "Your library has \(ChatIntent.countLabel(count)) \(count == 1 ? "file" : "files") using \(ChatIntent.bytesLabel(bytes)): \(kinds.joined(separator: ", "))."
-        if let range = try Row.fetchOne(db, sql: "SELECT strftime('%Y-%m-%d',MIN(\(taken)),'unixepoch','localtime') AS lo,strftime('%Y-%m-%d',MAX(\(taken)),'unixepoch','localtime') AS hi FROM files f WHERE f.failed=0"),
+        if let range = try Row.fetchOne(db, sql: "SELECT strftime('%Y-%m-%d',MIN(\(taken)),'unixepoch','localtime') AS lo,strftime('%Y-%m-%d',MAX(\(taken)),'unixepoch','localtime') AS hi FROM files f WHERE f.failed=0 AND \(LibraryRoots.scopeSQL("f.path_text"))", arguments: scoped),
            let lo: String = range["lo"], let hi: String = range["hi"] {
             message += lo == hi ? " Taken on \(lo)." : " Dates run from \(lo) to \(hi)."
         }
-        let top = try folders(db, bySize: false, limit: 3)
+        let top = try folders(db, bySize: false, limit: 3, root: root)
         if !top.isEmpty { message += " Busiest folders: \(top.map(folderPhrase).joined(separator: ", "))." }
         return (message, hits)
     }
 
     /// Answers a question that is fully structured: no subject words remain.
     static func answer(_ db: GRDB.Database, _ question: ChatIntent.Question, _ filter: Filter) throws -> (String, [CatalogHit]) {
-        if ["overview", "folders", "formats"].contains(question.measure) { return try libraryAnswer(db, question) }
+        if ["overview", "folders", "formats"].contains(question.measure) { return try libraryAnswer(db, question, root: filter.root) }
         let qualifiers = filter.qualifiers
         if question.duplicates {
             let found = try extras(db, filter, limit: shown)

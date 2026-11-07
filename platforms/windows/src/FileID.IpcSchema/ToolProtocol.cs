@@ -10,7 +10,11 @@ public sealed record ToolRecipe(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? AllowUpscale = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VideoAspectRatio = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VideoFraming = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? VideoStabilization = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? VideoStabilization = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? TrimStartSeconds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? TrimEndSeconds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TrimMode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? RotationDegrees = null);
 public sealed record ToolCapability(string Id, bool Available, IReadOnlyList<string> InputFormats, IReadOnlyList<string> OutputFormats, string Detail);
 public sealed record ToolOutput(long FileID, string SourcePath, string OutputPath, string State, string Message);
 public sealed record ToolRequest(

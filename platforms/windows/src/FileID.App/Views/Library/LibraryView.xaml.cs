@@ -62,7 +62,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     public LibraryView()
     {
         var paths = AppPaths.DbPath;
-        _store = new ReadStore(paths);
+        _store = new ReadStore(paths) { Scope = AppViewModel.Instance.Scope };
         _clip = new ClipSearchService(_store);
         ViewModel = new LibraryViewModel(_store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
@@ -108,6 +108,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             SyncUndoPill();
             SyncBanners();
             ApplyLibraryQueryHandoff();
+            StartScope();
             StartOfflineRoots();
         };
     }
@@ -330,6 +331,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         try { AppViewModel.Instance.LibraryQueryRequested -= OnLibraryQueryRequested; } catch { /* swallow */ }
         try { StopOfflineRoots(); } catch (Exception ex) { DebugLog.Warn("LibraryView: stop offline roots failed: " + ex.Message); }
+        try { AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged; } catch { /* swallow */ }
         // Step 1: cancel + dispose every in-flight thumb load so closing
         // the tab doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)

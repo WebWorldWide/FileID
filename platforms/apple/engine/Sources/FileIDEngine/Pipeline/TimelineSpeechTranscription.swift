@@ -162,10 +162,7 @@ enum TimelineSpeechTranscription {
     }
 
     private static func requestAuthorization() async -> Bool {
-        if SFSpeechRecognizer.authorizationStatus() == .authorized { return true }
-        return await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
-        }
+        await SpeechPermission.authorized()
     }
 
     private static func recognize(audioURL: URL, recognizer: SFSpeechRecognizer) async -> [Segment]? {

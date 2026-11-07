@@ -115,6 +115,9 @@
         "fields": {
           "maxDimension": {
             "type": "u32"
+          },
+          "rotationDegrees": {
+            "type": "u32"
           }
         }
       },
@@ -216,6 +219,7 @@
           "limit",
           "capturedFrom",
           "capturedTo",
+          "rootID",
           "event",
           "eventID",
           "takeFeedback",
