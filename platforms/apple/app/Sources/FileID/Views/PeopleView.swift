@@ -35,15 +35,18 @@ struct PeopleView: View {
         case personDetail(Int64)        // person id; we look up the row
         case suggestedMerges
         case mergeTargetPicker
+        case faceReview
         var id: String {
             switch self {
             case .personDetail(let pid): return "personDetail-\(pid)"
             case .suggestedMerges:       return "suggestedMerges"
             case .mergeTargetPicker:     return "mergeTargetPicker"
+            case .faceReview:            return "faceReview"
             }
         }
     }
     @State private var activeSheet: ActiveSheet?
+    @State private var review: FaceReviewModel?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,10 +65,13 @@ struct PeopleView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { reload() }
+        .onAppear { reload(); refreshReview() }
         .onChange(of: store.version) { _, _ in reload() }
-        .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload() }
-        .onChange(of: activeSheet) { _, sheet in publishSelection(sheet) }
+        .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload(); refreshReview() }
+        .onChange(of: activeSheet) { _, sheet in
+            publishSelection(sheet)
+            if sheet == nil { refreshReview() }
+        }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
@@ -145,6 +151,10 @@ struct PeopleView: View {
                     },
                     onDismiss: { activeSheet = nil }
                 )
+            case .faceReview:
+                if let review {
+                    FaceReviewSheet(model: review, personByID: personByID) { activeSheet = nil }
+                }
             case .mergeTargetPicker:
                 MergeTargetPickerSheet(
                     checked: Array(mergeChecked).compactMap { personByID[$0] }
@@ -174,11 +184,30 @@ struct PeopleView: View {
 
     // MARK: - Header
 
+    @ViewBuilder
+    private var reviewButton: some View {
+        if let review, review.total > 0, !mergeMode, !unknownMode {
+            Button { activeSheet = .faceReview } label: {
+                Label("\(FaceReviewText.title) (\(review.total))", systemImage: "person.crop.circle.badge.checkmark")
+            }
+            .buttonStyle(.dsAccentOutline)
+            .accessibilityLabel(FaceReviewText.header(review.total))
+            .help("New faces that look like people you already have. Nothing is assigned until you accept.")
+        }
+    }
+
+    private func refreshReview() {
+        let model = review ?? FaceReviewModel(engine: engine)
+        review = model
+        Task { await model.reload() }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 MetaText(headerCountLine, color: Theme.text2)
                 Spacer()
+                reviewButton
                 headerActions
             }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
@@ -511,7 +540,7 @@ struct PeopleView: View {
     }
 
     private var showsHeader: Bool {
-        !persons.isEmpty || totalFacePrints > 0 || mergeMode || unknownMode
+        !persons.isEmpty || totalFacePrints > 0 || mergeMode || unknownMode || (review?.total ?? 0) > 0
             || (engine.lastFaceClustering?.deferredFaces ?? 0) > 0
     }
 
@@ -908,6 +937,7 @@ private struct PersonDetailSheet: View {
                 }
             }
             .padding(16)
+            FaceReviewSection(engine: engine, person: person, onChange: loadFiles)
             Divider()
             // Photo grid + multi-select toolbar. Toolbar only shows when
             // we have ≥ 2 photos and ≥ 2 named persons in total — moving
