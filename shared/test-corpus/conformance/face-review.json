@@ -1042,10 +1042,10 @@
    },
    {
     "label": "assigned",
-    "db": "SELECT f.person_id,a.outcome FROM face_prints f JOIN face_assignment_assessed a ON a.face_id=f.id WHERE f.id=5",
+    "db": "SELECT p.name,a.outcome FROM face_prints f JOIN persons p ON p.id=f.person_id JOIN face_assignment_assessed a ON a.face_id=f.id WHERE f.id=5",
     "expect": [
      [
-      1,
+      "Alex",
       "assigned"
      ]
     ]
