@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-06 — GTK Moments follows the location; GTK scoped Library read folded in; sharp video and HiDPI thumbnails
+
+- **GTK** (agent; owner-approved `engine_client.rs` digest refresh): Search & Moments runs its current search again when the title-bar location changes, as on Mac and WinUI. `query_files` takes the location scope, so the copied scoped query is gone; Library pages, counts and the preview's full list read through the query worker, scoped.
+- **GTK HiDPI** (agent): thumbnails and previews (Library, side pane, Cleanup, File Tools, Search & Moments, Best Takes; images and video keyframes) decode at the shown size × the widget's scale factor, capped at 4096 px; the Library tile cache is a byte budget (512 tiles at 1x).
+- **WinUI** (agent): ThumbnailService asks `generateVideoThumbnail` for 192 px × the display scale, capped at 2048, and the disk cache keys each video keyframe on that size, so a restart stays sharp.
+- The shared Rust engine has no sequential frame pool, so the Mac's 59.94 fps near-duplicate doesn't occur there.
+- PR #298 merged (File Tools, Mac app on engine commands, sidecar renames, All locations, evals) after fixing three CI-only compile timeouts (LibraryView, ToolsWorkbench, a test luma map) and two WinUI source contracts.
+
 ## 2026-11-06 — Labelled People and timeline evals; scene cuts at cosine 0.85; speech no longer kills a bare engine
 
 - **Eval sets** (agent, owner's request): private labelled sets in `~/Library/Developer/FileIDEval` (copied from Adlon read-only; never in the repo), scripts in `shared/scripts/eval/`. People: 366 photos, 335 identity faces across 37 anonymous ids (14 with 5+ faces), split into tune and held-out halves by event. Timeline: 14 videos, 103 labelled intervals (13 fast actions) and 30 cuts.
