@@ -4335,3 +4335,49 @@ Reimplements the design recorded above ("Incremental face assignment failed the 
 - **Decision.** The model does localize more with timestamps, but the tune gain didn't hold on held-out, so the default stays the frame-index prompt. `FILEID_TIMELINE_FRAME_LABELS=1` turns the labelled request on for later experiments (larger models, the Rust engine).
 - **Parsing is now tolerant in both engines.** `start`/`end` seconds (numbers or strings such as `"t=10.5s"`) snap to the nearest sampled frame within 0.5 s of the sampled range; whole numbers outside that range that fit as frame indexes are read as indexes; `firstFrame`/`lastFrame` still work; a moment with no usable time covers the whole window. Reversed or out-of-range spans still reject the reply. The Rust `parse_moments` takes the frame times and mirrors this.
 - **Rust request not changed.** The Rust request body is built in the digest-locked `models/vlm_server.rs` (text first, then images), so interleaving timestamps there needs its own owner approval; the Rust prompt stays the frame-index one.
+## 2026-11-07 — Catalog regeneration: reviewed upstream overrides, derivatives rejected, one build per upstream
+
+Regenerated `shared/models/catalog.json` with `build_model_catalog.py --cache <dir> --verbose`. Only read-only metadata calls went to huggingface.co: the API, plus README/LICENSE/config/index files to review entries. No weights were downloaded. 323 → 309 entries (238 Apache-2.0, 45 MIT, 26 Gemma with `termsRequired`; 119 vision, 167 text, 11 embedding, 10 speech, 2 reranker). Every kept repository's pinned revision is unchanged.
+
+**Reviewed upstream overrides.** `UPSTREAM_OVERRIDES` replaces a card's `base_model` when the repository's own README names a different release. Identity, family/size/variant, architecture and the license chain are still checked against the corrected upstream. Every entry the NEXT item listed is kept with its existing pin:
+- mlx-community Qwen2.5 0.5/1.5/7/14/32B Instruct 4-bit: the card names the base model, the README says it was converted from `-Instruct`. 1.5B stays. For 0.5/7/14/32B the higher-ranked lmstudio-community build of the same upstream wins.
+- mlx-community gemma-3-4b-it-8bit and gemma-3-12b-it-4bit: the card names `-pt`; the README says `google/gemma-3-*-it` (Gemma Terms).
+- olmOCR-2-7B-1025 MLX → `allenai/olmOCR-2-7B-1025` (Apache-2.0; fine-tuned from Apache-2.0 Qwen2.5-VL-7B-Instruct).
+- PaddleOCR-VL-1.5 MLX → `PaddlePaddle/PaddleOCR-VL-1.5` (Apache-2.0 LICENSE file; the card named the ERNIE-4.5-0.3B backbone).
+- SmolLM 360M/1.7B Instruct v0.2 GGUF → `HuggingFaceTB/SmolLM-{360M,1.7B}-Instruct`. The cards name private or renamed "add-basics" training checkpoints. The 360M one has the same safetensors SHA256 as `SmolLM-360M-Instruct`, whose card documents v0.2. The 1.7B checkpoint is private, so the sibling's evidence is used.
+- unsloth GLM-4-32B-0414 GGUF → `zai-org/GLM-4-32B-0414` (MIT LICENSE file; the card names `THUDM/`, which now answers 401).
+
+**Moved repositories.** A lineage hop is named by the id Hugging Face redirects to, so `dots.ocr` resolves to `dots-studio/dots.ocr` without a hand edit.
+
+**Role.** `ROLE_OVERRIDES` is now keyed by repository too. `mlx-community/gemma-3n-E2B-it-lm-4bit` holds only `model.language_model` tensors, so it stays `text`; its upstream's pipeline would make it `vision`.
+
+**New rejections.**
+- A repository whose own model name does not start with the declared base's family, such as `EVA-Qwen2.5-14B` or `ReadyArt_gemma-4-31B-it-scotoma-2`. Before, these were listed under the base model's name.
+- A repository whose name has a parameter size the base lacks. This covers the expert-pruned `MiniCPM-V-4.7-35B-A3B-OptiQ-4bit-REAP-19B` and `Qwen3.6-35B-A3B-OptiQ-4bit-REAP-19B`; the hand-audited catalog had kept both under corrected names. The base models' own builds (mxfp4 and lmstudio-community 4-bit) remain.
+- The Dolphin denylist pattern missed `Dolphin3.0-…` (no hyphen) and the `dphn/` organisation. It now covers both, so `bartowski/Dolphin3.0-Qwen2.5-1.5B-GGUF`, which was about to be listed as Qwen2.5-1.5B, is rejected in both catalogs.
+
+**One build per upstream and format.** The generator always kept one build per upstream and format. The committed catalog had duplicates because the 2026-11-06 hand corrections pointed several conversions at the same upstream; regeneration collapses them to the best-ranked publisher. 25 dropped repositories are duplicates or same-publisher swaps whose upstream is still listed. Within one publisher, MLX now prefers 4-bit, then 5/6/8/3-bit, then other quantizations, then bf16/fp16. Before, ties went by download order, which picked the 70 GB `Qwen3-30B-A3B-MLX-bf16`.
+
+Dropped duplicates, with the upstream kept through another build:
+- Qwen3-30B-A3B MLX bf16 and lmstudio 4bit; Qwen3-32B MLX 8bit and lmstudio 4bit; Qwen3-8B MLX 6bit, 8bit and lmstudio 8bit; lmstudio Qwen3-4B MLX. The `Qwen/` 4-bit builds stay.
+- lmstudio Qwen3-Next-80B-A3B-Instruct GGUF and unsloth Qwen3-Next-80B-A3B-Thinking GGUF. Qwen's own GGUFs stay.
+- lmstudio phi-4 GGUF; `microsoft/phi-4-gguf` stays.
+- 8-bit/bf16/fp16 builds replaced by the same publisher's 4-bit (bge-m3: 8-bit): Devstral-Small-2507, GLM-4.7-Flash, Magistral-Small-2509, Magistral-Small-2506, gemma-3-270m-it, bge-m3.
+- Mistral-Small-3.2-24B-Instruct-2506: lmstudio 6bit and mlx-community 4bit are replaced by lmstudio 4bit.
+- mlx-community Qwen2.5 0.5/7/14/32B Instruct; lmstudio-community stays.
+- mlx-community SmolLM2-135M-Instruct-8bit; `HuggingFaceTB/SmolLM2-135M-Instruct-Q8-mlx` stays.
+- lmstudio Mistral-Small-24B-Instruct-2501 GGUF, which left lmstudio-community's top-400 listing; `unsloth/` of the same upstream replaces it.
+
+**Added**, upstream license and lineage checked:
+- `allenai/OLMoE-1B-7B-0125-Instruct` GGUF (Apache-2.0 chain).
+- `microsoft/Mage-VL-Cowork` GGUF (Apache-2.0 LICENSE file; Mage-ViT + Qwen3-4B-Instruct-2507 backbone).
+- IBM granite-vision-3.3-2b-chart2csv-preview and granite-vision-3.2-2b GGUF (Apache-2.0 chains).
+- mlx-community Qwen2.5-VL-7B-Instruct-4bit, until now shadowed by the mislabelled olmOCR build.
+
+Names now follow the upstream: the Ministral-3 GGUFs lose a `-BF16` suffix and the SmolLM GGUFs lose `-v0.2`, so those five ids change. No code references them.
+
+**Mac `model-catalog.json`.** Licenses and the denylist were already clean; the widened Dolphin pattern found nothing. 27 entries listed a base or backbone checkpoint as their first `bases` hop, which the app shows as the upstream:
+- Qwen2.5 Instruct 4/8-bit, Qwen2.5-Coder and Coder-Instruct, olmOCR-2/olmOCR-7B-0725 and SmolVLM/SmolVLM2: the release named in each conversion's README is now first, pinned at its current commit (Apache-2.0).
+- Qwen3-30B-A3B-Instruct-2507-4bit-ODWQ: same fix, but its README names no source. Its config (262144 context, rope_theta 1e7) matches `Qwen3-30B-A3B-Instruct-2507`, not the declared `Qwen3-30B-A3B`.
+
+No entry was added or removed (218).
