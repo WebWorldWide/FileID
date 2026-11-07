@@ -61,7 +61,7 @@ When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned through v31 (v27 is chat retrieval, v28 is take quality, v29 is the library_roots registry, v30 is the directory expression index behind Chat's folder totals, v31 holds the library-wide related-take proposals and their per-file fingerprints; see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v32 (v27 is chat retrieval, v28 is take quality, v29 is the library_roots registry, v30 is the directory expression index behind Chat's folder totals, v31 holds the library-wide related-take proposals and their per-file fingerprints, v32 the face review queue (assessed faces, pending suggestions and rejected-identity constraints); see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`

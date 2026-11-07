@@ -38,6 +38,26 @@ internal sealed partial class EngineClient
 
     public Task CancelBenchmarkAsync() => SendCommandAsync(new CancelBenchmarkCommand());
 
+    public Task<FaceReviewPage> ListFaceReviewAsync(long? personId, long offset, long limit, CancellationToken ct = default)
+    {
+        var id = FaceReviewRequestId();
+        return SendWorkbenchAsync<FaceReviewPage>(id, new ListFaceReviewCommand(id, personId, offset, limit), TimeSpan.FromSeconds(60), ct);
+    }
+
+    public Task<FaceReviewPage> ResolveFaceReviewAsync(long faceId, long personId, string resolution, CancellationToken ct = default)
+    {
+        var id = FaceReviewRequestId();
+        return SendWorkbenchAsync<FaceReviewPage>(id, new ResolveFaceReviewCommand(id, faceId, personId, resolution), TimeSpan.FromSeconds(60), ct);
+    }
+
+    public Task<FaceReviewPage> UndoFaceReviewAsync(string operationId, CancellationToken ct = default)
+    {
+        var id = FaceReviewRequestId();
+        return SendWorkbenchAsync<FaceReviewPage>(id, new UndoFaceReviewCommand(id, operationId), TimeSpan.FromSeconds(60), ct);
+    }
+
+    private static string FaceReviewRequestId() => "review-" + Guid.NewGuid().ToString("N");
+
     public Task<CatalogResponse> CatalogAsync(CatalogRequest request, CancellationToken ct = default) =>
         SendWorkbenchAsync<CatalogResponse>(request.RequestID, new CatalogRequestCommand(request), TimeSpan.FromSeconds(30), ct);
     public ToolExecutionState ToolExecution { get; } = new();
@@ -189,6 +209,9 @@ internal sealed partial class EngineClient
                 break;
             case RootsListEvent roots:
                 _workbenchRequests.Apply(roots.Roots.RequestId, generation, roots.Roots);
+                break;
+            case FaceReviewEvent review:
+                _workbenchRequests.Apply(review.Page.RequestId, generation, review.Page);
                 break;
             case BenchmarkProgressEvent progress:
                 BenchmarkProgress = progress.Progress;

@@ -52,6 +52,7 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         InitializeComponent();
         FaceGrid.ItemsSource = _faces;
+        ReviewPanel.TotalChanged += OnReviewTotalChanged;
         FaceGrid.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
                           xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
@@ -86,7 +87,12 @@ public sealed partial class PersonDetailSheet : UserControl
         _personId = personId;
         HeaderText.Text = string.IsNullOrEmpty(displayName) ? $"Person #{personId}" : displayName;
         Load();
+        ReviewPanel.SetPerson(personId);
+        _ = ReviewPanel.ReloadAsync();
     }
+
+    private void OnReviewTotalChanged(object? sender, long total)
+        => ReviewPanel.Visibility = total > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     private async void Load()
         => await DebugLog.SafeRunAsync(nameof(Load), async () =>

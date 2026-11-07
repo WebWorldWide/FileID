@@ -169,6 +169,25 @@ public sealed record ReassignFaceCommand(
     [property: JsonPropertyName("destinationPersonID")] long? DestinationPersonId = null,
     bool CreateNewPerson = false) : CommandPayload;
 
+/// <summary>One page of pending face review suggestions (schema 1.23.0). Replies with <c>faceReview</c>.</summary>
+public sealed record ListFaceReviewCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    [property: JsonPropertyName("personID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PersonId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Offset = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Limit = null) : CommandPayload;
+
+/// <summary>Accept, reject or ignore one pending face suggestion (schema 1.23.0).</summary>
+public sealed record ResolveFaceReviewCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("personID")] long PersonId,
+    string Resolution) : CommandPayload;
+
+/// <summary>Undo one face review resolution by its operation id (schema 1.23.0).</summary>
+public sealed record UndoFaceReviewCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    [property: JsonPropertyName("operationID")] string OperationId) : CommandPayload;
+
 public sealed record RenamePersonCommand(
     [property: JsonPropertyName("personID")] long PersonId,
     string? Title = null,
@@ -276,6 +295,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "cancelRestructure" => Empty<CancelRestructureCommand>(ref reader),
             "purgeExcluded" => JsonSerializer.Deserialize<PurgeExcludedCommand>(ref reader, options) ?? throw new JsonException("purgeExcluded: null body"),
             "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
+            "listFaceReview" => JsonSerializer.Deserialize<ListFaceReviewCommand>(ref reader, options) ?? throw new JsonException("listFaceReview: null body"),
+            "resolveFaceReview" => JsonSerializer.Deserialize<ResolveFaceReviewCommand>(ref reader, options) ?? throw new JsonException("resolveFaceReview: null body"),
+            "undoFaceReview" => JsonSerializer.Deserialize<UndoFaceReviewCommand>(ref reader, options) ?? throw new JsonException("undoFaceReview: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "listRoots" => JsonSerializer.Deserialize<ListRootsCommand>(ref reader, options) ?? throw new JsonException("listRoots: null body"),
@@ -316,6 +338,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case CancelRestructureCommand: WriteEmpty(writer, "cancelRestructure"); break;
             case PurgeExcludedCommand c: WriteVariant(writer, "purgeExcluded", c, options); break;
             case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
+            case ListFaceReviewCommand c: WriteVariant(writer, "listFaceReview", c, options); break;
+            case ResolveFaceReviewCommand c: WriteVariant(writer, "resolveFaceReview", c, options); break;
+            case UndoFaceReviewCommand c: WriteVariant(writer, "undoFaceReview", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case ListRootsCommand c: WriteVariant(writer, "listRoots", c, options); break;

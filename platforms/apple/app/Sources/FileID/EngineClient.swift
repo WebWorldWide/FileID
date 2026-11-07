@@ -80,6 +80,11 @@ public final class EngineClient {
         await queryReplies.mergeSuggestions { send(.findMergeSuggestions) }
     }
 
+    /// One face review reply (list, resolve or undo); nil when the engine is down or doesn't answer in time.
+    public func faceReview(_ command: (String) -> IPCCommand.Payload) async -> FaceReviewPage? {
+        await queryReplies.faceReview { send(command($0)) }
+    }
+
     /// Nil when the engine has no CLIP text encoder or can't answer.
     public func embedTextQuery(_ query: String) async -> [Float]? {
         await queryReplies.textEmbedding { send(.embedTextQuery(query: query, queryID: $0)) }
@@ -837,6 +842,8 @@ public final class EngineClient {
             queryReplies.deliver(reply)
         case .thumbnailGenerated(let reply):
             queryReplies.deliver(reply)
+        case .faceReview(let page):
+            queryReplies.deliver(page)
         case .healthCheckResult,
              .hardwareReprobed,
              .libraryWiped:

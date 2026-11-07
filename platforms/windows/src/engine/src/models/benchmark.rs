@@ -228,7 +228,7 @@ pub async fn measure(server: &VlmServer, probes: &[Probe], cancel: &Arc<AtomicBo
             let raw = server.complete_sequence_with_cancel(&images, &crate::pipeline::timeline_analysis::moment_prompt(&times), STRUCTURED_TOKENS, cancel.clone()).await?;
             record(&mut measurement, server.last_timings());
             measurement.json_total += 1;
-            if crate::pipeline::timeline_analysis::parse_moments(&raw, images.len()).is_ok() {
+            if crate::pipeline::timeline_analysis::parse_moments(&raw, &times).is_ok() {
                 measurement.json_valid += 1;
             }
             done += 1;
