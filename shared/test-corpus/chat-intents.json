@@ -111,7 +111,10 @@
     {"text": "photos of Kyle sorted by size", "question": {"measure": "list", "order": "largest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "photos of Kyle"}},
     {"text": "videos by date", "question": {"measure": "list", "order": "newest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "videos"}},
     {"text": "what's taking up the most space?", "question": {"measure": "size", "order": "largest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "the"}},
-    {"text": "photos from summer 2023", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos", "date": {"from": ["2023-06-01"], "to": ["2023-06-01", "+3 months"], "phrase": "from summer 2023"}}}
+    {"text": "photos from summer 2023", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos", "date": {"from": ["2023-06-01"], "to": ["2023-06-01", "+3 months"], "phrase": "from summer 2023"}}},
+    {"text": "winter photos of Drew", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "date": {"months": ["12", "01", "02"], "phrase": "from winter (any year)"}, "duplicates": false, "undescribed": false, "reduced": "photos of Drew"}},
+    {"text": "kids playing in the summer", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "date": {"months": ["06", "07", "08"], "phrase": "from summer (any year)"}, "duplicates": false, "undescribed": false, "reduced": "kids playing"}},
+    {"text": "spring cleaning receipts", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "spring cleaning receipts"}}
   ],
   "labels": [
     [0, "0 bytes"], [1, "1 byte"], [999, "999 bytes"], [1000, "1.0 KB"], [1049, "1.0 KB"], [1050, "1.1 KB"],
