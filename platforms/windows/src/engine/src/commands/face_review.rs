@@ -486,7 +486,8 @@ pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqli
     let offset = payload.offset.unwrap_or(0);
     let limit = payload.limit.unwrap_or(50);
     if offset < 0 || !(1..=200).contains(&limit) {
-        return Ok(refused(&payload.request_id, "list", "Ask for 1 to 200 suggestions from offset 0 or later."));
+        let reply = refused(&payload.request_id, "list", "Ask for 1 to 200 suggestions from offset 0 or later.");
+        return Ok(FaceReviewPage { offset, ..reply });
     }
     let filter = format!("{PENDING_WHERE} AND (?1 IS NULL OR c.person_id=?1)");
     let total: i64 = conn.query_row(
@@ -781,22 +782,34 @@ fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Resu
     })
 }
 
+fn settle(tx: rusqlite::Transaction<'_>, reply: FaceReviewPage) -> rusqlite::Result<FaceReviewPage> {
+    if reply.status == "ok" {
+        tx.commit()?;
+        return Ok(reply);
+    }
+    drop(tx);
+    Ok(FaceReviewPage { total: 0, ..reply })
+}
+
 pub(crate) fn resolve(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
     let tx = conn.unchecked_transaction()?;
     let reply = resolve_in(&tx, payload)?;
-    if reply.status == "ok" {
-        tx.commit()?;
-    }
-    Ok(reply)
+    let reply = settle(tx, reply)?;
+    with_pending_total(conn, reply)
 }
 
 pub(crate) fn undo(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
     let tx = conn.unchecked_transaction()?;
     let reply = undo_in(&tx, payload)?;
+    let reply = settle(tx, reply)?;
+    with_pending_total(conn, reply)
+}
+
+fn with_pending_total(conn: &Connection, reply: FaceReviewPage) -> rusqlite::Result<FaceReviewPage> {
     if reply.status == "ok" {
-        tx.commit()?;
+        return Ok(reply);
     }
-    Ok(reply)
+    Ok(FaceReviewPage { total: pending_count(conn)?, ..reply })
 }
 
 pub(crate) fn rejection(request_id: &str, action: &str) -> IpcEvent {
@@ -810,12 +823,12 @@ fn reply_event(page: FaceReviewPage) -> IpcEvent {
 async fn invalid(sink: &Sink) {
     sink.send(EngineError::event(
         "invalid_face_review_request",
-        "Face review requests need a 1 to 128 character ID of letters, digits, '-' or '_'.",
+        "Face review requests need a 1–128 character ASCII request ID.",
     ))
     .await;
 }
 
-async fn run<F>(sink: Sink, db: Option<Writer>, request_id: String, action: &'static str, work: F)
+async fn run<F>(sink: Sink, db: Option<Writer>, request_id: String, action: &'static str, failure: &'static str, work: F)
 where
     F: FnOnce(&Connection) -> rusqlite::Result<FaceReviewPage> + Send + 'static,
 {
@@ -833,11 +846,11 @@ where
         Ok(Ok(page)) => page,
         Ok(Err(err)) => {
             tracing::warn!(?err, action, "face review failed");
-            failed(&id, action, "The catalog could not be read or updated.")
+            failed(&id, action, failure)
         }
         Err(err) => {
             tracing::warn!(?err, action, "face review task failed");
-            failed(&id, action, "The catalog could not be read or updated.")
+            failed(&id, action, failure)
         }
     };
     sink.send(reply_event(page)).await;
@@ -845,17 +858,17 @@ where
 
 pub(crate) async fn handle_list(sink: Sink, db: Option<Writer>, payload: ListFaceReviewPayload) {
     let request_id = payload.request_id.clone();
-    run(sink, db, request_id, "list", move |conn| list(conn, &payload)).await;
+    run(sink, db, request_id, "list", "The review list could not be read.", move |conn| list(conn, &payload)).await;
 }
 
 pub(crate) async fn handle_resolve(sink: Sink, db: Option<Writer>, payload: ResolveFaceReviewPayload) {
     let request_id = payload.request_id.clone();
-    run(sink, db, request_id, "resolve", move |conn| resolve(conn, &payload)).await;
+    run(sink, db, request_id, "resolve", "The review could not be saved.", move |conn| resolve(conn, &payload)).await;
 }
 
 pub(crate) async fn handle_undo(sink: Sink, db: Option<Writer>, payload: UndoFaceReviewPayload) {
     let request_id = payload.request_id.clone();
-    run(sink, db, request_id, "undo", move |conn| undo(conn, &payload)).await;
+    run(sink, db, request_id, "undo", "The review could not be saved.", move |conn| undo(conn, &payload)).await;
 }
 
 #[cfg(test)]

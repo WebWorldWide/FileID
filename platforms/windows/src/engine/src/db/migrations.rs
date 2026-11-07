@@ -519,7 +519,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 31, "expected 31 applied migrations");
+        assert_eq!(n, 32, "expected 32 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -598,7 +598,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 31);
+        assert_eq!(n, 32);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)

@@ -235,7 +235,7 @@ fn a_rejected_face_without_another_match_stays_rejected_and_held() {
     .unwrap();
     run(&conn, &Settings::default());
     assert_eq!(outcome(&conn, 3).as_deref(), Some("rejected"));
-    assert!(candidates(&conn).is_empty());
+    assert_eq!(candidates(&conn), Vec::<Row>::new());
     assert!(held(&conn).contains(&3));
 }
 
@@ -373,7 +373,7 @@ fn deleting_a_person_removes_its_suggestions() {
     run(&conn, &Settings::default());
     conn.execute("UPDATE face_prints SET person_id=NULL WHERE person_id=1", []).unwrap();
     conn.execute("DELETE FROM persons WHERE id=1", []).unwrap();
-    assert!(candidates(&conn).is_empty());
+    assert_eq!(candidates(&conn), Vec::<Row>::new());
     assert!(held(&conn).contains(&3), "the face is assessed again next run");
 }
 
