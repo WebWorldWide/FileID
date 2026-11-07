@@ -369,6 +369,24 @@ fn owned_probe_bundle_priority_and_application_fallback_use_host_suffix() {
         serde_json::json!({"order":"CUDA,universal,application bundle","hostSuffix":suffix,"metadataOnly":true}),
     );
 }
+#[cfg(not(windows))]
+#[test]
+fn owned_probe_finds_packaged_runtime_under_prefix_lib_after_application_bundle() {
+    let root = root();
+    let app = root.join("prefix/bin/RuntimeBundles/llama.cpp/llama-server");
+    let packaged = root.join("prefix/lib/fileid/llama.cpp/llama-server");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    synthetic_host_binary(&packaged);
+    let only_packaged = discover_at(&root.join("models"), Some(&root.join("prefix/bin")), "llama-server", None).unwrap();
+    assert_eq!(only_packaged, vec![std::fs::canonicalize(&packaged).unwrap()]);
+    synthetic_host_binary(&app);
+    let both = discover_at(&root.join("models"), Some(&root.join("prefix/bin")), "llama-server", None).unwrap();
+    assert_eq!(both, [&app, &packaged].map(|p| std::fs::canonicalize(p).unwrap()));
+    receipt(
+        &root,
+        serde_json::json!({"order":"application bundle,prefix lib","metadataOnly":true}),
+    );
+}
 #[test]
 fn owned_probe_actual_consumer_order_and_refusals_remain_before_model_reservation() {
     let server = include_str!("vlm_server.rs").replace("\r\n", "\n");

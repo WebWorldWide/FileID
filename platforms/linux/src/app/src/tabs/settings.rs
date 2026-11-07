@@ -382,7 +382,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             .build(),
     );
     root.append(&gtk::Label::builder()
-        .label("Search and Faces work on their own. Describe Files and finding moments in videos also need a llama.cpp runtime (llama-server), which Linux packages do not include yet; point FILEID_LLAMA_SERVER at a local build to use them. Chat can't write answers with a model yet. Nothing downloads until you press Download. Ready means the files are downloaded and checked against pinned SHA-256 sums, not that a runtime is installed.")
+        .label("Search and Faces work on their own. Describe Files and finding moments in videos also need the llama.cpp runtime (llama-server); packaged builds include it, and for a source build you can point FILEID_LLAMA_SERVER at a local llama-server. Chat can't write answers with a model yet. Nothing downloads until you press Download. Ready means the files are downloaded and checked against pinned SHA-256 sums, not that a runtime is installed.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let connection = gtk::Label::builder()
         .label(if engine.borrow().is_ready() {

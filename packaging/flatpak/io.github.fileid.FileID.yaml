@@ -7,8 +7,11 @@
 #   flatpak-builder --user --force-clean --repo=repo \
 #     build-dir packaging/flatpak/io.github.fileid.FileID.yaml
 #
-# Cargo crates and ONNX Runtime are immutable manifest sources. The build
-# sandbox has no network access and Cargo is forced offline. Before Flathub
+# Cargo crates, ONNX Runtime and the llama.cpp source archive are immutable
+# manifest sources. The build sandbox has no network access and Cargo is
+# forced offline. llama-runtime builds llama-server from the pinned llama.cpp
+# b9254 source with platforms/linux/build/build-llama-runtime.sh into
+# /app/lib/fileid/llama.cpp, where the engine looks for it. Before Flathub
 # submission, replace the local `dir` sources with the immutable archive
 # of the audited release commit and regenerate cargo-sources.json from that
 # archive's platforms/linux/Cargo.lock.
@@ -37,6 +40,21 @@ cleanup:
   - '*.la'
 
 modules:
+  - name: llama-runtime
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+    build-commands:
+      - bash build/build-llama-runtime.sh --archive "$PWD/llama.cpp-b9254.tar.gz" --output /app/lib/fileid/llama.cpp --jobs "${FLATPAK_BUILDER_N_JOBS:-4}"
+    sources:
+      - type: file
+        url: https://codeload.github.com/ggml-org/llama.cpp/tar.gz/e947228222147356bc7e64154d3439e142481632
+        sha256: b45827df371f9a418680f0137f58a3a27e0e577b4c5e99e54519eea28be67241
+        dest-filename: llama.cpp-b9254.tar.gz
+      - type: dir
+        path: ../../platforms/linux/build
+        dest: build
+
   - name: fileid
     buildsystem: simple
     build-options:

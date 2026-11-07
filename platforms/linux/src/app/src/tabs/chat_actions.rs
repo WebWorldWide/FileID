@@ -324,7 +324,7 @@ pub(super) fn unavailable(action: &ChatAction, plan: Option<&PlanSummary>, descr
             Some("Ask Chat to organize this folder first.")
         }
         "describeFiles" if !describe_runtime => Some(
-            "Describing needs a llama.cpp runtime, which this package doesn't include yet.",
+            "Describing needs the llama.cpp runtime, which isn't in this installation.",
         ),
         "changeSetting" => Some(SETTING_UNAVAILABLE),
         _ => None,

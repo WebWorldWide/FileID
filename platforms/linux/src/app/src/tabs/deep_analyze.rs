@@ -829,7 +829,7 @@ fn sync_apply_buttons(ui: &DeepUi) {
 fn run_blocker(ui: &DeepUi) -> Option<String> {
     if !vlm_runtime_available() {
         return Some(
-            "Describing isn't available in this Flatpak yet: it needs a reviewed llama-mtmd-cli, which isn't bundled."
+            "Describing needs the llama.cpp runtime (llama-server), which isn't in this installation. Packaged builds include it; for a source build, point FILEID_LLAMA_SERVER at a local llama-server."
                 .into(),
         );
     }
@@ -1208,7 +1208,7 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
 // ─── Model picker ────────────────────────────────────────────────────────────
 
 pub fn vlm_runtime_available() -> bool {
-    std::env::var_os("FLATPAK_ID").is_none()
+    fileid_engine::models::llama_server_available()
 }
 
 /// The engine-independent picker shown until `listModels` answers: the
@@ -1694,10 +1694,10 @@ fn build_status_card(
 fn build_picker_card(picker_box: &gtk::Box, download_card: &gtk::Box) -> gtk::Box {
     let card = glass_card();
     card.append(&heading("Description model"));
-    let runtime_note = if std::env::var_os("FLATPAK_ID").is_some() {
-        "Describing isn't available in this Flatpak yet, so don't download a model for it."
+    let runtime_note = if vlm_runtime_available() {
+        "The model downloads the first time you describe."
     } else {
-        "The model downloads the first time you describe. It also needs llama-mtmd-cli installed on this computer."
+        "This installation has no llama.cpp runtime (llama-server), so don't download a model for it yet."
     };
     card.append(&wrap_caption(&format!(
         "The AI that writes descriptions and suggested names. Bigger models write better but need more memory. {runtime_note}"

@@ -60,6 +60,7 @@ Things that are **out of scope**:
 - Vulnerabilities in third-party model weights or in tools you supply on `PATH`
   (`llama-mtmd-cli`, `tesseract`, external `ffmpeg`, HEIC converters). These sit
   inside your local trust boundary — report those upstream. FileID's own bundled
-  FFmpeg runtime and its staging controls remain in scope.
+  FFmpeg runtime, the llama.cpp runtime bundled in Windows and Linux packages,
+  and their staging controls remain in scope.
 - An attacker who already has code execution as your user account, or
   administrator/root on the machine

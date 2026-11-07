@@ -12,8 +12,9 @@
 #   oldest distro that ships GTK 4.14 (Ubuntu 22.04 / glibc 2.35) and accept a
 #   higher floor. This trade-off needs Linux-side iteration; see README.md. ***
 #
-# Bundles: fileid-linux + a self-contained FileIDEngine + the whole GTK4 /
-# libadwaita / glib runtime (via linuxdeploy-plugin-gtk).
+# Bundles: fileid-linux + a self-contained FileIDEngine + the pinned llama.cpp
+# runtime (llama-server, built from source) + the whole GTK4 / libadwaita /
+# glib runtime (via linuxdeploy-plugin-gtk).
 #
 # Usage (from repo root):  ./packaging/appimage/build-appimage.sh
 set -euo pipefail
@@ -54,6 +55,26 @@ fetch() {  # fetch <url> <dest> <sha256>
     exit 1
   }
 }
+fetch_source() {  # fetch_source <url> <dest> <sha256>
+  local url="$1" dest="$2" sha256="$3"
+  if [ -e "${dest}" ] && ! printf '%s  %s\n' "${sha256}" "${dest}" |
+      sha256sum --check --status; then
+    echo "Discarding stale or invalid cached source: ${dest}"
+    rm -f "${dest}"
+  fi
+  if [ ! -f "${dest}" ]; then
+    echo "Downloading ${url}"
+    local tmp="${dest}.tmp.$$"
+    curl --fail --show-error --location --retry 3 --retry-all-errors \
+      "${url}" -o "${tmp}"
+    printf '%s  %s\n' "${sha256}" "${tmp}" | sha256sum --check --status || {
+      rm -f "${tmp}"
+      echo "ERROR: SHA256 mismatch for ${url}" >&2
+      exit 1
+    }
+    mv -f "${tmp}" "${dest}"
+  fi
+}
 LD="${TOOLS}/linuxdeploy-x86_64.AppImage"
 LD_GTK="${TOOLS}/linuxdeploy-plugin-gtk.sh"
 fetch \
@@ -64,6 +85,12 @@ fetch \
   "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh" \
   "${LD_GTK}" \
   "b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
+
+LLAMA_ARCHIVE="${TOOLS}/llama.cpp-b9254.tar.gz"
+fetch_source \
+  "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/e947228222147356bc7e64154d3439e142481632" \
+  "${LLAMA_ARCHIVE}" \
+  "b45827df371f9a418680f0137f58a3a27e0e577b4c5e99e54519eea28be67241"
 
 # --- 2. Build the workspace (release) -----------------------------------------
 echo "Building fileid-linux + FileIDEngine (release)…"
@@ -76,6 +103,13 @@ TARGET="${REPO_ROOT}/platforms/linux/target/release"
 # --- 3. Stage AppDir ----------------------------------------------------------
 install -Dm755 "${TARGET}/fileid-linux" "${APPDIR}/usr/bin/fileid-linux"
 install -Dm755 "${TARGET}/FileIDEngine" "${APPDIR}/usr/bin/FileIDEngine"
+
+# llama.cpp runtime for Deep Analyze, beside FileIDEngine where the engine
+# looks for it. Kept out of usr/lib so linuxdeploy's library pass does not
+# rewrite its $ORIGIN RPATHs; confirm on the native AppImage build.
+"${REPO_ROOT}/platforms/linux/build/build-llama-runtime.sh" \
+  --archive "${LLAMA_ARCHIVE}" \
+  --output "${APPDIR}/usr/bin/RuntimeBundles/llama.cpp"
 
 # Desktop + icon + metainfo (reuse platforms/linux/data/ — single source).
 DATA="${REPO_ROOT}/platforms/linux/data"
