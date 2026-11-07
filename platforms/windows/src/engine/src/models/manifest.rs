@@ -103,7 +103,7 @@ fn valid(manifest: &Manifest) -> bool {
                 && !artifact.kind.is_empty()
                 && !artifact.platforms.is_empty()
                 && repo_ok(&artifact.repo)
-                && revision_ok(&artifact.revision)
+                && hex(&artifact.revision, 40)
                 && path_ok(&artifact.path)
                 && hex(&artifact.sha256, 64)
                 && artifact.approx_bytes > 0
@@ -131,10 +131,6 @@ fn name_ok(part: &str) -> bool {
 fn repo_ok(repo: &str) -> bool {
     let mut parts = repo.split('/');
     matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(name), None) if name_ok(owner) && name_ok(name))
-}
-
-fn revision_ok(revision: &str) -> bool {
-    hex(revision, 40) || revision == "main"
 }
 
 fn path_ok(path: &str) -> bool {
@@ -173,6 +169,7 @@ mod tests {
         assert!(mutate(&|v| v["artifacts"][0]["path"] = "../escape.onnx".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][0]["path"] = "x?y=1".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][0]["revision"] = "v1".into()).is_none());
+        assert!(mutate(&|v| v["artifacts"][0]["revision"] = "main".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][0]["license"] = "CC-BY-NC-4.0".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][1]["id"] = v["artifacts"][0]["id"].clone()).is_none());
         assert!(mutate(&|v| v["artifacts"][0]["url"] = "https://evil.example/x".into()).is_none());

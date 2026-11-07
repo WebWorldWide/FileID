@@ -9,7 +9,6 @@ from check_runtime_egress import (
     EXPECTED_INITIAL_GUARD,
     EXPECTED_INITIAL_PREDICATE,
     EXPECTED_REDIRECT_POLICY,
-    KNOWN_MOVING_REVISION_URLS,
     MANIFEST_URL_BUILDER,
     manifest_urls_checked,
     RAW_NETWORK_FILES,
@@ -164,8 +163,8 @@ class RuntimeEgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"])
             self.assertEqual(violations(registry, downloader, manifest), [])
-            failures, urls, moving = manifest_urls_checked(manifest)
-            self.assertEqual((failures, moving), ([], set()))
+            failures, urls = manifest_urls_checked(manifest)
+            self.assertEqual(failures, [])
             self.assertEqual(urls, {f"https://huggingface.co/org/model/resolve/{self.REVISION}/onnx/model.onnx"})
 
     def test_rejects_off_policy_allowlist_host_and_url_builder(self) -> None:
@@ -231,22 +230,16 @@ class RuntimeEgressTests(unittest.TestCase):
                     self.assertTrue(violations(registry, downloader, manifest))
                     self.assertTrue(known_blocker_violations(registry, downloader, manifest))
 
-    def test_moving_revision_baseline_rejects_additions(self) -> None:
+    def test_moving_revision_fails_in_every_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            artifacts = [
-                self.artifact(id=f"a{index}", repo="/".join(url.split("/")[3:5]), revision="main",
-                              path="/".join(url.split("/")[7:]))
-                for index, url in enumerate(sorted(KNOWN_MOVING_REVISION_URLS))
-            ]
-            registry, downloader, manifest = self.files(
-                directory, ["huggingface.co", "hf.co"], manifest=self.manifest(artifacts),
-            )
-            self.assertEqual(known_blocker_violations(registry, downloader, manifest), [])
-            self.assertEqual(len(violations(registry, downloader, manifest)), len(KNOWN_MOVING_REVISION_URLS))
-            added = self.manifest(artifacts + [self.artifact(id="new", revision="main")])
-            registry, downloader, manifest = self.files(directory, ["huggingface.co", "hf.co"], manifest=added)
-            self.assertTrue(any("moving-revision manifest URL baseline changed" in failure
-                                for failure in known_blocker_violations(registry, downloader, manifest)))
+            for revision in ["main", "v1.0", "refs/pr/1"]:
+                with self.subTest(revision=revision):
+                    registry, downloader, manifest = self.files(
+                        directory, ["huggingface.co", "hf.co"], manifest=self.manifest([self.artifact(revision=revision)]),
+                    )
+                    for check in (violations, known_blocker_violations):
+                        self.assertTrue(check(registry, downloader, manifest))
+                    self.assertFalse(manifest_urls_checked(manifest)[1])
 
     def test_catalog_urls_must_be_pinned_files_in_their_own_revision(self) -> None:
         import json
@@ -726,14 +719,11 @@ class RuntimeEgressTests(unittest.TestCase):
         downloader = root / "platforms/windows/src/engine/src/downloader.rs"
         self.assertEqual(known_blocker_violations(registry, downloader), [])
 
-    def test_repository_strict_gate_reports_only_moving_revisions(self) -> None:
+    def test_repository_strict_gate_passes(self) -> None:
         root = Path(__file__).resolve().parents[2]
         registry = root / "platforms/windows/src/engine/src/models/registry.rs"
         downloader = root / "platforms/windows/src/engine/src/downloader.rs"
-        prefix = "manifest URL is not pinned to an immutable revision: "
-        failures = violations(registry, downloader)
-        self.assertTrue(all(failure.startswith(prefix) for failure in failures), failures)
-        self.assertEqual({failure.removeprefix(prefix) for failure in failures}, KNOWN_MOVING_REVISION_URLS)
+        self.assertEqual(violations(registry, downloader), [])
 
     def test_registry_literal_or_duplicate_manifest_constructions_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

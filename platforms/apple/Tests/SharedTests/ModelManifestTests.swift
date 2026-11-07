@@ -111,9 +111,13 @@ struct ModelManifestTests {
     @Test("lookup helpers resolve by exact URL / repo")
     func lookupHelpers() throws {
         let sface = try #require(URL(string:
-            "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"))
+            "https://huggingface.co/opencv/face_recognition_sface/resolve/3d7082438a6e4551e840c9b2bb60b71e8da4b524/face_recognition_sface_2021dec.onnx"))
         #expect(ModelManifest.sha256(forURL: sface)
             == "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79")
+        let moving = try #require(URL(string:
+            "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"))
+        #expect(ModelManifest.sha256(forURL: moving) == nil)
+        #expect(ModelManifest.artifacts.allSatisfy { $0.url.range(of: "/resolve/[0-9a-f]{40}/", options: .regularExpression) != nil })
         let unknown = try #require(URL(string: "https://huggingface.co/unknown/repo/resolve/main/x.onnx"))
         #expect(ModelManifest.sha256(forURL: unknown) == nil)
 

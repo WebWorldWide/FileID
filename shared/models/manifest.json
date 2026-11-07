@@ -1,5 +1,5 @@
 {
-  "comment": "Canonical curated model download set: the one place each default download is defined. A static artifact's URL is https://huggingface.co/<repo>/resolve/<revision>/<path>; its sha256 is the exact file digest (HF LFS oid or the hash of a small non-LFS file). An MLX VLM repo pins an immutable revision; per-file sha256 comes from that commit's LFS pointers at download time. license names a licensePolicies key. The shared Rust engine embeds this file (platforms/windows/src/engine/src/models/manifest.rs) and the macOS table is generated from it by shared/scripts/gen_model_manifest.py. shared/scripts/check_runtime_egress.py verifies every URL, revision, sha256 and license; shared/scripts/check_model_license_policy.py verifies the policies.",
+  "comment": "Canonical curated model download set: the one place each default download is defined. Every artifact pins an immutable commit revision. A static artifact's URL is https://huggingface.co/<repo>/resolve/<revision>/<path>; its sha256 is the exact file digest (HF LFS oid or the hash of a small non-LFS file). An MLX VLM repo pins an immutable revision; per-file sha256 comes from that commit's LFS pointers at download time. license names a licensePolicies key. The shared Rust engine embeds this file (platforms/windows/src/engine/src/models/manifest.rs) and the macOS table is generated from it by shared/scripts/gen_model_manifest.py. shared/scripts/check_runtime_egress.py verifies every URL, revision, sha256 and license; shared/scripts/check_model_license_policy.py verifies the policies.",
   "schemaVersion": 2,
   "licensePolicies": {
     "MIT": {
@@ -41,7 +41,7 @@
         "windows"
       ],
       "repo": "opencv/face_detection_yunet",
-      "revision": "main",
+      "revision": "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
       "path": "face_detection_yunet_2023mar.onnx",
       "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
       "approxBytes": 232589,
@@ -55,7 +55,7 @@
         "windows"
       ],
       "repo": "opencv/face_recognition_sface",
-      "revision": "main",
+      "revision": "3d7082438a6e4551e840c9b2bb60b71e8da4b524",
       "path": "face_recognition_sface_2021dec.onnx",
       "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
       "approxBytes": 38696353,
@@ -69,7 +69,7 @@
         "windows"
       ],
       "repo": "Xenova/clip-vit-base-patch32",
-      "revision": "main",
+      "revision": "6b7c523703ae26e39be4b03774966f8571c7f523",
       "path": "onnx/vision_model.onnx",
       "sha256": "fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40",
       "approxBytes": 351685709,
@@ -83,7 +83,7 @@
         "windows"
       ],
       "repo": "Xenova/clip-vit-base-patch32",
-      "revision": "main",
+      "revision": "6b7c523703ae26e39be4b03774966f8571c7f523",
       "path": "onnx/text_model.onnx",
       "sha256": "3f6571f5bad13a97c469c1622e1cfc4d9aef78b79fdbfcff804ca357bfada8cc",
       "approxBytes": 254058553,
@@ -97,7 +97,7 @@
         "windows"
       ],
       "repo": "openai/clip-vit-base-patch32",
-      "revision": "main",
+      "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
       "path": "vocab.json",
       "sha256": "5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363",
       "approxBytes": 1000000,
@@ -111,7 +111,7 @@
         "windows"
       ],
       "repo": "openai/clip-vit-base-patch32",
-      "revision": "main",
+      "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
       "path": "merges.txt",
       "sha256": "f526393189112391ce6f9795d4695f704121ce452c3aad1f5335cc41337eba85",
       "approxBytes": 525000,
@@ -125,7 +125,7 @@
         "windows"
       ],
       "repo": "Web-World-Wide/ram-plus-onnx",
-      "revision": "main",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
       "path": "ram_plus.onnx",
       "sha256": "86058ac8881128540084d29f2b83cd1c4b4214350a8658addad35a877634f7d9",
       "approxBytes": 925600000,
@@ -139,7 +139,7 @@
         "windows"
       ],
       "repo": "Web-World-Wide/ram-plus-onnx",
-      "revision": "main",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
       "path": "ram_plus_tags.txt",
       "sha256": "78c9db7838690addaddcb7b3f7dc724b6798f0d6eff7d67c106e8ad8f3f3e69e",
       "approxBytes": 47000,
@@ -153,7 +153,7 @@
         "windows"
       ],
       "repo": "Web-World-Wide/ram-plus-onnx",
-      "revision": "main",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
       "path": "ram_plus_thresholds.txt",
       "sha256": "7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2",
       "approxBytes": 46000,
@@ -166,7 +166,7 @@
         "windows"
       ],
       "repo": "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
-      "revision": "main",
+      "revision": "b3592d09be469bedab6be51f577824b3b6b76ba1",
       "path": "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
       "sha256": "80f5bda68f156f12650ca03a0a2dbfae06a215ac41caa773b8631a479f82415e",
       "approxBytes": 14300000000,
@@ -179,7 +179,7 @@
         "windows"
       ],
       "repo": "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
-      "revision": "main",
+      "revision": "b3592d09be469bedab6be51f577824b3b6b76ba1",
       "path": "mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf",
       "sha256": "e41cc0321dbd0d7e42cdada75862a5ed0b221263313b0f1b55b0b696dfec8647",
       "approxBytes": 878000000,
@@ -244,7 +244,7 @@
         "windows"
       ],
       "repo": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
-      "revision": "main",
+      "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
       "path": "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
       "sha256": "9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392",
       "approxBytes": 4700000000,
@@ -257,7 +257,7 @@
         "windows"
       ],
       "repo": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
-      "revision": "main",
+      "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
       "path": "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
       "sha256": "c24a7f5fcfc68286f0a217023b6738e73bea4f11787a43e8238d4bb1b8604cde",
       "approxBytes": 1400000000,
@@ -270,7 +270,7 @@
         "windows"
       ],
       "repo": "ggml-org/gemma-3-4b-it-GGUF",
-      "revision": "main",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
       "path": "gemma-3-4b-it-Q4_K_M.gguf",
       "sha256": "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863",
       "approxBytes": 2500000000,
@@ -283,7 +283,7 @@
         "windows"
       ],
       "repo": "ggml-org/gemma-3-4b-it-GGUF",
-      "revision": "main",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
       "path": "mmproj-model-f16.gguf",
       "sha256": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb",
       "approxBytes": 851251104,
@@ -297,7 +297,7 @@
         "macos"
       ],
       "repo": "Xenova/bge-small-en-v1.5",
-      "revision": "main",
+      "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
       "path": "onnx/model.onnx",
       "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
       "approxBytes": 135000000,
@@ -311,7 +311,7 @@
         "macos"
       ],
       "repo": "Xenova/bge-small-en-v1.5",
-      "revision": "main",
+      "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
       "path": "vocab.txt",
       "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
       "approxBytes": 232000,
