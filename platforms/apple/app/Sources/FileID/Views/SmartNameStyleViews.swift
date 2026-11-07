@@ -5,11 +5,14 @@ import SwiftUI
 import FileIDShared
 
 struct NameStyleControls: View {
+    var engine: EngineClient? = nil
+    var refresh = 0
     @AppStorage(NameStyle.styleKey) private var style = NameStyle.defaultStyle
     @AppStorage(NameStyle.maxLengthKey) private var maxLength = NameStyle.defaultMaxLength
     @AppStorage(NameStyle.includePeopleKey) private var includePeople = NameStyle.defaultIncludePeople
     @AppStorage(NameStyle.includeEventKey) private var includeEvent = NameStyle.defaultIncludeEvent
     @AppStorage(NameStyle.includeDateKey) private var includeDate = NameStyle.defaultIncludeDate
+    @AppStorage(NameStyle.learnKey) private var learn = NameStyle.defaultLearn
 
     private var lengthBinding: Binding<Double> {
         Binding(get: { Double(min(max(maxLength, NameStyle.lengthRange.lowerBound), NameStyle.lengthRange.upperBound)) },
@@ -44,8 +47,42 @@ struct NameStyleControls: View {
                 .disabled(!NameStyle.dateToggleEnabled(style: style))
                 .opacity(NameStyle.dateToggleEnabled(style: style) ? 1 : 0.45)
                 .help(NameStyle.dateToggleEnabled(style: style) ? "Add the capture date at the end" : "Date first already starts with the date")
+            Toggle("Learn from my renames", isOn: $learn).toggleStyle(DSToggleStyle())
+                .help("When you edit a suggested name before renaming, later suggestions follow your style. Stays on this Mac.")
+            if let engine { LearnedStyleRow(engine: engine, enabled: learn, refresh: refresh) }
         }
         .font(Theme.Font.body(13))
+    }
+}
+
+private struct LearnedStyleRow: View {
+    let engine: EngineClient
+    let enabled: Bool
+    let refresh: Int
+    @State private var learned = NameStyle.Learned()
+    @State private var busy = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(NameStyle.learnedSummary(learned, enabled: enabled))
+                .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Reset") { Task { await load(reset: true) } }
+                .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                .disabled(busy || learned.samples == 0)
+                .help("Forget the style FileID learned from your renames")
+                .accessibilityLabel("Reset learned name style")
+        }
+        .task(id: refresh) { await load(reset: false) }
+    }
+
+    private func load(reset: Bool) async {
+        busy = true
+        defer { busy = false }
+        let request = NameStyle.preferencesRequest(id: "names-learned-" + UUID().uuidString, reset: reset)
+        guard let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" else { return }
+        learned = NameStyle.learned(from: response.hits)
     }
 }
 
@@ -61,6 +98,7 @@ struct SmartNamePreviewSheet: View {
     @AppStorage(NameStyle.includePeopleKey) private var includePeople = NameStyle.defaultIncludePeople
     @AppStorage(NameStyle.includeEventKey) private var includeEvent = NameStyle.defaultIncludeEvent
     @AppStorage(NameStyle.includeDateKey) private var includeDate = NameStyle.defaultIncludeDate
+    @AppStorage(NameStyle.learnKey) private var learn = NameStyle.defaultLearn
 
     @State private var rows: [NameStyle.Row] = []
     @State private var loading = false
@@ -69,9 +107,11 @@ struct SmartNamePreviewSheet: View {
     @State private var generation = 0
     @State private var pending: Task<Void, Never>?
     @State private var lastBatch: [ReadStore.RenameOutcome] = []
+    @State private var learnedRefresh = 0
 
     private var naming: CatalogNaming {
-        NameStyle.naming(style: style, maxLength: maxLength, includePeople: includePeople, includeEvent: includeEvent, includeDate: includeDate)
+        NameStyle.naming(style: style, maxLength: maxLength, includePeople: includePeople, includeEvent: includeEvent,
+                         includeDate: includeDate, learn: learn)
     }
     private var rowSpring: Animation? { reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8) }
     private var ready: [CatalogWrites.NamedRename] { NameStyle.renames(rows) }
@@ -86,7 +126,7 @@ struct SmartNamePreviewSheet: View {
             }
             Text("Check the new names and edit any you want. Only ticked files are renamed.")
                 .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-            NameStyleControls()
+            NameStyleControls(engine: engine, refresh: learnedRefresh)
                 .padding(12)
                 .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
             list
@@ -167,17 +207,28 @@ struct SmartNamePreviewSheet: View {
         guard !renames.isEmpty, !applying else { return }
         applying = true
         status = "Renaming…"
+        let shown = rows, style = naming
         Task { @MainActor in
             let result = await CatalogWrites.applyNames(renames, engine: engine, store: store)
             if !result.renamed.isEmpty {
                 BulkRenameSheet.saveLastBatch(result.renamed)
                 lastBatch = result.renamed
             }
+            await learnFrom(shown, renamed: result.renamed, naming: style)
             status = "Renamed \(result.renamed.count.formatted()) file\(result.renamed.count == 1 ? "" : "s")"
                 + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" + (result.firstError.map { ": \($0)" } ?? "") : "") + "."
             applying = false
             await preview()
         }
+    }
+
+    private func learnFrom(_ shown: [NameStyle.Row], renamed: [ReadStore.RenameOutcome], naming: CatalogNaming) async {
+        guard naming.learn else { return }
+        let edits = NameStyle.edits(shown, renamed: Set(renamed.map(\.fileID)))
+        guard !edits.isEmpty else { return }
+        let request = NameStyle.learnRequest(id: "names-learn-" + UUID().uuidString, edits: edits, naming: naming)
+        _ = await TakeRequests.send(engine, request, timeout: 15)
+        learnedRefresh += 1
     }
 
     private func undo() {
@@ -254,7 +305,8 @@ private struct SmartNameRow: View {
                     .fixedSize()
                     .help("Renamed together with this file")
             }
-            Text(NameStyle.reasonLabel(row.reason))
+            Text(NameStyle.reasonChip(row))
+                .help(NameStyle.learnedHelp(row.learned) ?? "")
                 .font(Theme.Font.body(11.5, .medium))
                 .foregroundStyle(Theme.ai)
                 .padding(.horizontal, 7).padding(.vertical, 2)
