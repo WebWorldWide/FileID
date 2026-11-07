@@ -559,4 +559,61 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn learned_style_is_recorded_applied_and_reset() {
+        let dir = std::env::temp_dir().join(format!("fileid-names-learn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
+        for (id, stored) in [(1, "beach sunset"), (2, "dog park"), (3, "red barn field"), (4, "kids playing soccer")] {
+            let path = dir.join(format!("Renamed_{id}.jpg"));
+            std::fs::write(&path, b"a").unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,0,'image','jpg',0,?3)",
+                params![id, path.to_string_lossy(), stored],
+            )
+            .unwrap();
+        }
+        let learn_request = |edits: serde_json::Value| {
+            request(serde_json::json!({"requestID":"l","action":"learnNames","naming":{"style":"short","maxLength":40},"nameEdits":edits}))
+        };
+        let hits = learn(
+            &mut conn,
+            &learn_request(serde_json::json!([
+                {"fileID":1,"proposed":"beach-sunset.jpg","applied":"Beach_Sunset.jpg"},
+                {"fileID":2,"proposed":"dog-park.jpg","applied":"Dog_Park.jpg"},
+                {"fileID":99,"proposed":"x.jpg","applied":"y.jpg"}
+            ])),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].kind.as_str(), hits[0].text.as_str()), ("nameSamples", "2"));
+        let hits = learn(&mut conn, &learn_request(serde_json::json!([{"fileID":3,"proposed":"x.jpg","applied":"Red_Barn_Field.jpg"}]))).unwrap();
+        let got: Vec<(&str, Option<&str>, &str)> =
+            hits.iter().map(|h| (h.kind.as_str(), h.evidence_id.as_deref(), h.text.as_str())).collect();
+        assert_eq!(got, [("namePreference", Some("separator"), "_"), ("namePreference", Some("case"), "title"), ("nameSamples", None, "3")]);
+        let base: String = conn
+            .query_row("SELECT json_extract(before_json,'$.base') FROM catalog_corrections WHERE kind='nameStyle' AND file_id=3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(base, "red-barn-field");
+        let propose_request = |learn: bool| {
+            request(serde_json::json!({"requestID":"p","action":"proposeNames","fileIDs":[4],"naming":{"style":"short","maxLength":40,"learn":learn}}))
+        };
+        let plain = propose(&conn, &propose_request(false)).unwrap();
+        assert_eq!((plain[0].text.as_str(), plain[0].evidence_id.as_deref()), ("kids-playing-soccer.jpg", Some("proposedName")));
+        let learned = propose(&conn, &propose_request(true)).unwrap();
+        assert_eq!(
+            (learned[0].text.as_str(), learned[0].evidence_id.as_deref()),
+            ("Kids_Playing_Soccer.jpg", Some("proposedName|learned:separator,case"))
+        );
+        assert!(learn(&mut conn, &learn_request(serde_json::json!([{"fileID":1,"proposed":" ","applied":"a.jpg"}]))).is_err());
+        assert!(learn(&mut conn, &request(serde_json::json!({"requestID":"l","action":"learnNames","naming":{"style":"short","maxLength":40}}))).is_err());
+        let hits = reset(&conn).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "0");
+        let after = propose(&conn, &propose_request(true)).unwrap();
+        assert_eq!(after[0].text, "kids-playing-soccer.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
