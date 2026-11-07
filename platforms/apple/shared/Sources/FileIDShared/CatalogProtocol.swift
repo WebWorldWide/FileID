@@ -257,7 +257,6 @@ public struct CatalogNaming: Codable, Sendable, Equatable {
     public var includeEvent: Bool
     public var includeDate: Bool
     public var learn: Bool
-    enum CodingKeys: String, CodingKey { case style, maxLength, includePeople, includeEvent, includeDate, learn }
     public init(style: String, maxLength: Int, includePeople: Bool = false, includeEvent: Bool = false, includeDate: Bool = false, learn: Bool = false) {
         self.style = style; self.maxLength = maxLength
         self.includePeople = includePeople; self.includeEvent = includeEvent; self.includeDate = includeDate; self.learn = learn
@@ -270,15 +269,6 @@ public struct CatalogNaming: Codable, Sendable, Equatable {
         includeEvent = try c.decodeIfPresent(Bool.self, forKey: .includeEvent) ?? false
         includeDate = try c.decodeIfPresent(Bool.self, forKey: .includeDate) ?? false
         learn = try c.decodeIfPresent(Bool.self, forKey: .learn) ?? false
-    }
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(style, forKey: .style)
-        try c.encode(maxLength, forKey: .maxLength)
-        try c.encode(includePeople, forKey: .includePeople)
-        try c.encode(includeEvent, forKey: .includeEvent)
-        try c.encode(includeDate, forKey: .includeDate)
-        if learn { try c.encode(learn, forKey: .learn) }
     }
 }
 
