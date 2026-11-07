@@ -12,6 +12,7 @@ use std::time::Instant;
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, FaceClusteringResult, IpcEvent, Wrap,
 };
+use crate::commands::face_review;
 use crate::platform::SleepGuard;
 use crate::pipeline::face_clustering::{cluster, ClusterAnchor, ClusterAssignment, FaceRow};
 use rusqlite::OptionalExtension;
@@ -531,7 +532,7 @@ fn release_active_before_terminal(active: &AtomicBool) {
 /// Refuses to recluster unless every face cache shares one current model and
 /// processing space with valid unit vectors, so incompatible embeddings never
 /// reshape existing People.
-fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT fp.arcface_embedding, fp.embedding_model, fp.processing_version, fp.source_revision, r.revision \
          FROM face_prints fp LEFT JOIN catalog_revisions r ON r.file_id=fp.file_id \
@@ -565,7 +566,7 @@ fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<(
         count += 1;
         anyhow::ensure!(count <= 200_000, "Face clustering exceeds the safe batch size; existing People were preserved.");
     }
-    Ok(())
+    Ok(space)
 }
 
 pub(crate) async fn handle_run_face_clustering(
@@ -591,9 +592,11 @@ pub(crate) async fn handle_run_face_clustering(
         // phase 1 and phase 3 is benign — it lands with person_id=NULL and is
         // picked up next run.
         let mut faces: Vec<FaceRow> = Vec::new();
+        let space;
+        let held: HashSet<i64>;
         {
             let conn = db.lock();
-            ensure_compatible_face_space(&conn)?;
+            space = ensure_compatible_face_space(&conn)?;
 
             // (a) Load every face that has an ArcFace embedding.
             //
@@ -673,6 +676,14 @@ pub(crate) async fn handle_run_face_clustering(
                     });
                 }
             }
+
+            held = match &space {
+                Some((model, processing)) => {
+                    face_review::holdout(&conn, model, processing, f64::from(min_cluster_quality))?
+                }
+                None => HashSet::new(),
+            };
+            faces.retain(|face| !held.contains(&face.face_id));
 
             // The user-identity snapshot (prior names/title/is_unknown + the
             // face->person map) is read in PHASE 3 under the persist lock — NOT
@@ -1175,6 +1186,14 @@ pub(crate) async fn handle_run_face_clustering(
         }
         drop(update);
         tx.execute("DROP TABLE face_cluster_preserve", [])?;
+        face_review::mark_pool(&tx, faces.iter().map(|face| &face.face_id), now)?;
+        if let Some((model, processing)) = &space {
+            let stats = face_review::assess(&tx, &held, model, processing, &face_review::Settings::from_env(), now)?;
+            if stats != face_review::AssessStats::default() {
+                tracing::info!(queued = stats.queued, assigned = stats.assigned, unmatched = stats.unmatched, "[CLUSTER] assessed new faces for review");
+            }
+        }
+        let review_queued = face_review::pending_count(&tx)?;
         tx.commit()?;
 
         // Faces that stayed person_id=NULL — either they never clustered, or their
@@ -1192,6 +1211,7 @@ pub(crate) async fn handle_run_face_clustering(
             unmatched_faces: face_count.saturating_sub(matched as u64),
             duration_seconds: started.elapsed().as_secs_f64(),
             deferred_faces: None,
+            review_queued: Some(review_queued),
         })
     })
     .await;

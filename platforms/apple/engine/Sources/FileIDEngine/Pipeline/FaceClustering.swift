@@ -880,11 +880,17 @@ public enum FaceClustering {
         }
         let selectedSpace = EmbeddingSpace(model: selectedModel, processing: FaceAnalysisCache.processingVersion)
         let selectedPartition: SelectedPartition
+        let reviewHoldout: Set<Int64>
+        let skippedFaceIDs: Set<Int64>
         do {
-            selectedPartition = try await database.pool.read { db in
-                try loadSelectedPartition(from: db, expectedSpace: selectedSpace,
-                    phaseZeroUnknownFaceIDs: unknownFaceIDs, minQuality: clusterMinQuality)
+            (selectedPartition, reviewHoldout) = try await database.pool.read { db in
+                let holdout = try FaceReview.holdout(db, model: selectedSpace.model, processing: selectedSpace.processing,
+                                                     minQuality: clusterMinQuality)
+                let partition = try loadSelectedPartition(from: db, expectedSpace: selectedSpace,
+                    phaseZeroUnknownFaceIDs: unknownFaceIDs.union(holdout), minQuality: clusterMinQuality)
+                return (partition, holdout)
             }
+            skippedFaceIDs = unknownFaceIDs.union(reviewHoldout)
         } catch {
             JSONLog.shared.error(ev: "face_cluster_query_failed", error: "\(error)")
             await sink.emit(.error(EngineError(
@@ -904,11 +910,13 @@ public enum FaceClustering {
         let rows = selectedPartition.rows
         guard !rows.isEmpty else {
             JSONLog.shared.info(ev: "face_cluster_empty")
+            let queued = await FaceReview.finish(database: database, pool: [], holdout: reviewHoldout,
+                                                 model: selectedSpace.model, processing: selectedSpace.processing)
             let personCount = await currentPersonCount(database: database)
             return FaceClusteringResult(personCount: personCount, faceCount: 0,
                                         unmatchedFaces: 0,
                                         durationSeconds: Date().timeIntervalSince(started),
-                                        deferredFaces: selectedPartition.deferredFaces)
+                                        deferredFaces: selectedPartition.deferredFaces, reviewQueued: queued)
         }
         // Hitting the cap means there are likely embedded faces past it that
         // this wipe-recluster run leaves unassigned. Surface it instead of the
@@ -1058,7 +1066,7 @@ public enum FaceClustering {
             stats = try await database.pool.write { db in
                 try Self.persistSelectedPartition(from: db, partition: selectedPartition,
                     expectedSpace: selectedSpace, rawClusters: rawClusters,
-                    phaseZeroUnknownFaceIDs: unknownFaceIDs, minQuality: clusterMinQuality,
+                    phaseZeroUnknownFaceIDs: skippedFaceIDs, minQuality: clusterMinQuality,
                     minClusterSize: minClusterSizeToKeep, soloQualityFloor: soloQualityFloor)
             }
         } catch {
@@ -1110,6 +1118,8 @@ public enum FaceClustering {
         // fragmentation (1-photo clusters whose embeddings happen to land
         // just below the kNN threshold). Cheap insurance.
         let autoMergedSources = await tightPairAutoMerge(database: database, expectedSpace: selectedSpace)
+        let reviewQueued = await FaceReview.finish(database: database, pool: rows.filter { !$0.held }.map(\.id), holdout: reviewHoldout,
+                                                   model: selectedSpace.model, processing: selectedSpace.processing)
 
         let finalPersonCount = await currentPersonCount(database: database)
         let dur = Date().timeIntervalSince(started)
@@ -1125,7 +1135,8 @@ public enum FaceClustering {
             faceCount: decoded.count,
             unmatchedFaces: unmatched,
             durationSeconds: dur,
-            deferredFaces: stats.deferredFaces
+            deferredFaces: stats.deferredFaces,
+            reviewQueued: reviewQueued
         )
     }
 

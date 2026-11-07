@@ -129,6 +129,26 @@ pub enum CommandPayload {
     /// 'purgeExcluded', succeeded = purged row count).
     #[serde(rename = "purgeExcluded")]
     PurgeExcluded(PurgeExcludedPayload),
+    /// Schema 1.23.0. Read one page of pending face review suggestions: faces runFaceClustering
+    /// compared with person centroids in their own model and processing space and queued instead of
+    /// assigning. Read-only. Replies faceReview with action list.
+    #[serde(rename = "listFaceReview")]
+    ListFaceReview(ListFaceReviewPayload),
+    /// Schema 1.23.0. Resolve one pending suggestion. accept assigns the face to personID and is
+    /// refused when that person is already in the same photo; reject records that the face is not
+    /// this person (against the person's representative face, by file and box, so it survives
+    /// reclustering); ignore files the face under a new Unknown person. personID must match the
+    /// pending suggestion, otherwise the reply is refused. Each resolution is one catalog operation
+    /// (catalog_corrections kind face_review). Replies faceReview with action resolve and the
+    /// operationID to undo.
+    #[serde(rename = "resolveFaceReview")]
+    ResolveFaceReview(ResolveFaceReviewPayload),
+    /// Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person
+    /// (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the
+    /// suggestion is pending again. Refused when the face changed since. Replies faceReview with
+    /// action undo.
+    #[serde(rename = "undoFaceReview")]
+    UndoFaceReview(UndoFaceReviewPayload),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +239,8 @@ pub enum EventPayload {
     CatalogResponse(Wrap<CatalogResponse>),
     #[serde(rename = "chatResponse")]
     ChatResponse(Wrap<ChatResponse>),
+    #[serde(rename = "faceReview")]
+    FaceReview(Wrap<FaceReviewPage>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -942,6 +964,54 @@ pub struct PurgeExcludedPayload {
     pub excluded_paths: Vec<String>,
 }
 
+/// Schema 1.23.0. Read one page of pending face review suggestions: faces runFaceClustering
+/// compared with person centroids in their own model and processing space and queued instead of
+/// assigning. Read-only. Replies faceReview with action list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFaceReviewPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    /// Only suggestions for this person. Omitted or null lists every person's.
+    #[serde(rename = "personID", default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+/// Schema 1.23.0. Resolve one pending suggestion. accept assigns the face to personID and is
+/// refused when that person is already in the same photo; reject records that the face is not this
+/// person (against the person's representative face, by file and box, so it survives reclustering);
+/// ignore files the face under a new Unknown person. personID must match the pending suggestion,
+/// otherwise the reply is refused. Each resolution is one catalog operation (catalog_corrections
+/// kind face_review). Replies faceReview with action resolve and the operationID to undo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveFaceReviewPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    #[serde(rename = "faceID")]
+    pub face_id: i64,
+    #[serde(rename = "personID")]
+    pub person_id: i64,
+    pub resolution: String,
+}
+
+/// Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person
+/// (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the
+/// suggestion is pending again. Refused when the face changed since. Replies faceReview with action
+/// undo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoFaceReviewPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    #[serde(rename = "operationID")]
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolResponse {
@@ -1244,6 +1314,11 @@ pub struct FaceClusteringResult {
     /// are retained. Omitted means this engine does not report coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_faces: Option<u64>,
+    /// Schema 1.23.0. Pending face review suggestions after this pass (listFaceReview). New faces
+    /// are compared with existing people and queued for review rather than assigned. Omitted by
+    /// engines that do not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_queued: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1788,6 +1863,73 @@ pub struct ChatRename {
     #[serde(rename = "fileID")]
     pub file_id: i64,
     pub new_name: String,
+}
+
+/// Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceReviewPage {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub action: String,
+    /// refused: the request was understood but the catalog no longer allows it (the suggestion or
+    /// face changed, or the person is already in the photo); nothing changed.
+    pub status: String,
+    /// Plain-language reason when status is not ok.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// resolve: the operation to pass to undoFaceReview. undo: the operation undone.
+    #[serde(rename = "operationID", default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// resolve and undo: the face changed.
+    #[serde(rename = "faceID", default, skip_serializing_if = "Option::is_none")]
+    pub face_id: Option<i64>,
+    /// resolve: the person the face now belongs to (accept: the suggested person; ignore: the new
+    /// Unknown person; reject: null).
+    #[serde(rename = "personID", default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<i64>,
+    /// Pending suggestions matching the list filter (for resolve and undo: all pending
+    /// suggestions).
+    pub total: i64,
+    pub offset: i64,
+    /// list: the page, best score first. Empty for resolve and undo.
+    pub items: Vec<FaceReviewItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceReviewItem {
+    #[serde(rename = "faceID")]
+    pub face_id: i64,
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    /// The photo the face is in.
+    pub path: String,
+    /// The face box as the engine stores it (face_prints.bbox).
+    pub bbox: String,
+    /// The suggested person.
+    #[serde(rename = "personID")]
+    pub person_id: i64,
+    /// The suggested person's display name; null when unnamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_name: Option<String>,
+    /// The suggested person's representative face, to show beside this face.
+    #[serde(rename = "representativeFaceID", default, skip_serializing_if = "Option::is_none")]
+    pub representative_face_id: Option<i64>,
+    /// Cosine similarity between the face and the person's centroid.
+    pub score: f64,
+    /// suggested: close to this person and clearly closer than to anyone else; uncertain: only
+    /// moderately close; ambiguous: about as close to another person.
+    pub reason: String,
+    /// The next closest person, when there is one.
+    #[serde(rename = "runnerUpPersonID", default, skip_serializing_if = "Option::is_none")]
+    pub runner_up_person_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_up_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_up_score: Option<f64>,
+    /// Unix seconds when the suggestion was made.
+    pub created_at: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

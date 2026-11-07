@@ -1,0 +1,142 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FileID.Views.People.FaceReviewPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:FileID.ViewModels"
+    mc:Ignorable="d">
+
+    <Grid RowSpacing="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="4">
+            <TextBlock x:Name="HeaderText"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level2"
+                       Text="Review suggestions" />
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Text="New faces that look like someone you already have. Nothing is added to a person until you accept it." />
+            <StackPanel x:Name="BusyPanel" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+                <ProgressRing x:Name="BusyRing" Width="16" Height="16" IsActive="False" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Loading suggestions…" />
+            </StackPanel>
+            <TextBlock x:Name="EmptyText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       Visibility="Collapsed"
+                       Text="No suggestions to review." />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" x:Name="RowsScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+            <StackPanel Spacing="10">
+                <ItemsRepeater x:Name="RowsRepeater" ElementPrepared="OnRowElementPrepared">
+                    <ItemsRepeater.Layout>
+                        <StackLayout Orientation="Vertical" Spacing="8" />
+                    </ItemsRepeater.Layout>
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:FaceReviewItemVm">
+                            <Grid Padding="12,10,12,10"
+                                  CornerRadius="12"
+                                  ColumnSpacing="12"
+                                  Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                  BorderThickness="1"
+                                  AutomationProperties.Name="{x:Bind RowLabel}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Border Width="64" Height="64" CornerRadius="32"
+                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                            BorderBrush="{ThemeResource GoldBrush}" BorderThickness="1"
+                                            AutomationProperties.Name="{x:Bind FaceLabel}">
+                                        <Image Source="{x:Bind FaceImage, Mode=OneTime}" Stretch="UniformToFill" Width="64" Height="64" />
+                                    </Border>
+                                    <FontIcon Glyph="&#xE8D4;" FontSize="12" Foreground="{ThemeResource AiBrush}" VerticalAlignment="Center" />
+                                    <Border Width="44" Height="44" CornerRadius="22"
+                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                            AutomationProperties.Name="{x:Bind PersonLabel}">
+                                        <Image Source="{x:Bind PersonImage, Mode=OneTime}" Stretch="UniformToFill" Width="44" Height="44" />
+                                    </Border>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock Text="{x:Bind PersonName}"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind ReasonText}"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind FileName}"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                               TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Button Content="Ignore"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind IgnoreLabel}"
+                                            ToolTipService.ToolTip="File this face under Unknown so it isn't suggested again"
+                                            Click="OnIgnoreClicked" />
+                                    <Button Content="Not this person"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind RejectLabel}"
+                                            Click="OnRejectClicked" />
+                                    <Button Content="Accept"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind AcceptLabel}"
+                                            Click="OnAcceptClicked" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+                <Button x:Name="MoreButton"
+                        HorizontalAlignment="Center"
+                        Visibility="Collapsed"
+                        Content="Show more"
+                        AutomationProperties.Name="Show more suggestions"
+                        Click="OnMoreClicked" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2"
+              x:Name="UndoBar"
+              Visibility="Collapsed"
+              Padding="12,8"
+              CornerRadius="10"
+              ColumnSpacing="8"
+              BorderBrush="{ThemeResource GoldBrush}"
+              BorderThickness="1"
+              Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="UndoText" Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap" />
+            <Button x:Name="UndoButton"
+                    Grid.Column="1"
+                    Content="Undo"
+                    AutomationProperties.Name="Undo the last review"
+                    Click="OnUndoClicked" />
+        </Grid>
+
+        <TextBlock Grid.Row="3"
+                   x:Name="StatusText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

@@ -1657,6 +1657,17 @@ async fn handle_line(d: &Dispatcher, line: &str) {
         CommandPayload::PurgeExcluded(payload) => {
             d.dispatch_mutation(action, &ids, "Excluded files could not be purged", payload, commands::scan::handle_purge_excluded).await;
         }
+        CommandPayload::ListFaceReview(payload) => {
+            spawn_guarded(sink, commands::face_review::handle_list(sink.clone(), db.cloned(), payload));
+        }
+        CommandPayload::ResolveFaceReview(payload) => {
+            let rejection = commands::face_review::rejection(&payload.request_id, "resolve");
+            spawn_mutation_with_rejection(mutation_gate, sink, scan_state, rejection, commands::face_review::handle_resolve(sink.clone(), db.cloned(), payload)).await;
+        }
+        CommandPayload::UndoFaceReview(payload) => {
+            let rejection = commands::face_review::rejection(&payload.request_id, "undo");
+            spawn_mutation_with_rejection(mutation_gate, sink, scan_state, rejection, commands::face_review::handle_undo(sink.clone(), db.cloned(), payload)).await;
+        }
     }
 }
 

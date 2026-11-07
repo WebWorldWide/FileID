@@ -14,6 +14,7 @@ use super::{
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload, DeepAnalyzeProgress,
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload, EmbedImageQueryPayload,
     EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload, ExactTrashIdentity, FaceClusteringResult,
+    FaceReviewItem, FaceReviewPage, ListFaceReviewPayload, ResolveFaceReviewPayload, UndoFaceReviewPayload,
     FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload, GrantFolderAccessPayload, HardwareInfo,
     HardwareReprobed, HealthCheckPayload, HealthCheckResult, IpcCommand, IpcEvent, JobCategory, LibraryWiped,
     ListModelsPayload, ListRootsPayload, LibraryRoot, RootsList, LogLevel, LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload,
@@ -230,6 +231,9 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::WipeLibrary(_) => "wipeLibrary",
         CommandPayload::GenerateVideoThumbnail(_) => "generateVideoThumbnail",
         CommandPayload::PurgeExcluded(_) => "purgeExcluded",
+        CommandPayload::ListFaceReview(_) => "listFaceReview",
+        CommandPayload::ResolveFaceReview(_) => "resolveFaceReview",
+        CommandPayload::UndoFaceReview(_) => "undoFaceReview",
     }
 }
 
@@ -269,6 +273,7 @@ fn event_tag(payload: &EventPayload) -> &'static str {
         EventPayload::HardwareReprobed(_) => "hardwareReprobed",
         EventPayload::LibraryWiped(_) => "libraryWiped",
         EventPayload::ThumbnailGenerated(_) => "thumbnailGenerated",
+        EventPayload::FaceReview(_) => "faceReview",
     }
 }
 
@@ -451,6 +456,22 @@ pub(crate) fn command_exemplars() -> Vec<CommandPayload> {
             modified_at: Some(1_700_000_000.0),
             max_pixel_size: Some(512),
         }),
+        CommandPayload::ListFaceReview(ListFaceReviewPayload {
+            request_id: "review-1".into(),
+            person_id: Some(4),
+            offset: Some(0),
+            limit: Some(50),
+        }),
+        CommandPayload::ResolveFaceReview(ResolveFaceReviewPayload {
+            request_id: "review-2".into(),
+            face_id: 10,
+            person_id: 4,
+            resolution: "accept".into(),
+        }),
+        CommandPayload::UndoFaceReview(UndoFaceReviewPayload {
+            request_id: "review-3".into(),
+            operation_id: "op-1".into(),
+        }),
     ]
 }
 
@@ -563,6 +584,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             unmatched_faces: 2,
             duration_seconds: 1.2,
             deferred_faces: None,
+            review_queued: Some(1),
         })),
         EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
             model_kind: "qwen2_5_vl_7b".into(),
@@ -682,6 +704,32 @@ fn event_exemplars() -> Vec<EventPayload> {
             path: r"C:\Users\adam\Videos\clip.mp4".into(),
             modified_at: Some(1_700_000_000.0),
             bytes: "/9j/4AAQSkZJRg==".into(),
+        })),
+        EventPayload::FaceReview(Wrap::new(FaceReviewPage {
+            request_id: "review-1".into(),
+            action: "list".into(),
+            status: "ok".into(),
+            message: Some("ok".into()),
+            operation_id: Some("op-1".into()),
+            face_id: Some(10),
+            person_id: Some(4),
+            total: 1,
+            offset: 0,
+            items: vec![FaceReviewItem {
+                face_id: 10,
+                file_id: 3,
+                path: r"C:\Users\adam\Pictures\IMG_0003.jpg".into(),
+                bbox: "0.1,0.1,0.2,0.2".into(),
+                person_id: 4,
+                person_name: Some("Alex".into()),
+                representative_face_id: Some(7),
+                score: 0.62,
+                reason: "suggested".into(),
+                runner_up_person_id: Some(5),
+                runner_up_name: None,
+                runner_up_score: Some(0.41),
+                created_at: 1_700_000_000.0,
+            }],
         })),
     ]
 }

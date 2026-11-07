@@ -18,6 +18,7 @@ mod offline_roots;
 pub mod moments;
 mod moments_dates;
 mod moments_timeline;
+mod face_review;
 pub mod people;
 pub mod restructure;
 mod restructure_map;

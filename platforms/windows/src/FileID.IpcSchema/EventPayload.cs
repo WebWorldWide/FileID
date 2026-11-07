@@ -50,6 +50,7 @@ public sealed record RestructureApplyResultEvent(RestructureApplyResult Result) 
 public sealed record BulkActionResultEvent(BulkActionResult Result) : EventPayload;
 public sealed record ClipTextEmbeddingEvent(ClipTextEmbedding Embedding) : EventPayload;
 public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : EventPayload;
+public sealed record FaceReviewEvent(FaceReviewPage Page) : EventPayload;
 
 /// <summary>Engine reply to a <c>verifyCudaPack</c> command. Carries
 /// fresh hardware probe + optional diagnostics text for the Settings →
@@ -114,6 +115,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "hardwareReprobed" => new HardwareReprobedEvent(ReadWrapped<HardwareReprobed>(ref reader, options)),
             "libraryWiped" => new LibraryWipedEvent(ReadWrapped<LibraryWiped>(ref reader, options)),
             "thumbnailGenerated" => new ThumbnailGeneratedEvent(ReadWrapped<ThumbnailGenerated>(ref reader, options)),
+            "faceReview" => new FaceReviewEvent(ReadWrapped<FaceReviewPage>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -161,6 +163,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case HardwareReprobedEvent v: WriteWrapped(writer, "hardwareReprobed", v.Result, options); break;
             case LibraryWipedEvent v: WriteWrapped(writer, "libraryWiped", v.Result, options); break;
             case ThumbnailGeneratedEvent v: WriteWrapped(writer, "thumbnailGenerated", v.Generated, options); break;
+            case FaceReviewEvent v: WriteWrapped(writer, "faceReview", v.Page, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

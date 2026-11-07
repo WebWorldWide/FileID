@@ -101,6 +101,10 @@ public struct IPCCommand: Codable, Sendable {
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         /// Move one face to another person (or a new one when `createNewPerson`).
         case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
+        /// Face review queue (schema 1.23.0). Each replies with `faceReview`.
+        case listFaceReview(requestID: String, personID: Int64?, offset: Int?, limit: Int?)
+        case resolveFaceReview(requestID: String, faceID: Int64, personID: Int64, resolution: String)
+        case undoFaceReview(requestID: String, operationID: String)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
         case markPersonsAsUnknown(personIDs: [Int64])
@@ -265,6 +269,7 @@ public struct IPCEvent: Codable, Sendable {
         case hardwareReprobed(HardwareReprobed)
         case libraryWiped(LibraryWiped)
         case thumbnailGenerated(ThumbnailGenerated)
+        case faceReview(FaceReviewPage)
     }
 }
 
@@ -855,13 +860,70 @@ public struct FaceClusteringResult: Codable, Sendable {
     public let unmatchedFaces: Int
     public let durationSeconds: Double
     public let deferredFaces: Int?
+    public let reviewQueued: Int?
 
-    public init(personCount: Int, faceCount: Int, unmatchedFaces: Int, durationSeconds: Double, deferredFaces: Int? = nil) {
+    public init(personCount: Int, faceCount: Int, unmatchedFaces: Int, durationSeconds: Double, deferredFaces: Int? = nil,
+                reviewQueued: Int? = nil) {
         self.personCount = personCount
         self.faceCount = faceCount
         self.unmatchedFaces = unmatchedFaces
         self.durationSeconds = durationSeconds
         self.deferredFaces = deferredFaces
+        self.reviewQueued = reviewQueued
+    }
+
+    public func withReviewQueued(_ count: Int?) -> FaceClusteringResult {
+        FaceClusteringResult(personCount: personCount, faceCount: faceCount, unmatchedFaces: unmatchedFaces,
+                             durationSeconds: durationSeconds, deferredFaces: deferredFaces, reviewQueued: count)
+    }
+}
+
+/// One pending face review suggestion (schema 1.23.0).
+public struct FaceReviewItem: Codable, Sendable, Equatable, Identifiable {
+    public let faceID: Int64
+    public let fileID: Int64
+    public let path: String
+    public let bbox: String
+    public let personID: Int64
+    public let personName: String?
+    public let representativeFaceID: Int64?
+    public let score: Double
+    public let reason: String
+    public let runnerUpPersonID: Int64?
+    public let runnerUpName: String?
+    public let runnerUpScore: Double?
+    public let createdAt: Double
+
+    public var id: Int64 { faceID }
+
+    public init(faceID: Int64, fileID: Int64, path: String, bbox: String, personID: Int64, personName: String?,
+                representativeFaceID: Int64?, score: Double, reason: String, runnerUpPersonID: Int64?,
+                runnerUpName: String?, runnerUpScore: Double?, createdAt: Double) {
+        self.faceID = faceID; self.fileID = fileID; self.path = path; self.bbox = bbox
+        self.personID = personID; self.personName = personName; self.representativeFaceID = representativeFaceID
+        self.score = score; self.reason = reason; self.runnerUpPersonID = runnerUpPersonID
+        self.runnerUpName = runnerUpName; self.runnerUpScore = runnerUpScore; self.createdAt = createdAt
+    }
+}
+
+/// Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).
+public struct FaceReviewPage: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let action: String
+    public let status: String
+    public let message: String?
+    public let operationID: String?
+    public let faceID: Int64?
+    public let personID: Int64?
+    public let total: Int
+    public let offset: Int
+    public let items: [FaceReviewItem]
+
+    public init(requestID: String, action: String, status: String, message: String? = nil, operationID: String? = nil,
+                faceID: Int64? = nil, personID: Int64? = nil, total: Int, offset: Int, items: [FaceReviewItem] = []) {
+        self.requestID = requestID; self.action = action; self.status = status; self.message = message
+        self.operationID = operationID; self.faceID = faceID; self.personID = personID
+        self.total = total; self.offset = offset; self.items = items
     }
 }
 
