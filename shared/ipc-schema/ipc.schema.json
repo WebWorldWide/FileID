@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.20.0",
+  "version": "1.21.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1542,9 +1542,12 @@
             "scoreTakes",
             "rankTakesWithGoal",
             "decideTakeGroup",
-            "proposeNames"
+            "proposeNames",
+            "learnNames",
+            "namePreferences",
+            "resetNamePreferences"
           ],
-          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed."
+          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed. Schema 1.21.0 adds local learning of style corrections: learnNames records, for each nameEdits entry, the name the user applied after a proposeNames preview (naming is the style the preview used); the engine stores it with the unlearned name it would propose for that file, keeps the newest 200 and never sends them anywhere. namePreferences lists what the newest 50 show and resetNamePreferences forgets them all; both learnNames and these reply with hits of kind namePreference (fileID 0, path empty, evidenceID the preference: separator, case, leadingDate, trailingDate, dateFormat, people, words or dropWords, text its value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the number of stored samples. proposeNames applies them only when naming.learn is true; evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'), naming the preferences that changed that file's name."
         },
         "query": {
           "type": "string",
@@ -1581,7 +1584,8 @@
           ],
           "description": "Optional enqueueTimeline depth. Omitted means sampled. Moments requests overlapping frame-sequence analysis; unavailable workers must reject it explicitly. Neither mode proves absence of unobserved events."
         },
-        "naming": {"$ref": "#/$defs/CatalogNaming"}
+        "naming": {"$ref": "#/$defs/CatalogNaming"},
+        "nameEdits": {"type": "array", "items": {"$ref": "#/$defs/CatalogNameEdit"}, "minItems": 1, "maxItems": 1000, "description": "learnNames only (schema 1.21.0): the names the user applied after a proposeNames preview, one per renamed file (a companion group's leader only)."}
       }
     },
     "CatalogNaming": {
@@ -1603,7 +1607,19 @@
         },
         "includePeople": {"type": "boolean", "description": "Add up to two confirmed people's first names. Omitted means false."},
         "includeEvent": {"type": "boolean", "description": "Add the title of the one user-edited event holding the file. Omitted means false."},
-        "includeDate": {"type": "boolean", "description": "short/descriptive: append the capture date (-2023-07-04). Ignored by dateFirst, which always leads with it. Omitted means false. Files without a capture date get no date."}
+        "includeDate": {"type": "boolean", "description": "short/descriptive: append the capture date (-2023-07-04). Ignored by dateFirst, which always leads with it. Omitted means false. Files without a capture date get no date."},
+        "learn": {"type": "boolean", "description": "proposeNames only (schema 1.21.0): apply the preferences learned from learnNames samples. Omitted means false, so evaluations and older apps get the unlearned names."}
+      }
+    },
+    "CatalogNameEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileID", "proposed", "applied"],
+      "description": "One applied smart name for learnNames: proposed is the file name the preview showed and applied the file name the user renamed it to (the same text when accepted unedited).",
+      "properties": {
+        "fileID": {"type": "integer"},
+        "proposed": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "applied": {"type": "string", "minLength": 1, "maxLength": 1000}
       }
     },
     "CatalogResponse": {
