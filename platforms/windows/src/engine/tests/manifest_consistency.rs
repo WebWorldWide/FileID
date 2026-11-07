@@ -1,7 +1,6 @@
-// Locks the compiled model registry to the canonical cross-platform
-// manifest (shared/models/manifest.json). Either side drifting — a URL,
-// hash, or size changed in one place but not the other — fails this test
-// on every platform's `cargo test`.
+// The registry serves every shared-engine artifact in
+// shared/models/manifest.json exactly once, with its manifest URL, hash and
+// size, and no download the manifest lacks.
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -43,7 +42,12 @@ fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
         })
         .map(|a| {
             (
-                a["url"].as_str().expect("url").to_string(),
+                format!(
+                    "https://huggingface.co/{}/resolve/{}/{}",
+                    a["repo"].as_str().expect("repo"),
+                    a["revision"].as_str().expect("revision"),
+                    a["path"].as_str().expect("path"),
+                ),
                 (
                     a["sha256"].as_str().expect("sha256").to_string(),
                     a["approxBytes"].as_u64().expect("approxBytes"),

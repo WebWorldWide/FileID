@@ -36,9 +36,10 @@ FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) an
 
 `shared/models/manifest.json` is the single source of truth: 29 static artifacts with pinned
 SHA256 + the MLX VLM repos pinned by immutable HuggingFace revision (per-file LFS `oid`
-verification). The Windows registry (`models/registry.rs`) is locked to the manifest by a cargo
-test (`manifest_consistency.rs`, bidirectional); macOS parses the same manifest as a SwiftPM
-resource (`ModelManifest.swift`) and `StreamingDownload` hashes incrementally, deleting the
+verification). The shared Rust engine embeds the manifest (`models/manifest.rs`, rejected whole
+if malformed) and `registry.rs` holds only install paths; macOS compiles a table generated from
+the manifest (`ModelManifest.swift`, `gen_model_manifest.py --check`) and `StreamingDownload`
+hashes incrementally, deleting the
 artifact and failing with a distinct checksum error *before* the atomic move. Small embedders
 (CLIP/ArcFace) re-verify on load at preWarm; multi-GB VLMs are install-time-verified with a
 `.fileid-verified-<revision>` sentinel (re-hashing 5–7 GB on every load is unacceptable — the

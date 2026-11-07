@@ -131,7 +131,14 @@ def main() -> int:
         help="extended model catalog to check (shared/models/catalog.json)",
     )
     args = parser.parse_args()
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"ERROR: unreadable model manifest: {error}")
+        return 1
+    if not isinstance(manifest, dict):
+        print("ERROR: model manifest must be a JSON object")
+        return 1
     errors: list[str] = []
     try:
         errors.extend(catalog_errors(args.catalog))
@@ -161,23 +168,21 @@ def main() -> int:
         if parsed_reviewed is None or parsed_reviewed.isoformat() != reviewed:
             errors.append(f"{key}: reviewedAt must be a valid YYYY-MM-DD calendar date")
 
-    artifact_ids = {artifact.get("id") for artifact in manifest.get("artifacts", [])}
-    artifact_licenses = manifest.get("artifactLicenses", {})
-    if set(artifact_licenses) != artifact_ids:
-        missing = sorted(artifact_ids - set(artifact_licenses))
-        extra = sorted(set(artifact_licenses) - artifact_ids)
-        errors.append(f"artifactLicenses coverage mismatch; missing={missing}, extra={extra}")
-
-    repos = {repo.get("repo") for repo in manifest.get("vlmRepos", [])}
-    repo_licenses = manifest.get("vlmRepoLicenses", {})
-    if set(repo_licenses) != repos:
-        missing = sorted(repos - set(repo_licenses))
-        extra = sorted(set(repo_licenses) - repos)
-        errors.append(f"vlmRepoLicenses coverage mismatch; missing={missing}, extra={extra}")
-
-    for name, key in {**artifact_licenses, **repo_licenses}.items():
-        if key not in ALLOWED_POLICIES:
+    artifacts = manifest.get("artifacts")
+    repos = manifest.get("vlmRepos")
+    if not isinstance(artifacts, list) or not artifacts or not isinstance(repos, list):
+        errors.append("artifacts must be a non-empty list and vlmRepos a list")
+        artifacts, repos = [], []
+    licenses: list[str] = []
+    for entry in [*artifacts, *repos]:
+        name = entry.get("id") or entry.get("repo") if isinstance(entry, dict) else None
+        key = entry.get("license") if isinstance(entry, dict) else None
+        if not name:
+            errors.append(f"manifest entry without an id or repo: {entry!r}")
+        elif key not in ALLOWED_POLICIES:
             errors.append(f"{name}: unknown license policy {key!r}")
+        else:
+            licenses.append(key)
 
     repository = Path(__file__).resolve().parents[2]
     if args.manifest.resolve() == repository / "shared/models/manifest.json":
@@ -193,13 +198,9 @@ def main() -> int:
             print(f"ERROR: {error}")
         return 1
 
-    restricted = sum(
-        1
-        for key in [*artifact_licenses.values(), *repo_licenses.values()]
-        if ALLOWED_POLICIES[key][1]
-    )
+    restricted = sum(1 for key in licenses if ALLOWED_POLICIES[key][1])
     print(
-        f"Model license policy OK: {len(artifact_ids)} artifacts, {len(repos)} repos, "
+        f"Model license policy OK: {len(artifacts)} artifacts, {len(repos)} repos, "
         f"{restricted} restricted entries require explicit terms acceptance."
     )
     return 0

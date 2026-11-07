@@ -73,35 +73,11 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         }
     }
 
-    public var sourceRepo: String {
-        switch self {
-        case .qwen2VL7B:     return "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
-        case .qwen3VL2B:     return "mlx-community/Qwen3-VL-2B-Instruct-4bit"
-        case .qwen3VL4B:     return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
-        case .qwen3VL8B:     return "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit"
-        case .qwen35_2B:     return "mlx-community/Qwen3.5-2B-MLX-4bit"
-        case .gemma3_4B:     return "mlx-community/gemma-3-4b-it-qat-4bit"
-        case .gemma3_12B:    return "mlx-community/gemma-3-12b-it-qat-4bit"
-        case .mistralSmall32: return "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit"
-        case .paligemma3B:   return "mlx-community/paligemma-3b-mix-448-8bit"
-        default: return MLXModelCatalog.entry(forID: rawValue)!.repo
-        }
-    }
+    private var manifestPin: VLMRepoPin? { ModelManifest.vlmPin(forKind: rawValue) }
 
-    public var approxBytes: Int64 {
-        switch self {
-        case .qwen2VL7B:     return 4_300_000_000
-        case .qwen3VL2B:     return 1_800_000_000
-        case .qwen3VL4B:     return 3_500_000_000
-        case .qwen3VL8B:     return 5_776_636_403
-        case .qwen35_2B:     return 1_750_000_000
-        case .gemma3_4B:     return 3_300_000_000
-        case .gemma3_12B:    return 7_500_000_000
-        case .mistralSmall32: return 13_500_000_000
-        case .paligemma3B:   return 3_300_000_000
-        default: return MLXModelCatalog.entry(forID: rawValue)!.weightBytes
-        }
-    }
+    public var sourceRepo: String { manifestPin?.repo ?? MLXModelCatalog.entry(forID: rawValue)!.repo }
+
+    public var approxBytes: Int64 { manifestPin?.approxBytes ?? MLXModelCatalog.entry(forID: rawValue)!.weightBytes }
 
     public var ramBudgetGB: Double {
         switch self {
@@ -134,24 +110,22 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     }
 
     public var licensePolicyKey: String {
-        switch self {
-        case .qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache-2.0"
-        case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
-        default: return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
-        }
+        if let manifestPin { return manifestPin.license }
+        return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
     }
 
     public var licenseName: String {
-        switch self {
-        case .qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache License 2.0"
-        case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
+        guard manifestPin != nil else { return licensePolicyKey }
+        switch licensePolicyKey {
+        case "Apache-2.0": return "Apache License 2.0"
+        case "Gemma": return "Gemma Terms of Use"
         default: return licensePolicyKey
         }
     }
 
     public var licenseTermsURL: URL? {
-        guard licensePolicyKey == "Gemma" else { return nil }
-        return URL(string: "https://ai.google.dev/gemma/terms")
+        guard let policy = ModelManifest.licensePolicies[licensePolicyKey], policy.termsRequired else { return nil }
+        return URL(string: policy.licenseURL)
     }
 
     /// Top three picks for a given RAM tier, ranked best-first.

@@ -27,6 +27,15 @@ struct CLIPModelInstallerTests {
         guard process.terminationStatus == 0 else { throw InjectedFailure() }
     }
 
+    @Test("model installer downloads resolve through the model manifest")
+    func installerDownloadsResolveThroughManifest() {
+        for installer in [ModelInstaller.ramPlus, ModelInstaller.bge, ModelInstaller.face] {
+            #expect(!installer.spec.downloads.isEmpty)
+            #expect(installer.spec.downloads.allSatisfy { $0.manifest != nil })
+            #expect(installer.spec.approxBytes > 0)
+        }
+    }
+
     @Test("promotion succeeds without leaving a backup")
     func promotionSuccess() throws {
         let root = try temporaryRoot("promote")

@@ -8,16 +8,18 @@ from pathlib import Path
 
 
 class ModelLicensePolicyTests(unittest.TestCase):
-    def run_checker(self, reviewed_at: str) -> subprocess.CompletedProcess[str]:
+    def run_checker(self, reviewed_at: str, edit=None) -> subprocess.CompletedProcess[str]:
         repository = Path(__file__).resolve().parents[2]
         manifest = json.loads(
             (repository / "shared/models/manifest.json").read_text(encoding="utf-8")
         )
         for policy in manifest["licensePolicies"].values():
             policy["reviewedAt"] = reviewed_at
+        if edit:
+            edit(manifest)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "manifest.json"
-            path.write_text(json.dumps(manifest), encoding="utf-8")
+            path.write_text(manifest if isinstance(manifest, str) else json.dumps(manifest), encoding="utf-8")
             return subprocess.run(
                 [
                     sys.executable,
@@ -45,6 +47,26 @@ class ModelLicensePolicyTests(unittest.TestCase):
         result = self.run_checker("not-a-date")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("valid YYYY-MM-DD calendar date", result.stdout)
+
+    def test_every_entry_names_a_reviewed_license(self) -> None:
+        def unknown_artifact(manifest: dict) -> None:
+            manifest["artifacts"][0]["license"] = "CC-BY-NC-4.0"
+
+        def missing_repo_license(manifest: dict) -> None:
+            del manifest["vlmRepos"][0]["license"]
+
+        def no_artifacts(manifest: dict) -> None:
+            manifest["artifacts"] = []
+
+        for edit, expected in [
+            (unknown_artifact, "unknown license policy 'CC-BY-NC-4.0'"),
+            (missing_repo_license, "unknown license policy None"),
+            (no_artifacts, "artifacts must be a non-empty list"),
+        ]:
+            with self.subTest(expected=expected):
+                result = self.run_checker("2026-07-16", edit)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout)
 
 
 def catalog_entry(**fields: object) -> dict:
