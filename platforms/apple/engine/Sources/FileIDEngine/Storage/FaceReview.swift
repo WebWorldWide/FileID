@@ -320,7 +320,7 @@ enum FaceReview {
             SELECT c.face_id, fp.file_id, f.path_text, fp.bbox, c.person_id, \(display("p")) AS person_name,
                    p.representative_face_id, c.score, c.reason, c.runner_up_person_id, \(display("rp")) AS runner_name,
                    c.runner_up_score, c.created_at
-            """ + pendingFrom + " ORDER BY c.score DESC, c.face_id ASC LIMIT ?2 OFFSET ?3",
+            """ + " " + pendingFrom + " ORDER BY c.score DESC, c.face_id ASC LIMIT ?2 OFFSET ?3",
             arguments: [personID, limit, offset])
         let items = rows.map { row in
             FaceReviewItem(faceID: row["face_id"], fileID: row["file_id"], path: row["path_text"], bbox: row["bbox"],
