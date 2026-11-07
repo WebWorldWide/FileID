@@ -207,7 +207,7 @@ impl CatalogUi {
             let rx = self
                 .engine
                 .borrow()
-                .request_preview(hit.path.clone(), 1600, false);
+                .request_preview(hit.path.clone(), super::util::decode_px(&self.picture, 1600), false);
             let picture = self.picture.downgrade();
             glib::MainContext::default().spawn_local(async move {
                 if let (Ok(ThumbReply::Image(decoded)), Some(picture)) =
@@ -1028,7 +1028,26 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         &cancel,
     );
     subscribe(&ui);
+    follow_scope(&ui);
     (root.upcast(), ui)
+}
+
+/// The location changed under a typed query: search again there (macOS
+/// `CatalogWorkbench`). A search still in flight is superseded by the new one.
+pub(super) fn search_again(shown: Option<i64>, chosen: Option<i64>, query: &str) -> bool {
+    shown != chosen && !query.trim().is_empty()
+}
+
+fn follow_scope(ui: &Rc<CatalogUi>) {
+    let shown = Cell::new(super::library_scope::current_id());
+    let weak = Rc::downgrade(ui);
+    super::library_scope::subscribe(Rc::new(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let chosen = super::library_scope::current_id();
+        if search_again(shown.replace(chosen), chosen, &ui.query.text()) {
+            run_search(&ui);
+        }
+    }));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1382,6 +1401,14 @@ mod tests {
             hit_kind(&hit("documentText", None, None)),
             ("Text in document", false)
         );
+    }
+
+    #[test]
+    fn a_new_location_searches_again_only_with_a_query() {
+        assert!(search_again(None, Some(2), "beach"));
+        assert!(search_again(Some(2), None, "beach"));
+        assert!(!search_again(Some(2), Some(2), "beach"));
+        assert!(!search_again(None, Some(2), "  "));
     }
 
     #[test]
