@@ -511,6 +511,8 @@ mod tests {
                     captured_at: None,
                 })
                 .collect(),
+            relation: None,
+            evidence: None,
         }
     }
 

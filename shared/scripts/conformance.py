@@ -15,10 +15,13 @@ Expected values are literal (exact) or a tolerance object:
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state} and {conversation}; {"$var": "name.key"}
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation} and {clip_model} (the CLIP
+embedding model id both engines derive from the model manifest); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
 
+A catalog step with "until": seconds resends its request until "expect" matches or the
+time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends".
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
@@ -55,6 +58,14 @@ CASES = ROOT / "shared/test-corpus/conformance"
 TIMEOUT = 30.0
 FORBIDDEN_ROOTS = ("/volumes/adlon", "/srv/data")
 PLACEHOLDER = re.compile(r"\{([a-z0-9_]+(?::[^{}]*)?)\}")
+
+
+def clip_model():
+    manifest = json.loads((ROOT / "shared/models/manifest.json").read_text(encoding="utf-8"))
+    hashes = {entry["id"]: entry["sha256"] for entry in manifest["artifacts"]}
+    ids = ["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"]
+    descriptor = "|".join(["clip-rgb-stretch224-bpe77-l2-v1"] + [f"{key}:{hashes.get(key, 'missing')}" for key in ids])
+    return "clip-vitb32-openai-v1:" + hashlib.sha256(descriptor.encode()).hexdigest()
 
 
 def host_os():
@@ -320,6 +331,8 @@ class Context:
             return Path(self.path(argument)).stat().st_ino
         if name == "conversation":
             return self.conversation
+        if name == "clip_model":
+            return clip_model()
         raise Failure(f"unknown placeholder {{{token}}}")
 
     def expand(self, value):
@@ -526,9 +539,18 @@ def run_step(engine, ctx, step, binaries):
         engine.send(ctx.expand(step["command"]))
         actual = await_event(engine, ctx, step, timeout, seen) if "await" in step else None
     elif "catalog" in step:
-        request = {"requestID": str(uuid.uuid4()), **ctx.expand(step["catalog"])}
-        engine.send({"catalogRequest": {"request": request}})
-        actual = engine.wait("catalogResponse", request["requestID"], timeout=timeout, seen=seen)
+        deadline = time.monotonic() + step.get("until", 0)
+        while True:
+            request = {"requestID": str(uuid.uuid4()), **ctx.expand(step["catalog"])}
+            engine.send({"catalogRequest": {"request": request}})
+            actual = engine.wait("catalogResponse", request["requestID"], timeout=timeout, seen=seen)
+            if "until" not in step or time.monotonic() >= deadline:
+                break
+            try:
+                match(step.get("expect", {}), actual, ctx)
+                break
+            except Failure:
+                time.sleep(0.1)
     elif "tool" in step:
         request = {"requestID": str(uuid.uuid4()), **ctx.expand(step["tool"])}
         engine.send({"toolRequest": {"request": request}})

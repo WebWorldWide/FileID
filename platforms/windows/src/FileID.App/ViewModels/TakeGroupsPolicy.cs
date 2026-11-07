@@ -113,7 +113,7 @@ internal static class TakeGroupsPolicy
         jobs.FirstOrDefault(job => job.Kind == "timelineSample" && !previous.Contains(job.Id) && job.FileIDs.ToHashSet().SetEquals(requested));
 
     public static string JobTitle(CatalogJob job) =>
-        job.Kind == "catalogIndex" ? "Search index" : $"{job.FileIDs.Count} video{(job.FileIDs.Count == 1 ? "" : "s")} · finding moments";
+        job.Kind == "catalogIndex" ? "Search index" : job.Kind == "takeGrouping" ? "Related tries" : $"{job.FileIDs.Count} video{(job.FileIDs.Count == 1 ? "" : "s")} · finding moments";
 
     public static (string Text, Tone Tone) JobState(CatalogJob job) => job.State switch
     {

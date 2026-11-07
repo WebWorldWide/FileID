@@ -680,6 +680,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     }
     private sealed record JobItem(CatalogJob Job)
     {
-        public override string ToString() => $"{(Job.Kind == "catalogIndex" ? "Search index" : "Video analysis")} · {Job.State} · {Job.Progress:P0} · {Job.FileIDs.Count} file(s)\nJob {Job.Id} · Files: {string.Join(", ", Job.FileIDs)}\n{Job.Error}";
+        public override string ToString() => $"{(Job.Kind == "catalogIndex" ? "Search index" : Job.Kind == "takeGrouping" ? "Related tries" : "Video analysis")} · {Job.State} · {Job.Progress:P0} · {Job.FileIDs.Count} file(s)\nJob {Job.Id} · Files: {string.Join(", ", Job.FileIDs)}\n{Job.Error}";
     }
 }

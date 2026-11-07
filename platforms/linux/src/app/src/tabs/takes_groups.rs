@@ -489,9 +489,24 @@ impl Manual {
                 self.footer.set_visible(false);
             }
             self.send(ui, "listEvents", |_| {});
+            ui.proposals.request(ui);
         }
         self.render_editor();
         self.render_events_selection(ui.current.borrow().is_some());
+    }
+
+    /// Opens the editor as a new group holding `hits`, named `title`, for the person to finish and save.
+    pub(super) fn review_hits(&self, ui: &Rc<Ui>, hits: Vec<CatalogHit>, title: &str) {
+        self.start_manual(ui);
+        self.new_group_state();
+        let known: std::collections::HashSet<i64> = self.pool().iter().map(|hit| hit.file_id).collect();
+        *self.chosen.borrow_mut() = hits.iter().map(|hit| hit.file_id).collect();
+        self.found.borrow_mut().extend(hits.into_iter().filter(|hit| !known.contains(&hit.file_id)));
+        self.syncing.set(true);
+        self.title_entry.set_text(title);
+        self.syncing.set(false);
+        self.render_editor();
+        ui.toast("Name the group and describe the outcome, then save");
     }
 
     pub(super) fn request_failed(&self) {

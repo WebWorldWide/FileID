@@ -401,7 +401,11 @@ internal sealed partial class TakesWorkbench
             relist = Consume(request.Action, response);
             Status.Text = "";
         }, ct);
-        if (relist) await ManualAsync(ManualRequest("listEvents"), ct);
+        if (relist)
+        {
+            await ManualAsync(ManualRequest("listEvents"), ct);
+            await LoadProposalsAsync(null, ct);
+        }
     }
 
     /// <summary>One catalog reply for the manual flow (macOS consume). True when the group list must be read again.</summary>
@@ -585,6 +589,7 @@ internal sealed partial class TakesWorkbench
         {
             _rendering = false;
         }
+        ClearProposalSelection();
     }
 
     /// <summary>Leaves the manual editor because a possible group was opened.</summary>
@@ -861,7 +866,11 @@ internal sealed partial class TakesWorkbench
             _jobBox.Visibility = Visibility.Collapsed;
             return;
         }
-        var row = _jobRow ??= BuildJobRow();
+        RenderJobRow(_jobRow ??= BuildJobRow(_jobBox, "Scoring progress", JobControlAsync), _jobBox, job);
+    }
+
+    private void RenderJobRow(JobRow row, StackPanel box, CatalogJob job)
+    {
         row.Job = job;
         var title = TakeGroupsPolicy.JobTitle(job);
         row.Title.Text = title;
@@ -884,10 +893,10 @@ internal sealed partial class TakesWorkbench
         row.Error.Text = job.Error ?? "";
         row.Error.Visibility = string.IsNullOrEmpty(job.Error) ? Visibility.Collapsed : Visibility.Visible;
         AutomationProperties.SetName(row.Root, $"{title}, {state}");
-        _jobBox.Visibility = Visibility.Visible;
+        box.Visibility = Visibility.Visible;
     }
 
-    private JobRow BuildJobRow()
+    private JobRow BuildJobRow(StackPanel host, string progressName, Func<string, CatalogJob, CancellationToken, Task> control)
     {
         var title = TextLine("", 13, _text1);
         title.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
@@ -920,7 +929,7 @@ internal sealed partial class TakesWorkbench
         head.Children.Add(percent);
         head.Children.Add(controls);
         var bar = new ProgressBar { Minimum = 0, Maximum = 100, Height = 4, MinHeight = 4 };
-        AutomationProperties.SetName(bar, "Scoring progress");
+        AutomationProperties.SetName(bar, progressName);
         var error = Meta("");
         error.Foreground = _danger;
         error.FontSize = 12;
@@ -951,13 +960,13 @@ internal sealed partial class TakesWorkbench
         };
         void Wire(Button button, string action) => button.Click += (_, _) => DebugLog.SafeRun("TakesWorkbench.JobControl", () =>
         {
-            if (row.Job is { } current) Run(ct => JobControlAsync(action, current, ct));
+            if (row.Job is { } current) Run(ct => control(action, current, ct));
         });
         Wire(pause, "pauseJob");
         Wire(resume, "resumeJob");
         Wire(retry, "resumeJob");
         Wire(cancel, "cancelJob");
-        _jobBox.Children.Add(root);
+        host.Children.Add(root);
         return row;
     }
 

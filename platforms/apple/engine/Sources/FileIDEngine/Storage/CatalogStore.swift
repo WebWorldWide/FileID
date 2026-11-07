@@ -13,8 +13,16 @@ public enum CatalogStore {
                 return try await CatalogTakes.handle(request, database: database)
             case "autoTakeGroups", "scoreTakes", "decideTakeGroup", "rankTakesWithGoal":
                 return try await CatalogTakeAuto.handle(request, database: database)
+            case "takeGroupProposals":
+                return try await database.pool.read { db in try CatalogTakeGrouping.proposals(db, request: request) }
             case "proposeNames":
                 return try await CatalogNameProposals.handle(request, database: database)
+            case "learnNames":
+                return try await CatalogNameProposals.learn(request, database: database)
+            case "unlearnNames":
+                return try await CatalogNameProposals.unlearn(request, database: database)
+            case "namePreferences", "resetNamePreferences":
+                return try await CatalogNameProposals.preferences(request, database: database)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
                 let detail = try await database.pool.read { db in
