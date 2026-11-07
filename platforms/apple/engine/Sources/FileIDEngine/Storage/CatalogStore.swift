@@ -15,6 +15,10 @@ public enum CatalogStore {
                 return try await CatalogTakeAuto.handle(request, database: database)
             case "proposeNames":
                 return try await CatalogNameProposals.handle(request, database: database)
+            case "learnNames":
+                return try await CatalogNameProposals.learn(request, database: database)
+            case "namePreferences", "resetNamePreferences":
+                return try await CatalogNameProposals.preferences(request, database: database)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
                 let detail = try await database.pool.read { db in

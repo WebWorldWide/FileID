@@ -8,16 +8,93 @@ import FileIDShared
 enum CatalogNameProposals {
     typealias S = SmartNameStyle
     typealias C = SmartNameCompanions
+    typealias L = SmartNameLearning
     static let maxFiles = 1000
+    static let maxEditScalars = 1000
+    static let sampleKind = "nameStyle"
+
+    static func options(_ request: CatalogRequest) throws -> S.Options {
+        guard let naming = request.naming, let style = S.Style(rawValue: naming.style),
+              (S.minLength...S.maxLength).contains(naming.maxLength) else { throw CatalogStore.InvalidRequest() }
+        return S.Options(style: style, maxLength: naming.maxLength, people: naming.includePeople,
+                         event: naming.includeEvent, date: naming.includeDate)
+    }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
-        guard let naming = request.naming, let style = S.Style(rawValue: naming.style),
-              (S.minLength...S.maxLength).contains(naming.maxLength),
-              let ids = request.fileIDs, !ids.isEmpty, ids.count <= maxFiles else { throw CatalogStore.InvalidRequest() }
-        let options = S.Options(style: style, maxLength: naming.maxLength, people: naming.includePeople,
-                                event: naming.includeEvent, date: naming.includeDate)
-        let hits = try await database.pool.read { db in try propose(db, ids: ids, options: options) }
+        var options = try options(request)
+        guard let ids = request.fileIDs, !ids.isEmpty, ids.count <= maxFiles else { throw CatalogStore.InvalidRequest() }
+        let learn = request.naming?.learn == true
+        let hits = try await database.pool.read { db in
+            if learn { options.learned = try learned(db) }
+            return try propose(db, ids: ids, options: options)
+        }
         return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+    }
+
+    /// learnNames: stores one sample per edit with the unlearned name the engine
+    /// would propose for that file now, then replies with the preferences.
+    static func learn(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        let options = try options(request)
+        let style = request.naming?.style ?? ""
+        func valid(_ text: String) -> Bool { !S.trimmed(text).isEmpty && text.unicodeScalars.count <= maxEditScalars }
+        guard let edits = request.nameEdits, !edits.isEmpty, edits.count <= maxFiles,
+              edits.allSatisfy({ valid($0.proposed) && valid($0.applied) }) else { throw CatalogStore.InvalidRequest() }
+        let hits = try await database.pool.write { db in
+            let words = try personWords(db)
+            let now = Date().timeIntervalSince1970
+            for edit in edits {
+                guard var file = try load(db, id: edit.fileID) else { continue }
+                file.evidence.originalStem = ""
+                file.evidence.personWords = words
+                let base = S.propose(file.evidence, options).stem
+                let before: [String: Any] = ["base": base.map { $0 as Any } ?? NSNull(), "proposed": edit.proposed,
+                                             "people": options.people ? file.evidence.people : [], "style": style]
+                let after: [String: Any] = ["applied": edit.applied]
+                try db.execute(sql: "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?,?,?,?,?,?)",
+                               arguments: [UUID().uuidString.lowercased(), edit.fileID, sampleKind, try json(before), try json(after), now])
+            }
+            try db.execute(sql: "DELETE FROM catalog_corrections WHERE kind=? AND rowid NOT IN (SELECT rowid FROM catalog_corrections WHERE kind=? ORDER BY rowid DESC LIMIT ?)",
+                           arguments: [sampleKind, sampleKind, L.keep])
+            return try preferences(db)
+        }
+        return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+    }
+
+    static func preferences(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        let reset = request.action == "resetNamePreferences"
+        let hits = try await database.pool.write { db in
+            if reset { try db.execute(sql: "DELETE FROM catalog_corrections WHERE kind=?", arguments: [sampleKind]) }
+            return try preferences(db)
+        }
+        return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+    }
+
+    static func json(_ object: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+    }
+
+    static func learned(_ db: GRDB.Database) throws -> L.Learned {
+        var samples: [L.Sample] = []
+        for row in try Row.fetchAll(db, sql: "SELECT before_json,after_json FROM catalog_corrections WHERE kind=? ORDER BY rowid DESC LIMIT ?",
+                                    arguments: [sampleKind, L.window]) {
+            let beforeText: String = row[0], afterText: String = row[1]
+            guard let before = try? JSONSerialization.jsonObject(with: Data(beforeText.utf8)) as? [String: Any],
+                  let after = try? JSONSerialization.jsonObject(with: Data(afterText.utf8)) as? [String: Any],
+                  let base = before["base"] as? String, let applied = after["applied"] as? String else { continue }
+            samples.append(L.Sample(base: base, applied: applied, people: (before["people"] as? [Any])?.compactMap { $0 as? String } ?? []))
+        }
+        return L.derive(samples)
+    }
+
+    /// The learned preferences as namePreference hits, then the stored sample count as nameSamples.
+    static func preferences(_ db: GRDB.Database) throws -> [CatalogHit] {
+        let learned = try learned(db)
+        var hits = L.keys.flatMap { key in
+            learned.values(key).map { CatalogHit(fileID: 0, path: "", kind: "namePreference", text: $0, evidenceID: key) }
+        }
+        let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM catalog_corrections WHERE kind=?", arguments: [sampleKind]) ?? 0
+        hits.append(CatalogHit(fileID: 0, path: "", kind: "nameSamples", text: String(count)))
+        return hits
     }
 
     static func propose(_ db: GRDB.Database, ids: [Int64], options: S.Options) throws -> [CatalogHit] {
@@ -90,7 +167,7 @@ enum CatalogNameProposals {
                 case nil: reason = "collision"
                 }
             }
-            push(id, file.path, text, reason)
+            push(id, file.path, text, L.tagged(reason, outcome.learned))
         }
 
         mutating func group(_ id: Int64, _ file: Loaded, _ members: [C.Member]) throws {
@@ -134,7 +211,7 @@ enum CatalogNameProposals {
                 case nil: reason = "collision"
                 }
             }
-            let tagged = C.groupReason(reason, leader: known[leader].1)
+            let tagged = C.groupReason(L.tagged(reason, outcome.learned), leader: known[leader].1)
             for (text, index) in zip(texts, order) { push(known[index].1, known[index].0.path, text, tagged) }
         }
 
