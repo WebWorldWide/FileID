@@ -35,6 +35,7 @@ from check_model_license_policy import (  # noqa: E402
     catalog_errors,
     gemma_terms_error,
     identity_mismatch,
+    non_llm,
     restricted_reason,
 )
 
@@ -67,6 +68,19 @@ REVIEWED_LICENSE_REFERENCES = {
     "OpenGVLab/InternVL3-1B-Instruct", "OpenGVLab/InternVL3-2B-Instruct",
     "OpenGVLab/InternVL3-8B-Instruct", "OpenGVLab/InternVL3-14B-Instruct",
 }
+# Image generators and text-to-speech models: no FileID role consumes them.
+NON_LLM_ARCHITECTURES = {
+    "qwen_image", "wan", "flux", "sd3", "stable_diffusion", "hunyuan_video", "qwen3_tts", "voxcpm", "voxcpm2", "kokoro",
+}
+NON_LLM_PIPELINES = {
+    "text-to-image", "image-to-image", "text-to-video", "image-to-video", "text-to-speech", "text-to-audio",
+    "unconditional-image-generation",
+}
+NON_LLM_LIBRARIES = {"diffusers", "mflux"}
+# Reviewed roles that override what the repository's files suggest.
+# FrogNano's GGUF ships the projector inherited from Qwen3.5-4B, but its card
+# says image and video input are unsupported, so it is never a vision model.
+ROLE_OVERRIDES = {"microsoft/FrogNano-4B-2609": "text"}
 # Words that make a different model of the same family and size; a
 # conversion and its declared base must agree on them.
 VARIANT_WORDS = {"instruct", "it", "chat", "thinking", "reasoning", "vl", "coder", "math", "embedding", "reranker", "ocr"}
@@ -241,6 +255,15 @@ def architecture_family(info: dict) -> str | None:
     model_type = (info.get("config") or {}).get("model_type") or ""
     match = re.match(r"[a-z]+", model_type.lower())
     return match.group(0) if match else None
+
+
+def not_language_model(info: dict, base_repo: str, base_info: dict) -> bool:
+    for item in (info, base_info):
+        architecture = (item.get("config") or {}).get("model_type") or (item.get("gguf") or {}).get("architecture")
+        if architecture in NON_LLM_ARCHITECTURES or item.get("pipeline_tag") in NON_LLM_PIPELINES \
+                or item.get("library_name") in NON_LLM_LIBRARIES:
+            return True
+    return non_llm(model_name(base_repo), info["id"], base_repo, [])
 
 
 def upstream_of(chain: list[tuple[str, dict]]) -> tuple[str, dict]:
@@ -489,6 +512,9 @@ def main() -> int:
         if EXCLUDE.search(base_repo):
             reject("excluded variant", info["id"])
             continue
+        if not_language_model(info, base_repo, base_info):
+            reject("not a language model", info["id"])
+            continue
         rank = PUBLISHERS.index(info["id"].split("/", 1)[0])
         key = (base_repo, info["_format"])
         if key in chosen and chosen[key][0] <= rank:
@@ -498,6 +524,7 @@ def main() -> int:
         if not entry or entry["estimatedResidentGB"] > args.max_resident_gb:
             reject("no usable artifact or too large", info["id"])
             continue
+        entry["role"] = ROLE_OVERRIDES.get(base_repo, entry["role"])
         chosen[key] = (rank, entry)
 
     entries = sorted((entry for _, entry in chosen.values()), key=lambda e: (e["role"], e["format"], e["estimatedResidentGB"], e["id"]))

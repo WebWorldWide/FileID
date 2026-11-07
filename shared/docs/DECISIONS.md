@@ -4178,3 +4178,58 @@ Before and after, the shared engine resolves byte-identical URLs, destinations, 
 ## 2026-11-06 — Every curated model artifact is pinned to a commit
 
 The owner approved pinning the 17 manifest artifacts that resolved `main` (faces, CLIP, RAM++, BGE, Mistral, Qwen2.5-VL and Gemma GGUF). Each now names its repository's current commit, chosen by read-only Hugging Face API lookups: for the 12 LFS files the commit's LFS sha256 equals the existing pin; for CLIP vocab/merges and the BGE vocab, a local copy's sha256 equals the pin and its git blob id equals the commit's blob; RAM++ tags and thresholds have one version in their history (one commit each), the same blob `main` serves, and remain verified by SHA256 at download. No hash, size or license changed. The `--known-blockers` allowance is gone: a moving revision now fails the gate in every mode, and the engine rejects one at load. FileID has not shipped, so the re-keyed Windows install markers re-download only on development machines.
+
+## 2026-11-06 — Catalogs drop safety-stripped, vendor-named and non-language models; EmbeddingGemma 2 stays out
+
+**Owner decision: EmbeddingGemma 2 stays excluded.** Its license is Apache-2.0, but its card requires deployments to follow the Gemma Prohibited Use Policy.
+
+`RESTRICTED_MODELS` adds two patterns:
+- **Safety training removed:** abliterated, uncensored, heretic, OBLITERATED and Dolphin; Dolphin's card says "Dolphin is uncensored. We have filtered the dataset to remove alignment".
+- **Named after another vendor's model, provenance unclear:** Claude/Opus/Sonnet/Haiku/Fable/Composer, GPT-4/5, Gemini, Grok, DeepSeek-V*-Pro distills and FuseO1.
+
+`check_model_license_policy.py` now applies the denylist to every repository in the Mac `model-catalog.json` lineage. The Mac catalog has no generator, so this gate is what stops re-adds. `build_model_catalog.py` applies the denylist to every lineage hop.
+
+Removed from the Mac catalog (265 → 218):
+- Dolphin-2.9.3-Mistral-Nemo-12b 4bit/8bit
+- Dolphin-Mistral-24B-Venice-Edition 4bit/DWQ/mlx-8Bit
+- FuseO1-DeepSeekR1-Qwen2.5-Coder-32B-Preview-Q8
+- gemma-4-12b-coder-fable5-composer2.5 4bit/8bit, -v1-OptiQ-4bit, -v1-4bit-msq
+- Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated-4bit-msq
+- gemma-4-31B-it-uncensored-heretic-4bit
+- gemma-4-E4B-it-OBLITERATED-mlx-8Bit
+- gemma-4-26B-A4B-it-heretic-4bit / -heretic-msq-2.6bit
+- gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-4.6bit-msq
+- Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-5bit-msq
+- Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-4bit-msq
+- Huihui-Qwen3.5-35B-A3B-Claude-4.6-Opus-abliterated 4bit/5bit
+- Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated-4bit
+- Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated 4bit/6bit
+- Josiefied-Qwen2.5 abliterated: 0.5B v1, 1.5B v1, 7B v2, 14B v4 4-bit/8-bit, Coder-7B v1 4/6/8bit
+- Qwen3-4B-Thinking-2507-heretic-4bit
+- Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX 4bit/6bit
+- Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16 mlx-2Bit/mlx-8Bit
+- Qwen3.6-27B-F451-AND-TRI-Polar-Ultra-Pro-Writer-Uncensored-Heretic-OptiQ-4bit
+- Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-OptiQ-4bit
+- Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-8bit
+- Qwen3.8-27B-OBLITERATED-OptiQ-4bit
+- RavenX-CyberAgent-Qwen3.6-35B-A3B-Opus-4.7-OpenMythos-Pentester-BugHunter-RATH mlx-4bit-msq / mlx-4bit-mtp-msq
+- DeepSeek-V4-Pro-Qwen3.5-4B 4/6/8bit
+- DeepSeek-V4-Pro-Qwen3.5-9B 4/8bit
+
+All are `mlx-community/` repositories.
+
+Image generators and text-to-speech models are excluded from the shared catalog rather than given new roles, because no FileID consumer handles those roles. Removed (334 → 323):
+- Qwen-Image, -Edit, -Edit-2509, -Edit-2511, -Layered and -2512 GGUF
+- Qwen-Image-2512 MLX 4bit/8bit
+- ERNIE-Image-Turbo GGUF
+- Qwen3-TTS-12Hz-1.7B-CustomVoice MLX
+- VoxCPM2 MLX
+
+The generator now rejects:
+- architectures `qwen_image`, `wan`, `flux`, `sd3`, `qwen3_tts`, `voxcpm*` and similar;
+- image-, video- and speech-generation pipeline tags;
+- the `diffusers` and `mflux` libraries.
+
+The gate fails any entry whose name or files (`transformer/`, `vae/`, `text_encoder/`) mark it as one of these.
+
+FrogNano-4B is now role `text`. Its GGUF ships the projector inherited from Qwen3.5-4B, but its card says image and video use are unsupported, so it must never be offered for Deep Analyze. The generator keeps this choice in a reviewed `ROLE_OVERRIDES` table.
