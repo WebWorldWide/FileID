@@ -152,6 +152,8 @@ pub(super) struct SelectedPane {
     facts: gtk::Box,
     current: RefCell<Option<FileRow>>,
     generation: Rc<Cell<u64>>,
+    ask: gtk::Button,
+    picked: Rc<RefCell<Vec<(i64, String)>>>,
 }
 
 impl SelectedPane {
@@ -240,6 +242,18 @@ impl SelectedPane {
         actions.append(&reveal);
         actions.append(&open);
         body.append(&actions);
+        let ask = crate::v3::secondary("Ask about this file", false);
+        ask.set_halign(gtk::Align::Start);
+        ask.set_tooltip_text(Some("Open Chat with only the selected files attached (Ctrl+click adds files, Shift+click a range)"));
+        body.append(&ask);
+        let picked: Rc<RefCell<Vec<(i64, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let chosen = picked.clone();
+        ask.connect_clicked(move |button| {
+            let picked = chosen.borrow();
+            let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
+            let kinds: Vec<&str> = picked.iter().map(|(_, kind)| kind.as_str()).collect();
+            super::chat_handoff::ask_about(button, &ids, &kinds);
+        });
 
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -264,6 +278,8 @@ impl SelectedPane {
             facts,
             current: RefCell::new(None),
             generation: Rc::new(Cell::new(0)),
+            ask,
+            picked,
         });
         let weak = Rc::downgrade(&pane);
         reveal.connect_clicked(move |button| {
@@ -284,6 +300,14 @@ impl SelectedPane {
             }
         });
         pane
+    }
+
+    /// The selected files the Ask button attaches to the next chat question.
+    pub fn set_picked(&self, picked: Vec<(i64, String)>) {
+        let count = picked.len();
+        self.ask.set_label(&if count == 1 { "Ask about this file".to_owned() } else { format!("Ask about {count} files") });
+        self.ask.update_property(&[gtk::accessible::Property::Label(&format!("Ask Chat about the {count} selected files"))]);
+        self.picked.replace(picked);
     }
 
     pub fn show(&self, row: FileRow) {

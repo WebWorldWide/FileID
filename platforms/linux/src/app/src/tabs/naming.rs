@@ -1058,6 +1058,7 @@ mod tests {
             evidence_id: Some(reason.into()),
             start_seconds: None,
             page: None,
+            selection_match: None,
         }
     }
 
@@ -1311,6 +1312,7 @@ mod tests {
             evidence_id: Some(key.into()),
             start_seconds: None,
             page: None,
+            selection_match: None,
         };
         let count = |n: &str| CatalogHit { kind: "nameSamples".into(), evidence_id: None, ..pref("", n) };
         let hits = [pref("separator", "_"), pref("leadingDate", "end"), pref("dateFormat", "compact"), pref("words", "2"), pref("dropWords", "outdoor"), count("12")];
