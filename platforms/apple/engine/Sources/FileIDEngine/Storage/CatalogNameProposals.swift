@@ -21,10 +21,11 @@ enum CatalogNameProposals {
     }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
-        var options = try options(request)
+        let style = try options(request)
         guard let ids = request.fileIDs, !ids.isEmpty, ids.count <= maxFiles else { throw CatalogStore.InvalidRequest() }
         let learn = request.naming?.learn == true
         let hits = try await database.pool.read { db in
+            var options = style
             if learn { options.learned = try learned(db) }
             return try propose(db, ids: ids, options: options)
         }
@@ -36,7 +37,7 @@ enum CatalogNameProposals {
     static func learn(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
         let options = try options(request)
         let style = request.naming?.style ?? ""
-        func valid(_ text: String) -> Bool { !S.trimmed(text).isEmpty && text.unicodeScalars.count <= maxEditScalars }
+        func valid(_ text: String) -> Bool { !text.unicodeScalars.allSatisfy(\.properties.isWhitespace) && text.unicodeScalars.count <= maxEditScalars }
         guard let edits = request.nameEdits, !edits.isEmpty, edits.count <= maxFiles,
               edits.allSatisfy({ valid($0.proposed) && valid($0.applied) }) else { throw CatalogStore.InvalidRequest() }
         let hits = try await database.pool.write { db in
