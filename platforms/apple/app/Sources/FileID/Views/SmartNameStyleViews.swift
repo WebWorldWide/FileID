@@ -229,7 +229,7 @@ struct SmartNamePreviewSheet: View {
         let edits = NameStyle.edits(shown, renamed: Set(renamed.map(\.fileID)))
         guard !edits.isEmpty else { return }
         let request = NameStyle.learnRequest(id: "names-learn-" + UUID().uuidString, edits: edits, naming: naming)
-        _ = await TakeRequests.send(engine, request, timeout: 15)
+        if let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" { NameStyle.rememberLearned(edits) }
         learnedRefresh += 1
     }
 
@@ -241,6 +241,7 @@ struct SmartNamePreviewSheet: View {
             let result = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
             if result.failed == 0 && result.skipped == 0 { BulkRenameSheet.clearLastBatch() }
             lastBatch = []
+            learnedRefresh += 1
             status = "Put back \(result.undone.formatted()) name\(result.undone == 1 ? "" : "s")"
                 + (result.skipped > 0 ? " · \(result.skipped.formatted()) skipped because the file moved or changed" : "")
                 + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed back" : "") + "."
