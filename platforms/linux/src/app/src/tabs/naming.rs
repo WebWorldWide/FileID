@@ -194,6 +194,19 @@ pub(super) fn learn_request(edits: Vec<CatalogNameEdit>, naming: CatalogNaming) 
     request
 }
 
+/// After an Undo puts names back, the learned samples to forget: the edits
+/// whose file was renamed back, or None when there are none.
+pub(super) fn unlearn_request(edits: &[CatalogNameEdit], put_back: &HashSet<i64>) -> Option<CatalogRequest> {
+    let undone: Vec<CatalogNameEdit> = edits.iter().filter(|edit| put_back.contains(&edit.file_id)).cloned().collect();
+    if undone.is_empty() {
+        return None;
+    }
+    let mut request = catalog_request("unlearnNames");
+    request.limit = None;
+    request.name_edits = Some(undone);
+    Some(request)
+}
+
 pub(super) fn preferences_request(reset: bool) -> CatalogRequest {
     let mut request = catalog_request(if reset { "resetNamePreferences" } else { "namePreferences" });
     request.limit = None;
@@ -385,6 +398,7 @@ struct PendingRename {
     old: HashMap<i64, String>,
     undoing: bool,
     rows: Vec<Row>,
+    learned: Vec<CatalogNameEdit>,
 }
 
 struct NamingUi {
@@ -706,7 +720,7 @@ fn apply(ui: &Rc<NamingUi>) {
     }
     let old = rows.iter().map(|row| (row.file_id, row.current_name().to_owned())).collect();
     let ids = entries.iter().map(|entry| entry.file_id).collect();
-    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows });
+    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows, learned: Vec::new() });
 }
 
 fn send_renames(ui: &Rc<NamingUi>, renames: Vec<RenameEntry>, pending: PendingRename) {
@@ -743,6 +757,8 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
         .collect();
     let failed = pending.ids.len() - done.len();
     let first_error = result.messages.iter().find(|item| !item.ok).and_then(|item| item.message.clone());
+    let landed: HashSet<i64> = done.iter().copied().collect();
+    let samples = if pending.undoing || !ui.learn.is_active() { Vec::new() } else { edits(&pending.rows, &landed) };
     let toast = if pending.undoing {
         adw::Toast::builder()
             .title(format!("Put back {} names.", crate::shell::grouped(done.len() as u64)))
@@ -768,13 +784,14 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
         if !back.is_empty() {
             toast.set_button_label(Some("Undo"));
             let weak = Rc::downgrade(ui);
+            let learned = samples.clone();
             toast.connect_button_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     let ids = back.iter().map(|entry| entry.file_id).collect();
                     send_renames(
                         &ui,
                         back.clone(),
-                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new() },
+                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new(), learned: learned.clone() },
                     );
                 }
             });
@@ -784,9 +801,14 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
     ui.overlay.add_toast(toast);
     set_status(ui, "");
     sync_apply(ui);
-    let landed: HashSet<i64> = done.iter().copied().collect();
-    let samples = if pending.undoing || !ui.learn.is_active() { Vec::new() } else { edits(&pending.rows, &landed) };
-    if samples.is_empty() || !send_learned(ui, learn_request(samples, naming(&settings(ui)))) {
+    let request = if pending.undoing {
+        unlearn_request(&pending.learned, &landed)
+    } else if samples.is_empty() {
+        None
+    } else {
+        Some(learn_request(samples, naming(&settings(ui))))
+    };
+    if !request.is_some_and(|request| send_learned(ui, request)) {
         run_preview(ui);
     }
 }
@@ -1264,6 +1286,19 @@ mod tests {
         assert_eq!(preferences_request(true).action, "resetNamePreferences");
         let wire = serde_json::to_value(request(vec![1], naming(&NamingSettings::default()))).unwrap();
         assert_eq!(wire["naming"]["learn"], true);
+    }
+
+    #[test]
+    fn undo_forgets_only_the_renames_put_back() {
+        let edit = |file_id: i64, applied: &str| CatalogNameEdit { file_id, proposed: "x.jpg".into(), applied: applied.into() };
+        let edits = [edit(1, "A.jpg"), edit(3, "B.jpg")];
+        let request = unlearn_request(&edits, &HashSet::from([3, 9])).unwrap();
+        assert_eq!(request.action, "unlearnNames");
+        let sent: Vec<(i64, String)> = request.name_edits.iter().flatten().map(|e| (e.file_id, e.applied.clone())).collect();
+        assert_eq!(sent, [(3, "B.jpg".to_owned())]);
+        assert!(request.naming.is_none() && request.limit.is_none());
+        assert!(unlearn_request(&edits, &HashSet::new()).is_none());
+        assert!(unlearn_request(&[], &HashSet::from([1])).is_none());
     }
 
     #[test]
