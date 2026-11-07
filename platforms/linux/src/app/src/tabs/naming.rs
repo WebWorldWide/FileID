@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use fileid_engine::ipc::{
-    CatalogHit, CatalogNaming, CatalogRequest, CatalogRequestPayload, CommandPayload, RenameEntry,
-    RenameFilesPayload,
+    CatalogHit, CatalogNameEdit, CatalogNaming, CatalogRequest, CatalogRequestPayload, CommandPayload,
+    RenameEntry, RenameFilesPayload,
 };
 use gtk::glib;
 
@@ -29,6 +29,7 @@ pub(super) const MAX_LENGTH: u32 = 120;
 pub(super) const MAX_FILES: usize = 1_000;
 pub(super) const PREVIEW_DELAY: Duration = Duration::from_millis(300);
 const SLOT: &str = "names";
+const LEARNED_SLOT: &str = "names-learned";
 const NOT_READY: &str = "FileID is still getting ready. Try again in a moment.";
 
 pub(super) fn date_toggle_enabled(style: &str) -> bool {
@@ -46,6 +47,7 @@ pub(super) fn naming(settings: &NamingSettings) -> CatalogNaming {
         include_people: settings.include_people,
         include_event: settings.include_event,
         include_date: settings.include_date && date_toggle_enabled(style),
+        learn: settings.learn,
     }
 }
 
@@ -88,6 +90,115 @@ pub(super) fn reason_label(reason: &str) -> &'static str {
 
 pub(super) const UNSCANNED_COMPANION: &str = "unscannedCompanion";
 const GROUP_MARKER: &str = "|group:";
+const LEARNED_MARKER: &str = "|learned:";
+
+/// Splits the learned preferences ("proposedName|learned:case,separator")
+/// off a reason that `parse_reason` returned.
+pub(super) fn split_learned(reason: &str) -> (String, Vec<String>) {
+    match reason.split_once(LEARNED_MARKER) {
+        Some((plain, keys)) => {
+            (plain.to_owned(), keys.split(',').filter(|key| !key.is_empty()).map(str::to_owned).collect())
+        }
+        None => (reason.to_owned(), Vec::new()),
+    }
+}
+
+pub(super) fn reason_chip(row: &Row) -> String {
+    let label = reason_label(&row.reason);
+    if row.learned.is_empty() { label.to_owned() } else { format!("{label} · your style") }
+}
+
+/// What the learned preferences named in a proposeNames reason did to this name.
+pub(super) fn learned_help(keys: &[String]) -> Option<String> {
+    let parts: Vec<&str> = keys
+        .iter()
+        .filter_map(|key| match key.as_str() {
+            "dropWords" => Some("leaves out words you remove"),
+            "people" => Some("leaves out people's names"),
+            "words" => Some("keeps it as short as you do"),
+            "leadingDate" | "trailingDate" => Some("puts the date where you do"),
+            "dateFormat" => Some("writes the date your way"),
+            "separator" => Some("uses your word separator"),
+            "case" => Some("uses your capitals"),
+            _ => None,
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("Learned from your renames: {}", parts.join(", ")))
+}
+
+pub(super) fn preference_label(key: &str, value: &str) -> Option<String> {
+    let fixed = match (key, value) {
+        ("separator", "_") => "underscores between words",
+        ("separator", " ") => "spaces between words",
+        ("case", "title") => "Capitalised Words",
+        ("case", "upper") => "CAPITALS",
+        ("leadingDate", "end") => "the date at the end",
+        ("trailingDate", "start") => "the date first",
+        ("leadingDate" | "trailingDate", "none") => "no date",
+        ("dateFormat", "compact") => "dates like 20230704",
+        ("dateFormat", "underscore") => "dates like 2023_07_04",
+        ("dateFormat", "dotted") => "dates like 2023.07.04",
+        ("dateFormat", "month") => "dates like 2023-07",
+        ("people", _) => "no people's names",
+        ("words", _) => return Some(format!("at most {value} {}", if value == "1" { "word" } else { "words" })),
+        ("dropWords", _) => return Some(format!("without \u{201C}{value}\u{201D}")),
+        _ => return None,
+    };
+    Some(fixed.to_owned())
+}
+
+/// The Name style card's line about what FileID learned, from a
+/// learnNames/namePreferences reply.
+pub(super) fn learned_summary(hits: &[CatalogHit], enabled: bool) -> (String, u64) {
+    let samples: u64 = hits.iter().find(|hit| hit.kind == "nameSamples").and_then(|hit| hit.text.parse().ok()).unwrap_or(0);
+    if !enabled {
+        return ("Names follow the style above only.".to_owned(), samples);
+    }
+    if samples == 0 {
+        return ("Edit names before you rename them and FileID will follow your style.".to_owned(), 0);
+    }
+    let count = format!("{} {}", crate::shell::grouped(samples), if samples == 1 { "rename" } else { "renames" });
+    let items: Vec<String> = hits
+        .iter()
+        .filter(|hit| hit.kind == "namePreference")
+        .filter_map(|hit| preference_label(hit.evidence_id.as_deref().unwrap_or_default(), &hit.text))
+        .collect();
+    let text = if items.is_empty() {
+        format!("No clear preference yet from {count}.")
+    } else {
+        format!("From {count}: {}.", items.join(", "))
+    };
+    (text, samples)
+}
+
+/// One sample per renamed file the user saw in the preview: singles and
+/// group leaders, never followers, whose rename landed.
+pub(super) fn edits(rows: &[Row], renamed: &HashSet<i64>) -> Vec<CatalogNameEdit> {
+    rows.iter()
+        .filter(|row| row.checked && row.can_check() && !row.is_follower() && renamed.contains(&row.file_id))
+        .filter_map(|row| {
+            valid_name(&row.edited).map(|applied| CatalogNameEdit {
+                file_id: row.file_id,
+                proposed: row.proposed.clone(),
+                applied,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn learn_request(edits: Vec<CatalogNameEdit>, naming: CatalogNaming) -> CatalogRequest {
+    let mut request = catalog_request("learnNames");
+    request.limit = None;
+    request.naming = Some(naming);
+    request.name_edits = Some(edits);
+    request
+}
+
+pub(super) fn preferences_request(reset: bool) -> CatalogRequest {
+    let mut request = catalog_request(if reset { "resetNamePreferences" } else { "namePreferences" });
+    request.limit = None;
+    request
+}
 
 /// Splits a proposeNames evidenceID into its reason and the companion
 /// group's leader file ID ("proposedName|group:11").
@@ -117,6 +228,7 @@ pub(super) struct Row {
     pub checked: bool,
     pub group: Option<i64>,
     pub suffix: String,
+    pub learned: Vec<String>,
 }
 
 impl Row {
@@ -150,7 +262,8 @@ pub(super) fn rows(hits: &[CatalogHit], previous: &[Row]) -> Vec<Row> {
         .iter()
         .filter(|hit| hit.kind == "proposedName")
         .map(|hit| {
-            let (reason, group) = parse_reason(hit.evidence_id.as_deref());
+            let (tagged, group) = parse_reason(hit.evidence_id.as_deref());
+            let (reason, learned) = split_learned(&tagged);
             Row {
                 file_id: hit.file_id,
                 path: hit.path.clone(),
@@ -160,6 +273,7 @@ pub(super) fn rows(hits: &[CatalogHit], previous: &[Row]) -> Vec<Row> {
                 checked: !hit.text.is_empty() && !unticked.contains(&group.unwrap_or(hit.file_id)),
                 group,
                 suffix: String::new(),
+                learned,
             }
         })
         .collect();
@@ -248,7 +362,7 @@ pub(super) fn renames(rows: &[Row]) -> Vec<RenameEntry> {
 }
 
 pub(super) fn accessible_label(row: &Row, rows: &[Row]) -> String {
-    let reason = reason_label(&row.reason);
+    let reason = reason_chip(row);
     let because = reason[..1].to_lowercase() + &reason[1..];
     let others: Vec<&str> = match row.group {
         Some(group) => rows
@@ -270,6 +384,7 @@ struct PendingRename {
     ids: HashSet<i64>,
     old: HashMap<i64, String>,
     undoing: bool,
+    rows: Vec<Row>,
 }
 
 struct NamingUi {
@@ -285,6 +400,9 @@ struct NamingUi {
     people: adw::SwitchRow,
     event: adw::SwitchRow,
     date: adw::SwitchRow,
+    learn: adw::SwitchRow,
+    learned: adw::ActionRow,
+    reset: gtk::Button,
     apply: gtk::Button,
     status: gtk::Label,
     view: gtk::ColumnView,
@@ -327,11 +445,37 @@ fn new_ui(
         .active(saved.include_date)
         .sensitive(date_toggle_enabled(&saved.style))
         .build();
+    let learn = adw::SwitchRow::builder()
+        .title("Learn from my renames")
+        .subtitle("When you edit a suggested name before renaming, later suggestions follow your style. Stays on this computer.")
+        .active(saved.learn)
+        .build();
+    let reset = gtk::Button::builder()
+        .label("Reset")
+        .valign(gtk::Align::Center)
+        .sensitive(false)
+        .tooltip_text("Forget the style FileID learned from your renames")
+        .build();
+    reset.update_property(&[gtk::accessible::Property::Label("Reset learned name style")]);
+    let learned = adw::ActionRow::builder()
+        .title("Learned style")
+        .subtitle(if saved.learn { "Edit names before you rename them and FileID will follow your style." } else { "Names follow the style above only." })
+        .subtitle_lines(3)
+        .build();
+    learned.add_suffix(&reset);
     let group = adw::PreferencesGroup::builder()
         .title("Name style")
         .description("How FileID builds new names from what it knows: chapters, descriptions, tags, events and the people you named. Nothing is renamed until you press Rename.")
         .build();
-    for row in [style.upcast_ref::<gtk::Widget>(), length.upcast_ref(), people.upcast_ref(), event.upcast_ref(), date.upcast_ref()] {
+    for row in [
+        style.upcast_ref::<gtk::Widget>(),
+        length.upcast_ref(),
+        people.upcast_ref(),
+        event.upcast_ref(),
+        date.upcast_ref(),
+        learn.upcast_ref(),
+        learned.upcast_ref(),
+    ] {
         group.add(row);
     }
 
@@ -379,6 +523,9 @@ fn new_ui(
         people,
         event,
         date,
+        learn,
+        learned,
+        reset,
         apply,
         status,
         view,
@@ -390,6 +537,7 @@ fn new_ui(
     add_columns(&ui);
     wire(&ui, &preview);
     subscribe(&ui);
+    request_learned(&ui, false);
     (card, ui)
 }
 
@@ -400,6 +548,7 @@ fn settings(ui: &NamingUi) -> NamingSettings {
         include_people: ui.people.is_active(),
         include_event: ui.event.is_active(),
         include_date: ui.date.is_active(),
+        learn: ui.learn.is_active(),
     }
 }
 
@@ -417,7 +566,7 @@ fn wire(ui: &Rc<NamingUi>, preview: &gtk::Button) {
     ui.style.connect_selected_notify(move |_| f());
     let f = on_change.clone();
     ui.length.connect_value_notify(move |_| f());
-    for switch in [&ui.people, &ui.event, &ui.date] {
+    for switch in [&ui.people, &ui.event, &ui.date, &ui.learn] {
         let f = on_change.clone();
         switch.connect_active_notify(move |_| f());
     }
@@ -433,6 +582,41 @@ fn wire(ui: &Rc<NamingUi>, preview: &gtk::Button) {
             apply(&ui);
         }
     });
+    let weak = Rc::downgrade(ui);
+    ui.reset.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            request_learned(&ui, true);
+        }
+    });
+    let weak = Rc::downgrade(ui);
+    ui.learn.connect_active_notify(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            request_learned(&ui, false);
+        }
+    });
+}
+
+fn send_learned(ui: &Rc<NamingUi>, request: CatalogRequest) -> bool {
+    ui.requests.borrow_mut().begin(LEARNED_SLOT, &request.request_id);
+    let sent = ui
+        .engine
+        .borrow_mut()
+        .send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request })));
+    if sent.is_err() {
+        ui.requests.borrow_mut().forget(LEARNED_SLOT);
+    }
+    sent.is_ok()
+}
+
+fn request_learned(ui: &Rc<NamingUi>, reset: bool) {
+    ui.reset.set_sensitive(false);
+    send_learned(ui, preferences_request(reset));
+}
+
+fn show_learned(ui: &Rc<NamingUi>, hits: &[CatalogHit]) {
+    let (text, samples) = learned_summary(hits, ui.learn.is_active());
+    ui.learned.set_subtitle(&text);
+    ui.reset.set_sensitive(samples > 0);
 }
 
 fn style_changed(ui: &Rc<NamingUi>) {
@@ -522,7 +706,7 @@ fn apply(ui: &Rc<NamingUi>) {
     }
     let old = rows.iter().map(|row| (row.file_id, row.current_name().to_owned())).collect();
     let ids = entries.iter().map(|entry| entry.file_id).collect();
-    send_renames(ui, entries, PendingRename { ids, old, undoing: false });
+    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows });
 }
 
 fn send_renames(ui: &Rc<NamingUi>, renames: Vec<RenameEntry>, pending: PendingRename) {
@@ -587,7 +771,11 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
             toast.connect_button_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     let ids = back.iter().map(|entry| entry.file_id).collect();
-                    send_renames(&ui, back.clone(), PendingRename { ids, old: HashMap::new(), undoing: true });
+                    send_renames(
+                        &ui,
+                        back.clone(),
+                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new() },
+                    );
                 }
             });
         }
@@ -596,7 +784,11 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
     ui.overlay.add_toast(toast);
     set_status(ui, "");
     sync_apply(ui);
-    run_preview(ui);
+    let landed: HashSet<i64> = done.iter().copied().collect();
+    let samples = if pending.undoing || !ui.learn.is_active() { Vec::new() } else { edits(&pending.rows, &landed) };
+    if samples.is_empty() || !send_learned(ui, learn_request(samples, naming(&settings(ui)))) {
+        run_preview(ui);
+    }
 }
 
 fn subscribe(ui: &Rc<NamingUi>) {
@@ -607,7 +799,17 @@ fn subscribe(ui: &Rc<NamingUi>) {
             let Some(ui) = weak.upgrade() else { break };
             match event {
                 EngineState::CatalogResponse(response) => {
-                    if ui.requests.borrow_mut().accept(&response.request_id, true).as_deref() != Some(SLOT) {
+                    let slot = ui.requests.borrow_mut().accept(&response.request_id, true);
+                    if slot.as_deref() == Some(LEARNED_SLOT) {
+                        if response.status == "ok" {
+                            show_learned(&ui, &response.hits);
+                        }
+                        if ui.shown.get() && ui.pending.borrow().is_none() {
+                            run_preview(&ui);
+                        }
+                        continue;
+                    }
+                    if slot.as_deref() != Some(SLOT) {
                         continue;
                     }
                     if response.status == "ok" {
@@ -617,6 +819,7 @@ fn subscribe(ui: &Rc<NamingUi>) {
                     }
                 }
                 EngineState::BulkActionResult(result) if result.action == "renameFiles" => renamed(&ui, &result),
+                EngineState::Ready => request_learned(&ui, false),
                 EngineState::Failed(_) | EngineState::Exited => {
                     ui.requests.borrow_mut().clear();
                     if ui.pending.take().is_some() {
@@ -782,7 +985,8 @@ fn add_columns(ui: &Rc<NamingUi>) {
             companions.set_visible(chip.is_some());
             companions.set_label(chip.as_deref().unwrap_or_default());
             if let Some(reason) = companions.next_sibling().and_downcast::<gtk::Label>() {
-                reason.set_label(reason_label(&row.reason));
+                reason.set_label(&reason_chip(row));
+                reason.set_tooltip_text(learned_help(&row.learned).as_deref());
             }
         },
     );
@@ -871,7 +1075,8 @@ mod tests {
                 max_length: 40,
                 include_people: true,
                 include_event: true,
-                include_date: false
+                include_date: false,
+                learn: true
             }
         );
         let loud = NamingSettings { style: "loud".into(), max_length: 900, ..defaults };
@@ -1026,5 +1231,63 @@ mod tests {
         );
         edit(&mut list, 11, "bad/name.JPG");
         assert_eq!(renames(&list).into_iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![14]);
+    }
+
+    #[test]
+    fn learned_reasons_summary_and_edits() {
+        let hits = [
+            hit(1, "IMG_1.jpg", "Kids_Soccer.jpg", "proposedName|learned:separator,case"),
+            hit(3, "DSC_1.JPG", "Red_Barn.JPG", "proposedName|learned:case|group:3"),
+            hit(2, "DSC_1.ARW", "Red_Barn.ARW", "proposedName|learned:case|group:3"),
+            hit(4, "IMG_4.jpg", "beach.jpg", "tags"),
+        ];
+        let mut list = rows(&hits, &[]);
+        assert_eq!(list.iter().map(|r| r.reason.as_str()).collect::<Vec<_>>(), ["proposedName"; 3].iter().copied().chain(["tags"]).collect::<Vec<_>>());
+        assert_eq!(list[0].learned, ["separator", "case"]);
+        assert_eq!((list[2].group, list[2].suffix.as_str()), (Some(3), ".ARW"));
+        assert_eq!(reason_chip(&list[0]), "From the AI name · your style");
+        assert_eq!(reason_chip(&list[3]), "From tags");
+        assert_eq!(
+            learned_help(&list[0].learned).as_deref(),
+            Some("Learned from your renames: uses your word separator, uses your capitals")
+        );
+        assert_eq!(learned_help(&[]), None);
+        edit(&mut list, 1, "Kids Soccer Final.jpg");
+        let landed: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        let samples = edits(&list, &landed);
+        let got: Vec<(i64, &str, &str)> =
+            samples.iter().map(|e| (e.file_id, e.proposed.as_str(), e.applied.as_str())).collect();
+        assert_eq!(got, [(1, "Kids_Soccer.jpg", "Kids Soccer Final.jpg"), (3, "Red_Barn.JPG", "Red_Barn.JPG")]);
+        let request = learn_request(samples, naming(&NamingSettings::default()));
+        assert_eq!(request.action, "learnNames");
+        assert_eq!(request.name_edits.as_ref().map(Vec::len), Some(2));
+        assert_eq!(preferences_request(true).action, "resetNamePreferences");
+        let wire = serde_json::to_value(request(vec![1], naming(&NamingSettings::default()))).unwrap();
+        assert_eq!(wire["naming"]["learn"], true);
+    }
+
+    #[test]
+    fn learned_summary_reads_preferences() {
+        let pref = |key: &str, text: &str| CatalogHit {
+            file_id: 0,
+            path: String::new(),
+            kind: "namePreference".into(),
+            text: text.into(),
+            evidence_id: Some(key.into()),
+            start_seconds: None,
+            page: None,
+        };
+        let count = |n: &str| CatalogHit { kind: "nameSamples".into(), evidence_id: None, ..pref("", n) };
+        let hits = [pref("separator", "_"), pref("leadingDate", "end"), pref("dateFormat", "compact"), pref("words", "2"), pref("dropWords", "outdoor"), count("12")];
+        assert_eq!(
+            learned_summary(&hits, true),
+            (
+                "From 12 renames: underscores between words, the date at the end, dates like 20230704, at most 2 words, without \u{201C}outdoor\u{201D}.".to_owned(),
+                12
+            )
+        );
+        assert_eq!(learned_summary(&[count("2")], true).0, "No clear preference yet from 2 renames.");
+        assert_eq!(learned_summary(&hits, false).0, "Names follow the style above only.");
+        assert_eq!(learned_summary(&[], true), ("Edit names before you rename them and FileID will follow your style.".to_owned(), 0));
     }
 }
