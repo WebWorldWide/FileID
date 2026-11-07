@@ -25,15 +25,27 @@ fn unique_dir(tag: &str) -> PathBuf {
     p
 }
 
+fn isolated_state() -> &'static std::path::Path {
+    static STATE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| unique_dir("state"))
+}
+
+fn command() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env("XDG_DATA_HOME", isolated_state())
+        .env("LOCALAPPDATA", isolated_state());
+    cmd
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(bin())
+    command()
         .args(args)
         .output()
         .expect("spawn fileid binary")
 }
 
 fn run_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(bin());
+    let mut cmd = command();
     cmd.args(args);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -69,7 +81,7 @@ fn models_download_without_a_selection_is_a_failure() {
 #[test]
 fn duplicate_model_names_are_planned_once() {
     let models = unique_dir("duplicate-model-selection").join("Models");
-    let out = Command::new(bin())
+    let out = command()
         .args([
             "--json",
             "models",
@@ -89,7 +101,7 @@ fn duplicate_model_names_are_planned_once() {
 #[cfg(target_os = "macos")]
 #[test]
 fn runtime_install_json_abort_and_no_source_are_machine_safe() {
-    let abort = Command::new(bin())
+    let abort = command()
         .args(["--json", "runtime", "install", "--force"])
         .env(
             "FILEID_ORT_DYLIB_URL",
@@ -103,7 +115,7 @@ fn runtime_install_json_abort_and_no_source_are_machine_safe() {
     assert_eq!(abort_json["installed"], false);
     assert_eq!(abort_json["aborted"], true);
 
-    let no_source = Command::new(bin())
+    let no_source = command()
         .args(["--json", "runtime", "install", "--force", "--yes"])
         .env_remove("FILEID_ORT_DYLIB_URL")
         .env_remove("FILEID_ORT_DYLIB_SHA256")
@@ -118,7 +130,7 @@ fn runtime_install_json_abort_and_no_source_are_machine_safe() {
 #[test]
 fn restricted_model_json_mode_is_single_result_and_noninteractive() {
     let models = unique_dir("restricted-json").join("Models");
-    let out = Command::new(bin())
+    let out = command()
         .args(["--json", "models", "download", "gemma_3_4b", "--yes"])
         .env("FILEID_MODELS_DIR", &models)
         .output()
