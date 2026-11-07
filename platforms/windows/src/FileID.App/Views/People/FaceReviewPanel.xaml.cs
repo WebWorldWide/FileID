@@ -143,8 +143,15 @@ public sealed partial class FaceReviewPanel : UserControl
         _undoOperationId = operationId;
         UndoText.Text = label + ".";
         UndoButton.IsEnabled = true;
-        UndoBar.Visibility = Visibility.Visible;
-        SpringEasing.AnimateOpacity(UndoBar, 1f, 0.38, 0.8);
+        if (UndoBar.Visibility != Visibility.Visible)
+        {
+            UndoBar.Visibility = Visibility.Visible;
+            if (!ReducedMotion.Instance.IsReduced)
+            {
+                SpringEasing.SetScalar(UndoBar, "Opacity", 0f);
+                SpringEasing.AnimateOpacity(UndoBar, 1f, 0.38, 0.8);
+            }
+        }
         ChangeLog.Instance.Push(label, ChangeKind.Other, async () =>
         {
             var page = await EngineClient.Instance.UndoFaceReviewAsync(operationId);
@@ -168,7 +175,6 @@ public sealed partial class FaceReviewPanel : UserControl
                     return;
                 }
                 _undoOperationId = null;
-                SpringEasing.AnimateOpacity(UndoBar, 0f, 0.38, 0.8);
                 UndoBar.Visibility = Visibility.Collapsed;
                 await ReloadAsync();
             }

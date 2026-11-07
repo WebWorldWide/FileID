@@ -115,7 +115,6 @@
         <Grid Grid.Row="2"
               x:Name="UndoBar"
               Visibility="Collapsed"
-              Opacity="0"
               Padding="12,8"
               CornerRadius="10"
               ColumnSpacing="8"
