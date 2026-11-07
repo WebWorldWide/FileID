@@ -121,6 +121,44 @@ extension CatalogNameProposalsTests {
         proposal = await propose(learn: true)
         #expect(proposal.hits.map(\.text) == ["kids-playing-soccer.jpg"])
     }
+
+    @Test func undoneRenamesForgetTheirNewestMatchingSample() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-names-unlearn-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("test.sqlite"))
+        try await db.pool.write { d in
+            for id in 1...2 {
+                try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?,?,?,1,10.0,0,'image','jpg',0,'beach sunset')",
+                              arguments: [id, "/n/Renamed_\(id).jpg", id])
+            }
+        }
+        func send(_ action: String, _ edits: [CatalogNameEdit]?) async -> CatalogResponse {
+            await CatalogStore.handle(CatalogRequest(requestID: "l", action: action, naming: CatalogNaming(style: "short", maxLength: 40), nameEdits: edits), database: db)
+        }
+        for applied in ["Beach_Sunset.jpg", "Beach_Sunset.jpg", "Beach Sunset.jpg"] {
+            _ = await send("learnNames", [CatalogNameEdit(fileID: 1, proposed: "beach-sunset.jpg", applied: applied)])
+        }
+        _ = await send("learnNames", [CatalogNameEdit(fileID: 2, proposed: "beach-sunset.jpg", applied: "Beach_Sunset.jpg")])
+        let newest = try await db.pool.read { d in
+            try Int64.fetchOne(d, sql: "SELECT MAX(rowid) FROM catalog_corrections WHERE file_id=1 AND json_extract(after_json,'$.applied')='Beach_Sunset.jpg'")
+        }
+        let response = await send("unlearnNames", [CatalogNameEdit(fileID: 1, proposed: "other.jpg", applied: "Beach_Sunset.jpg"),
+                                                   CatalogNameEdit(fileID: 1, proposed: "x.jpg", applied: "Never_Applied.jpg"),
+                                                   CatalogNameEdit(fileID: 99, proposed: "x.jpg", applied: "Beach_Sunset.jpg")])
+        #expect(response.status == "ok")
+        #expect(response.hits.last?.kind == "nameSamples")
+        #expect(response.hits.last?.text == "3")
+        let left = try await db.pool.read { d in
+            try Row.fetchAll(d, sql: "SELECT rowid,file_id,json_extract(after_json,'$.applied') FROM catalog_corrections WHERE kind='nameStyle' ORDER BY rowid")
+                .map { (rowid: $0[0] as Int64, file: $0[1] as Int64, applied: $0[2] as String) }
+        }
+        #expect(!left.contains { $0.rowid == newest })
+        #expect(left.map(\.file) == [1, 1, 2])
+        #expect(left.map(\.applied) == ["Beach_Sunset.jpg", "Beach Sunset.jpg", "Beach_Sunset.jpg"])
+        #expect(await send("unlearnNames", []).status == "error")
+        #expect(await send("unlearnNames", nil).status == "error")
+    }
 }
 
 private extension UInt32 {

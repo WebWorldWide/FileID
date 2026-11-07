@@ -259,6 +259,24 @@ pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<V
     preferences(conn)
 }
 
+/// unlearnNames: after renames are undone, deletes for each edit the newest
+/// sample for that file whose applied name matches, then replies with the preferences.
+pub(crate) fn unlearn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
+    let edits: &[CatalogNameEdit] = request.name_edits.as_deref().unwrap_or(&[]);
+    if edits.is_empty() || edits.len() > MAX_FILES || !edits.iter().all(|e| e.applied.chars().count() <= MAX_EDIT_SCALARS) {
+        bail!("Invalid naming request");
+    }
+    let tx = conn.transaction()?;
+    for edit in edits {
+        tx.execute(
+            "DELETE FROM catalog_corrections WHERE rowid=(SELECT rowid FROM catalog_corrections WHERE kind=?1 AND file_id=?2 AND json_extract(after_json,'$.applied')=?3 ORDER BY rowid DESC LIMIT 1)",
+            params![SAMPLE_KIND, edit.file_id, edit.applied],
+        )?;
+    }
+    tx.commit()?;
+    preferences(conn)
+}
+
 pub(crate) fn reset(conn: &Connection) -> Result<Vec<CatalogHit>> {
     conn.execute("DELETE FROM catalog_corrections WHERE kind=?1", [SAMPLE_KIND])?;
     preferences(conn)
@@ -615,5 +633,52 @@ mod tests {
         let after = propose(&conn, &propose_request(true)).unwrap();
         assert_eq!(after[0].text, "kids-playing-soccer.jpg");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undone_renames_forget_their_newest_matching_sample() {
+        let mut conn = crate::db::test_support::memory_db();
+        for id in 1..=2 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,0,'image','jpg',0,'beach sunset')",
+                params![id, format!("/n/Renamed_{id}.jpg")],
+            )
+            .unwrap();
+        }
+        let edits = |action: &str, edits: serde_json::Value| {
+            request(serde_json::json!({"requestID":"l","action":action,"naming":{"style":"short","maxLength":40},"nameEdits":edits}))
+        };
+        for applied in ["Beach_Sunset.jpg", "Beach_Sunset.jpg", "Beach Sunset.jpg"] {
+            learn(&mut conn, &edits("learnNames", serde_json::json!([{"fileID":1,"proposed":"beach-sunset.jpg","applied":applied}]))).unwrap();
+        }
+        learn(&mut conn, &edits("learnNames", serde_json::json!([{"fileID":2,"proposed":"beach-sunset.jpg","applied":"Beach_Sunset.jpg"}]))).unwrap();
+        let newest: i64 = conn
+            .query_row("SELECT MAX(rowid) FROM catalog_corrections WHERE file_id=1 AND json_extract(after_json,'$.applied')='Beach_Sunset.jpg'", [], |r| r.get(0))
+            .unwrap();
+        let hits = unlearn(
+            &mut conn,
+            &edits(
+                "unlearnNames",
+                serde_json::json!([
+                    {"fileID":1,"proposed":"other.jpg","applied":"Beach_Sunset.jpg"},
+                    {"fileID":1,"proposed":"x.jpg","applied":"Never_Applied.jpg"},
+                    {"fileID":99,"proposed":"x.jpg","applied":"Beach_Sunset.jpg"}
+                ]),
+            ),
+        )
+        .unwrap();
+        assert_eq!(hits.last().map(|h| (h.kind.as_str(), h.text.as_str())), Some(("nameSamples", "3")));
+        let left: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT rowid,file_id,json_extract(after_json,'$.applied') FROM catalog_corrections WHERE kind='nameStyle' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(left.iter().all(|(rowid, _, _)| *rowid != newest));
+        let kept: Vec<(i64, &str)> = left.iter().map(|(_, file, applied)| (*file, applied.as_str())).collect();
+        assert_eq!(kept, [(1, "Beach_Sunset.jpg"), (1, "Beach Sunset.jpg"), (2, "Beach_Sunset.jpg")]);
+        assert!(unlearn(&mut conn, &edits("unlearnNames", serde_json::json!([]))).is_err());
+        assert!(unlearn(&mut conn, &request(serde_json::json!({"requestID":"u","action":"unlearnNames"}))).is_err());
     }
 }

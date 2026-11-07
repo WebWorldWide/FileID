@@ -19,6 +19,8 @@ public enum CatalogStore {
                 return try await CatalogNameProposals.handle(request, database: database)
             case "learnNames":
                 return try await CatalogNameProposals.learn(request, database: database)
+            case "unlearnNames":
+                return try await CatalogNameProposals.unlearn(request, database: database)
             case "namePreferences", "resetNamePreferences":
                 return try await CatalogNameProposals.preferences(request, database: database)
             case "detail":

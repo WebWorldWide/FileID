@@ -1602,5 +1602,287 @@
         }
       }
     ]
+  },
+  {
+    "name": "names-undo-forgets-learned-sample",
+    "description": "unlearnNames (schema 1.22.0) runs after the user undoes renames that learnNames recorded: for each entry it deletes the newest stored sample for that file whose applied name matches, ignoring the proposed text and entries with no match. Undoing one of three renames that taught underscores and title case drops that sample, so the preferences fall below the three-vote minimum and proposeNames returns the unlearned name again. Nothing on disk changes.",
+    "tree": [
+      {
+        "path": "unlearn/IMG_0001.jpg",
+        "content": "unlearn/IMG_0001.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 61,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Beach Sunset"
+        }
+      },
+      {
+        "path": "unlearn/IMG_0002.jpg",
+        "content": "unlearn/IMG_0002.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 62,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Dog Park"
+        }
+      },
+      {
+        "path": "unlearn/IMG_0003.jpg",
+        "content": "unlearn/IMG_0003.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 63,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Snow Day"
+        }
+      },
+      {
+        "path": "unlearn/IMG_0004.jpg",
+        "content": "unlearn/IMG_0004.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 64,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Kids Playing Soccer"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "three renames teach a style",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 61,
+              "proposed": "beach-sunset.jpg",
+              "applied": "Beach_Sunset.jpg"
+            },
+            {
+              "fileID": 62,
+              "proposed": "dog-park.jpg",
+              "applied": "Dog_Park.jpg"
+            },
+            {
+              "fileID": 63,
+              "proposed": "snow-day.jpg",
+              "applied": "Snow_Day.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "the same file renamed again",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 63,
+              "proposed": "snow-day.jpg",
+              "applied": "Snow Day.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "4"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "undo forgets the newest matching sample only",
+        "catalog": {
+          "action": "unlearnNames",
+          "nameEdits": [
+            {
+              "fileID": 63,
+              "proposed": "changed-preview.jpg",
+              "applied": "Snow Day.jpg"
+            },
+            {
+              "fileID": 62,
+              "proposed": "dog-park.jpg",
+              "applied": "Never_Applied.jpg"
+            },
+            {
+              "fileID": 999,
+              "proposed": "x.jpg",
+              "applied": "Snow Day.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "undoing another rename drops the style",
+        "catalog": {
+          "action": "unlearnNames",
+          "nameEdits": [
+            {
+              "fileID": 61,
+              "proposed": "beach-sunset.jpg",
+              "applied": "Beach_Sunset.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "the remaining samples",
+        "db": "SELECT file_id,json_extract(after_json,'$.applied') FROM catalog_corrections WHERE kind='nameStyle' ORDER BY rowid",
+        "expect": [
+          [
+            62,
+            "Dog_Park.jpg"
+          ],
+          [
+            63,
+            "Snow_Day.jpg"
+          ]
+        ]
+      },
+      {
+        "label": "unlearned name again",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            64
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 64,
+                "path": "{path:unlearn/IMG_0004.jpg}",
+                "kind": "proposedName",
+                "text": "kids-playing-soccer.jpg",
+                "evidenceID": "proposedName"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "files unchanged",
+        "fs": {
+          "exists": [
+            "unlearn/IMG_0001.jpg",
+            "unlearn/IMG_0004.jpg"
+          ]
+        }
+      }
+    ]
   }
 ]
