@@ -760,6 +760,7 @@ struct CatalogJobRow: View {
 
     private var title: String {
         if job.kind == "catalogIndex" { return "Search index" }
+        if job.kind == "takeGrouping" { return "Related tries" }
         let count = job.fileIDs.count
         return "\(count) video\(count == 1 ? "" : "s") · finding moments"
     }
@@ -789,7 +790,7 @@ struct CatalogJobRow: View {
                 }
                 if job.kind == "catalogIndex", ["failed", "cancelled"].contains(job.state) {
                     Button("Retry") { control("resumeJob") }.buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
-                } else if job.state == "failed" {
+                } else if job.state == "failed", job.kind == "timelineSample" {
                     Button("Retry") { control("retryTimeline") }.buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                 }
                 if ["running", "queued", "paused"].contains(job.state) {
