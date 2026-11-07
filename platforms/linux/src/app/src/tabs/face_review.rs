@@ -148,7 +148,7 @@ enum Pending {
     Reload,
     More,
     Resolve {
-        item: FaceReviewItem,
+        item: Box<FaceReviewItem>,
         resolution: &'static str,
     },
     Undo,
@@ -303,7 +303,7 @@ impl ReviewPanel {
             payload,
             id,
             Pending::Resolve {
-                item: item.clone(),
+                item: Box::new(item.clone()),
                 resolution,
             },
         ) {
