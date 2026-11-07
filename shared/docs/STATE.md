@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-07 — Extended model catalog regenerated (323 → 309)
+
+- **Generator** (agent, read-only Hugging Face metadata, no weights downloaded): a reviewed `UPSTREAM_OVERRIDES` table keeps every hand-corrected entry whose card still names the wrong base (mlx-community Qwen2.5 Instruct, gemma-3 -it MLX, olmOCR-2 MLX, PaddleOCR-VL-1.5 MLX, SmolLM v0.2, GLM-4-32B), all at their existing pins. Moved repos resolve through the API redirect; the gemma-3n `-lm` MLX build stays text. New rejections: fine-tunes named after their base (EVA, ReadyArt), REAP-pruned builds, and Dolphin 3.0 (denylist widened for both catalogs). Duplicate builds of one upstream collapse to one, with MLX preferring 4-bit (it had picked a 70 GB bf16 build).
+- **Mac catalog:** still 218 entries; 27 now list their real release first in `bases` (Qwen2.5 Instruct/Coder, olmOCR, SmolVLM/SmolVLM2, Qwen3-30B-A3B-Instruct-2507).
+- Licence policy (default, `--catalog`, `--mac-catalog`), generator/policy tests, egress, docs, Rust engine and Swift catalog tests pass.
+
 ## 2026-11-07 — Timeline moments: timestamp-labelled frames measured, kept opt-in
 
 - **Both engines** (agent): the Mac moments request can put a `[t=12.50s]` label before each frame and ask for `start`/`end` in seconds (`FILEID_TIMELINE_FRAME_LABELS=1`; owner-approved `DeepAnalyze.swift` digest refresh, three request lines, no network code). Moment replies are now parsed tolerantly in Swift and Rust: seconds snap to the nearest frame, frame indexes still work, and a moment without a time covers its window. The Rust request is unchanged: its body is built in the digest-locked `vlm_server.rs`.
