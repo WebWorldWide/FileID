@@ -255,11 +255,8 @@ enum FaceReview {
         }
         for person in received.sorted() {
             try db.execute(sql: """
-                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
-                    representative_face_id=COALESCE(representative_face_id,
-                        (SELECT id FROM face_prints WHERE person_id=?1 ORDER BY id LIMIT 1))
-                WHERE id=?1
-                """, arguments: [person])
+                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?) WHERE id=?
+                """, arguments: [person, person])
         }
     }
 
@@ -277,6 +274,8 @@ enum FaceReview {
                                  decision.runnerUpScore.map { round4(Double($0)) }, namespace, created])
         } else if outcome == "assigned", let person = decision.person {
             try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE id=?", arguments: [person, face.id])
+            try db.execute(sql: "UPDATE persons SET representative_face_id=COALESCE(representative_face_id, ?) WHERE id=?",
+                           arguments: [face.id, person])
         } else if outcome == "unmatched", previousOutcome == "rejected" {
             outcome = "rejected"
         }
