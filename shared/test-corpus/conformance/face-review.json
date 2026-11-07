@@ -541,7 +541,8 @@
     "command": {
      "reassignFace": {
       "faceID": 3,
-      "destinationPersonID": 2
+      "destinationPersonID": 2,
+      "createNewPerson": false
      }
     },
     "await": "bulkActionResult",
@@ -665,7 +666,8 @@
     "command": {
      "reassignFace": {
       "faceID": 1,
-      "destinationPersonID": 2
+      "destinationPersonID": 2,
+      "createNewPerson": false
      }
     },
     "await": "bulkActionResult",
@@ -713,7 +715,8 @@
     "command": {
      "reassignFace": {
       "faceID": 3,
-      "destinationPersonID": 1
+      "destinationPersonID": 1,
+      "createNewPerson": false
      }
     },
     "await": "bulkActionResult",
