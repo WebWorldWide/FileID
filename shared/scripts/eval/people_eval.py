@@ -17,6 +17,15 @@ cluster again with the given environment overrides.
 
   people_eval.py --engine <FileIDEngine> --images <dir> --labels <labels.json> --work <dir>
   people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
+  people_eval.py ... --incremental
+
+--incremental replays a library that grows: the later half of each event's photos
+(by image path) is held back, the rest is clustered, then the held-back faces come
+back as new faces and clustering runs again. New faces are compared with the
+existing people and queued for review (FILEID_FACE_REVIEW_AUTO_ASSIGN=1 assigns
+confident ones instead). It reports whether each new face's top suggestion is its
+labelled identity, per reason and split, and checks that the default run changed no
+assignment.
 """
 from __future__ import annotations
 
@@ -93,20 +102,30 @@ def checkpoint(database: Path):
     connection.close()
 
 
-def recluster(binary, snapshot, state, env, timeout):
+PEOPLE_TABLES = ("persons", "face_verifications", "face_verdicts", "person_merge_links",
+                 "face_review_candidates", "face_identity_constraints", "face_assignment_assessed")
+
+
+def tables_of(connection):
+    return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def fresh_copy(snapshot, state):
     if state.exists():
         shutil.rmtree(state)
     database = database_path(state)
     database.parent.mkdir(parents=True)
     shutil.copy2(snapshot, database)
     connection = sqlite3.connect(database)
-    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = tables_of(connection)
     connection.execute("UPDATE face_prints SET person_id=NULL")
-    for table in ("persons", "face_verifications", "face_verdicts", "person_merge_links"):
+    for table in PEOPLE_TABLES:
         if table in tables:
             connection.execute(f"DELETE FROM {table}")
-    connection.commit()
-    connection.close()
+    return database, connection
+
+
+def cluster_once(binary, state, env, timeout):
     engine = Engine(binary, state, env=env, log=state / "engine.log")
     try:
         engine.wait("ready", 180)
@@ -116,6 +135,145 @@ def recluster(binary, snapshot, state, env, timeout):
         return {"cluster": cluster, "clusterSeconds": round(time.monotonic() - started, 2)}
     finally:
         engine.close()
+
+
+def recluster(binary, snapshot, state, env, timeout):
+    _, connection = fresh_copy(snapshot, state)
+    connection.commit()
+    connection.close()
+    return cluster_once(binary, state, env, timeout)
+
+
+def later_half_hashes(labels):
+    images = defaultdict(dict)
+    for face in labels:
+        images[face["event"]][face["image"]] = face["sha256"]
+    held = set()
+    for by_image in images.values():
+        ordered = sorted(by_image)
+        held.update(by_image[name] for name in ordered[(len(ordered) + 1) // 2:])
+    return held
+
+
+def file_hashes(connection, hash_cache):
+    out = {}
+    for file_id, path in connection.execute("SELECT id, path_text FROM files"):
+        real = os.path.realpath(path)
+        if real not in hash_cache and os.path.exists(real):
+            hash_cache[real] = sha256_file(Path(real))
+        out[file_id] = hash_cache.get(real)
+    return out
+
+
+def assignments(database):
+    connection = sqlite3.connect(database)
+    rows = dict(connection.execute("SELECT id, person_id FROM face_prints"))
+    connection.close()
+    return rows
+
+
+def co_members(assigned, faces):
+    groups = defaultdict(set)
+    for face in faces:
+        if assigned.get(face) is not None:
+            groups[assigned[face]].add(face)
+    return {face: frozenset(groups[assigned[face]]) if assigned.get(face) is not None else None for face in faces}
+
+
+def incremental_run(binary, snapshot, state, env, timeout, labels, hash_cache):
+    """Cluster the earlier half of each event, then bring the later half back as new faces."""
+    database, connection = fresh_copy(snapshot, state)
+    held_hashes = later_half_hashes(labels)
+    hashes = file_hashes(connection, hash_cache)
+    held_files = sorted(file_id for file_id, digest in hashes.items() if digest in held_hashes)
+    marks = ",".join("?" * len(held_files)) or "NULL"
+    connection.execute("DROP TABLE IF EXISTS eval_held_faces")
+    connection.execute(f"CREATE TABLE eval_held_faces AS SELECT * FROM face_prints WHERE file_id IN ({marks})", held_files)
+    held_faces = [row[0] for row in connection.execute("SELECT id FROM eval_held_faces")]
+    connection.execute(f"DELETE FROM face_prints WHERE file_id IN ({marks})", held_files)
+    connection.commit()
+    connection.close()
+    first = cluster_once(binary, state, env, timeout)
+    before = assignments(database)
+    connection = sqlite3.connect(database)
+    connection.execute("INSERT INTO face_prints SELECT * FROM eval_held_faces")
+    connection.execute("UPDATE face_prints SET person_id=NULL WHERE id IN (SELECT id FROM eval_held_faces)")
+    if "face_assignment_assessed" in tables_of(connection):
+        connection.execute("DELETE FROM face_assignment_assessed WHERE face_id IN (SELECT id FROM eval_held_faces)")
+    connection.execute("DROP TABLE eval_held_faces")
+    connection.commit()
+    connection.close()
+    second = cluster_once(binary, state, env, timeout)
+    after = assignments(database)
+    earlier = list(before)
+    then, now_ = co_members(before, earlier), co_members(after, earlier)
+    connection = sqlite3.connect(database)
+    candidates = {face: (person, reason, score) for face, person, reason, score in connection.execute(
+        "SELECT face_id, person_id, reason, score FROM face_review_candidates")}
+    connection.close()
+    return {
+        "first": first, "second": second, "heldFiles": len(held_files), "heldFaces": len(held_faces),
+        "heldHashes": sorted(held_hashes),
+        "earlierFacesWhoseGroupChanged": sum(1 for face in earlier if then[face] != now_[face]),
+        "newFacesAssigned": sum(1 for face in held_faces if after.get(face) is not None),
+        "candidates": candidates,
+    }
+
+
+def suggestion_report(labels, assigned, held_hashes, candidates):
+    """Top suggestion correct? A person's identity is the majority label of its labelled earlier faces."""
+    identity_faces = [f for f in labels if f["identity"].startswith("P")]
+    votes = defaultdict(Counter)
+    for face in identity_faces:
+        det = assigned.get(face["id"])
+        if face["sha256"] not in held_hashes and det and det["person"] is not None:
+            votes[det["person"]][face["identity"]] += 1
+    person_identity = {person: counts.most_common(1)[0][0] for person, counts in votes.items()}
+    known = set(person_identity.values())
+    new = [f for f in identity_faces if f["sha256"] in held_hashes]
+    detected = [f for f in new if f["id"] in assigned]
+    by_reason = defaultdict(lambda: {"queued": 0, "correct": 0})
+    for face in detected:
+        det = assigned[face["id"]]
+        found = candidates.get(det["id"])
+        if not found:
+            continue
+        person, reason, _ = found
+        by_reason[reason]["queued"] += 1
+        by_reason[reason]["correct"] += int(person_identity.get(person) == face["identity"])
+    queued = sum(v["queued"] for v in by_reason.values())
+    correct = sum(v["correct"] for v in by_reason.values())
+    eligible = [f for f in detected if f["identity"] in known]
+    strong = by_reason.get("suggested", {"queued": 0, "correct": 0})
+    def after_accepting(face):
+        det = assigned.get(face["id"])
+        if det is None:
+            return None
+        if det["person"] is not None:
+            return det["person"]
+        found = candidates.get(det["id"])
+        return found[0] if found and found[1] == "suggested" else None
+
+    accepted = [(f["identity"], after_accepting(f)) for f in identity_faces]
+    return {
+        "newIdentityFaces": len(new),
+        "newDetected": len(detected),
+        "newWithKnownIdentity": len(eligible),
+        "queued": queued,
+        "correct": correct,
+        "precision": round(correct / queued, 4) if queued else None,
+        "recall": round(correct / len(eligible), 4) if eligible else None,
+        "suggestedPrecision": round(strong["correct"] / strong["queued"], 4) if strong["queued"] else None,
+        "byReason": {reason: dict(values) for reason, values in sorted(by_reason.items())},
+        "acceptingSuggested": cluster_metrics(accepted),
+    }
+
+
+def incremental_reports(labels, assigned, split, held_hashes, candidates):
+    out = {"all": suggestion_report(labels, assigned, held_hashes, candidates)}
+    for name, events in (split or {}).items():
+        out[name] = suggestion_report([f for f in labels if f["event"] in events], assigned, held_hashes, candidates)
+    return out
 
 
 def load_detections(database: Path, images: Path, hash_cache: dict):
@@ -261,6 +419,7 @@ def main():
     parser.add_argument("--env", action="append", help="KEY=VALUE engine override (repeatable)")
     parser.add_argument("--rescan", action="store_true", help="scan again even if a snapshot exists")
     parser.add_argument("--timeout", type=float, default=3600)
+    parser.add_argument("--incremental", action="store_true", help="hold back the later half of each event, then add it as new faces")
     args = parser.parse_args()
 
     images = require_internal(args.images, "images")
@@ -280,15 +439,25 @@ def main():
         checkpoint(database_path(scan_state))
         shutil.copy2(database_path(scan_state), snapshot)
     state = work / f"{args.flavor}-{args.name}"
-    meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout)
+    hash_cache = {}
+    incremental = None
+    if args.incremental:
+        incremental = incremental_run(args.engine, snapshot, state, env, args.timeout, labels, hash_cache)
+        meta["clusterRun"] = {key: incremental[key] for key in ("first", "second", "heldFiles", "heldFaces",
+                                                                 "earlierFacesWhoseGroupChanged", "newFacesAssigned")}
+    else:
+        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout)
     changes = diff_snapshots(before, live_state_snapshot())
     if changes:
         print("WARNING: the live FileID state changed during the run:", *changes, sep="\n  ", file=sys.stderr)
     meta["liveStateChanges"] = changes
 
-    detections = load_detections(database_path(state), images, {})
+    detections = load_detections(database_path(state), images, hash_cache)
     assigned = match(labels, detections)
     report = split_reports(labels, assigned, labels_doc.get("split"))
+    if incremental:
+        report["incremental"] = incremental_reports(labels, assigned, labels_doc.get("split"),
+                                                    set(incremental["heldHashes"]), incremental["candidates"])
     report["meta"] = meta
     connection = sqlite3.connect(database_path(state))
     report["meta"]["persons"] = connection.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
@@ -298,6 +467,15 @@ def main():
     out.write_text(json.dumps(report, indent=1))
     for key in ("all", *labels_doc.get("split", {}).keys()):
         print(summary_line(key, report[key]))
+        if incremental:
+            block = report["incremental"][key]
+            accepted = block["acceptingSuggested"]
+            print(f"{'':8s} new faces {block['newDetected']}: queued {block['queued']} correct {block['correct']} "
+                  f"P {block['precision']} R {block['recall']} suggestedP {block['suggestedPrecision']} "
+                  f"| accepting suggested: pairP {accepted.get('pairPrecision')} pairR {accepted.get('pairRecall')}")
+    if incremental:
+        print(f"earlier faces whose group changed: {incremental['earlierFacesWhoseGroupChanged']}, "
+              f"new faces assigned: {incremental['newFacesAssigned']}")
     print(f"persons {report['meta']['persons']}, engine faces {report['meta']['engineFaces']}; report {out}")
     return 1 if changes else 0
 

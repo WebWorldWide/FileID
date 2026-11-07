@@ -58,6 +58,8 @@ python3 shared/scripts/eval/people_eval.py --engine <FileIDEngine> \
     --images $E/people/images --labels $E/people/labels.json --work $E/people/runs
 # re-cluster the stored scan with an override:
 python3 shared/scripts/eval/people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
+# replay a growing library: cluster the earlier half of each event, then add the rest as new faces
+python3 shared/scripts/eval/people_eval.py ... --name incremental --incremental
 
 python3 shared/scripts/eval/timeline_eval.py candidates --engine <FileIDEngine> \
     --videos $E/timeline/videos --labels $E/timeline/labels.json --work $E/timeline \
@@ -65,6 +67,13 @@ python3 shared/scripts/eval/timeline_eval.py candidates --engine <FileIDEngine> 
 python3 shared/scripts/eval/timeline_eval.py full --engine <FileIDEngine> \
     --videos $E/timeline/videos --labels $E/timeline/labels.json --work $E/timeline --model qwen3_vl_2b
 ```
+
+With `--incremental`, `people_eval.py` holds back the later half of each event's photos (by image
+path), clusters the rest, restores the held-back faces as new and clusters again. It reports, per split,
+how many new faces were queued for review, how often the top suggestion is the face's labelled identity
+(overall and per reason; a person's identity is the majority label of its earlier faces), the pairwise
+numbers if every `suggested` item were accepted, and how many earlier faces changed group or new faces
+were assigned (both 0 unless `FILEID_FACE_REVIEW_AUTO_ASSIGN=1`).
 
 `people_eval.py` reports detection recall, pairwise precision/recall, B-cubed F1 (unassigned
 and undetected faces count as singletons), a small-face subset (shorter side under 40 px on a
