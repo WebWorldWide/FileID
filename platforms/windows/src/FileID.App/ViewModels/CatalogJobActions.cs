@@ -6,7 +6,8 @@ internal static class CatalogJobActions
 {
     public static bool CanPause(string? state) => state is "running" or "queued";
     public static bool CanCancel(string? state) => state is "running" or "queued" or "paused";
-    public static bool CanResume(string? kind, string? state) => kind is "catalogIndex" or "timelineSample" && state is "paused" or "failed" or "cancelled";
+    public static bool CanResume(string? kind, string? state) =>
+        kind is "catalogIndex" or "timelineSample" or TakeProposalPolicy.JobKind && state is "paused" or "failed" or "cancelled";
 
     public static IReadOnlyList<long> TimelineFileIDs(IEnumerable<CatalogHit> hits) => hits.Select(hit => hit.FileID).Distinct().Order().ToArray();
     public static CatalogRequest TimelineRequest(IEnumerable<CatalogHit> hits, string? timelineMode = null) =>
@@ -23,6 +24,8 @@ internal static class CatalogJobActions
         // one is retried as a fresh job over the same files, as on macOS.
         if (action == "resumeJob" && job.Kind == "timelineSample" && job.State is "failed" or "cancelled")
             return TimelineRequest(job.FileIDs.Distinct().Order().ToArray(), null);
+        if (action == "resumeJob" && job.Kind == TakeProposalPolicy.JobKind && job.State is "failed" or "cancelled")
+            return TakeProposalPolicy.EnqueueRequest(Guid.NewGuid().ToString());
         var allowed = action switch
         {
             "pauseJob" => CanPause(job.State),

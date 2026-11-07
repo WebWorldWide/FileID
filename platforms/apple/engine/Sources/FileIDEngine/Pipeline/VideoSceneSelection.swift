@@ -42,7 +42,10 @@ enum VideoSceneSelection {
     static let activityChange = 0.02
     static let activityPadSeconds = 0.5
     static let mergeGapSeconds = 1.0
-    static let maxWindowSeconds = 4.0
+    /// 2.5 rather than 4: the 2B visual model rarely localizes inside a window and tends to
+    /// report a moment over the whole window, so a shorter window is what lets a one-second
+    /// action be proposed; at 0.5 s pool spacing it also keeps every pool frame (no subsampling).
+    static let maxWindowSeconds = 2.5
     static let maxWindowFrames = 6
 
     static func poolTimes(duration: Double, interval: Double = poolInterval) -> [Double] {

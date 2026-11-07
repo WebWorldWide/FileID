@@ -28,6 +28,7 @@ pub mod takes;
 mod takes_groups;
 mod takes_groups_model;
 mod takes_model;
+mod takes_proposals_model;
 mod takes_widgets;
 pub(crate) mod util;
 mod vlm_picker;

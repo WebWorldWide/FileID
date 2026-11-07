@@ -374,7 +374,7 @@ struct TitleBar: View {
     }
 
     private static func jobName(_ kind: String) -> String {
-        kind == "catalogIndex" ? "Search index" : "Video analysis"
+        kind == "catalogIndex" ? "Search index" : kind == "takeGrouping" ? "Related tries" : "Video analysis"
     }
 
     private static func phaseLabel(_ phase: ScanPhase) -> String {

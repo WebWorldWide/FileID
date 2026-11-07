@@ -18,6 +18,10 @@ public sealed class CatalogJobActionsTests
     [InlineData("timelineSample", "cancelled", true)]
     [InlineData("timelineSample", "running", false)]
     [InlineData("timelineSample", "completed", false)]
+    [InlineData("takeGrouping", "paused", true)]
+    [InlineData("takeGrouping", "failed", true)]
+    [InlineData("takeGrouping", "running", false)]
+    [InlineData("takeGrouping", "completed", false)]
     [InlineData("unknown", "paused", false)]
     [InlineData(null, "paused", false)]
     [InlineData("catalogIndex", null, false)]
@@ -57,6 +61,19 @@ public sealed class CatalogJobActionsTests
         Assert.Equal("enqueueTimeline", request.Action);
         Assert.Equal(new long[] { 7, 42 }, request.FileIDs);
         Assert.Null(request.JobID);
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public void RetryingAStoppedTakeGroupingQueuesItAgain(string state)
+    {
+        var job = new CatalogJob("take-grouping", "takeGrouping", Array.Empty<long>(), state, 0.5, null, 0, 1);
+        var request = CatalogJobActions.ControlRequest("resumeJob", job);
+        Assert.Equal("enqueueTakeGrouping", request.Action);
+        Assert.Null(request.JobID);
+        var paused = CatalogJobActions.ControlRequest("resumeJob", job with { State = "paused" });
+        Assert.Equal(("resumeJob", "take-grouping"), (paused.Action, paused.JobID));
     }
 
     [Theory]

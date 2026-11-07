@@ -21,6 +21,9 @@ use super::workbenches::Engine;
 use crate::engine_client::{CancelToken, EngineState, ThumbReply};
 use crate::v3;
 
+#[path = "takes_proposals.rs"]
+mod proposals;
+
 const COMPARE_PX: i32 = 1200;
 const TILE_PX: i32 = 192;
 const FAN_PX: i32 = 96;
@@ -36,6 +39,7 @@ struct PendingTrash {
 pub(super) struct Ui {
     pub(super) engine: Engine,
     pub(super) manual: Manual,
+    pub(super) proposals: proposals::Proposals,
     requests: RefCell<Requests>,
     groups: RefCell<Vec<CatalogTakeAutoGroup>>,
     loaded: Cell<bool>,
@@ -124,6 +128,7 @@ pub(super) fn open_dialog(
 
 fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk::Widget, Rc<Ui>) {
     let manual = Manual::new(candidates);
+    let related = proposals::Proposals::new();
     let page = v3::hbox(0);
 
     let pane = v3::vbox(0);
@@ -145,10 +150,11 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
         "Bursts and repeated clips from your scans. Biggest and newest first.",
         &["v3-meta-115"],
     ));
-    pane.append(&top);
     let groups_list = v3::vbox(2);
     groups_list.set_margin_top(8);
     let pane_body = v3::vbox(0);
+    pane_body.append(&related.section);
+    pane_body.append(&top);
     pane_body.append(&groups_list);
     pane_body.append(&manual.pane);
     let list_scroll = v3::scroller(&pane_body);
@@ -213,12 +219,10 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     heading.append(&date);
     let skipped = v3::pill("SKIPPED", crate::shell::status::Tone::Muted);
     skipped.set_visible(false);
+    heading.append(&related.relation);
     heading.append(&skipped);
     header.append(&heading);
-    header.append(&v3::wrapped(
-        "Tries of the same shot, taken moments apart. FileID starred the one that looks best. Check it, then keep it and clear out the rest.",
-        &["v3-meta", "v3-meta-13"],
-    ));
+    header.append(&related.intro);
     let actions = v3::hbox(8);
     let trash_button = v3::primary("Keep the best, move the other 0 to Trash", false);
     actions.append(&trash_button);
@@ -229,6 +233,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
         "Decide later. Skipped groups move to the bottom of the list.",
     ));
     actions.append(&skip);
+    actions.append(&related.save);
     let action_bar = v3::busy_bar(60);
     actions.append(&action_bar);
     header.append(&actions);
@@ -278,6 +283,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     let ui = Rc::new(Ui {
         engine,
         manual,
+        proposals: related,
         requests: RefCell::new(Requests::default()),
         groups: RefCell::new(vec![]),
         loaded: Cell::new(false),
@@ -350,6 +356,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     }
     let run = with(|ui| {
         ui.request_groups();
+        ui.proposals.request(ui);
         if ui.engine.borrow().is_ready() && !ui.requests.borrow().busy("manual") {
             ui.manual.send(ui, "listEvents", |_| {});
         }
@@ -422,6 +429,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     });
 
     super::takes_groups::wire(&ui);
+    proposals::Proposals::wire(&ui);
     subscribe(&ui, keep_alive);
     (root.upcast(), ui)
 }
@@ -500,6 +508,7 @@ impl Ui {
             v3::set_selected(&widget, false);
             child = widget.next_sibling();
         }
+        self.proposals.clear_selection();
     }
 
     /// The right side with nothing open: first load, no groups, or a hint.
@@ -543,7 +552,7 @@ impl Ui {
             .set_text(&format!("POSSIBLE GROUPS · {}", model::open_count(&groups)));
         let current_key = self.current.borrow().as_ref().map(|g| g.group_key.clone());
         let resolved = self.resolved.borrow_mut().take();
-        let manual = self.manual.engaged() && current_key.is_none();
+        let manual = (self.manual.engaged() && current_key.is_none()) || self.proposals.any_open();
         let target = if manual {
             None
         } else {
@@ -659,6 +668,41 @@ impl Ui {
         let Some(group) = self.groups.borrow().get(index).cloned() else {
             return;
         };
+        self.proposals.clear_selection();
+        let mut child = self.groups_list.first_child();
+        let mut position = 0;
+        while let Some(widget) = child {
+            v3::set_selected(&widget, position == index);
+            position += 1;
+            child = widget.next_sibling();
+        }
+        self.open_group(group);
+    }
+
+    fn open_proposal(self: &Rc<Self>, key: &str) {
+        let Some(group) = self.proposals.take(key) else {
+            return;
+        };
+        let mut child = self.groups_list.first_child();
+        while let Some(widget) = child {
+            v3::set_selected(&widget, false);
+            child = widget.next_sibling();
+        }
+        self.open_group(group);
+    }
+
+    /// Nothing open on the right any more (a proposal vanished or the last one was resolved).
+    fn close_review(&self) {
+        *self.current.borrow_mut() = None;
+        self.best_pane.reset();
+        self.other_pane.reset();
+        if self.manual.engaged() {
+            return;
+        }
+        self.show_idle();
+    }
+
+    fn open_group(self: &Rc<Self>, group: CatalogTakeAutoGroup) {
         self.manual.leave();
         self.tile_token
             .borrow()
@@ -676,14 +720,8 @@ impl Ui {
         let mut request = catalog_request("scoreTakes");
         request.file_ids = Some(group.file_ids());
         self.send("score", request);
-        let mut child = self.groups_list.first_child();
-        let mut position = 0;
-        while let Some(widget) = child {
-            v3::set_selected(&widget, position == index);
-            position += 1;
-            child = widget.next_sibling();
-        }
         *self.current.borrow_mut() = Some(group);
+        self.refresh_header();
     }
 
     fn render_review(self: &Rc<Self>, qualities: Vec<CatalogTakeQuality>) {
@@ -770,6 +808,7 @@ impl Ui {
         self.date.set_text(&date_text(group.captured_at));
         self.skipped.set_visible(!model::is_open(&group));
         let trashing = self.pending_trash.borrow().is_some();
+        self.proposals.render_header(&group, trashing);
         self.skip.set_sensitive(model::is_open(&group) && !trashing);
         self.keep_all.set_sensitive(!trashing);
         let button = model::trash_button(&group, &self.qualities.borrow(), &self.keep.borrow());
@@ -1100,8 +1139,7 @@ impl Ui {
             }
             None => self.toast(&text),
         }
-        self.resolve(&pending.group.group_key);
-        self.request_groups();
+        self.after_resolve(&pending.group.group_key);
     }
 
     fn finish_restore(self: &Rc<Self>, result: BulkActionResult) {
@@ -1115,6 +1153,7 @@ impl Ui {
         }
         self.toast(&model::restored_message(&result));
         self.request_groups();
+        self.proposals.request(self);
     }
 
     fn decide(self: &Rc<Self>, kind: &str) {
@@ -1145,8 +1184,19 @@ impl Ui {
             request.take_decision = Some(model::decision(&reopen, "reopen"));
             ui.send("reopen", request);
         });
-        self.resolve(&group.group_key);
+        self.after_resolve(&group.group_key);
+    }
+
+    /// Reads both lists again after a group is kept, skipped or trashed; review
+    /// flows on to the next group in whichever list it came from.
+    fn after_resolve(self: &Rc<Self>, key: &str) {
+        if self.proposals.is_open(key) {
+            self.proposals.resolve(key);
+        } else {
+            self.resolve(key);
+        }
         self.request_groups();
+        self.proposals.request(self);
     }
 }
 
@@ -1199,6 +1249,9 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
         while let Ok(event) = rx.recv().await {
             let Some(ui) = weak.upgrade() else { return };
             match event {
+                EngineState::CatalogResponse(r) if super::takes_proposals_model::is_job_push(&r) => {
+                    ui.proposals.set_job(&ui, super::takes_proposals_model::job(&r.jobs));
+                }
                 EngineState::CatalogResponse(r) => {
                     let Some(slot) = ui.requests.borrow_mut().accept(&r.request_id, true) else {
                         continue;
@@ -1223,7 +1276,11 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                                 .unwrap_or("FileID didn't answer in time. Try again in a moment."),
                         ),
                         "decision" => ui.finish_decision(ok),
-                        "reopen" | "keep-rest" => ui.request_groups(),
+                        "reopen" | "keep-rest" => {
+                            ui.request_groups();
+                            ui.proposals.request(&ui);
+                        }
+                        "proposals" | "grouping" | "grouping-control" => ui.proposals.consume(&ui, &slot, r),
                         "manual" => ui.manual.consume(&ui, r),
                         "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs),
                         "job-control" => {
@@ -1240,6 +1297,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                 }
                 EngineState::Ready => {
                     ui.request_groups();
+                    ui.proposals.request(&ui);
                     if ui.root.is_mapped() && !ui.requests.borrow().busy("manual") {
                         ui.manual.send(&ui, "listEvents", |_| {});
                     }
@@ -1250,6 +1308,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     ui.manual.request_failed();
                     ui.pending_decision.borrow_mut().take();
                     ui.groups_finished();
+                    ui.proposals.finished_request(&ui);
                     if ui.end_trash().is_some() || ui.root.is_mapped() {
                         ui.toast(&message);
                     }

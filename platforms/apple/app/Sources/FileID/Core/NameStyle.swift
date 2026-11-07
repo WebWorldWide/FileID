@@ -10,12 +10,14 @@ enum NameStyle {
     static let includePeopleKey = "naming.includePeople"
     static let includeEventKey = "naming.includeEvent"
     static let includeDateKey = "naming.includeDate"
+    static let learnKey = "naming.learn"
 
     static let defaultStyle = "short"
     static let defaultMaxLength = 40
     static let defaultIncludePeople = true
     static let defaultIncludeEvent = true
     static let defaultIncludeDate = false
+    static let defaultLearn = true
 
     static let styles: [(id: String, title: String)] = [("short", "Short"), ("descriptive", "Descriptive"), ("dateFirst", "Date first")]
     static let lengthRange = 4...120
@@ -24,13 +26,14 @@ enum NameStyle {
 
     static func dateToggleEnabled(style: String) -> Bool { style != "dateFirst" }
 
-    static func naming(style: String, maxLength: Int, includePeople: Bool, includeEvent: Bool, includeDate: Bool) -> CatalogNaming {
+    static func naming(style: String, maxLength: Int, includePeople: Bool, includeEvent: Bool, includeDate: Bool, learn: Bool = false) -> CatalogNaming {
         let style = styles.contains { $0.id == style } ? style : defaultStyle
         return CatalogNaming(style: style,
                              maxLength: min(max(maxLength, lengthRange.lowerBound), lengthRange.upperBound),
                              includePeople: includePeople,
                              includeEvent: includeEvent,
-                             includeDate: includeDate && dateToggleEnabled(style: style))
+                             includeDate: includeDate && dateToggleEnabled(style: style),
+                             learn: learn)
     }
 
     /// The Library selection when there is one, otherwise `fallback`; ids are
@@ -69,6 +72,7 @@ enum NameStyle {
         var checked: Bool
         var group: Int64? = nil
         var suffix: String = ""
+        var learned: [String] = []
         var id: Int64 { fileID }
         var currentName: String { (path as NSString).lastPathComponent }
         var canCheck: Bool { !proposed.isEmpty }
@@ -83,9 +87,11 @@ enum NameStyle {
     static func rows(from hits: [CatalogHit], previous: [Row]) -> [Row] {
         let unticked = Set(previous.filter { $0.canCheck && !$0.checked }.map(\.groupKey))
         var rows = hits.filter { $0.kind == "proposedName" }.map { hit in
-            let (reason, group) = SmartNameCompanions.parse(hit.evidenceID)
+            let (tagged, group) = SmartNameCompanions.parse(hit.evidenceID)
+            let (reason, learned) = SmartNameLearning.splitReason(tagged)
             return Row(fileID: hit.fileID, path: hit.path, proposed: hit.text, reason: reason,
-                       edited: hit.text, checked: !hit.text.isEmpty && !unticked.contains(group ?? hit.fileID), group: group)
+                       edited: hit.text, checked: !hit.text.isEmpty && !unticked.contains(group ?? hit.fileID), group: group,
+                       learned: learned)
         }
         let leaderStems = Dictionary(rows.filter(\.isLeader).map { ($0.fileID, stem($0.proposed)) }, uniquingKeysWith: { first, _ in first })
         for index in rows.indices {
@@ -141,8 +147,121 @@ enum NameStyle {
         }
     }
 
+    static func reasonChip(_ row: Row) -> String {
+        row.learned.isEmpty ? reasonLabel(row.reason) : reasonLabel(row.reason) + " · your style"
+    }
+
+    /// What the learned preferences named in a proposeNames reason did to this name.
+    static func learnedHelp(_ keys: [String]) -> String? {
+        let parts = keys.compactMap { key -> String? in
+            switch key {
+            case "dropWords": "leaves out words you remove"
+            case "people": "leaves out people's names"
+            case "words": "keeps it as short as you do"
+            case "leadingDate", "trailingDate": "puts the date where you do"
+            case "dateFormat": "writes the date your way"
+            case "separator": "uses your word separator"
+            case "case": "uses your capitals"
+            default: nil
+            }
+        }
+        return parts.isEmpty ? nil : "Learned from your renames: " + parts.joined(separator: ", ")
+    }
+
+    struct Learned: Equatable, Sendable {
+        var samples = 0
+        var items: [String] = []
+    }
+
+    static func learned(from hits: [CatalogHit]) -> Learned {
+        var learned = Learned()
+        for hit in hits {
+            if hit.kind == "nameSamples" { learned.samples = Int(hit.text) ?? 0 }
+            if hit.kind == "namePreference", let label = preferenceLabel(hit.evidenceID ?? "", hit.text) { learned.items.append(label) }
+        }
+        return learned
+    }
+
+    static func preferenceLabel(_ key: String, _ value: String) -> String? {
+        switch (key, value) {
+        case ("separator", "_"): "underscores between words"
+        case ("separator", " "): "spaces between words"
+        case ("case", "title"): "Capitalised Words"
+        case ("case", "upper"): "CAPITALS"
+        case ("leadingDate", "end"): "the date at the end"
+        case ("trailingDate", "start"): "the date first"
+        case ("leadingDate", "none"), ("trailingDate", "none"): "no date"
+        case ("dateFormat", "compact"): "dates like 20230704"
+        case ("dateFormat", "underscore"): "dates like 2023_07_04"
+        case ("dateFormat", "dotted"): "dates like 2023.07.04"
+        case ("dateFormat", "month"): "dates like 2023-07"
+        case ("people", _): "no people's names"
+        case ("words", _): "at most \(value) word\(value == "1" ? "" : "s")"
+        case ("dropWords", _): "without \u{201C}\(value)\u{201D}"
+        default: nil
+        }
+    }
+
+    static func learnedSummary(_ learned: Learned, enabled: Bool) -> String {
+        guard enabled else { return "Names follow the style above only." }
+        guard learned.samples > 0 else { return "Edit names before you rename them and FileID will follow your style." }
+        let count = "\(learned.samples.formatted()) rename\(learned.samples == 1 ? "" : "s")"
+        guard !learned.items.isEmpty else { return "No clear preference yet from \(count)." }
+        return "From \(count): " + learned.items.joined(separator: ", ") + "."
+    }
+
+    /// One sample per renamed file the user saw in the preview: singles and
+    /// group leaders, never followers, whose rename landed.
+    static func edits(_ rows: [Row], renamed: Set<Int64>) -> [CatalogNameEdit] {
+        rows.compactMap { row in
+            guard row.checked, row.canCheck, !row.isFollower, renamed.contains(row.fileID), let name = validName(row.edited) else { return nil }
+            return CatalogNameEdit(fileID: row.fileID, proposed: row.proposed, applied: name)
+        }
+    }
+
+    static func learnRequest(id: String, edits: [CatalogNameEdit], naming: CatalogNaming) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: "learnNames", naming: naming, nameEdits: edits)
+    }
+
+    static let learnedEditsKey = "naming.learnedEdits"
+    static let learnedEditsKeep = 1000
+
+    /// The samples learnNames recorded, newest last, so an Undo from any
+    /// surface can tell the engine which ones to forget.
+    nonisolated static func rememberLearned(_ edits: [CatalogNameEdit], defaults: UserDefaults = .standard) {
+        guard !edits.isEmpty else { return }
+        let all = (storedLearned(defaults) + edits).suffix(learnedEditsKeep)
+        if let data = try? JSONEncoder().encode(Array(all)) { defaults.set(data, forKey: learnedEditsKey) }
+    }
+
+    nonisolated static func storedLearned(_ defaults: UserDefaults = .standard) -> [CatalogNameEdit] {
+        defaults.data(forKey: learnedEditsKey).flatMap { try? JSONDecoder().decode([CatalogNameEdit].self, from: $0) } ?? []
+    }
+
+    /// Splits the stored samples after an Undo: for each rename put back, the
+    /// newest stored sample of that file whose applied name is the name it was
+    /// undone from is forgotten; everything else stays.
+    nonisolated static func undone(_ stored: [CatalogNameEdit], outcomes: [ReadStore.RenameOutcome],
+                                   putBack: Set<Int64>) -> (forget: [CatalogNameEdit], keep: [CatalogNameEdit]) {
+        var keep = stored, forget: [CatalogNameEdit] = []
+        for outcome in outcomes where putBack.contains(outcome.fileID) {
+            let name = URL(fileURLWithPath: outcome.newPath).lastPathComponent
+            guard let index = keep.lastIndex(where: { $0.fileID == outcome.fileID && $0.applied == name }) else { continue }
+            forget.append(keep.remove(at: index))
+        }
+        return (forget, keep)
+    }
+
+    static func unlearnRequest(id: String, edits: [CatalogNameEdit]) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: "unlearnNames", nameEdits: edits)
+    }
+
+    static func preferencesRequest(id: String, reset: Bool) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: reset ? "resetNamePreferences" : "namePreferences")
+    }
+
     static func accessibilityLabel(_ row: Row, in rows: [Row] = []) -> String {
-        let reason = reasonLabel(row.reason)
+        let reason = reasonChip(row)
         let because = reason.prefix(1).lowercased() + reason.dropFirst()
         let others = row.group.map { group in rows.filter { $0.group == group && $0.fileID != row.fileID }.map(\.currentName) } ?? []
         let together = others.isEmpty ? "" : ", together with " + others.joined(separator: ", ")

@@ -9,27 +9,42 @@ use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::ipc::{CatalogHit, CatalogRequest};
+use crate::ipc::CatalogNameEdit;
 use crate::util::smart_name_companions::{self as companions, Member, Role};
+use crate::util::smart_name_learning::{self as learning, Learned, Sample};
 use crate::util::smart_name_style::{self as style, Evidence, Options, Outcome, Style};
 
 const MAX_FILES: usize = 1000;
+const MAX_EDIT_SCALARS: usize = 1000;
+const SAMPLE_KIND: &str = "nameStyle";
 
-pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
+fn options(request: &CatalogRequest) -> Result<Options> {
     let invalid = || anyhow::anyhow!("Invalid naming request");
     let naming = request.naming.as_ref().ok_or_else(invalid)?;
     let style_kind = Style::parse(&naming.style).ok_or_else(invalid)?;
     let max_length = naming.max_length as usize;
-    let ids = request.file_ids.as_deref().unwrap_or(&[]);
-    if !(style::MIN_LENGTH..=style::MAX_LENGTH).contains(&max_length) || ids.is_empty() || ids.len() > MAX_FILES {
+    if !(style::MIN_LENGTH..=style::MAX_LENGTH).contains(&max_length) {
         bail!(invalid());
     }
-    let options = Options {
+    Ok(Options {
         style: style_kind,
         max_length,
         people: naming.include_people,
         event: naming.include_event,
         date: naming.include_date,
-    };
+        learned: Learned::default(),
+    })
+}
+
+pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
+    let mut options = options(request)?;
+    let ids = request.file_ids.as_deref().unwrap_or(&[]);
+    if ids.is_empty() || ids.len() > MAX_FILES {
+        bail!("Invalid naming request");
+    }
+    if request.naming.as_ref().is_some_and(|naming| naming.learn) {
+        options.learned = learned(conn)?;
+    }
     let mut run = Run {
         conn,
         options,
@@ -126,7 +141,7 @@ impl Run<'_> {
             }
             None => (String::new(), outcome.reason),
         };
-        self.push(id, file.path, text, reason.into());
+        self.push(id, file.path, text, learning::tagged(reason, &outcome.learned));
     }
 
     fn group(&mut self, id: i64, file: Loaded, parent: &str, members: Vec<Member>) -> Result<()> {
@@ -179,7 +194,12 @@ impl Run<'_> {
             .or_else(|| known.iter().position(|(c, _)| c.member.role != Role::Sidecar))
             .unwrap_or(0);
         let order: Vec<usize> = leader_first(leader, known.len()).collect();
-        let outcome = outcomes[leader].clone().unwrap_or(Outcome { stem: None, reason: "noEvidence", source: "noEvidence" });
+        let outcome = outcomes[leader].clone().unwrap_or(Outcome {
+            stem: None,
+            reason: "noEvidence",
+            source: "noEvidence",
+            learned: Vec::new(),
+        });
         let mut texts = vec![String::new(); order.len()];
         let reason = match &outcome.stem {
             Some(stem) => {
@@ -196,13 +216,117 @@ impl Run<'_> {
             }
             None => outcome.reason,
         };
-        let reason = companions::group_reason(reason, known[leader].1);
+        let reason = companions::group_reason(&learning::tagged(reason, &outcome.learned), known[leader].1);
         for (text, index) in texts.into_iter().zip(order) {
             let (c, row) = known[index];
             self.push(row, c.path.clone(), text, reason.clone());
         }
         Ok(())
     }
+}
+
+/// learnNames: stores one sample per edit with the unlearned name the engine
+/// would propose for that file now, then replies with the preferences.
+pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
+    let options = options(request)?;
+    let style_name = request.naming.as_ref().map(|naming| naming.style.clone()).unwrap_or_default();
+    let edits: &[CatalogNameEdit] = request.name_edits.as_deref().unwrap_or(&[]);
+    let valid = |text: &str| !text.trim().is_empty() && text.chars().count() <= MAX_EDIT_SCALARS;
+    if edits.is_empty() || edits.len() > MAX_FILES || !edits.iter().all(|e| valid(&e.proposed) && valid(&e.applied)) {
+        bail!("Invalid naming request");
+    }
+    let person_words = person_words(conn)?;
+    let tx = conn.transaction()?;
+    let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+    for edit in edits {
+        let Some(mut file) = load(&tx, edit.file_id)? else { continue };
+        file.evidence.original_stem.clear();
+        file.evidence.person_words.clone_from(&person_words);
+        let base = style::propose(&file.evidence, &options).stem;
+        let people = if options.people { file.evidence.people.clone() } else { Vec::new() };
+        let before = serde_json::json!({"base": base, "proposed": edit.proposed, "people": people, "style": style_name});
+        let after = serde_json::json!({"applied": edit.applied});
+        tx.execute(
+            "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![uuid::Uuid::new_v4().to_string(), edit.file_id, SAMPLE_KIND, before.to_string(), after.to_string(), now],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM catalog_corrections WHERE kind=?1 AND rowid NOT IN (SELECT rowid FROM catalog_corrections WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2)",
+        params![SAMPLE_KIND, learning::KEEP as i64],
+    )?;
+    tx.commit()?;
+    preferences(conn)
+}
+
+/// unlearnNames: after renames are undone, deletes for each edit the newest
+/// sample for that file whose applied name matches, then replies with the preferences.
+pub(crate) fn unlearn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
+    let edits: &[CatalogNameEdit] = request.name_edits.as_deref().unwrap_or(&[]);
+    if edits.is_empty() || edits.len() > MAX_FILES || !edits.iter().all(|e| e.applied.chars().count() <= MAX_EDIT_SCALARS) {
+        bail!("Invalid naming request");
+    }
+    let tx = conn.transaction()?;
+    for edit in edits {
+        tx.execute(
+            "DELETE FROM catalog_corrections WHERE rowid=(SELECT rowid FROM catalog_corrections WHERE kind=?1 AND file_id=?2 AND json_extract(after_json,'$.applied')=?3 ORDER BY rowid DESC LIMIT 1)",
+            params![SAMPLE_KIND, edit.file_id, edit.applied],
+        )?;
+    }
+    tx.commit()?;
+    preferences(conn)
+}
+
+pub(crate) fn reset(conn: &Connection) -> Result<Vec<CatalogHit>> {
+    conn.execute("DELETE FROM catalog_corrections WHERE kind=?1", [SAMPLE_KIND])?;
+    preferences(conn)
+}
+
+fn learned(conn: &Connection) -> Result<Learned> {
+    let mut statement = conn.prepare(
+        "SELECT before_json,after_json FROM catalog_corrections WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![SAMPLE_KIND, learning::WINDOW as i64], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut samples = Vec::new();
+    for row in rows {
+        let (before, after) = row?;
+        let (Ok(before), Ok(after)) =
+            (serde_json::from_str::<serde_json::Value>(&before), serde_json::from_str::<serde_json::Value>(&after))
+        else {
+            continue;
+        };
+        let (Some(base), Some(applied)) = (before["base"].as_str(), after["applied"].as_str()) else { continue };
+        let people = before["people"]
+            .as_array()
+            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        samples.push(Sample { base: base.to_string(), applied: applied.to_string(), people });
+    }
+    Ok(learning::derive(&samples))
+}
+
+/// The learned preferences as namePreference hits, then the stored sample count as nameSamples.
+pub(crate) fn preferences(conn: &Connection) -> Result<Vec<CatalogHit>> {
+    let learned = learned(conn)?;
+    let hit = |kind: &str, key: Option<&str>, text: String| CatalogHit {
+        file_id: 0,
+        path: String::new(),
+        kind: kind.into(),
+        text,
+        evidence_id: key.map(str::to_string),
+        start_seconds: None,
+        page: None,
+    };
+    let mut hits: Vec<CatalogHit> = learning::KEYS
+        .into_iter()
+        .flat_map(|key| learned.values(key).into_iter().map(move |value| (key, value)))
+        .map(|(key, value)| hit("namePreference", Some(key), value))
+        .collect();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_corrections WHERE kind=?1", [SAMPLE_KIND], |r| r.get(0))?;
+    hits.push(hit("nameSamples", None, count.to_string()));
+    Ok(hits)
 }
 
 struct Companion {
@@ -452,5 +576,109 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn learned_style_is_recorded_applied_and_reset() {
+        let dir = std::env::temp_dir().join(format!("fileid-names-learn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
+        for (id, stored) in [(1, "beach sunset"), (2, "dog park"), (3, "red barn field"), (4, "kids playing soccer")] {
+            let path = dir.join(format!("Renamed_{id}.jpg"));
+            std::fs::write(&path, b"a").unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,0,'image','jpg',0,?3)",
+                params![id, path.to_string_lossy(), stored],
+            )
+            .unwrap();
+        }
+        let learn_request = |edits: serde_json::Value| {
+            request(serde_json::json!({"requestID":"l","action":"learnNames","naming":{"style":"short","maxLength":40},"nameEdits":edits}))
+        };
+        let hits = learn(
+            &mut conn,
+            &learn_request(serde_json::json!([
+                {"fileID":1,"proposed":"beach-sunset.jpg","applied":"Beach_Sunset.jpg"},
+                {"fileID":2,"proposed":"dog-park.jpg","applied":"Dog_Park.jpg"},
+                {"fileID":99,"proposed":"x.jpg","applied":"y.jpg"}
+            ])),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].kind.as_str(), hits[0].text.as_str()), ("nameSamples", "2"));
+        let hits = learn(&mut conn, &learn_request(serde_json::json!([{"fileID":3,"proposed":"x.jpg","applied":"Red_Barn_Field.jpg"}]))).unwrap();
+        let got: Vec<(&str, Option<&str>, &str)> =
+            hits.iter().map(|h| (h.kind.as_str(), h.evidence_id.as_deref(), h.text.as_str())).collect();
+        assert_eq!(got, [("namePreference", Some("separator"), "_"), ("namePreference", Some("case"), "title"), ("nameSamples", None, "3")]);
+        let base: String = conn
+            .query_row("SELECT json_extract(before_json,'$.base') FROM catalog_corrections WHERE kind='nameStyle' AND file_id=3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(base, "red-barn-field");
+        let propose_request = |learn: bool| {
+            request(serde_json::json!({"requestID":"p","action":"proposeNames","fileIDs":[4],"naming":{"style":"short","maxLength":40,"learn":learn}}))
+        };
+        let plain = propose(&conn, &propose_request(false)).unwrap();
+        assert_eq!((plain[0].text.as_str(), plain[0].evidence_id.as_deref()), ("kids-playing-soccer.jpg", Some("proposedName")));
+        let learned = propose(&conn, &propose_request(true)).unwrap();
+        assert_eq!(
+            (learned[0].text.as_str(), learned[0].evidence_id.as_deref()),
+            ("Kids_Playing_Soccer.jpg", Some("proposedName|learned:separator,case"))
+        );
+        assert!(learn(&mut conn, &learn_request(serde_json::json!([{"fileID":1,"proposed":" ","applied":"a.jpg"}]))).is_err());
+        assert!(learn(&mut conn, &request(serde_json::json!({"requestID":"l","action":"learnNames","naming":{"style":"short","maxLength":40}}))).is_err());
+        let hits = reset(&conn).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "0");
+        let after = propose(&conn, &propose_request(true)).unwrap();
+        assert_eq!(after[0].text, "kids-playing-soccer.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undone_renames_forget_their_newest_matching_sample() {
+        let mut conn = crate::db::test_support::memory_db();
+        for id in 1..=2 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,0,'image','jpg',0,'beach sunset')",
+                params![id, format!("/n/Renamed_{id}.jpg")],
+            )
+            .unwrap();
+        }
+        let edits = |action: &str, edits: serde_json::Value| {
+            request(serde_json::json!({"requestID":"l","action":action,"naming":{"style":"short","maxLength":40},"nameEdits":edits}))
+        };
+        for applied in ["Beach_Sunset.jpg", "Beach_Sunset.jpg", "Beach Sunset.jpg"] {
+            learn(&mut conn, &edits("learnNames", serde_json::json!([{"fileID":1,"proposed":"beach-sunset.jpg","applied":applied}]))).unwrap();
+        }
+        learn(&mut conn, &edits("learnNames", serde_json::json!([{"fileID":2,"proposed":"beach-sunset.jpg","applied":"Beach_Sunset.jpg"}]))).unwrap();
+        let newest: i64 = conn
+            .query_row("SELECT MAX(rowid) FROM catalog_corrections WHERE file_id=1 AND json_extract(after_json,'$.applied')='Beach_Sunset.jpg'", [], |r| r.get(0))
+            .unwrap();
+        let hits = unlearn(
+            &mut conn,
+            &edits(
+                "unlearnNames",
+                serde_json::json!([
+                    {"fileID":1,"proposed":"other.jpg","applied":"Beach_Sunset.jpg"},
+                    {"fileID":1,"proposed":"x.jpg","applied":"Never_Applied.jpg"},
+                    {"fileID":99,"proposed":"x.jpg","applied":"Beach_Sunset.jpg"}
+                ]),
+            ),
+        )
+        .unwrap();
+        assert_eq!(hits.last().map(|h| (h.kind.as_str(), h.text.as_str())), Some(("nameSamples", "3")));
+        let left: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT rowid,file_id,json_extract(after_json,'$.applied') FROM catalog_corrections WHERE kind='nameStyle' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(left.iter().all(|(rowid, _, _)| *rowid != newest));
+        let kept: Vec<(i64, &str)> = left.iter().map(|(_, file, applied)| (*file, applied.as_str())).collect();
+        assert_eq!(kept, [(1, "Beach_Sunset.jpg"), (1, "Beach Sunset.jpg"), (2, "Beach_Sunset.jpg")]);
+        assert!(unlearn(&mut conn, &edits("unlearnNames", serde_json::json!([]))).is_err());
+        assert!(unlearn(&mut conn, &request(serde_json::json!({"requestID":"u","action":"unlearnNames"}))).is_err());
     }
 }

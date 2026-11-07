@@ -117,6 +117,7 @@ struct FileIDEngineMain {
             await detectCrashedSessions(database: database)
             await TimelineAnalysis.shared.recover(database: database)
             await MediaTools.shared.recover(database: database)
+            await CatalogTakeGrouping.recover(database: database)
             try? await database.vectorIndex.recover()
             await TrashJournal.reconcile(database: database)
             await PathMoveJournal.reconcile(database: database)
@@ -255,17 +256,21 @@ struct FileIDEngineMain {
                 await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
                 return
             }
-            if ["search", "autoTakeGroups", "scoreTakes", "rankTakesWithGoal"].contains(request.action) {
+            if ["search", "autoTakeGroups", "scoreTakes", "rankTakesWithGoal", "takeGroupProposals"].contains(request.action) {
                 Task { await sink.emit(.catalogResponse(await CatalogStore.handle(request, database: database))) }
                 return
             }
             let response: CatalogResponse
             if request.action == "enqueueTimeline" {
                 response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)
+            } else if request.action == "enqueueTakeGrouping" {
+                response = await CatalogTakeGrouping.shared.enqueue(request, database: database, sink: sink)
             } else if ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) {
                 let kind = try? await database.pool.read { db in try String.fetchOne(db, sql: "SELECT kind FROM catalog_jobs WHERE id=?", arguments: [request.jobID ?? ""]) }
                 if kind == "timelineSample" {
                     response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+                } else if kind == CatalogTakeGrouping.kind {
+                    response = await CatalogTakeGrouping.shared.control(request, database: database, sink: sink)
                 } else if kind == CatalogIndexJob.kind {
                     response = await CatalogStore.handle(request, database: database)
                 } else {

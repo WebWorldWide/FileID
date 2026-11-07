@@ -16,8 +16,11 @@ public enum SmartNameStyle {
         public var people: Bool
         public var event: Bool
         public var date: Bool
-        public init(style: Style, maxLength: Int, people: Bool = false, event: Bool = false, date: Bool = false) {
+        public var learned: SmartNameLearning.Learned
+        public init(style: Style, maxLength: Int, people: Bool = false, event: Bool = false, date: Bool = false,
+                    learned: SmartNameLearning.Learned = .init()) {
             self.style = style; self.maxLength = maxLength; self.people = people; self.event = event; self.date = date
+            self.learned = learned
         }
     }
 
@@ -44,7 +47,10 @@ public enum SmartNameStyle {
         public let stem: String?
         public let reason: String
         public var source: String
-        public init(stem: String?, reason: String, source: String) { self.stem = stem; self.reason = reason; self.source = source }
+        public var learned: [String]
+        public init(stem: String?, reason: String, source: String, learned: [String] = []) {
+            self.stem = stem; self.reason = reason; self.source = source; self.learned = learned
+        }
     }
 
     public static let minLength = 4
@@ -76,6 +82,33 @@ public enum SmartNameStyle {
         var view = String.UnicodeScalarView()
         for scalar in text.unicodeScalars { view.append(contentsOf: scalar.properties.lowercaseMapping.unicodeScalars) }
         return String(view)
+    }
+
+    public static func upper(_ text: String) -> String {
+        var view = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars { view.append(contentsOf: scalar.properties.uppercaseMapping.unicodeScalars) }
+        return String(view)
+    }
+
+    static func cased(_ word: String, _ letterCase: String?) -> String {
+        switch letterCase {
+        case "upper": return upper(word)
+        case "title":
+            let scalars = Array(word.unicodeScalars)
+            guard let first = scalars.first else { return word }
+            return upper(String(first)) + string(Array(scalars.dropFirst()))
+        default: return word
+        }
+    }
+
+    static func formattedDate(_ date: String, _ format: String?) -> String {
+        switch format {
+        case "underscore": return date.replacingOccurrences(of: "-", with: "_")
+        case "dotted": return date.replacingOccurrences(of: "-", with: ".")
+        case "compact": return date.replacingOccurrences(of: "-", with: "")
+        case "month": return string(Array(date.unicodeScalars.prefix(7)))
+        default: return date
+        }
     }
 
     static func isNumeric(_ s: Unicode.Scalar) -> Bool {
@@ -197,8 +230,22 @@ public enum SmartNameStyle {
 
     struct Pick { var people: [Bool]; var core: Int; var date = false; var event = false }
 
+    /// The name in `options`' style with its learned preferences applied, and the
+    /// preferences that changed it: each one whose removal alone gives another outcome.
     public static func propose(_ evidence: Evidence, _ options: Options) -> Outcome {
-        let pw = evidence.personWords
+        var outcome = build(evidence, options)
+        for key in options.learned.activeKeys {
+            var alternative = options
+            alternative.learned = options.learned.without(key)
+            let other = build(evidence, alternative)
+            if other.stem != outcome.stem || other.reason != outcome.reason { outcome.learned.append(key) }
+        }
+        return outcome
+    }
+
+    static func build(_ evidence: Evidence, _ options: Options) -> Outcome {
+        let learned = options.learned
+        let pw = learned.dropWords.isEmpty ? evidence.personWords : evidence.personWords.union(learned.dropWords.map(key))
         let chapter = evidence.chapter.map { words($0, personWords: pw) } ?? []
         let stored = evidence.storedName.map { words($0, personWords: pw) } ?? []
         let description = evidence.description.map { words(firstSentence($0), personWords: pw) } ?? []
@@ -216,23 +263,36 @@ public enum SmartNameStyle {
         }
         core = Array(core.prefix(options.style.coreLimit))
         var people: [String] = []
-        if options.people {
+        if options.people && !learned.omitPeople {
             for token in evidence.people.sorted(by: { $0.unicodeScalars.lexicographicallyPrecedes($1.unicodeScalars) })
             where people.last.map(key) != key(token) { people.append(token) }
         }
         if people.count > 2 { people = [] }
-        let date = options.style == .dateFirst || options.date ? evidence.date : nil
+        var dateFirst = options.style == .dateFirst
+        var date = dateFirst || options.date ? evidence.date : nil
+        if date != nil {
+            switch dateFirst ? learned.leadingDate : learned.trailingDate {
+            case "none": date = nil
+            case "end": dateFirst = false
+            case "start": dateFirst = true
+            default: break
+            }
+        }
+        date = date.map { formattedDate($0, learned.dateFormat) }
+        let separator = learned.separator ?? "-"
 
         func render(_ pick: Pick) -> String {
             var seen = Set<Key>()
             let chosen = zip(people, pick.people).filter(\.1).map(\.0) + (pick.event ? event : []) + core.prefix(pick.core)
-            let body = chosen.filter { seen.insert(key($0)).inserted }.joined(separator: "-")
+            let body = chosen.filter { seen.insert(key($0)).inserted }.map { cased($0, learned.letterCase) }.joined(separator: separator)
             guard let date, pick.date else { return body }
-            return options.style == .dateFirst ? date + " " + body : body + "-" + date
+            return dateFirst ? date + (separator == "-" ? " " : separator) + body : body + separator + date
         }
         func fits(_ pick: Pick) -> Bool {
             let text = render(pick)
+            let words = (pick.event ? event.count : 0) + pick.core
             return text.unicodeScalars.count <= options.maxLength && text.utf8.count <= maxStemBytes
+                && learned.maxWords.map { words <= $0 } ?? true
         }
         var pick = Pick(people: Array(repeating: false, count: people.count), core: 1)
         guard fits(pick) else { return Outcome(stem: nil, reason: "budget", source: reason) }
@@ -252,7 +312,7 @@ public enum SmartNameStyle {
             coreOpen = attempt { $0.core = next }
         }
         let stem = render(pick)
-        if reserved.contains(stem) { return Outcome(stem: nil, reason: "reserved", source: reason) }
+        if reserved.contains(lower(stem)) { return Outcome(stem: nil, reason: "reserved", source: reason) }
         if key(lower(stem)) == key(lower(evidence.originalStem)) { return Outcome(stem: nil, reason: "unchanged", source: reason) }
         return Outcome(stem: stem, reason: reason, source: reason)
     }

@@ -134,6 +134,15 @@ fn prompt_lists_every_frame_time() {
 }
 
 #[test]
+fn prompt_shows_types_not_copyable_sample_values() {
+    let prompt = moment_prompt(&[0.0, 0.5, 1.0]);
+    assert!(prompt.contains(r#"{"moments":[{"title":string,"summary":string,"firstFrame":integer,"lastFrame":integer}]}"#));
+    assert!(prompt.contains("brief actions seen in only one or two frames"));
+    assert!(!prompt.contains("short observable action"));
+    assert!(!prompt.contains(r#""firstFrame":0"#));
+}
+
+#[test]
 fn speech_chunks_cover_the_file_without_overlap() {
     assert_eq!(speech_chunks(65.0, 30.0), vec![(0.0, 30.0), (30.0, 60.0), (60.0, 65.0)]);
     assert_eq!(speech_chunks(60.4, 30.0), vec![(0.0, 30.0), (30.0, 60.4)], "a sub-second tail joins the previous chunk");

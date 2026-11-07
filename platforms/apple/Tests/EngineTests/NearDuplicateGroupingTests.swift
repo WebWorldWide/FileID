@@ -131,10 +131,10 @@ struct VideoSceneSelectionTests {
 
     @Test func activityWindowsCoverOnlyMotionAndRespectFrameLimits() {
         var frames = (0..<40).map { frame(Double($0) * 0.5, 0) }
-        for i in 10..<14 { frames[i] = frame(Double(i) * 0.5, 0, change: 0.05) }
+        for i in 10..<12 { frames[i] = frame(Double(i) * 0.5, 0, change: 0.05) }
         let windows = VideoSceneSelection.activityWindows(frames, duration: 20)
         #expect(windows.count == 1)
-        #expect(windows[0].start >= 4 && windows[0].end <= 7.5)
+        #expect(windows[0].start >= 4 && windows[0].end <= 6.5)
         #expect((2...VideoSceneSelection.maxWindowFrames).contains(windows[0].times.count))
         #expect(VideoSceneSelection.activityWindows((0..<10).map { frame(Double($0), 0) }, duration: 10).isEmpty)
     }
@@ -145,6 +145,16 @@ struct VideoSceneSelectionTests {
         #expect(windows.count >= 5)
         #expect(windows.allSatisfy { $0.end - $0.start <= VideoSceneSelection.maxWindowSeconds + 1.01 && $0.times.count <= VideoSceneSelection.maxWindowFrames })
         #expect(windows.allSatisfy { zip($0.times, $0.times.dropFirst()).allSatisfy { $0 < $1 } })
+    }
+
+    @Test func shortWindowsSendEveryPoolFrame() {
+        let frames = (0..<40).map { frame(Double($0) * 0.5, 0, change: 0.1) }
+        let windows = VideoSceneSelection.activityWindows(frames, duration: 20)
+        #expect(windows.count == 8)
+        #expect(windows.allSatisfy { $0.end - $0.start <= VideoSceneSelection.maxWindowSeconds + 0.001 })
+        for window in windows {
+            #expect(window.times == frames.map(\.seconds).filter { $0 >= window.start && $0 <= window.end })
+        }
     }
 
     @Test func poolTimesStayInsideTheVideo() {

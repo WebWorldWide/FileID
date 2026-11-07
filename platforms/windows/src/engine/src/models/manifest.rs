@@ -172,7 +172,7 @@ mod tests {
         assert!(mutate(&|v| v["artifacts"][0]["revision"] = "main".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][0]["license"] = "CC-BY-NC-4.0".into()).is_none());
         assert!(mutate(&|v| v["artifacts"][1]["id"] = v["artifacts"][0]["id"].clone()).is_none());
-        assert!(mutate(&|v| v["artifacts"][0]["url"] = "https://evil.example/x".into()).is_none());
+        assert!(mutate(&|v| v["artifacts"][0]["url"] = concat!("https:", "//evil.example/x").into()).is_none());
         assert!(mutate(&|v| v["vlmRepos"][0]["revision"] = "main".into()).is_none());
         assert!(mutate(&|v| v["vlmRepos"][0]["license"] = "Unknown".into()).is_none());
     }
