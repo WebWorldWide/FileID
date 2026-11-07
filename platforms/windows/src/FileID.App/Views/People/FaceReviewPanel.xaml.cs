@@ -104,6 +104,13 @@ public sealed partial class FaceReviewPanel : UserControl
             }
         });
 
+    private void OnRowElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement element) return;
+        if (FileID.Views.Restructure.RestructureView.ResolveRepeaterItem<FaceReviewItemVm>(sender.ItemsSource, args.Index) is not { } item) return;
+        element.DataContext = item;
+    }
+
     private void OnAcceptClicked(object sender, RoutedEventArgs e) => Resolve(sender, FaceReviewPolicy.Accept);
     private void OnRejectClicked(object sender, RoutedEventArgs e) => Resolve(sender, FaceReviewPolicy.Reject);
     private void OnIgnoreClicked(object sender, RoutedEventArgs e) => Resolve(sender, FaceReviewPolicy.Ignore);

@@ -38,7 +38,7 @@
 
         <ScrollViewer Grid.Row="1" x:Name="RowsScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
             <StackPanel Spacing="10">
-                <ItemsRepeater x:Name="RowsRepeater">
+                <ItemsRepeater x:Name="RowsRepeater" ElementPrepared="OnRowElementPrepared">
                     <ItemsRepeater.Layout>
                         <StackLayout Orientation="Vertical" Spacing="8" />
                     </ItemsRepeater.Layout>
