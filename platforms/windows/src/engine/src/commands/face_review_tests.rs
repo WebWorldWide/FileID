@@ -150,7 +150,7 @@ fn new_faces_become_suggestions_without_changing_assignments() {
         rows.iter().map(|r| (r.0, r.1, r.3.as_str(), r.4)).collect::<Vec<_>>(),
         vec![(3, 1, "suggested", Some(2)), (4, 1, "ambiguous", Some(2)), (6, 1, "suggested", Some(2))]
     );
-    assert_eq!(rows[0].2, 0.9939);
+    assert!((rows[0].2 - 0.9939).abs() < 1e-9);
     assert_eq!(outcome(&conn, 5).as_deref(), Some("unmatched"));
     for face in 3..=6 {
         assert_eq!(owner(&conn, face), None);
