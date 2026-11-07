@@ -32,7 +32,7 @@ internal sealed partial class TakesWorkbench
     private readonly Brush _info = ThemeHelper.GetBrushSafe("InfoBrush");
     private readonly Brush _infoWash = new SolidColorBrush(Color.FromArgb(0x1F, 0xA0, 0xE2, 0xEA));
     private readonly TextBlock _proposalHeader = SectionLabel("Related tries · 0");
-    private readonly Button _findRelated = Secondary(new Button { Content = "Find related tries", Height = 28, MinHeight = 28 });
+    private readonly Button _findRelatedTries = Secondary(new Button { Content = "Find related tries", Height = 28, MinHeight = 28 });
     private readonly StackPanel _groupingJobBox = new() { Visibility = Visibility.Collapsed, Margin = new Thickness(8, 0, 8, 6) };
     private readonly TextBlock _proposalsEmpty = Meta("");
     private readonly ListView _proposalList = new() { SelectionMode = ListViewSelectionMode.Single, MaxHeight = 300, Padding = new Thickness(0, 4, 0, 4) };
@@ -45,18 +45,18 @@ internal sealed partial class TakesWorkbench
     {
         _proposalHeader.Foreground = _gold;
         _proposalHeader.VerticalAlignment = VerticalAlignment.Center;
-        _findRelated.Foreground = _gold;
-        _findRelated.BorderBrush = _gold;
-        _findRelated.Background = _goldWash;
-        ToolTipService.SetToolTip(_findRelated, "Look through the whole library for related tries. Runs on this PC.");
-        AutomationProperties.SetName(_findRelated, "Find related tries across the library");
-        _findRelated.Click += (_, _) => Run(FindRelatedAsync);
+        _findRelatedTries.Foreground = _gold;
+        _findRelatedTries.BorderBrush = _gold;
+        _findRelatedTries.Background = _goldWash;
+        ToolTipService.SetToolTip(_findRelatedTries, "Look through the whole library for related tries. Runs on this PC.");
+        AutomationProperties.SetName(_findRelatedTries, "Find related tries across the library");
+        _findRelatedTries.Click += (_, _) => Run(FindRelatedAsync);
         var header = new Grid { ColumnSpacing = 8, Padding = new Thickness(14, 10, 8, 4) };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        Grid.SetColumn(_findRelated, 1);
+        Grid.SetColumn(_findRelatedTries, 1);
         header.Children.Add(_proposalHeader);
-        header.Children.Add(_findRelated);
+        header.Children.Add(_findRelatedTries);
         var intro = Meta("Tries and other angles of the same moment, found across your whole library. Suggestions never change your files.");
         intro.FontSize = 11.5;
         intro.Margin = new Thickness(14, 0, 14, 6);
@@ -285,8 +285,8 @@ internal sealed partial class TakesWorkbench
     private void RenderGroupingJob()
     {
         var job = _groupingJob;
-        _findRelated.IsEnabled = TakeProposalPolicy.CanFind(job);
-        ToolTipService.SetToolTip(_findRelated, TakeProposalPolicy.CanFind(job)
+        _findRelatedTries.IsEnabled = TakeProposalPolicy.CanFind(job);
+        ToolTipService.SetToolTip(_findRelatedTries, TakeProposalPolicy.CanFind(job)
             ? "Look through the whole library for related tries. Runs on this PC."
             : "Already looking");
         if (job is null || !TakeProposalPolicy.ShowJob(job))

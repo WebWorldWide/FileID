@@ -38,10 +38,7 @@ fn command() -> Command {
 }
 
 fn run(args: &[&str]) -> Output {
-    command()
-        .args(args)
-        .output()
-        .expect("spawn fileid binary")
+    command().args(args).output().expect("spawn fileid binary")
 }
 
 fn run_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
