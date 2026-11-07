@@ -267,10 +267,10 @@ pub(crate) fn checked_message(yes: usize, unsure: usize, checked: usize, total: 
         format!("None of the {total} selected {noun} clearly show that.")
     };
     if unsure > 0 {
-        text.push_str(&format!(" {unsure} {}might; the model wasn't sure.", if yes > 0 { "more " } else { "" }));
+        text = format!("{text} {unsure} {}might; the model wasn't sure.", if yes > 0 { "more " } else { "" });
     }
     if checked < total {
-        text.push_str(&format!(" Checked the {checked} most likely; select fewer to check every one."));
+        text = format!("{text} Checked the {checked} most likely; select fewer to check every one.");
     }
     text
 }
@@ -655,7 +655,10 @@ mod tests {
                 .collect();
             let ranked = rank(candidates, &criteria(&case.text), &case.known);
             assert_eq!(ranked.iter().map(|r| r.id).collect::<Vec<_>>(), case.order, "{}", case.name);
-            assert_eq!(ranked.iter().map(|r| r.score).collect::<Vec<_>>(), case.scores, "{}", case.name);
+            assert_eq!(ranked.len(), case.scores.len(), "{}", case.name);
+            for (ranked, score) in ranked.iter().zip(&case.scores) {
+                assert!((ranked.score - score).abs() < 1e-9, "{}: {} vs {score}", case.name, ranked.score);
+            }
             assert_eq!(ranked.iter().map(evidence_reason).collect::<Vec<_>>(), case.reasons, "{}", case.name);
         }
     }
