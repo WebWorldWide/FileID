@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-06 — Timeline moments: prompt no longer copied; 2.5 s activity windows
+
+- **Both engines** (agent): Qwen3-VL 2B was copying the moment prompt's literal JSON example into every reply (all 129 moments on the labelled set were titled "short observable action" and covered frames 0–1). The prompt now shows the schema as types and asks for brief actions seen in one or two frames. The model still answers for the whole window in nearly every reply, so activity windows are now at most 2.5 s instead of 4 s, and every 0.5 s pool frame in a window is sent.
+- Labelled set (Swift, 2B; tune / held-out): moment recall 0.395/0.511 → 0.767/0.933; precision (within) 0.654/0.784 → 0.622/0.828; fast actions 3/9 / 2/4 → 6/9 / 2/4 (held-out ties, with different misses); scenes and cuts unchanged; job time about 1.22x (per video 32.9 → 41.4 s mean on 14 clips). 2.5 s was chosen on the tune half; 3.0 s reached 3/4 held-out at 1.12x but ranked lower on tune, and 2.0 s reached 4/4 but cost 1.37x. A motion-peak follow-up was ruled out offline: peaks found by brightness or CLIP change don't line up with the fast actions.
+- `timeline_eval.py full` reports per-video job time. Checks: Swift 854 (serial), Rust 1,158 and clippy, egress/docs/DTO gates. The Rust moments job doesn't use activity windows yet, and the Rust engine wasn't evaluated (no GGUF VLM here).
+
 ## 2026-11-06 — Catalog follow-ups: community fine-tunes, image generators and TTS removed
 
 - **Mac `model-catalog.json` 265 → 218** (agent/catalog-fix): removed 47 community fine-tunes with safety training stripped (abliterated, uncensored, heretic, OBLITERATED, Dolphin) or named after another vendor's model (Claude/Opus, Fable/Composer, DeepSeek-V4-Pro distills, FuseO1). The shared denylist covers both patterns, and `check_model_license_policy.py` now applies it to every repo in each Mac catalog entry's lineage.
