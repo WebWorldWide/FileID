@@ -182,6 +182,7 @@ internal sealed class NameStyleCard : UserControl
             _event.IsOn = settings.NamingIncludeEvent;
             _date.IsOn = settings.NamingIncludeDate;
             _learn.IsOn = settings.NamingLearn;
+            _learned.Text = NameStylePolicy.LearnedSummary(Array.Empty<CatalogHit>(), settings.NamingLearn).Text;
             _date.IsEnabled = NameStylePolicy.DateToggleEnabled(style);
         }
         catch (Exception ex)
@@ -251,7 +252,9 @@ internal sealed class NameStyleCard : UserControl
         {
             var response = await EngineClient.Instance.CatalogAsync(
                 NameStylePolicy.PreferencesRequest("names-learned-" + Guid.NewGuid().ToString("N"), reset));
-            if (!_unloaded && response.Status == "ok") ShowLearned(response.Hits);
+            if (_unloaded || response.Status != "ok") return;
+            ShowLearned(response.Hits);
+            if (reset && _previewShown) SchedulePreview();
         }
         catch (Exception ex)
         {

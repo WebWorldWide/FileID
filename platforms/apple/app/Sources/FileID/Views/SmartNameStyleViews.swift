@@ -7,6 +7,7 @@ import FileIDShared
 struct NameStyleControls: View {
     var engine: EngineClient? = nil
     var refresh = 0
+    var onLearnedReset: () -> Void = {}
     @AppStorage(NameStyle.styleKey) private var style = NameStyle.defaultStyle
     @AppStorage(NameStyle.maxLengthKey) private var maxLength = NameStyle.defaultMaxLength
     @AppStorage(NameStyle.includePeopleKey) private var includePeople = NameStyle.defaultIncludePeople
@@ -49,7 +50,7 @@ struct NameStyleControls: View {
                 .help(NameStyle.dateToggleEnabled(style: style) ? "Add the capture date at the end" : "Date first already starts with the date")
             Toggle("Learn from my renames", isOn: $learn).toggleStyle(DSToggleStyle())
                 .help("When you edit a suggested name before renaming, later suggestions follow your style. Stays on this Mac.")
-            if let engine { LearnedStyleRow(engine: engine, enabled: learn, refresh: refresh) }
+            if let engine { LearnedStyleRow(engine: engine, enabled: learn, refresh: refresh, onReset: onLearnedReset) }
         }
         .font(Theme.Font.body(13))
     }
@@ -59,6 +60,7 @@ private struct LearnedStyleRow: View {
     let engine: EngineClient
     let enabled: Bool
     let refresh: Int
+    let onReset: () -> Void
     @State private var learned = NameStyle.Learned()
     @State private var busy = false
 
@@ -68,7 +70,7 @@ private struct LearnedStyleRow: View {
                 .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            Button("Reset") { Task { await load(reset: true) } }
+            Button("Reset") { Task { await load(reset: true); onReset() } }
                 .buttonStyle(DSSecondaryButtonStyle(height: 26))
                 .disabled(busy || learned.samples == 0)
                 .help("Forget the style FileID learned from your renames")
@@ -126,7 +128,7 @@ struct SmartNamePreviewSheet: View {
             }
             Text("Check the new names and edit any you want. Only ticked files are renamed.")
                 .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-            NameStyleControls(engine: engine, refresh: learnedRefresh)
+            NameStyleControls(engine: engine, refresh: learnedRefresh, onLearnedReset: { schedulePreview() })
                 .padding(12)
                 .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
             list
