@@ -1,3 +1,4 @@
+﻿#pragma warning disable CA1861 // Fresh fixture arrays keep each test isolated.
 using FileID.IpcSchema;
 using FileID.ViewModels;
 using Xunit;
@@ -43,16 +44,20 @@ public sealed class ChatSelectionPolicyTests
         Assert.Equal("Ask about 1 selected", ChatSelectionPolicy.AskLabel(hits, 1));
         Assert.True(ChatSelectionPolicy.HasResults(hits));
         Assert.False(ChatSelectionPolicy.HasResults(new[] { Hit(5, "yes") with { Match = null } }));
-        Assert.Equal("Match: 1.jpg. reason", ChatSelectionPolicy.MatchSpoken(Hit(1, "yes", "C:\\f\\1.jpg")));
+        Assert.Equal("Match: 1.jpg. reason", ChatSelectionPolicy.MatchSpoken(Hit(1, "yes", "C:/f/1.jpg")));
     }
 
     [Fact]
     public void BestTakesAttachesKeptTriesOnlyWhenSomeAreKept()
     {
         var primaries = new long[] { 10, 11, 12 };
-        Assert.Equal((new long[] { 10, 11, 12 }, "Ask about all 3"), Unpack(ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long>())));
-        Assert.Equal((new long[] { 11 }, "Ask about 1 kept"), Unpack(ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long> { 11 })));
-        Assert.Equal((new long[] { 10, 11, 12 }, "Ask about all 3"), Unpack(ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long> { 10, 11, 12 })));
+        var all = ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long>());
+        Assert.Equal(new long[] { 10, 11, 12 }, all.Ids);
+        Assert.Equal("Ask about all 3", all.Label);
+        var kept = ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long> { 11 });
+        Assert.Equal(new long[] { 11 }, kept.Ids);
+        Assert.Equal("Ask about 1 kept", kept.Label);
+        Assert.Equal("Ask about all 3", ChatSelectionPolicy.TakeTargets(primaries, new HashSet<long> { 10, 11, 12 }).Label);
     }
 
     [Fact]
@@ -65,6 +70,4 @@ public sealed class ChatSelectionPolicyTests
         Assert.Equal("yes", hit.Match);
         Assert.DoesNotContain("match", System.Text.Json.JsonSerializer.Serialize(hit with { Match = null }, IpcCoder.Options), StringComparison.Ordinal);
     }
-
-    private static (long[], string) Unpack((IReadOnlyList<long> Ids, string Label) value) => (value.Ids.ToArray(), value.Label);
 }

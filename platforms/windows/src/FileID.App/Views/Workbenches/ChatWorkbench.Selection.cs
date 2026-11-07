@@ -1,4 +1,4 @@
-using FileID.IpcSchema;
+﻿using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;

@@ -1,4 +1,4 @@
-using FileID.Services;
+﻿using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
