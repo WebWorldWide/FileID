@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,6 +14,107 @@ ALLOWED_POLICIES = {
     "NVIDIA-CUDA": ("LicenseRef-NVIDIA-CUDA", True),
 }
 
+CATALOG_LICENSES = {"Apache-2.0", "MIT", "Gemma"}
+
+# Never offered, whatever a model card's license field says. Hugging Face
+# cards inherit wrong license and base_model metadata, so these are matched
+# against names and repositories, not declared licenses. The generator applies
+# the same list to every lineage hop.
+RESTRICTED_MODELS = (
+    (r"qwen2\.5-(vl-|coder-|math-|omni-)?3b", "Qwen Research License (non-commercial)"),
+    (r"(qwen[0-9.]*|qvq)-(vl-|coder-|math-)?72b|internvl(2\.5|3)-78b", "Qwen License (monthly-active-user cap)"),
+    (r"(^|[^a-z])(code)?llama|meta-llama/", "Llama Community License (includes Llama-derived distills)"),
+    (r"fastvlm|mobileclip|(^|[^a-z])apple/", "Apple research license"),
+    (r"(^|[^a-z])lfm[0-9]|liquidai/", "LFM Open License (revenue threshold)"),
+    (r"codestral-22b|mistral-large|pixtral-large|ministral-8b-instruct-2410|devstral-2-123b",
+     "Mistral Research or revenue-capped license"),
+    (r"embeddinggemma-2", "card requires the Gemma Prohibited Use Policy; held for owner review"),
+)
+
+# Gemma lines Google released under plain Apache-2.0
+# (https://ai.google.dev/gemma/docs/gemma_4_license, checked 2026-11-06).
+# Every other Gemma repository is under the Gemma Terms.
+APACHE_GEMMA = re.compile(r"(?<![a-z])(gemma-4|diffusiongemma)-")
+
+_SIZE = re.compile(r"(?<![a-z0-9.])([ae]?\d+(?:\.\d+)?[bm])(?![a-z])")
+
+
+def _normalized(text: str) -> str:
+    return text.lower().replace("_", "-")
+
+
+def _canonical(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _sizes(text: str) -> set[str]:
+    return set(_SIZE.findall(_normalized(text)))
+
+
+def restricted_reason(*names: str) -> str | None:
+    for name in names:
+        for pattern, reason in RESTRICTED_MODELS:
+            if re.search(pattern, _normalized(name or "")):
+                return reason
+    return None
+
+
+def identity_mismatch(name: str, family: str, repo: str, upstream: str) -> str | None:
+    """Why a catalog name does not describe the repository it downloads."""
+    repo_name = repo.split("/", 1)[-1]
+    upstream_name = upstream.split("/", 1)[-1]
+    family_key = _canonical(family)
+    if not family_key or not _canonical(name).startswith(family_key):
+        return f"family {family!r} is not the start of name {name!r}"
+    if family_key not in _canonical(repo_name):
+        return f"family {family!r} does not match repo {repo}"
+    if family_key not in _canonical(upstream_name):
+        return f"family {family!r} does not match upstream {upstream}"
+    if not _sizes(name) <= _sizes(repo_name):
+        return f"size {sorted(_sizes(name) - _sizes(repo_name))} of {name!r} is not in repo {repo}"
+    if not _sizes(upstream_name) <= _sizes(name):
+        return f"upstream {upstream} size {sorted(_sizes(upstream_name) - _sizes(name))} is not in name {name!r}"
+    return None
+
+
+def gemma_terms_error(name: str, repo: str, license_name: str, terms_required: bool) -> str | None:
+    subjects = [_normalized(name), _normalized(repo.split("/", 1)[-1])]
+    if not any("gemma" in subject for subject in subjects):
+        return None
+    if any(APACHE_GEMMA.search(subject) for subject in subjects):
+        return None if license_name == "Apache-2.0" else "Gemma 4 family is Apache-2.0"
+    if license_name != "Gemma" or terms_required is not True:
+        return "Gemma-family repository must be license Gemma with termsRequired"
+    return None
+
+
+def catalog_errors(catalog_path: Path) -> list[str]:
+    document = json.loads(catalog_path.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    seen: set[str] = set()
+    for entry in document.get("entries", []):
+        entry_id = entry.get("id", "?")
+        name, family = entry.get("name", ""), entry.get("family", "")
+        repo, upstream = entry.get("repo", ""), entry.get("upstream", "")
+        license_name, terms_required = entry.get("license"), entry.get("termsRequired")
+        if entry_id in seen:
+            errors.append(f"catalog {entry_id}: duplicate id")
+        seen.add(entry_id)
+        if license_name not in CATALOG_LICENSES:
+            errors.append(f"catalog {entry_id}: license {license_name!r} is not allowed")
+        if license_name == "Gemma" and terms_required is not True:
+            errors.append(f"catalog {entry_id}: Gemma Terms require termsRequired")
+        reason = restricted_reason(name, upstream, repo)
+        if reason:
+            errors.append(f"catalog {entry_id}: denylisted model ({reason})")
+        mismatch = identity_mismatch(name, family, repo, upstream)
+        if mismatch:
+            errors.append(f"catalog {entry_id}: {mismatch}")
+        gemma = gemma_terms_error(name, repo, license_name, terms_required)
+        if gemma:
+            errors.append(f"catalog {entry_id}: {gemma}")
+    return errors
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate FileID model license metadata")
@@ -22,9 +124,19 @@ def main() -> int:
         default="shared/models/manifest.json",
         type=Path,
     )
+    parser.add_argument(
+        "--catalog",
+        default=Path(__file__).resolve().parents[2] / "shared/models/catalog.json",
+        type=Path,
+        help="extended model catalog to check (shared/models/catalog.json)",
+    )
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     errors: list[str] = []
+    try:
+        errors.extend(catalog_errors(args.catalog))
+    except (ValueError, OSError, AttributeError) as error:
+        errors.append(f"Extended model catalog {args.catalog}: {error}")
 
     policies = manifest.get("licensePolicies", {})
     if set(policies) != set(ALLOWED_POLICIES):

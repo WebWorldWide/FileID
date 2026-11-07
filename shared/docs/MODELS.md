@@ -1,5 +1,16 @@
 # Models — canonical registry
 
+## 2026-11-06 — Extended catalog license and identity audit
+
+Every `shared/models/catalog.json` entry was checked against its pinned repository's own files and its true upstream's LICENSE file or model card. Result: 342 → 334 entries (262 Apache-2.0, 46 MIT, 26 Gemma Terms with `termsRequired`). Removed:
+- [Qwen2.5-VL-3B](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE): Qwen Research License.
+- `mlx-community/gemma-3-4b-it-qat-4bit`: Gemma 3 under the Gemma Terms, listed as InternVL3-1B under Apache-2.0.
+- The three [DeepSeek-R1-Distill-Llama 8B/70B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B#7-license) entries: Llama 3.1/3.3 license.
+- Both EmbeddingGemma 2 entries: the license is Apache-2.0, but the card requires the Gemma Prohibited Use Policy; held for owner review.
+- One Gemma 4 QAT MLX build whose declared upstream is not public.
+
+Corrected: PaddleOCR-VL 1.5 (was ERNIE-4.5-0.3B), olmOCR-2 7B MLX (was Qwen2.5-VL-7B), Instruct/`-it` names for mislabelled base/`-pt` conversions, and upstreams that pointed at conversions or moved organisations. [Gemma 4's license](https://ai.google.dev/gemma/docs/gemma_4_license) is the plain Apache-2.0 text, so Gemma 4 and DiffusionGemma stay Apache-2.0 without terms. `check_model_license_policy.py` now gates the catalog: denylisted models, name/repository family or size mismatches, and Gemma Terms repositories without `termsRequired` fail CI.
+
 ## 2026-10-20 — Handwriting OCR candidate (not installed, no download wired)
 
 Handwriting currently reads through Apple Vision's accurate tier on macOS and, on every engine, a VLM transcription of text-bearing images during Describe Files (Deep Analyze). A dedicated ONNX handwriting reader would let Windows and Linux read handwriting during the scan without a VLM. Licenses were read from the Hugging Face model cards and API on 2026-10-20. Nothing below is in `catalog.json`; adding one needs the owner's sign-off, a pinned revision and hashes, the license gate, and a measurement on the dev machines.
