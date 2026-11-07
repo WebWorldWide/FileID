@@ -63,16 +63,58 @@ fn short_video_gets_single_window() {
 #[test]
 fn parse_moments_accepts_wrapped_json_and_rejects_bad_ranges() {
     let raw = "Sure:\n{\"moments\":[{\"title\":\"Kid swings bat\",\"summary\":\"A child swings.\",\"firstFrame\":1,\"lastFrame\":3}]}";
-    let moments = parse_moments(raw, 4).unwrap();
+    let four = [0.0, 0.5, 1.0, 1.5];
+    let moments = parse_moments(raw, &four).unwrap();
     assert_eq!(moments[0].title, "Kid swings bat");
-    assert!(parse_moments("{\"moments\":[]}", 4).unwrap().is_empty());
-    assert!(parse_moments(raw, 3).is_err());
-    assert!(parse_moments(raw, 1).is_err());
-    assert!(parse_moments("no json", 4).is_err());
+    assert_eq!((moments[0].first_frame, moments[0].last_frame), (1, 3));
+    assert!(parse_moments("{\"moments\":[]}", &four).unwrap().is_empty());
+    assert!(parse_moments(raw, &four[..3]).is_err());
+    assert!(parse_moments(raw, &four[..1]).is_err());
+    assert!(parse_moments("no json", &four).is_err());
     let blank = "{\"moments\":[{\"title\":\"  \",\"summary\":\"\",\"firstFrame\":0,\"lastFrame\":0}]}";
-    assert!(parse_moments(blank, 4).is_err());
+    assert!(parse_moments(blank, &four).is_err());
     let reversed = "{\"moments\":[{\"title\":\"x\",\"summary\":\"\",\"firstFrame\":2,\"lastFrame\":1}]}";
-    assert!(parse_moments(reversed, 4).is_err());
+    assert!(parse_moments(reversed, &four).is_err());
+}
+
+fn spans(moments: &[Moment]) -> Vec<(usize, usize)> {
+    moments.iter().map(|m| (m.first_frame, m.last_frame)).collect()
+}
+
+#[test]
+fn parse_moments_snaps_quoted_seconds_to_frames() {
+    let window = Window { start: 10.0, end: 12.5, times: vec![10.0, 10.5, 11.0, 11.5, 12.0] };
+    let raw = r#"{"moments":[{"title":"Ball is thrown","summary":"A throw","start":11.0,"end":11.0},{"title":"Batter swings","summary":"","start":"t=10.45s","end":"11.6 seconds"}]}"#;
+    let moments = parse_moments(raw, &window.times).unwrap();
+    assert_eq!(spans(&moments), vec![(2, 2), (1, 3)]);
+    let chapters = moment_chapters(&moments, &window.times, &window, 1, "r", "m");
+    let bounds: Vec<(f64, f64)> = chapters.iter().map(|c| (c.start_seconds, c.end_seconds)).collect();
+    assert_eq!(bounds, vec![(11.0, 11.5), (10.5, 12.0)]);
+    let tail = parse_moments(r#"{"moments":[{"title":"Catch","summary":"","start":12.3}]}"#, &window.times).unwrap();
+    assert_eq!(spans(&tail), vec![(4, 4)]);
+}
+
+#[test]
+fn parse_moments_falls_back_to_frame_indices_or_the_whole_sequence() {
+    let times = [10.0, 10.5, 11.0, 11.5, 12.0];
+    let parse = |raw: &str| parse_moments(raw, &times);
+    assert_eq!(spans(&parse(r#"{"moments":[{"title":"Jump","summary":"","firstFrame":1,"lastFrame":3}]}"#).unwrap()), vec![(1, 3)]);
+    assert_eq!(spans(&parse(r#"{"moments":[{"title":"Wave","summary":"","start":2,"end":4}]}"#).unwrap()), vec![(2, 4)]);
+    let untimed = parse(r#"{"moments":[{"title":"Kids play","summary":"Running around"}]}"#).unwrap();
+    assert_eq!(spans(&untimed), vec![(0, 4)]);
+    assert_eq!(untimed[0].summary, "Running around");
+    let unreadable = parse(r#"{"moments":[{"title":"Hit","summary":"","start":"soon","end":null}]}"#).unwrap();
+    assert_eq!(spans(&unreadable), vec![(0, 4)]);
+    let early = parse_moments(r#"{"moments":[{"title":"Hit","summary":"","start":1,"end":2}]}"#, &[0.0, 0.5, 1.0, 1.5, 2.0]).unwrap();
+    assert_eq!(spans(&early), vec![(2, 4)]);
+    for raw in [
+        r#"{"moments":[{"title":"Hit","summary":"","start":11.5,"end":10.5}]}"#,
+        r#"{"moments":[{"title":"Hit","summary":"","start":30,"end":31}]}"#,
+        r#"{"moments":[{"title":"Hit","summary":"","start":1.5,"end":2.5}]}"#,
+        r#"{"moments":[{"title":"Hit","summary":"","firstFrame":-1,"lastFrame":2}]}"#,
+    ] {
+        assert!(parse(raw).is_err(), "{raw}");
+    }
 }
 
 #[test]

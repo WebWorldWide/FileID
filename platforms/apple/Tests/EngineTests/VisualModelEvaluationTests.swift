@@ -51,7 +51,7 @@ struct VisualModelEvaluationTests {
             imageURLs: indices.map { images[$0] }, times: indices.map { times[$0] }
         )
         print("MOMENT_EVALUATION: \(result.description)")
-        _ = try TimelineMomentAnalysis.parse(result.description, frameCount: indices.count)
+        _ = try TimelineMomentAnalysis.parse(result.description, times: indices.map { times[$0] })
     }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_EVALUATION_GOAL"] != nil))
     func evaluateGoalFrames() async throws {
