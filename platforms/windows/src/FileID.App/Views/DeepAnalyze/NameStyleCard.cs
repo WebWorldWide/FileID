@@ -35,6 +35,9 @@ internal sealed class NameStyleCard : UserControl
     private readonly ToggleSwitch _people = new() { Header = "Add confirmed people" };
     private readonly ToggleSwitch _event = new() { Header = "Add event" };
     private readonly ToggleSwitch _date = new() { Header = "Add date" };
+    private readonly ToggleSwitch _learn = new() { Header = "Learn from my renames" };
+    private readonly TextBlock _learned = new() { TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 560 };
+    private readonly Button _reset = new() { Content = "Reset", IsEnabled = false };
     private readonly Button _preview = new() { Content = "Preview names" };
     private readonly Button _apply = new() { Content = "Rename", IsEnabled = false };
     private readonly ProgressRing _busy = new() { Width = 16, Height = 16, IsActive = false, Visibility = Visibility.Collapsed };
@@ -65,7 +68,11 @@ internal sealed class NameStyleCard : UserControl
         AutomationProperties.SetName(_length, "Longest name in characters");
         AutomationProperties.SetName(_lengthBox, "Longest name in characters");
         _lengthText.Foreground = _text3;
+        _learned.Foreground = _text3;
         _status.Foreground = _text2;
+        AutomationProperties.SetName(_reset, "Reset learned name style");
+        ToolTipService.SetToolTip(_reset, "Forget the style FileID learned from your renames");
+        ToolTipService.SetToolTip(_learn, "When you edit a suggested name before renaming, later suggestions follow your style. Stays on this PC.");
         _preview.Style = ThemeHelper.GetStyleSafe("AccentButtonStyle");
         AutomationProperties.SetHelpText(_preview, "Show the new names before anything is renamed");
 
@@ -90,6 +97,10 @@ internal sealed class NameStyleCard : UserControl
         toggles.Children.Add(_people);
         toggles.Children.Add(_event);
         toggles.Children.Add(_date);
+        toggles.Children.Add(_learn);
+        var learnedRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        learnedRow.Children.Add(_learned);
+        learnedRow.Children.Add(_reset);
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
         actions.Children.Add(_preview);
         actions.Children.Add(_apply);
@@ -106,6 +117,7 @@ internal sealed class NameStyleCard : UserControl
         stack.Children.Add(caption);
         stack.Children.Add(styleRow);
         stack.Children.Add(toggles);
+        stack.Children.Add(learnedRow);
         stack.Children.Add(actions);
         stack.Children.Add(_status);
         stack.Children.Add(_header);
@@ -119,10 +131,16 @@ internal sealed class NameStyleCard : UserControl
         _people.Toggled += (_, _) => DebugLog.SafeRun("NameStyleCard.People", OnStyleChanged);
         _event.Toggled += (_, _) => DebugLog.SafeRun("NameStyleCard.Event", OnStyleChanged);
         _date.Toggled += (_, _) => DebugLog.SafeRun("NameStyleCard.Date", OnStyleChanged);
+        _learn.Toggled += (_, _) => DebugLog.SafeRun("NameStyleCard.Learn", OnLearnToggled);
+        _reset.Click += (_, _) => DebugLog.SafeRun("NameStyleCard.Reset", () => _ = DebugLog.SafeRunAsync("NameStyleCard.ResetAsync", () => LoadLearnedAsync(true)));
         _preview.Click += (_, _) => DebugLog.SafeRun("NameStyleCard.Preview", () => _ = DebugLog.SafeRunAsync("NameStyleCard.PreviewAsync", PreviewAsync));
         _apply.Click += (_, _) => DebugLog.SafeRun("NameStyleCard.Apply", () => _ = DebugLog.SafeRunAsync("NameStyleCard.ApplyAsync", ApplyAsync));
         Unloaded += (_, _) => DebugLog.SafeRun("NameStyleCard.Unloaded", OnUnloaded);
-        Loaded += (_, _) => DebugLog.SafeRun("NameStyleCard.Loaded", () => _unloaded = false);
+        Loaded += (_, _) => DebugLog.SafeRun("NameStyleCard.Loaded", () =>
+        {
+            _unloaded = false;
+            _ = DebugLog.SafeRunAsync("NameStyleCard.LearnedAsync", () => LoadLearnedAsync(false));
+        });
     }
 
     private StackPanel Labeled(string label, UIElement control)
@@ -163,6 +181,7 @@ internal sealed class NameStyleCard : UserControl
             _people.IsOn = settings.NamingIncludePeople;
             _event.IsOn = settings.NamingIncludeEvent;
             _date.IsOn = settings.NamingIncludeDate;
+            _learn.IsOn = settings.NamingLearn;
             _date.IsEnabled = NameStylePolicy.DateToggleEnabled(style);
         }
         catch (Exception ex)
@@ -178,7 +197,7 @@ internal sealed class NameStyleCard : UserControl
             : NameStylePolicy.DefaultStyle;
 
     private CatalogNaming CurrentNaming() =>
-        NameStylePolicy.Naming(SelectedStyle, NameStylePolicy.ClampLength(_length.Value), _people.IsOn, _event.IsOn, _date.IsOn);
+        NameStylePolicy.Naming(SelectedStyle, NameStylePolicy.ClampLength(_length.Value), _people.IsOn, _event.IsOn, _date.IsOn, _learn.IsOn);
 
     private void OnLengthChanged(double value)
     {
@@ -208,6 +227,7 @@ internal sealed class NameStyleCard : UserControl
             settings.NamingIncludePeople = _people.IsOn;
             settings.NamingIncludeEvent = _event.IsOn;
             settings.NamingIncludeDate = _date.IsOn;
+            settings.NamingLearn = _learn.IsOn;
             settings.Save();
         }
         catch (Exception ex)
@@ -215,6 +235,52 @@ internal sealed class NameStyleCard : UserControl
             DebugLog.Warn("NameStyleCard settings save failed: " + ex.Message);
         }
         if (_previewShown) SchedulePreview();
+    }
+
+    private void OnLearnToggled()
+    {
+        OnStyleChanged();
+        if (!_syncing) _ = DebugLog.SafeRunAsync("NameStyleCard.LearnedAsync", () => LoadLearnedAsync(false));
+    }
+
+    private async Task LoadLearnedAsync(bool reset)
+    {
+        if (_unloaded) return;
+        _reset.IsEnabled = false;
+        try
+        {
+            var response = await EngineClient.Instance.CatalogAsync(
+                NameStylePolicy.PreferencesRequest("names-learned-" + Guid.NewGuid().ToString("N"), reset));
+            if (!_unloaded && response.Status == "ok") ShowLearned(response.Hits);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("NameStyleCard learned style read failed: " + ex.Message);
+        }
+    }
+
+    private void ShowLearned(IEnumerable<CatalogHit> hits)
+    {
+        var (text, samples) = NameStylePolicy.LearnedSummary(hits, _learn.IsOn);
+        _learned.Text = text;
+        _reset.IsEnabled = samples > 0;
+    }
+
+    private async Task LearnFromAsync(IReadOnlyList<NameProposalRow> rows, IReadOnlyCollection<long> confirmed, CatalogNaming naming)
+    {
+        if (!naming.Learn) return;
+        var edits = NameStylePolicy.Edits(rows, confirmed);
+        if (edits.Count == 0) return;
+        try
+        {
+            var response = await EngineClient.Instance.CatalogAsync(
+                NameStylePolicy.LearnRequest("names-learn-" + Guid.NewGuid().ToString("N"), edits, naming));
+            if (!_unloaded && response.Status == "ok") ShowLearned(response.Hits);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("NameStyleCard learning from renames failed: " + ex.Message);
+        }
     }
 
     private void SchedulePreview()
@@ -373,7 +439,7 @@ internal sealed class NameStyleCard : UserControl
             Background = _chip,
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(7, 2, 7, 2),
-            Child = new TextBlock { Text = NameStylePolicy.ReasonLabel(row.Reason), Foreground = _ai, FontSize = 11.5 },
+            Child = LearnedTip(new TextBlock { Text = NameStylePolicy.ReasonChip(row), Foreground = _ai, FontSize = 11.5 }, row),
         });
         Grid.SetColumn(original, 1);
         Grid.SetColumn((FrameworkElement)proposed, 2);
@@ -386,6 +452,12 @@ internal sealed class NameStyleCard : UserControl
         _views[row.FileId] = new RowView(grid, check, box, follows);
         if (animate) grid.Loaded += (_, _) => DebugLog.SafeRun("NameStyleCard.RowIn", () => SpringIn(grid));
         return grid;
+    }
+
+    private static TextBlock LearnedTip(TextBlock chip, NameProposalRow row)
+    {
+        if (NameStylePolicy.LearnedHelp(row.Learned) is { } help) ToolTipService.SetToolTip(chip, help);
+        return chip;
     }
 
     private void OnChecked(NameProposalRow row, bool isChecked)
@@ -440,6 +512,7 @@ internal sealed class NameStyleCard : UserControl
         SyncApply();
         SetBusy(true, "Renaming…");
         var rows = _rows;
+        var naming = CurrentNaming();
         try
         {
             var engine = EngineClient.Instance;
@@ -465,6 +538,7 @@ internal sealed class NameStyleCard : UserControl
                     }
                 });
             }
+            await LearnFromAsync(rows, confirmed, naming);
             var failed = entries.Count - confirmed.Count;
             var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message;
             var text = $"Renamed {confirmed.Count:N0} file{(confirmed.Count == 1 ? "" : "s")}"

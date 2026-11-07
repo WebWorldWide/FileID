@@ -119,6 +119,9 @@ internal sealed class AppSettings
 
     public bool NamingIncludeDate { get; set; } = ViewModels.NameStylePolicy.DefaultIncludeDate;
 
+    /// <summary>Apply the style learned from the user's edits to proposed names, and record new edits.</summary>
+    public bool NamingLearn { get; set; } = ViewModels.NameStylePolicy.DefaultLearn;
+
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
     /// older files (and can't clobber a fresh user's first deliberate pick).</summary>

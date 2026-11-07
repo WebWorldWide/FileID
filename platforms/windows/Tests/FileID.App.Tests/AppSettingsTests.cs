@@ -47,6 +47,7 @@ public class AppSettingsTests
         Assert.True(s.NamingIncludePeople);
         Assert.True(s.NamingIncludeEvent);
         Assert.False(s.NamingIncludeDate);
+        Assert.True(s.NamingLearn);
         var json = JsonSerializer.Serialize(new AppSettings { NamingStyle = "dateFirst", NamingMaxLength = 64, NamingIncludeDate = true }, s_options);
         Assert.Contains("\"namingStyle\": \"dateFirst\"", json);
         var reloaded = JsonSerializer.Deserialize<AppSettings>(json, s_options)!;
