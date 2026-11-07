@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-07 — Rust moments job uses the activity windows; Qwen3-VL 4B checked; eval and worktree folders deleted
+
+- **Shared Rust engine** (agent): the moments job now builds a half-second brightness grid (the 1 fps signal scan plus a 1 fps pass offset by 0.5 s) and sends the model only activity windows of at most 2.5 s with every grid frame, like the Mac's `VideoSceneSelection`. Spans without motion are recorded as `moment-still` coverage; if a signal pass fails, the overlapping 4 s windows still cover the file. Unit tests cover the grid, window plan, still spans and fallback; the end-to-end fixture now moves for 3 s then holds. Not yet run with a GGUF vision model or the vetted FFmpeg. Rust 1,165 tests.
+- **Qwen3-VL 4B** on the labelled tune half (current prompt, 2.5 s windows): fast actions 4/9 (2B 6/9), moment recall 0.63 (0.77), precision 0.60 (0.62), scenes unchanged, about 2.4x job time, GPU peak 4.2 GB (2.9 GB). Worse than 2B, so held-out was not run; the default stays 2B.
+- **Lost:** at about 21:15 on 2026-11-06, outside any session, `~/Library/Developer/FileIDEval` (labelled photos, videos, labels, runs), `FileIDWorktrees` and `FileIDBuild` were deleted. Committed agent branches survived; the uncommitted People incremental-assignment work did not (design and its failed held-out gate are in DECISIONS 2026-11-07). The eval scripts remain in `shared/scripts/eval/`.
+- The local stable Rust toolchain is now 1.99.1; its new `assert_is_empty` clippy lint fails on about 50 older lines. CI pins 1.98, where clippy is clean.
+
 ## 2026-11-06 — Timeline moments: prompt no longer copied; 2.5 s activity windows
 
 - **Both engines** (agent): Qwen3-VL 2B was copying the moment prompt's literal JSON example into every reply (all 129 moments on the labelled set were titled "short observable action" and covered frames 0–1). The prompt now shows the schema as types and asks for brief actions seen in one or two frames. The model still answers for the whole window in nearly every reply, so activity windows are now at most 2.5 s instead of 4 s, and every 0.5 s pool frame in a window is sent.
