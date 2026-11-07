@@ -1,5 +1,6 @@
 {
-  "comment": "Canonical model-artifact manifest — the single cross-platform source of truth for download URLs, SHA256 pins, HF repo revisions, and reviewed license policy. The Windows engine's compiled registry (platforms/windows/src/engine/src/models/registry.rs) and the macOS table (platforms/apple/shared/Sources/FileIDShared/ModelManifest.swift) are both locked to this file by tests (engine/tests/manifest_consistency.rs, SharedTests/ModelManifestTests.swift). Static artifacts pin the exact file sha256 (HF LFS oid or release-asset hash). MLX VLM repos pin the HF revision (immutable commit); per-file sha256 comes from that commit's LFS pointers at download time. Every artifact/repo must have exactly one entry in the license maps below; CI rejects missing, unknown, or unapproved license keys.",
+  "comment": "Canonical curated model download set: the one place each default download is defined. Every artifact pins an immutable commit revision. A static artifact's URL is https://huggingface.co/<repo>/resolve/<revision>/<path>; its sha256 is the exact file digest (HF LFS oid or the hash of a small non-LFS file). An MLX VLM repo pins an immutable revision; per-file sha256 comes from that commit's LFS pointers at download time. license names a licensePolicies key. The shared Rust engine embeds this file (platforms/windows/src/engine/src/models/manifest.rs) and the macOS table is generated from it by shared/scripts/gen_model_manifest.py. shared/scripts/check_runtime_egress.py verifies every URL, revision, sha256 and license; shared/scripts/check_model_license_policy.py verifies the policies.",
+  "schemaVersion": 2,
   "licensePolicies": {
     "MIT": {
       "spdx": "MIT",
@@ -32,40 +33,6 @@
       "reviewedAt": "2026-07-16"
     }
   },
-  "artifactLicenses": {
-    "yunet_detector": "MIT",
-    "sface_embedder": "Apache-2.0",
-    "clip_vitb32_image": "MIT",
-    "clip_vitb32_text": "MIT",
-    "clip_bpe_vocab": "MIT",
-    "clip_bpe_merges": "MIT",
-    "ram_plus_model": "Apache-2.0",
-    "ram_plus_tags": "Apache-2.0",
-    "ram_plus_thresholds": "Apache-2.0",
-    "mistral_small_gguf": "Apache-2.0",
-    "mistral_small_mmproj": "Apache-2.0",
-    "qwen3vl4b_gguf": "Apache-2.0",
-    "qwen3vl4b_mmproj": "Apache-2.0",
-    "qwen3vl8b_gguf": "Apache-2.0",
-    "qwen3vl8b_mmproj": "Apache-2.0",
-    "qwen25vl_gguf": "Apache-2.0",
-    "qwen25vl_mmproj": "Apache-2.0",
-    "gemma3_gguf": "Gemma",
-    "gemma3_mmproj": "Gemma",
-    "bge_model": "MIT",
-    "bge_vocab": "MIT"
-  },
-  "vlmRepoLicenses": {
-    "mlx-community/Qwen2.5-VL-7B-Instruct-4bit": "Apache-2.0",
-    "mlx-community/Qwen3-VL-2B-Instruct-4bit": "Apache-2.0",
-    "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit": "Apache-2.0",
-    "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Apache-2.0",
-    "mlx-community/Qwen3.5-2B-MLX-4bit": "Apache-2.0",
-    "mlx-community/gemma-3-4b-it-qat-4bit": "Gemma",
-    "mlx-community/gemma-3-12b-it-qat-4bit": "Gemma",
-    "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit": "Apache-2.0",
-    "mlx-community/paligemma-3b-mix-448-8bit": "Gemma"
-  },
   "artifacts": [
     {
       "id": "yunet_detector",
@@ -73,9 +40,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+      "repo": "opencv/face_detection_yunet",
+      "revision": "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+      "path": "face_detection_yunet_2023mar.onnx",
       "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
-      "approxBytes": 232589
+      "approxBytes": 232589,
+      "license": "MIT"
     },
     {
       "id": "sface_embedder",
@@ -84,9 +54,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx",
+      "repo": "opencv/face_recognition_sface",
+      "revision": "3d7082438a6e4551e840c9b2bb60b71e8da4b524",
+      "path": "face_recognition_sface_2021dec.onnx",
       "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
-      "approxBytes": 38696353
+      "approxBytes": 38696353,
+      "license": "Apache-2.0"
     },
     {
       "id": "clip_vitb32_image",
@@ -95,9 +68,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx",
+      "repo": "Xenova/clip-vit-base-patch32",
+      "revision": "6b7c523703ae26e39be4b03774966f8571c7f523",
+      "path": "onnx/vision_model.onnx",
       "sha256": "fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40",
-      "approxBytes": 351685709
+      "approxBytes": 351685709,
+      "license": "MIT"
     },
     {
       "id": "clip_vitb32_text",
@@ -106,9 +82,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model.onnx",
+      "repo": "Xenova/clip-vit-base-patch32",
+      "revision": "6b7c523703ae26e39be4b03774966f8571c7f523",
+      "path": "onnx/text_model.onnx",
       "sha256": "3f6571f5bad13a97c469c1622e1cfc4d9aef78b79fdbfcff804ca357bfada8cc",
-      "approxBytes": 254058553
+      "approxBytes": 254058553,
+      "license": "MIT"
     },
     {
       "id": "clip_bpe_vocab",
@@ -117,9 +96,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json",
+      "repo": "openai/clip-vit-base-patch32",
+      "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+      "path": "vocab.json",
       "sha256": "5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363",
-      "approxBytes": 1000000
+      "approxBytes": 1000000,
+      "license": "MIT"
     },
     {
       "id": "clip_bpe_merges",
@@ -128,9 +110,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt",
+      "repo": "openai/clip-vit-base-patch32",
+      "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+      "path": "merges.txt",
       "sha256": "f526393189112391ce6f9795d4695f704121ce452c3aad1f5335cc41337eba85",
-      "approxBytes": 525000
+      "approxBytes": 525000,
+      "license": "MIT"
     },
     {
       "id": "ram_plus_model",
@@ -139,9 +124,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx",
+      "repo": "Web-World-Wide/ram-plus-onnx",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
+      "path": "ram_plus.onnx",
       "sha256": "86058ac8881128540084d29f2b83cd1c4b4214350a8658addad35a877634f7d9",
-      "approxBytes": 925600000
+      "approxBytes": 925600000,
+      "license": "Apache-2.0"
     },
     {
       "id": "ram_plus_tags",
@@ -150,9 +138,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt",
+      "repo": "Web-World-Wide/ram-plus-onnx",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
+      "path": "ram_plus_tags.txt",
       "sha256": "78c9db7838690addaddcb7b3f7dc724b6798f0d6eff7d67c106e8ad8f3f3e69e",
-      "approxBytes": 47000
+      "approxBytes": 47000,
+      "license": "Apache-2.0"
     },
     {
       "id": "ram_plus_thresholds",
@@ -161,9 +152,12 @@
         "macos",
         "windows"
       ],
-      "url": "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt",
+      "repo": "Web-World-Wide/ram-plus-onnx",
+      "revision": "bafc715179cf817dc5a64c664015e2cad6baccb1",
+      "path": "ram_plus_thresholds.txt",
       "sha256": "7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2",
-      "approxBytes": 46000
+      "approxBytes": 46000,
+      "license": "Apache-2.0"
     },
     {
       "id": "mistral_small_gguf",
@@ -171,9 +165,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+      "repo": "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+      "revision": "b3592d09be469bedab6be51f577824b3b6b76ba1",
+      "path": "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
       "sha256": "80f5bda68f156f12650ca03a0a2dbfae06a215ac41caa773b8631a479f82415e",
-      "approxBytes": 14300000000
+      "approxBytes": 14300000000,
+      "license": "Apache-2.0"
     },
     {
       "id": "mistral_small_mmproj",
@@ -181,9 +178,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf",
+      "repo": "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+      "revision": "b3592d09be469bedab6be51f577824b3b6b76ba1",
+      "path": "mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf",
       "sha256": "e41cc0321dbd0d7e42cdada75862a5ed0b221263313b0f1b55b0b696dfec8647",
-      "approxBytes": 878000000
+      "approxBytes": 878000000,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen3vl4b_gguf",
@@ -191,9 +191,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/1cd86afb9a95c410a6038ab3b40d8b578c892266/Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+      "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+      "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+      "path": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
       "sha256": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
-      "approxBytes": 2497281664
+      "approxBytes": 2497281664,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen3vl4b_mmproj",
@@ -201,9 +204,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/1cd86afb9a95c410a6038ab3b40d8b578c892266/mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+      "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+      "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+      "path": "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
       "sha256": "256f3a43bd4205ffef48d6b92715e1e70b5b0e9aef06522584967513a9985331",
-      "approxBytes": 836180256
+      "approxBytes": 836180256,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen3vl8b_gguf",
@@ -211,9 +217,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+      "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+      "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+      "path": "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
       "sha256": "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2",
-      "approxBytes": 5027784800
+      "approxBytes": 5027784800,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen3vl8b_mmproj",
@@ -221,9 +230,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+      "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+      "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+      "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
       "sha256": "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
-      "approxBytes": 1159029824
+      "approxBytes": 1159029824,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen25vl_gguf",
@@ -231,9 +243,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+      "repo": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+      "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
+      "path": "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
       "sha256": "9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392",
-      "approxBytes": 4700000000
+      "approxBytes": 4700000000,
+      "license": "Apache-2.0"
     },
     {
       "id": "qwen25vl_mmproj",
@@ -241,9 +256,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
+      "repo": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+      "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
+      "path": "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
       "sha256": "c24a7f5fcfc68286f0a217023b6738e73bea4f11787a43e8238d4bb1b8604cde",
-      "approxBytes": 1400000000
+      "approxBytes": 1400000000,
+      "license": "Apache-2.0"
     },
     {
       "id": "gemma3_gguf",
@@ -251,9 +269,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+      "repo": "ggml-org/gemma-3-4b-it-GGUF",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
+      "path": "gemma-3-4b-it-Q4_K_M.gguf",
       "sha256": "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863",
-      "approxBytes": 2500000000
+      "approxBytes": 2500000000,
+      "license": "Gemma"
     },
     {
       "id": "gemma3_mmproj",
@@ -261,9 +282,12 @@
       "platforms": [
         "windows"
       ],
-      "url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf",
+      "repo": "ggml-org/gemma-3-4b-it-GGUF",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
+      "path": "mmproj-model-f16.gguf",
       "sha256": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb",
-      "approxBytes": 851251104
+      "approxBytes": 851251104,
+      "license": "Gemma"
     },
     {
       "id": "bge_model",
@@ -272,9 +296,12 @@
         "windows",
         "macos"
       ],
-      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
+      "repo": "Xenova/bge-small-en-v1.5",
+      "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+      "path": "onnx/model.onnx",
       "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
-      "approxBytes": 135000000
+      "approxBytes": 135000000,
+      "license": "MIT"
     },
     {
       "id": "bge_vocab",
@@ -283,9 +310,12 @@
         "windows",
         "macos"
       ],
-      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
+      "repo": "Xenova/bge-small-en-v1.5",
+      "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+      "path": "vocab.txt",
       "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
-      "approxBytes": 232000
+      "approxBytes": 232000,
+      "license": "MIT"
     }
   ],
   "vlmRepos": [
@@ -296,7 +326,8 @@
         "macos"
       ],
       "revision": "fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b",
-      "approxBytes": 4300000000
+      "approxBytes": 4300000000,
+      "license": "Apache-2.0"
     },
     {
       "repo": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
@@ -305,7 +336,8 @@
         "macos"
       ],
       "revision": "9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
-      "approxBytes": 1800000000
+      "approxBytes": 1800000000,
+      "license": "Apache-2.0"
     },
     {
       "repo": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
@@ -314,7 +346,8 @@
         "macos"
       ],
       "revision": "552af30c9952c44f1e1a27c7c5810ded58e892bc",
-      "approxBytes": 3500000000
+      "approxBytes": 3500000000,
+      "license": "Apache-2.0"
     },
     {
       "repo": "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
@@ -323,7 +356,8 @@
         "macos"
       ],
       "revision": "a0afc48efd9308fb14b4d58bbd49d382f7d4f845",
-      "approxBytes": 5776636403
+      "approxBytes": 5776636403,
+      "license": "Apache-2.0"
     },
     {
       "repo": "mlx-community/Qwen3.5-2B-MLX-4bit",
@@ -332,7 +366,8 @@
         "macos"
       ],
       "revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
-      "approxBytes": 1750000000
+      "approxBytes": 1750000000,
+      "license": "Apache-2.0"
     },
     {
       "repo": "mlx-community/gemma-3-4b-it-qat-4bit",
@@ -341,7 +376,8 @@
         "macos"
       ],
       "revision": "3d9ef289111449933c22761961f16a5df237ce2a",
-      "approxBytes": 3300000000
+      "approxBytes": 3300000000,
+      "license": "Gemma"
     },
     {
       "repo": "mlx-community/gemma-3-12b-it-qat-4bit",
@@ -350,7 +386,8 @@
         "macos"
       ],
       "revision": "66fc51ef25778c03d33c4c8bc446973d062e73f4",
-      "approxBytes": 7500000000
+      "approxBytes": 7500000000,
+      "license": "Gemma"
     },
     {
       "repo": "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
@@ -359,7 +396,8 @@
         "macos"
       ],
       "revision": "2a1d5eabfc504747bdc24178394821a1efc0edde",
-      "approxBytes": 13500000000
+      "approxBytes": 13500000000,
+      "license": "Apache-2.0"
     },
     {
       "repo": "mlx-community/paligemma-3b-mix-448-8bit",
@@ -368,7 +406,8 @@
         "macos"
       ],
       "revision": "ce201f8b4b2c2793d4e18d3d44355b49ddff257c",
-      "approxBytes": 3300000000
+      "approxBytes": 3300000000,
+      "license": "Gemma"
     }
   ]
 }

@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result};
 
@@ -28,12 +27,13 @@ impl LicensePolicy {
 
 fn policy_key(model_kind: &str) -> Option<&'static str> {
     match model_kind {
-        "gemma_3_4b" | "gemma_3_12b" | "paligemma_3b" => Some("Gemma"),
         "cudnn_runtime_x64" => Some("NVIDIA-cuDNN"),
         // The ORT CUDA pack and CUDA llama runtime carry CUDA Toolkit
         // redistributables, so the CUDA EULA governs them.
         "ort_cuda_x64" | "llama_runtime_cuda_x64" => Some("NVIDIA-CUDA"),
-        _ => super::catalog::find(model_kind).filter(|entry| entry.terms_required).map(|entry| entry.license.as_str()),
+        _ => super::manifest::terms_policy_for_kind(model_kind).or_else(|| {
+            super::catalog::find(model_kind).filter(|entry| entry.terms_required).map(|entry| entry.license.as_str())
+        }),
     }
 }
 
@@ -46,39 +46,15 @@ fn display_name(key: &str) -> &'static str {
     }
 }
 
-/// `(key, licenseUrl, reviewedAt)` for every terms-required manifest policy.
-fn manifest_policies() -> &'static [(String, String, String)] {
-    static POLICIES: OnceLock<Vec<(String, String, String)>> = OnceLock::new();
-    POLICIES.get_or_init(|| {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../../../shared/models/manifest.json")).unwrap_or_default();
-        let Some(policies) = manifest["licensePolicies"].as_object() else {
-            return Vec::new();
-        };
-        policies
-            .iter()
-            .filter(|(_, policy)| policy["termsRequired"].as_bool() == Some(true))
-            .filter_map(|(key, policy)| {
-                Some((
-                    key.clone(),
-                    policy["licenseUrl"].as_str()?.to_owned(),
-                    policy["reviewedAt"].as_str()?.to_owned(),
-                ))
-            })
-            .collect()
-    })
-}
-
 /// The terms a model kind needs accepted before download; `None` when its
 /// license is permissive.
 pub fn policy_for(model_kind: &str) -> Option<LicensePolicy> {
-    let key = policy_key(model_kind)?;
-    let (key, terms_url, reviewed_at) = manifest_policies().iter().find(|(name, _, _)| name == key)?;
-    Some(LicensePolicy {
+    let (key, policy) = super::manifest::manifest().license_policies.get_key_value(policy_key(model_kind)?)?;
+    policy.terms_required.then(|| LicensePolicy {
         key,
         display_name: display_name(key),
-        terms_url,
-        reviewed_at,
+        terms_url: &policy.license_url,
+        reviewed_at: &policy.reviewed_at,
     })
 }
 

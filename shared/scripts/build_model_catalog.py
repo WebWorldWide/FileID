@@ -4,6 +4,8 @@
 Discovers llama.cpp (GGUF) and MLX repositories from trusted publishers on
 Hugging Face, traces each to its upstream base model, keeps only upstream
 licenses FileID may offer (Apache-2.0 / MIT, plus opt-in Gemma terms),
+rejects denylisted models and any repository whose own id or config
+disagrees with the base model its card declares,
 dedupes re-quantizations of the same base model, and pins an immutable
 revision with per-file SHA256 and sizes for every artifact.
 
@@ -21,11 +23,21 @@ import hashlib
 import json
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_model_license_policy import (  # noqa: E402
+    catalog_errors,
+    gemma_terms_error,
+    identity_mismatch,
+    non_llm,
+    restricted_reason,
+)
 
 API = "https://huggingface.co/api"
 
@@ -35,15 +47,46 @@ PUBLISHERS = [
     "ggml-org", "Qwen", "google", "mistralai", "ibm-granite", "HuggingFaceTB", "microsoft",
     "allenai", "lmstudio-community", "unsloth", "bartowski", "mlx-community",
 ]
-# Upstream organisations whose base models may be offered.
+# Upstream organisations whose base models may be offered. LiquidAI (LFM
+# license) and meta-llama (Llama license) publish only restricted weights.
 UPSTREAM_ORGS = {
     "Qwen", "google", "mistralai", "ibm-granite", "HuggingFaceTB", "microsoft", "allenai",
-    "OpenGVLab", "deepseek-ai", "zai-org", "THUDM", "LiquidAI", "nvidia", "openai",
+    "OpenGVLab", "deepseek-ai", "zai-org", "THUDM", "nvidia", "openai",
     "BAAI", "nomic-ai", "intfloat", "Snowflake", "jinaai", "mixedbread-ai", "ggerganov",
-    "openbmb", "moonshotai", "baidu", "tencent", "PaddlePaddle", "rednote-hilab",
-    "lightonai", "stepfun-ai", "XiaomiMiMo", "meta-llama", "tiiuae", "CohereLabs",
+    "openbmb", "moonshotai", "baidu", "tencent", "PaddlePaddle", "rednote-hilab", "dots-studio",
+    "lightonai", "stepfun-ai", "XiaomiMiMo", "tiiuae", "CohereLabs",
 }
 ALLOWED_LICENSES = {"apache-2.0": "Apache-2.0", "mit": "MIT", "gemma": "Gemma"}
+# A card's license_name, or a license_link to one of these licenses,
+# overrides an apache-2.0 or mit license field.
+RESTRICTED_LICENSE_NAME = re.compile(r"qwen|tongyi|llama|lfm|apple|amlr|research|non-?commercial|cc-by-nc", re.I)
+RESTRICTED_LICENSE_LINK = re.compile(r"llama|lfm|qwen2(\.5)?-(vl-)?72b|research|non-?commercial", re.I)
+# Cards whose license_name/link is a reviewed copy-paste error. InternVL3
+# 1B-14B cards link the Qwen2.5-72B license, but their README releases the
+# weights under MIT and their language parts are Apache-2.0 Qwen2.5 0.5B-14B.
+REVIEWED_LICENSE_REFERENCES = {
+    "OpenGVLab/InternVL3-1B-Instruct", "OpenGVLab/InternVL3-2B-Instruct",
+    "OpenGVLab/InternVL3-8B-Instruct", "OpenGVLab/InternVL3-14B-Instruct",
+}
+# Image generators and text-to-speech models: no FileID role consumes them.
+NON_LLM_ARCHITECTURES = {
+    "qwen_image", "wan", "flux", "sd3", "stable_diffusion", "hunyuan_video", "qwen3_tts", "voxcpm", "voxcpm2", "kokoro",
+}
+NON_LLM_PIPELINES = {
+    "text-to-image", "image-to-image", "text-to-video", "image-to-video", "text-to-speech", "text-to-audio",
+    "unconditional-image-generation",
+}
+NON_LLM_LIBRARIES = {"diffusers", "mflux"}
+# Reviewed roles that override what the repository's files suggest.
+# FrogNano's GGUF ships the projector inherited from Qwen3.5-4B, but its card
+# says image and video input are unsupported, so it is never a vision model.
+ROLE_OVERRIDES = {"microsoft/FrogNano-4B-2609": "text"}
+# Words that make a different model of the same family and size; a
+# conversion and its declared base must agree on them.
+VARIANT_WORDS = {"instruct", "it", "chat", "thinking", "reasoning", "vl", "coder", "math", "embedding", "reranker", "ocr"}
+CONVERSION_SUFFIX = re.compile(
+    r"([-_](gguf|mlx|q\d[\w]*|iq\d\w*|[2-8]-?bit|bf16|fp16|f16|mxfp4\w*|dwq|optiq|awq|gptq|int[48]|lm))+$", re.I
+)
 EXCLUDE = re.compile(
     r"abliterat|uncensor|nsfw|heretic|lora-|-lora|roleplay|merge|test|-pt-|base-gguf|-base$|-base-|draft|mtp|speculative"
     r"|imatrix|bitnet|madlad|coder|safeguard|phone|guard-|-guard|embedding-gemma-test",
@@ -158,8 +201,25 @@ def base_model_of(info: dict) -> str | None:
     return base if isinstance(base, str) else None
 
 
+def restricted_license_reference(info: dict) -> bool:
+    card = info.get("cardData") or {}
+    restricted = RESTRICTED_LICENSE_NAME.search(str(card.get("license_name") or "")) \
+        or RESTRICTED_LICENSE_LINK.search(str(card.get("license_link") or ""))
+    return bool(restricted) and info.get("id") not in REVIEWED_LICENSE_REFERENCES
+
+
+def license_chain(chain: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+    """Hops whose license references are checked: a reviewed repository
+    covers its own pretraining ancestors."""
+    for index, (repo, _) in enumerate(chain):
+        if repo in REVIEWED_LICENSE_REFERENCES:
+            return chain[: index + 1]
+    return chain
+
+
 def lineage(repo: str, cache: dict, info: dict | None = None) -> list[tuple[str, dict]]:
-    """The repo followed by its base_model ancestors (at most 4 hops)."""
+    """The repo followed by its base_model ancestors (at most 4 hops). An
+    ancestor Hugging Face cannot resolve keeps an empty info."""
     chain: list[tuple[str, dict]] = []
     current, current_info = repo, info
     while current and len(chain) < 5 and all(current != seen for seen, _ in chain):
@@ -171,6 +231,70 @@ def lineage(repo: str, cache: dict, info: dict | None = None) -> list[tuple[str,
         chain.append((current, current_info))
         current, current_info = base_model_of(current_info), None
     return chain
+
+
+def model_name(repo: str) -> str:
+    """The model a repository holds, read from its own id: publisher prefix
+    (`bartowski/mistralai_X-GGUF`) and conversion suffixes removed."""
+    name = repo.split("/", 1)[1]
+    owner, _, rest = name.partition("_")
+    if rest and owner in UPSTREAM_ORGS:
+        name = rest
+    return CONVERSION_SUFFIX.sub("", name) or name
+
+
+def family_of(name: str) -> str:
+    return re.split(r"[-_]\d", name, maxsplit=1)[0]
+
+
+def variant_words(name: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", name.lower())) & VARIANT_WORDS
+
+
+def architecture_family(info: dict) -> str | None:
+    model_type = (info.get("config") or {}).get("model_type") or ""
+    match = re.match(r"[a-z]+", model_type.lower())
+    return match.group(0) if match else None
+
+
+def not_language_model(info: dict, base_repo: str, base_info: dict) -> bool:
+    for item in (info, base_info):
+        architecture = (item.get("config") or {}).get("model_type") or (item.get("gguf") or {}).get("architecture")
+        if architecture in NON_LLM_ARCHITECTURES or item.get("pipeline_tag") in NON_LLM_PIPELINES \
+                or item.get("library_name") in NON_LLM_LIBRARIES:
+            return True
+    return non_llm(model_name(base_repo), info["id"], base_repo, [])
+
+
+def upstream_of(chain: list[tuple[str, dict]]) -> tuple[str, dict]:
+    """The original release a conversion was made from: the nearest ancestor
+    owned by an upstream organisation, skipping community conversions."""
+    for repo, info in chain[1:]:
+        if repo.split("/", 1)[0] in UPSTREAM_ORGS:
+            return repo, info
+    return chain[1] if len(chain) > 1 else chain[0]
+
+
+def identity_problem(chain: list[tuple[str, dict]], upstream: str, upstream_info: dict) -> str | None:
+    """Why the repository's own files and id disagree with its declared base.
+    Cards copy base_model and license from unrelated models, so the repo id
+    and config decide what the model is."""
+    repo, info = chain[0]
+    hops = [name for name, _ in chain]
+    through_upstream = chain[: hops.index(upstream) + 1] if upstream in hops else chain
+    if not upstream_info or any(not hop_info for _, hop_info in through_upstream):
+        return "lineage up to the upstream release contains a repository Hugging Face cannot resolve"
+    held = model_name(repo)
+    declared = model_name(upstream) if upstream != repo else held
+    mismatch = identity_mismatch(declared, family_of(declared), repo, upstream)
+    if mismatch:
+        return mismatch
+    if variant_words(held) != variant_words(declared):
+        return f"repo {repo} is {sorted(variant_words(held))}, declared base {upstream} is {sorted(variant_words(declared))}"
+    held_architecture, declared_architecture = architecture_family(info), architecture_family(upstream_info)
+    if held_architecture and declared_architecture and held_architecture != declared_architecture:
+        return f"repo architecture {held_architecture} differs from base {declared_architecture}"
+    return None
 
 
 def params_billion(name: str) -> float | None:
@@ -286,11 +410,11 @@ def build_mlx_entry(info: dict, base_repo: str, base_info: dict, license_key: st
 
 def finish_entry(info, base_repo, base_info, license_key, fmt, role, quant, artifacts, total, resident_gb, sha) -> dict:
     repo = info["id"]
-    name = re.sub(r"[-_](GGUF|MLX[-_A-Za-z0-9]*)$", "", base_repo.split("/", 1)[1], flags=re.I)
+    name = model_name(base_repo)
     return {
         "id": re.sub(r"[^a-z0-9]+", "_", f"{name}_{fmt}_{quant}".lower()).strip("_"),
         "name": name,
-        "family": re.split(r"[-_]\d", name, maxsplit=1)[0],
+        "family": family_of(name),
         "upstream": base_repo,
         "repo": repo,
         "revision": sha,
@@ -334,6 +458,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=400, help="listing size per publisher")
     parser.add_argument("--max-resident-gb", type=float, default=80.0)
     parser.add_argument("--cache", type=Path, help="directory caching Hugging Face API responses")
+    parser.add_argument("--verbose", action="store_true", help="print every rejected repository and why")
     args = parser.parse_args()
     global CACHE
     if args.cache:
@@ -344,24 +469,51 @@ def main() -> int:
     upstream_cache: dict = {}
     chosen: dict[tuple[str, str, str], tuple[int, dict]] = {}
     rejected: dict[str, int] = {}
+    def reject(reason: str, repo: str, detail: str = "") -> None:
+        rejected[reason] = rejected.get(reason, 0) + 1
+        if args.verbose:
+            print(f"reject {repo}: {reason} {detail}".rstrip(), file=sys.stderr)
+
     for info in discover(PUBLISHERS, formats, args.limit):
         chain = lineage(info["id"], upstream_cache, info=info)
-        # The model is the release this conversion was made from; deeper
-        # ancestors are its backbone. Every declared upstream license must
-        # be allowed, and the conversion may not claim a different one.
-        base_repo, base_info = chain[1] if len(chain) > 1 else chain[0]
+        # The model is the original release this conversion was made from;
+        # deeper ancestors are its backbone. Every declared upstream license
+        # must be allowed, and the conversion may not claim a different one.
+        base_repo, base_info = upstream_of(chain)
+        if base_repo == info["id"] and model_name(base_repo) != base_repo.split("/", 1)[1]:
+            original = f"{base_repo.split('/', 1)[0]}/{model_name(base_repo)}"
+            original_info = upstream_cache.setdefault(original, get(f"models/{original}") or {})
+            if original_info:
+                base_repo, base_info = original, original_info
         org = chain[-1][0].split("/", 1)[0]
         upstream_licenses = {license_of(item) for _, item in chain[1:]} - {None}
         license_key = license_of(base_info) or license_of(chain[-1][1]) or license_of(info)
         if org not in UPSTREAM_ORGS or base_repo.split("/", 1)[0] not in UPSTREAM_ORGS | set(PUBLISHERS):
-            rejected["untrusted upstream"] = rejected.get("untrusted upstream", 0) + 1
+            reject("untrusted upstream", info["id"])
+            continue
+        restricted = restricted_reason(info["id"], base_repo, *(repo for repo, _ in chain))
+        if restricted:
+            reject("denylisted", info["id"], restricted)
             continue
         if (license_key not in ALLOWED_LICENSES or not upstream_licenses <= set(ALLOWED_LICENSES)
-                or license_of(info) not in (None, license_key, "other")):
-            rejected["license"] = rejected.get("license", 0) + 1
+                or license_of(info) not in (None, license_key, "other")
+                or any(restricted_license_reference(item) for _, item in license_chain(chain))
+                or (base_info and restricted_license_reference(base_info))):
+            reject("license", info["id"])
+            continue
+        gemma = gemma_terms_error(model_name(base_repo), info["id"], ALLOWED_LICENSES[license_key], license_key == "gemma")
+        if gemma:
+            reject("license", info["id"], gemma)
+            continue
+        problem = identity_problem(chain, base_repo, base_info)
+        if problem:
+            reject("identity mismatch", info["id"], problem)
             continue
         if EXCLUDE.search(base_repo):
-            rejected["excluded variant"] = rejected.get("excluded variant", 0) + 1
+            reject("excluded variant", info["id"])
+            continue
+        if not_language_model(info, base_repo, base_info):
+            reject("not a language model", info["id"])
             continue
         rank = PUBLISHERS.index(info["id"].split("/", 1)[0])
         key = (base_repo, info["_format"])
@@ -370,8 +522,9 @@ def main() -> int:
         builder = build_gguf_entry if info["_format"] == "gguf" else build_mlx_entry
         entry = builder(info, base_repo, base_info, license_key)
         if not entry or entry["estimatedResidentGB"] > args.max_resident_gb:
-            rejected["no usable artifact or too large"] = rejected.get("no usable artifact or too large", 0) + 1
+            reject("no usable artifact or too large", info["id"])
             continue
+        entry["role"] = ROLE_OVERRIDES.get(base_repo, entry["role"])
         chosen[key] = (rank, entry)
 
     entries = sorted((entry for _, entry in chosen.values()), key=lambda e: (e["role"], e["format"], e["estimatedResidentGB"], e["id"]))
@@ -387,8 +540,18 @@ def main() -> int:
         "licensePolicy": {"allowed": sorted(set(ALLOWED_LICENSES.values())), "termsRequired": ["Gemma"]},
         "entries": entries,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(catalog, indent=1, sort_keys=False) + "\n")
+    # The release gate's checks run on the output before it replaces the
+    # catalog, so a bad entry fails the build instead of shipping.
+    with tempfile.TemporaryDirectory() as temporary:
+        candidate = Path(temporary) / "catalog.json"
+        candidate.write_text(json.dumps(catalog, indent=1, sort_keys=False) + "\n")
+        errors = catalog_errors(candidate)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(candidate.read_text())
     by_role: dict[str, int] = {}
     for entry in entries:
         by_role[f"{entry['format']}/{entry['role']}"] = by_role.get(f"{entry['format']}/{entry['role']}", 0) + 1

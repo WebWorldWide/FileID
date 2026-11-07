@@ -724,6 +724,7 @@ impl ToolsUi {
             limit: 500,
             offset: 0,
             channel: QueryChannel::Tools,
+            scope: None,
         });
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
@@ -829,7 +830,7 @@ impl ToolsUi {
         let rx = self
             .engine
             .borrow()
-            .request_preview(row.path.clone(), 900, row.kind == "video");
+            .request_preview(row.path.clone(), super::util::decode_px(&self.picture, 900), row.kind == "video");
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {

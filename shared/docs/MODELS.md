@@ -1,5 +1,18 @@
 # Models — canonical registry
 
+## 2026-11-06 — Extended catalog license and identity audit
+
+Every `shared/models/catalog.json` entry was checked against its pinned repository's own files and its true upstream's LICENSE file or model card. Result: 342 → 334 entries (262 Apache-2.0, 46 MIT, 26 Gemma Terms with `termsRequired`). Removed:
+- [Qwen2.5-VL-3B](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE): Qwen Research License.
+- `mlx-community/gemma-3-4b-it-qat-4bit`: Gemma 3 under the Gemma Terms, listed as InternVL3-1B under Apache-2.0.
+- The three [DeepSeek-R1-Distill-Llama 8B/70B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B#7-license) entries: Llama 3.1/3.3 license.
+- Both EmbeddingGemma 2 entries: the license is Apache-2.0, but the card requires the Gemma Prohibited Use Policy; the owner decided to keep it excluded.
+- One Gemma 4 QAT MLX build whose declared upstream is not public.
+
+Corrected: PaddleOCR-VL 1.5 (was ERNIE-4.5-0.3B), olmOCR-2 7B MLX (was Qwen2.5-VL-7B), Instruct/`-it` names for mislabelled base/`-pt` conversions, and upstreams that pointed at conversions or moved organisations. [Gemma 4's license](https://ai.google.dev/gemma/docs/gemma_4_license) is the plain Apache-2.0 text, so Gemma 4 and DiffusionGemma stay Apache-2.0 without terms. `check_model_license_policy.py` now gates the catalog: denylisted models, name/repository family or size mismatches, and Gemma Terms repositories without `termsRequired` fail CI.
+
+Follow-up the same day: image-generation and text-to-speech models (Qwen-Image family, ERNIE-Image-Turbo, Qwen3-TTS, VoxCPM2) left the shared catalog (334 → 323), and FrogNano-4B is role `text` because its card says image input is unsupported. The Mac `model-catalog.json` dropped 47 safety-stripped (abliterated, uncensored, heretic, OBLITERATED, Dolphin) and vendor-named (Claude/Opus, Fable/Composer, DeepSeek-V4-Pro, FuseO1) community fine-tunes (265 → 218); the shared denylist now covers both catalogs.
+
 ## 2026-10-20 — Handwriting OCR candidate (not installed, no download wired)
 
 Handwriting currently reads through Apple Vision's accurate tier on macOS and, on every engine, a VLM transcription of text-bearing images during Describe Files (Deep Analyze). A dedicated ONNX handwriting reader would let Windows and Linux read handwriting during the scan without a VLM. Licenses were read from the Hugging Face model cards and API on 2026-10-20. Nothing below is in `catalog.json`; adding one needs the owner's sign-off, a pinned revision and hashes, the license gate, and a measurement on the dev machines.
@@ -73,7 +86,7 @@ The approved, verified Qwen3-VL 4B MLX fixture reached the existing `FileID.Mode
 
 The isolated macOS UI fixture and default native test run used no downloaded model weights. The registered visual-model evaluation tests require an explicit internal frame corpus and model cache; they skipped in this checkpoint. No candidate was promoted or quality claim changed. Keep the existing memory-admission and license gates when resuming model-backed assessment.
 
-FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the canonical URL, pin, size, platform, and license record. The Windows compiled registry (`platforms/windows/src/engine/src/models/registry.rs`) is locked to it by `tests/manifest_consistency.rs`; MLX VLM repositories instead pin immutable revisions and resolve their files' hashes from that revision.
+FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the one definition of the curated download set: each artifact's Hugging Face repo, revision, path, SHA256, size, platforms and license (the URL is `https://huggingface.co/<repo>/resolve/<revision>/<path>`). The shared Rust engine embeds it (`models/manifest.rs`) and the registry only adds install paths; the macOS table `ModelManifest.swift` is generated from it by `shared/scripts/gen_model_manifest.py` (`--check` in CI). MLX VLM repositories pin immutable revisions and resolve their files' hashes from that revision. `check_runtime_egress.py` verifies every manifest URL (Hugging Face only, immutable commit revision, SHA256, permitted license, fail-closed parsing); every artifact is pinned to a commit, and a moving ref such as `main` fails the gate.
 
 ## macOS CLIP cache identity (2026-10-02)
 
@@ -209,7 +222,7 @@ The pinned [llama.cpp b9254](https://github.com/ggml-org/llama.cpp/releases/tag/
 
 ### macOS lineup (MLX)
 
-Current `AIModels.swift` exposes seven model kinds; repositories/revisions are pinned in the shared manifest and mirrored by `ModelManifest.swift`. Qwen3-VL is available on macOS; Windows/Linux Qwen3-VL runtime parity is still pending.
+Current `AIModels.swift` exposes seven model kinds; repositories, revisions, sizes and licenses come from the shared manifest through the generated `ModelManifest.swift`. Qwen3-VL is available on macOS; Windows/Linux Qwen3-VL runtime parity is still pending.
 
 | Model | Source repository | Notes |
 |---|---|---|

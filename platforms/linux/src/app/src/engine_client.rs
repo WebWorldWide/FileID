@@ -24,6 +24,7 @@ use fileid_engine::ipc::{
     ModelDownloadProgress, PrewarmModelPayload, StartScanPayload,
 };
 use fileid_engine::client::{self, BoundedLine, Frame};
+use fileid_engine::commands::roots::clause;
 use fileid_engine::read::text::{escape_like, fts_phrase_query};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -120,6 +121,8 @@ pub struct QuerySpec {
     pub limit: i64,
     /// Rows to skip; the Library pages in as the grid nears its end.
     pub offset: i64,
+    /// A location's `RootScope::param`; `None` reads every location.
+    pub scope: Option<String>,
     pub channel: QueryChannel,
 }
 
@@ -889,7 +892,10 @@ pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
 }
 
 fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
-    let conn = fileid_engine::db::open_read(path)?;
+    query_files_on(&fileid_engine::db::open_read(path)?, spec)
+}
+
+fn query_files_on(conn: &rusqlite::Connection, spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
     let search = spec.search.trim();
     let has_search = !search.is_empty();
     let like = format!("%{}%", escape_like(search));
@@ -897,8 +903,10 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
     let has_fts = !fts.is_empty();
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
     let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
+    let scope = spec.scope.as_deref();
+    let within = if scope.is_some() { clause("f.path_text", ":scope") } else { ":scope IS NULL".to_owned() };
     let mut stmt = conn.prepare(&format!(
-        "SELECT {FILE_COLUMNS} FROM files f WHERE {QUERY_FILTER} \
+        "SELECT {FILE_COLUMNS} FROM files f WHERE {QUERY_FILTER} AND {within} \
          ORDER BY f.scanned_at DESC, f.id DESC LIMIT :limit OFFSET :offset"
     ))?;
     let rows = stmt
@@ -909,6 +917,7 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
                 ":has_fts": has_fts,
                 ":fts": fts,
                 ":kind": kind,
+                ":scope": scope,
                 ":limit": limit,
                 ":offset": spec.offset.max(0),
             },
@@ -921,13 +930,14 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
         rows.len() as i64
     } else {
         conn.query_row(
-            &format!("SELECT COUNT(*) FROM files f WHERE {QUERY_FILTER}"),
+            &format!("SELECT COUNT(*) FROM files f WHERE {QUERY_FILTER} AND {within}"),
             rusqlite::named_params! {
                 ":has_search": has_search,
                 ":like": like,
                 ":has_fts": has_fts,
                 ":fts": fts,
                 ":kind": kind,
+                ":scope": scope,
             },
             |row| row.get(0),
         )?
@@ -1666,5 +1676,31 @@ mod tests {
         assert!(file_row_on(&conn, 99).unwrap().is_none());
         drop(conn);
         std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn a_scoped_page_read_keeps_to_its_location_before_its_limit() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES
+              (1,'/m/Camera/a.jpg',1,1,1,'image','jpg'),(2,'/m/Camera/2020/b.mov',2,1,2,'video','mov'),
+              (3,'/m/Camera2/c.jpg',3,1,3,'image','jpg'),(4,'/m/Camera/Synced/d.jpg',4,1,4,'image','jpg'),
+              (5,'/m/Cameras/e.jpg',5,1,5,'image','jpg');",
+        )
+        .unwrap();
+        let others = ["/m/Camera2".to_owned(), "/m/Camera/Synced".to_owned(), "/elsewhere".to_owned()];
+        let scope = Some(fileid_engine::commands::roots::RootScope::new("/m/Camera/", &others).param().to_owned());
+        let ids = |spec: QuerySpec| -> (Vec<i64>, i64) {
+            let (rows, total) = query_files_on(&conn, &spec).unwrap();
+            (rows.into_iter().map(|row| row.id).collect(), total)
+        };
+        let scoped = |spec: QuerySpec| ids(QuerySpec { scope: scope.clone(), ..spec });
+        assert_eq!(scoped(QuerySpec { limit: 10, ..QuerySpec::default() }), (vec![2, 1], 2));
+        assert_eq!(scoped(QuerySpec { limit: 1, ..QuerySpec::default() }), (vec![2], 2));
+        assert_eq!(scoped(QuerySpec { limit: 1, offset: 1, ..QuerySpec::default() }), (vec![1], 2));
+        assert_eq!(scoped(QuerySpec { limit: 10, kind: Some("image".into()), ..QuerySpec::default() }), (vec![1], 1));
+        assert_eq!(scoped(QuerySpec { limit: 10, search: "b.mov".into(), ..QuerySpec::default() }), (vec![2], 1));
+        assert_eq!(ids(QuerySpec { limit: 2, ..QuerySpec::default() }), (vec![5, 4], 5));
     }
 }

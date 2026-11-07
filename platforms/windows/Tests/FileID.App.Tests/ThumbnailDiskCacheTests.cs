@@ -72,4 +72,18 @@ public class ThumbnailDiskCacheTests
 
         Assert.Equal(s_aOldestOnly, picks);
     }
+
+    [Fact]
+    public void VideoKeyframesAreKeyedByTheSizeTheyWereAskedFor()
+    {
+        const string Clip = @"C:\Videos\clip.mp4";
+        var plain = ThumbnailDiskCache.Key(Clip, 1_700_000_000.0);
+        var at384 = ThumbnailDiskCache.Key(Clip, 1_700_000_000.0, 384);
+
+        Assert.Equal(at384, ThumbnailDiskCache.Key(Clip, 1_700_000_000.0, 384));
+        Assert.NotEqual(plain, at384);
+        Assert.NotEqual(at384, ThumbnailDiskCache.Key(Clip, 1_700_000_000.0, 288));
+        Assert.NotEqual(at384, ThumbnailDiskCache.Key(Clip, 1_700_000_001.0, 384));
+        Assert.Equal(plain, ThumbnailDiskCache.Key(Clip, 1_700_000_000.0, null));
+    }
 }

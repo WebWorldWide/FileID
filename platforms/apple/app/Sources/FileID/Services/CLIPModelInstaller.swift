@@ -1,6 +1,6 @@
-// In-app downloader for MobileCLIP-S2 (image encoder + text encoder +
-// BPE vocab). Files come straight from Apple/OpenAI HF repos —
-// per-file streaming with up to 3 concurrent fetches.
+// In-app downloader for the CLIP ViT-B/32 image and text encoders and BPE
+// vocab, as pinned in shared/models/manifest.json — per-file streaming with
+// up to 3 concurrent fetches.
 import Foundation
 import AppKit
 import CryptoKit
@@ -63,29 +63,15 @@ final class CLIPModelInstaller: ModelInstalling {
     private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
         let m = modelsRoot
         let txtDir = m.appendingPathComponent("clip_text")
-        // OpenCLIP ViT-B/32 (MIT) ONNX — commercial-clean replacement for the
-        // research-only Apple MobileCLIP-S2 CoreML packages. Same 512-d space
-        // as the Windows engine; BPE vocab/merges still from OpenAI's repo.
-        func xenova(_ rel: String) -> URL? {
-            URL(string: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/\(rel)")
-        }
-        func openaiBpe(_ name: String) -> URL? {
-            URL(string: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/\(name)")
-        }
-        // compactMap drops any entry whose URL doesn't parse — currently never
-        // possible (static literals), but it means a future typo can't crash
-        // the installer.
-        let pairs: [(URL?, URL)] = [
-            (xenova("onnx/vision_model.onnx"),
-             m.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
-            (xenova("onnx/text_model.onnx"),
-             txtDir.appendingPathComponent("clip_text.onnx")),
-            (openaiBpe("vocab.json"), txtDir.appendingPathComponent("vocab.json")),
-            (openaiBpe("merges.txt"), txtDir.appendingPathComponent("merges.txt")),
+        let plan: [(String, URL)] = [
+            ("clip_vitb32_image", m.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
+            ("clip_vitb32_text", txtDir.appendingPathComponent("clip_text.onnx")),
+            ("clip_bpe_vocab", txtDir.appendingPathComponent("vocab.json")),
+            ("clip_bpe_merges", txtDir.appendingPathComponent("merges.txt")),
         ]
-        return pairs.compactMap { remote, dest in
-            remote.map { (remote: $0, dest: dest,
-                          sha256: ModelManifest.sha256(forURL: $0)) }
+        return plan.compactMap { id, dest in
+            guard let artifact = ModelManifest.artifact(id: id), let remote = URL(string: artifact.url) else { return nil }
+            return (remote: remote, dest: dest, sha256: artifact.sha256)
         }
     }
 

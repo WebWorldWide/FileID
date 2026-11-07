@@ -18,7 +18,10 @@ pub const MAX_SCENE_SECONDS: f64 = 20.0;
 pub const ACTIVITY_CHANGE: f64 = 0.02;
 pub const ACTIVITY_PAD_SECONDS: f64 = 0.5;
 pub const MERGE_GAP_SECONDS: f64 = 1.0;
-pub const MAX_WINDOW_SECONDS: f64 = 4.0;
+/// 2.5 rather than 4: the 2B visual model rarely localizes inside a window and tends to
+/// report a moment over the whole window, so a shorter window is what lets a one-second
+/// action be proposed; at 0.5 s pool spacing it also keeps every pool frame (no subsampling).
+pub const MAX_WINDOW_SECONDS: f64 = 2.5;
 pub const MAX_WINDOW_FRAMES: usize = 6;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,10 +220,10 @@ mod tests {
 
     #[test]
     fn activity_windows_cover_only_motion() {
-        let frames: Vec<Frame> = (0..40).map(|i| frame(i as f64 * 0.5, 0.0, if (10..14).contains(&i) { 0.05 } else { 0.0 })).collect();
+        let frames: Vec<Frame> = (0..40).map(|i| frame(i as f64 * 0.5, 0.0, if (10..12).contains(&i) { 0.05 } else { 0.0 })).collect();
         let windows = activity_windows(&frames, 20.0);
         assert_eq!(windows.len(), 1);
-        assert!(windows[0].start >= 4.0 && windows[0].end <= 7.5);
+        assert!(windows[0].start >= 4.0 && windows[0].end <= 6.5);
         assert!((2..=MAX_WINDOW_FRAMES).contains(&windows[0].times.len()));
         let still: Vec<Frame> = (0..10).map(|i| frame(i as f64, 0.0, 0.0)).collect();
         assert!(activity_windows(&still, 10.0).is_empty());
@@ -233,6 +236,18 @@ mod tests {
         assert!(windows.len() >= 5);
         assert!(windows.iter().all(|w| w.end - w.start <= MAX_WINDOW_SECONDS + 1.01 && w.times.len() <= MAX_WINDOW_FRAMES));
         assert!(windows.iter().all(|w| w.times.windows(2).all(|p| p[0] < p[1])));
+    }
+
+    #[test]
+    fn short_windows_send_every_pool_frame() {
+        let frames: Vec<Frame> = (0..40).map(|i| frame(i as f64 * 0.5, 0.0, 0.1)).collect();
+        let windows = activity_windows(&frames, 20.0);
+        assert_eq!(windows.len(), 8);
+        for window in &windows {
+            assert!(window.end - window.start <= MAX_WINDOW_SECONDS + 0.001);
+            let pool: Vec<f64> = frames.iter().map(|f| f.seconds).filter(|t| *t >= window.start && *t <= window.end).collect();
+            assert_eq!(window.times, pool);
+        }
     }
 
     #[test]
