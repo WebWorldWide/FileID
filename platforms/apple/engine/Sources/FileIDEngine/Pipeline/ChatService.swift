@@ -4,12 +4,12 @@ import FileIDShared
 
 actor ChatService {
     static let shared = ChatService()
-    private var active: [String: String] = [:]
+    var active: [String: String] = [:]
     private var running: String?
     private var runningInterleaved = false
     private var accumulated: [String: String] = [:]
     private var lastEmit: [String: Date] = [:]
-    private var latestRequest: [String: String] = [:]
+    var latestRequest: [String: String] = [:]
 
     /// Reciprocal-rank fusion constant and per-list weights (lexical, CLIP,
     /// BGE). Identical in Rust `commands::chat`.
@@ -69,6 +69,10 @@ actor ChatService {
                 guard let text = request.text,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 2000 else { throw CatalogStore.InvalidRequest() }
                 if let rootID = request.context?.rootID { _ = try await database.pool.read { db in try LibraryRoots.Scope.load(db, id: rootID) } }
+                if request.scopeFileIDs != nil {
+                    try await selection(request, text: text, database: database, sink: sink)
+                    return
+                }
                 active[request.conversationID] = request.requestID
                 latestRequest[request.conversationID] = request.requestID
                 try await database.pool.write { db in
@@ -478,11 +482,11 @@ actor ChatService {
         }
     }
 
-    private static func save(_ text: String, role: String, conversation: String, database: Database) async throws {
+    static func save(_ text: String, role: String, conversation: String, database: Database) async throws {
         try await database.pool.write { db in try db.execute(sql: "INSERT INTO catalog_chat(id,conversation_id,role,text,created_at) VALUES(?,?,?,?,?)", arguments: [UUID().uuidString,conversation,role,text,Date().timeIntervalSince1970]) }
     }
 
-    private func emit(_ request: ChatRequest, status: String, message: String, hits: [CatalogHit] = [], actions: [ChatAction] = [], database: Database, sink: IPCSink) async {
+    func emit(_ request: ChatRequest, status: String, message: String, hits: [CatalogHit] = [], actions: [ChatAction] = [], database: Database, sink: IPCSink) async {
         let history = (try? await database.pool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM (SELECT rowid,* FROM catalog_chat WHERE conversation_id=? ORDER BY rowid DESC LIMIT 100) ORDER BY rowid", arguments: [request.conversationID]).map { row in
                 ChatMessage(id: row["id"], role: row["role"], text: row["text"], createdAt: row["created_at"])
