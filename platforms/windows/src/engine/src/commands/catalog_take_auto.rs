@@ -81,6 +81,8 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
                 captured_at: members.iter().filter_map(|m| m.time).fold(0.0, f64::max),
                 similarity: take_scoring::round4(similarity.clamp(0.0, 1.0) as f64),
                 shots: shots.into_iter().take(100).collect(),
+                relation: None,
+                evidence: None,
             });
         }
     }

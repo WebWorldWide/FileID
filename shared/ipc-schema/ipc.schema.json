@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.20.0",
+  "version": "1.21.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1319,7 +1319,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "Worker kind, including timelineSample and catalogIndex. Resume requires a supported worker; catalogIndex permits explicit retry after failure or cancellation."
+          "description": "Worker kind, including timelineSample, catalogIndex and takeGrouping. Resume requires a supported worker; catalogIndex permits explicit retry after failure or cancellation."
         },
         "fileIDs": {
           "type": "array",
@@ -1439,7 +1439,7 @@
     },
     "CatalogTakeAutoGroup": {
       "type": "object", "additionalProperties": false,
-      "description": "A suggested group of tries of the same shot, found from capture time and look. status skipped means the person chose Skip group.",
+      "description": "A suggested group of tries of the same shot, found from capture time and look. status skipped means the person chose Skip group. relation and evidence (schema 1.21.0) are set only on takeGroupProposals results.",
       "required": ["groupKey", "kind", "status", "capturedAt", "similarity", "shots"],
       "properties": {
         "groupKey": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -1447,7 +1447,9 @@
         "status": {"type": "string", "enum": ["open", "skipped"]},
         "capturedAt": {"type": "number"},
         "similarity": {"type": "number", "minimum": 0, "maximum": 1},
-        "shots": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeShot"}, "minItems": 2, "maxItems": 100}
+        "shots": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeShot"}, "minItems": 2, "maxItems": 100},
+        "relation": {"type": "string", "enum": ["repeatedAttempts", "alternateViews", "uncertain"], "description": "Schema 1.21.0. repeatedAttempts: one camera captured the tries one after another. alternateViews: different cameras captured the same moment, so the files are other angles or copies rather than separate tries. uncertain: camera details are missing or mixed, so the evidence cannot tell them apart."},
+        "evidence": {"type": "array", "items": {"type": "string", "enum": ["captureSession", "visualSimilarity", "sharedSubject", "sameCamera", "simultaneousCameras", "mixedCameras", "cameraDetailsMissing"]}, "maxItems": 8, "description": "Schema 1.21.0. Evidence codes behind the proposal, in this order when present. captureSession and visualSimilarity are always present; time alone never forms a group. sharedSubject means every try shows at least one common user-named person."}
       }
     },
     "CatalogTakeQuality": {
@@ -1542,9 +1544,11 @@
             "scoreTakes",
             "rankTakesWithGoal",
             "decideTakeGroup",
-            "proposeNames"
+            "proposeNames",
+            "enqueueTakeGrouping",
+            "takeGroupProposals"
           ],
-          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed."
+          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed. enqueueTakeGrouping (schema 1.21.0) queues the library-wide related-take job (kind takeGrouping, one job per library): it proposes groups of related tries from capture sessions, CLIP similarity and user-named people, never touches files, saved events or Keep all / Skip choices, and on a rerun reprocesses only capture sessions whose files were added, changed or removed. It replies with the job in jobs; a queued or running job is left as is, and a completed, cancelled, failed or paused one is queued again. pauseJob, resumeJob and cancelJob control it; an interrupted run comes back paused and resumes without redoing finished sessions. takeGroupProposals (schema 1.21.0) reads the stored proposals as takeGroups with relation and evidence, ranked like autoTakeGroups and limited by limit (default 100), and returns the job in jobs. Proposals overlapping a saved event are left out and Keep all / Skip choices apply as for autoTakeGroups."
         },
         "query": {
           "type": "string",

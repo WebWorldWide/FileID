@@ -190,13 +190,17 @@ public struct CatalogTakeAutoGroup: Codable, Sendable, Equatable, Identifiable {
     public var capturedAt: Double
     public var similarity: Double
     public var shots: [CatalogTakeShot]
+    public var relation: String?
+    public var evidence: [String]?
     public var id: String { groupKey }
     public var fileIDs: [Int64] { shots.flatMap(\.fileIDs) }
-    public init(groupKey: String, kind: String, status: String, capturedAt: Double, similarity: Double, shots: [CatalogTakeShot]) {
+    public init(groupKey: String, kind: String, status: String, capturedAt: Double, similarity: Double, shots: [CatalogTakeShot],
+                relation: String? = nil, evidence: [String]? = nil) {
         self.groupKey = groupKey; self.kind = kind; self.status = status
         self.capturedAt = capturedAt; self.similarity = similarity; self.shots = shots
+        self.relation = relation; self.evidence = evidence
     }
-    private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots }
+    private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots, relation, evidence }
 }
 
 public struct CatalogTakeQuality: Codable, Sendable, Equatable {
