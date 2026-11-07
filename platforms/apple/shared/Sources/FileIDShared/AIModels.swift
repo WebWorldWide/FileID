@@ -125,7 +125,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var licenseTermsURL: URL? {
         guard let policy = ModelManifest.licensePolicies[licensePolicyKey], policy.termsRequired else { return nil }
-        return URL(string: policy.licenseURL)
+        return policy.licenseURL.flatMap { URL(string: $0) }
     }
 
     /// Top three picks for a given RAM tier, ranked best-first.

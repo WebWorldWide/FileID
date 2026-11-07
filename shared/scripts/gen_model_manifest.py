@@ -66,7 +66,7 @@ def generate(manifest: dict) -> str:
         "",
         "public struct ModelLicensePolicy: Sendable, Equatable {",
         "    public let spdx: String",
-        "    public let licenseURL: String",
+        "    public let licenseURL: String?",
         "    public let termsRequired: Bool",
         "    public let reviewedAt: String",
         "}",
@@ -81,7 +81,7 @@ def generate(manifest: dict) -> str:
         lines += [
             f"        {literal(key)}: ModelLicensePolicy(",
             f"            spdx: {literal(policy['spdx'])},",
-            f"            licenseURL: {literal(policy['licenseUrl'])},",
+            f"            licenseURL: {literal(policy['licenseUrl']) if policy['termsRequired'] is True else 'nil'},",
             f"            termsRequired: {terms},",
             f"            reviewedAt: {literal(policy['reviewedAt'])}),",
         ]
