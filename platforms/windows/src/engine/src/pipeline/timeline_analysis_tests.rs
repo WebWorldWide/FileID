@@ -67,7 +67,7 @@ fn parse_moments_accepts_wrapped_json_and_rejects_bad_ranges() {
     let moments = parse_moments(raw, &four).unwrap();
     assert_eq!(moments[0].title, "Kid swings bat");
     assert_eq!((moments[0].first_frame, moments[0].last_frame), (1, 3));
-    assert!(parse_moments("{\"moments\":[]}", &four).unwrap().is_empty());
+    assert_eq!(parse_moments("{\"moments\":[]}", &four).unwrap(), vec![]);
     assert!(parse_moments(raw, &four[..3]).is_err());
     assert!(parse_moments(raw, &four[..1]).is_err());
     assert!(parse_moments("no json", &four).is_err());

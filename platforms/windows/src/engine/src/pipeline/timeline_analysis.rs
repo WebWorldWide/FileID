@@ -213,7 +213,7 @@ fn resolve_moment(raw: RawMoment, times: &[f64]) -> Option<Moment> {
         (0, times.len() as i64 - 1)
     };
     let (first, last) = (usize::try_from(first).ok()?, usize::try_from(last).ok()?);
-    (last >= first && last < times.len()).then(|| Moment { title: raw.title, summary: raw.summary, first_frame: first, last_frame: last })
+    (last >= first && last < times.len()).then_some(Moment { title: raw.title, summary: raw.summary, first_frame: first, last_frame: last })
 }
 
 fn seconds_value(value: &serde_json::Value) -> Option<f64> {
