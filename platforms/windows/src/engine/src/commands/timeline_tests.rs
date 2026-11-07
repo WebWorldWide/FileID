@@ -477,7 +477,10 @@ async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
 
 #[tokio::test]
 async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
-    let Some((directory, database)) = media_fixture("testsrc2=size=64x36:rate=5:duration=6") else {
+    // Brightness ramps for three seconds, then holds: activity windows cover only the ramp.
+    let Some((directory, database)) =
+        media_fixture("color=c=black:size=64x36:rate=5:duration=6,geq=lum=if(lt(T\\,3)\\,40+T*60\\,16):cb=128:cr=128")
+    else {
         return;
     };
     let (id, _) = enqueue(
@@ -492,12 +495,12 @@ async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
     let (sink, _events) = Sink::channel_for_test(1_024);
     let frames = directory.join("frames");
     let revision = revision(&database.lock(), 1).unwrap();
-    let edited_id = format!("{}0", analysis::moment_prefix(1, &revision, 3.0));
+    let edited_id = format!("{}0", analysis::moment_prefix(1, &revision, 0.0));
     let edited = CatalogChapter {
         id: edited_id.clone(),
         file_id: 1,
-        start_seconds: 3.0,
-        end_seconds: 4.0,
+        start_seconds: 0.5,
+        end_seconds: 1.0,
         title: "Grandpa's throw".into(),
         summary: String::new(),
         source_revision: revision.clone(),
@@ -525,7 +528,12 @@ async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
     assert_eq!(
         model.sequences.load(Ordering::SeqCst),
         2,
-        "a six-second clip has two overlapping windows"
+        "the three-second ramp splits into two activity windows"
+    );
+    assert_eq!(
+        count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=1 AND id LIKE 'moment-still:%' AND status='sampled'"),
+        1,
+        "the still tail is recorded as examined without a model call"
     );
     let moments = count(&database, "SELECT COUNT(*) FROM catalog_chapters WHERE file_id=1 AND model_version LIKE 'timeline-moment-sequence-v1/%' AND user_edited=0");
     assert_eq!(
@@ -770,7 +778,7 @@ async fn next_moment_window_decodes_while_the_model_runs() {
         1,
         &source,
         duration,
-        &[],
+        (&[], None),
         (4, 4),
         "fixture",
         (0, 1, 1.0),
@@ -799,4 +807,46 @@ async fn next_moment_window_decodes_while_the_model_runs() {
     );
     assert!(std::fs::read_dir(&frames).unwrap().next().is_none(), "temporary frames are removed");
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn signature(seconds: f64, level: u8) -> (f64, Vec<u8>) {
+    (seconds, vec![level; analysis::SIGNAL_WIDTH * analysis::SIGNAL_HEIGHT])
+}
+
+#[test]
+fn half_second_grid_interleaves_the_offset_pass() {
+    let whole = (0..6).map(|i| signature(i as f64, 0)).collect();
+    let offset = (0..6).map(|i| signature(i as f64 + 0.5, 0)).chain([signature(5.52, 0)]).collect();
+    let grid = merge_grid(whole, offset, 5.6);
+    let times: Vec<f64> = grid.iter().map(|(t, _)| *t).collect();
+    assert_eq!(times, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]);
+}
+
+#[test]
+fn moment_plan_uses_activity_windows_when_the_grid_is_complete() {
+    let grid: Vec<(f64, Vec<u8>)> = (0..24)
+        .map(|i| signature(i as f64 * 0.5, if (8..12).contains(&i) { 40 + 30 * (i as u8 - 8) } else { 10 }))
+        .collect();
+    let (windows, still) = moment_plan(12.0, &[], Some(&grid));
+    assert_eq!(windows.len(), 2);
+    for window in &windows {
+        assert!(window.end - window.start <= crate::pipeline::video_scene_selection::MAX_WINDOW_SECONDS + 1e-9);
+        let pool: Vec<f64> = grid.iter().map(|(t, _)| *t).filter(|t| *t >= window.start && *t <= window.end).collect();
+        assert_eq!(window.times, pool, "every half-second frame in the window is sent");
+    }
+    assert_eq!(still.len(), 2);
+    assert!(still[0].0.abs() < 1e-9 && (still[0].1 - windows[0].start).abs() < 1e-9);
+    assert!((still[1].1 - 12.0).abs() < 1e-9);
+
+    let flat: Vec<(f64, Vec<u8>)> = (0..24).map(|i| signature(i as f64 * 0.5, 10)).collect();
+    let (windows, still) = moment_plan(12.0, &[], Some(&flat));
+    assert_eq!(windows, Vec::new(), "footage without motion sends nothing to the model");
+    assert_eq!(still, vec![(0.0, 12.0)]);
+}
+
+#[test]
+fn moment_plan_falls_back_to_overlapping_windows_without_a_grid() {
+    let (windows, still) = moment_plan(8.0, &[], None);
+    assert_eq!(windows, analysis::windows(8.0, &[]));
+    assert_eq!(still, Vec::new());
 }
