@@ -192,6 +192,10 @@ public sealed class NameStylePolicyTests
         Assert.Equal(new[] { new RenameEntry(14, "lone-hill.ARW") }, NameStylePolicy.Renames(rows));
     }
 
+    private static readonly string[] ExpectedReasons = { "proposedName", "proposedName", "proposedName", "tags" };
+    private static readonly string[] ExpectedLearned = { "separator", "case" };
+    private static readonly JsonSerializerOptions CamelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     [Fact]
     public void LearnedReasonsChipsAndEdits()
     {
@@ -203,8 +207,8 @@ public sealed class NameStylePolicyTests
             Hit(4, "IMG_4.jpg", "beach.jpg", "tags"),
         };
         var rows = NameStylePolicy.Rows(hits, Array.Empty<NameProposalRow>());
-        Assert.Equal(new[] { "proposedName", "proposedName", "proposedName", "tags" }, rows.Select(r => r.Reason));
-        Assert.Equal(new[] { "separator", "case" }, rows[0].Learned);
+        Assert.Equal(ExpectedReasons, rows.Select(r => r.Reason));
+        Assert.Equal(ExpectedLearned, rows[0].Learned);
         Assert.Equal((3L, ".ARW"), (rows[2].Group!.Value, rows[2].Suffix));
         Assert.Equal("From the AI name · your style", NameStylePolicy.ReasonChip(rows[0]));
         Assert.Equal("From tags", NameStylePolicy.ReasonChip(rows[3]));
@@ -217,10 +221,10 @@ public sealed class NameStylePolicyTests
         Assert.True(naming.Learn);
         var request = NameStylePolicy.LearnRequest("l", edits, naming);
         Assert.Equal("learnNames", request.Action);
-        var wire = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        var wire = JsonSerializer.Serialize(request, CamelCase);
         Assert.Contains("\"learn\":true", wire);
         Assert.Contains("\"nameEdits\":[{\"fileID\":1", wire);
-        Assert.DoesNotContain("\"learn\"", JsonSerializer.Serialize(NameStylePolicy.Naming("short", 40, false, false, false), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        Assert.DoesNotContain("\"learn\"", JsonSerializer.Serialize(NameStylePolicy.Naming("short", 40, false, false, false), CamelCase));
         Assert.Equal("resetNamePreferences", NameStylePolicy.PreferencesRequest("p", true).Action);
     }
 

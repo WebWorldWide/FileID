@@ -6,12 +6,15 @@ namespace FileID.App.Tests;
 
 public sealed class TakeProposalPolicyTests
 {
+    private static readonly string[] SessionAndCameras = { "captureSession", "simultaneousCameras" };
+    private static readonly string[] MixedEvidence = { "captureSession", "visualSimilarity", "future", "sameCamera" };
+
     private static CatalogJob Job(string state, double updated = 1) => new("take-grouping", "takeGrouping", Array.Empty<long>(), state, 0.5, null, 0, updated);
 
     private static CatalogTakeAutoGroup Group(string key, string status = "open", string? relation = "alternateViews") => new(
         key, "photos", status, 0, 0.9,
         new[] { new CatalogTakeShot(4, new long[] { 4, 5 }, "/p/a.JPG"), new CatalogTakeShot(6, new long[] { 6 }, "/p/b.JPG") },
-        relation, new[] { "captureSession", "simultaneousCameras" });
+        relation, SessionAndCameras);
 
     [Fact]
     public void RelationChipsAndEvidenceText()
@@ -28,7 +31,7 @@ public sealed class TakeProposalPolicyTests
         foreach (var code in new[] { "captureSession", "visualSimilarity", "sharedSubject", "sameCamera", "simultaneousCameras", "mixedCameras", "cameraDetailsMissing" })
             Assert.NotNull(TakeProposalPolicy.EvidenceSentence(code));
         Assert.Equal("Taken close together. They look alike. One camera took them all.",
-            TakeProposalPolicy.EvidenceText(new[] { "captureSession", "visualSimilarity", "future", "sameCamera" }));
+            TakeProposalPolicy.EvidenceText(MixedEvidence));
         Assert.Equal("", TakeProposalPolicy.EvidenceText(null));
         Assert.StartsWith("Tries of the same shot", TakeProposalPolicy.Summary(Group("k", relation: null) with { Evidence = null }), StringComparison.Ordinal);
         Assert.StartsWith("Taken close together. Different cameras took them at the same moment. Different cameras caught", TakeProposalPolicy.Summary(Group("k")), StringComparison.Ordinal);
