@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-07 — Timeline moments: timestamp-labelled frames measured, kept opt-in
+
+- **Both engines** (agent): the Mac moments request can put a `[t=12.50s]` label before each frame and ask for `start`/`end` in seconds (`FILEID_TIMELINE_FRAME_LABELS=1`; owner-approved `DeepAnalyze.swift` digest refresh, three request lines, no network code). Moment replies are now parsed tolerantly in Swift and Rust: seconds snap to the nearest frame, frame indexes still work, and a moment without a time covers its window. The Rust request is unchanged: its body is built in the digest-locked `vlm_server.rs`.
+- Rebuilt labelled set (Swift, 2B; baseline → labelled; tune / held-out): moment recall 0.772→0.789 / 0.778→0.704; precision IoU 0.52→0.529 / 0.344→0.318; fast actions 10/22→12/22 / 8/12→7/12; moments narrower than 80% of their window 6%→21% / 8%→23%; about 9% more model time per call. It localizes but doesn't generalize, so the default stays the frame-index prompt.
+- Checks: Swift 872/873 serial (the ScanCancellation `ready` timeout happens only with the debug engine under load; it passes with release engines from main and this branch), Rust 1,176 and clippy/fmt, egress/docs/DTO gates.
+
 ## 2026-11-07 — Private labelled eval sets rebuilt; new baselines
 
 - **Rebuilt** (agent, owner-approved, copied read-only from the Adlon drive into `~/Library/Developer/FileIDEval`; nothing in the repo): People 365 photos across 18 events with 902 labelled boxes (615 identity faces, 103 anonymous ids, 67 small faces; 25 ids with ≥5 faces, 15 ids in both splits); timeline 18 videos with 104 intervals (34 fast actions, mostly sports; 19 cuts). Held-out has only one cut, so held-out cut numbers mean nothing.
