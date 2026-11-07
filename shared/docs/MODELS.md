@@ -13,6 +13,8 @@ Corrected: PaddleOCR-VL 1.5 (was ERNIE-4.5-0.3B), olmOCR-2 7B MLX (was Qwen2.5-V
 
 Follow-up the same day: image-generation and text-to-speech models (Qwen-Image family, ERNIE-Image-Turbo, Qwen3-TTS, VoxCPM2) left the shared catalog (334 → 323), and FrogNano-4B is role `text` because its card says image input is unsupported. The Mac `model-catalog.json` dropped 47 safety-stripped (abliterated, uncensored, heretic, OBLITERATED, Dolphin) and vendor-named (Claude/Opus, Fable/Composer, DeepSeek-V4-Pro, FuseO1) community fine-tunes (265 → 218); the shared denylist now covers both catalogs.
 
+2026-11-07 regeneration (323 → 309; 238 Apache-2.0, 45 MIT, 26 Gemma Terms): reviewed `UPSTREAM_OVERRIDES` keep the hand-corrected entries whose cards still name the wrong base (mlx-community Qwen2.5 Instruct, gemma-3 -it MLX, olmOCR-2 MLX, PaddleOCR-VL-1.5 MLX, SmolLM v0.2, GLM-4-32B). Community fine-tunes named after their base and REAP expert-pruned builds are rejected, Dolphin 3.0 is denylisted, and duplicate builds of one upstream collapse to one (MLX prefers 4-bit). Details in `DECISIONS.md`.
+
 ## 2026-10-20 — Handwriting OCR candidate (not installed, no download wired)
 
 Handwriting currently reads through Apple Vision's accurate tier on macOS and, on every engine, a VLM transcription of text-bearing images during Describe Files (Deep Analyze). A dedicated ONNX handwriting reader would let Windows and Linux read handwriting during the scan without a VLM. Licenses were read from the Hugging Face model cards and API on 2026-10-20. Nothing below is in `catalog.json`; adding one needs the owner's sign-off, a pinned revision and hashes, the license gate, and a measurement on the dev machines.
