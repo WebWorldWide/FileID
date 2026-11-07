@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.22.0",
+  "version": "1.23.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1298,6 +1298,10 @@
         },
         "page": {
           "type": "integer"
+        },
+        "match": {
+          "enum": ["yes", "unsure"],
+          "description": "Schema 1.23.0: set only on answers to a chat send with scopeFileIDs. yes: the local vision model saw the requested thing in this file. unsure: the model couldn't tell, or no model checked it (evidence ranking only). Files the model judged not to match are never returned. text then holds the one-sentence reason."
         }
       }
     },
@@ -1757,6 +1761,13 @@
         "embeddingModel": {
           "type": "string",
           "maxLength": 200
+        },
+        "scopeFileIDs": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "minItems": 1,
+          "maxItems": 2000,
+          "description": "Schema 1.23.0: files the user attached to the question (\"12 selected photos\"). A send with it answers only from these files: the engine never returns, counts or proposes anything outside them. It ranks the photos and videos among them by stored evidence (CLIP picture match against queryVector, tags, descriptions, file names, named people) and, when useModel is true and a local vision model is ready, checks the most likely files (every one when 60 or fewer) with a strict yes/no/unsure question. Hits come back matches first (CatalogHit.match yes), then the ones the model wasn't sure about (match unsure); files that don't match are left out, and text is a one-sentence reason. Without a model every hit is unsure and the message says nothing was checked. Unknown, failed and non-media IDs are dropped; context.rootID still applies. Duplicates are ignored. history, clear and cancel ignore it."
         }
       }
     },

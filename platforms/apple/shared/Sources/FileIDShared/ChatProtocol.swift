@@ -32,10 +32,11 @@ public struct ChatRequest: Codable, Sendable, Equatable {
     public let context: ChatContext?
     public let queryVector: [Float]?
     public let embeddingModel: String?
+    public let scopeFileIDs: [Int64]?
     public init(requestID: String, conversationID: String, action: String, text: String? = nil, useModel: Bool? = nil, modelKind: String? = nil,
-                context: ChatContext? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil) {
+                context: ChatContext? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, scopeFileIDs: [Int64]? = nil) {
         self.requestID = requestID; self.conversationID = conversationID; self.action = action; self.text = text; self.useModel = useModel; self.modelKind = modelKind
-        self.context = context; self.queryVector = queryVector; self.embeddingModel = embeddingModel
+        self.context = context; self.queryVector = queryVector; self.embeddingModel = embeddingModel; self.scopeFileIDs = scopeFileIDs
     }
 }
 

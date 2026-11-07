@@ -613,7 +613,12 @@
         }
       },
       "CatalogHit": {
-        "deny_unknown_fields": true
+        "deny_unknown_fields": true,
+        "fields": {
+          "match": {
+            "name": "selection_match"
+          }
+        }
       },
       "CatalogTake": {
         "deny_unknown_fields": true
