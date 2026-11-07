@@ -1589,6 +1589,11 @@
       "weightBytes": 278064920,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+          "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-0.5B",
           "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
           "license": "apache-2.0"
@@ -1616,6 +1621,11 @@
       "weightBytes": 525045902,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+          "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-0.5B",
           "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
           "license": "apache-2.0"
@@ -1642,6 +1652,11 @@
       "role": "text",
       "weightBytes": 868628559,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-1.5B-Instruct",
+          "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-1.5B",
           "revision": "8faed761d45a263340a0528343f099c05c9a4323",
@@ -1707,6 +1722,11 @@
       "weightBytes": 8309494233,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-14B-Instruct",
+          "revision": "cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-14B",
           "revision": "97e1e76335b7017d8f67c08a19d103c0504298c9",
           "license": "apache-2.0"
@@ -1738,6 +1758,11 @@
       "role": "text",
       "weightBytes": 18431478459,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-32B-Instruct",
+          "revision": "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-32B",
           "revision": "1818d35814b8319459f4bd55ed1ac8709630f003",
@@ -1780,6 +1805,11 @@
       "role": "text",
       "weightBytes": 34812857379,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-32B-Instruct",
+          "revision": "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-32B",
           "revision": "1818d35814b8319459f4bd55ed1ac8709630f003",
@@ -1976,6 +2006,11 @@
       "weightBytes": 4284346255,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-7B-Instruct",
+          "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-7B",
           "revision": "d149729398750b98c0af14eb82c78cfe92750796",
           "license": "apache-2.0"
@@ -2002,6 +2037,11 @@
       "role": "text",
       "weightBytes": 8091987725,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-7B-Instruct",
+          "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-7B",
           "revision": "d149729398750b98c0af14eb82c78cfe92750796",
@@ -2173,6 +2213,11 @@
       "weightBytes": 868628559,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-Coder-1.5B",
+          "revision": "df3ce67c0e24480f20468b6ef2894622d69eb73b",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-1.5B",
           "revision": "8faed761d45a263340a0528343f099c05c9a4323",
           "license": "apache-2.0"
@@ -2200,6 +2245,11 @@
       "weightBytes": 1640414038,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-Coder-1.5B",
+          "revision": "df3ce67c0e24480f20468b6ef2894622d69eb73b",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-1.5B",
           "revision": "8faed761d45a263340a0528343f099c05c9a4323",
           "license": "apache-2.0"
@@ -2226,6 +2276,11 @@
       "role": "text",
       "weightBytes": 868628559,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+          "revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-Coder-1.5B",
           "revision": "df3ce67c0e24480f20468b6ef2894622d69eb73b",
@@ -2258,6 +2313,11 @@
       "role": "text",
       "weightBytes": 1640414038,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+          "revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-Coder-1.5B",
           "revision": "df3ce67c0e24480f20468b6ef2894622d69eb73b",
@@ -2833,6 +2893,11 @@
       "weightBytes": 4284346255,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-Coder-7B",
+          "revision": "0396a76181e127dfc13e5c5ec48a8cee09938b02",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-7B",
           "revision": "d149729398750b98c0af14eb82c78cfe92750796",
           "license": "apache-2.0"
@@ -2859,6 +2924,11 @@
       "role": "text",
       "weightBytes": 8091987725,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-Coder-7B",
+          "revision": "0396a76181e127dfc13e5c5ec48a8cee09938b02",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-7B",
           "revision": "d149729398750b98c0af14eb82c78cfe92750796",
@@ -2929,6 +2999,11 @@
       "weightBytes": 4284346255,
       "bases": [
         {
+          "repo": "Qwen/Qwen2.5-Coder-7B-Instruct",
+          "revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-Coder-7B",
           "revision": "0396a76181e127dfc13e5c5ec48a8cee09938b02",
           "license": "apache-2.0"
@@ -2960,6 +3035,11 @@
       "role": "text",
       "weightBytes": 8091987725,
       "bases": [
+        {
+          "repo": "Qwen/Qwen2.5-Coder-7B-Instruct",
+          "revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-Coder-7B",
           "revision": "0396a76181e127dfc13e5c5ec48a8cee09938b02",
@@ -4965,6 +5045,11 @@
       "role": "text",
       "weightBytes": 17181071994,
       "bases": [
+        {
+          "repo": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+          "revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen3-30B-A3B",
           "revision": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
@@ -8748,6 +8833,11 @@
       "weightBytes": 5637502701,
       "bases": [
         {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
           "license": "apache-2.0"
@@ -8779,6 +8869,11 @@
       "role": "vision",
       "weightBytes": 6589412818,
       "bases": [
+        {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
@@ -8812,6 +8907,11 @@
       "weightBytes": 7541323328,
       "bases": [
         {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
           "license": "apache-2.0"
@@ -8843,6 +8943,11 @@
       "role": "vision",
       "weightBytes": 9445144344,
       "bases": [
+        {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
@@ -8876,6 +8981,11 @@
       "weightBytes": 5637502625,
       "bases": [
         {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
           "license": "apache-2.0"
@@ -8908,6 +9018,11 @@
       "weightBytes": 9445144344,
       "bases": [
         {
+          "repo": "allenai/olmOCR-2-7B-1025",
+          "revision": "e52d6f090b7a9007afffbbd6ce510876222fea93",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
           "license": "apache-2.0"
@@ -8939,6 +9054,11 @@
       "role": "vision",
       "weightBytes": 9445144344,
       "bases": [
+        {
+          "repo": "allenai/olmOCR-7B-0725",
+          "revision": "827f1746abc5375c530620c03aa4758fd4fa5674",
+          "license": "apache-2.0"
+        },
         {
           "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
           "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
@@ -10089,6 +10209,11 @@
       "weightBytes": 145470213,
       "bases": [
         {
+          "repo": "HuggingFaceTB/SmolVLM-256M-Instruct",
+          "revision": "7e3e67edbbed1bf9888184d9df282b700a323964",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "HuggingFaceTB/SmolLM2-135M-Instruct",
           "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
           "license": "apache-2.0"
@@ -10125,6 +10250,11 @@
       "role": "vision",
       "weightBytes": 286702361,
       "bases": [
+        {
+          "repo": "HuggingFaceTB/SmolVLM-500M-Instruct",
+          "revision": "a7da5b986cb59b408707209984f360a5f4ad7e47",
+          "license": "apache-2.0"
+        },
         {
           "repo": "HuggingFaceTB/SmolLM2-360M-Instruct",
           "revision": "a10cc1512eabd3dde888204e902eca88bddb4951",
@@ -10205,6 +10335,11 @@
       "weightBytes": 620402128,
       "bases": [
         {
+          "repo": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+          "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
+          "license": "apache-2.0"
+        },
+        {
           "repo": "HuggingFaceTB/SmolLM2-360M-Instruct",
           "revision": "a10cc1512eabd3dde888204e902eca88bddb4951",
           "license": "apache-2.0"
@@ -10217,11 +10352,6 @@
         {
           "repo": "google/siglip-base-patch16-512",
           "revision": "753a949581523b60257d93e18391e8c27f72eb22",
-          "license": "apache-2.0"
-        },
-        {
-          "repo": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
-          "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
           "license": "apache-2.0"
         },
         {
