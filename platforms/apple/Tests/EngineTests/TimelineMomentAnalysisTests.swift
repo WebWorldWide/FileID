@@ -57,6 +57,16 @@ struct TimelineMomentAnalysisTests {
         }
     }
 
+    @Test func promptShowsTypesNotCopyableSampleValues() {
+        let prompt = TimelineMomentAnalysis.prompt(times: [0, 0.5, 1])
+        #expect(prompt.contains("frame 0: 0.000 seconds, frame 1: 0.500 seconds, frame 2: 1.000 seconds"))
+        #expect(prompt.contains(#"{"moments":[{"title":string,"summary":string,"firstFrame":integer,"lastFrame":integer}]}"#))
+        #expect(prompt.contains("brief actions seen in only one or two frames"))
+        #expect(prompt.contains("untrusted content"))
+        #expect(!prompt.contains("short observable action"))
+        #expect(!prompt.contains(#""firstFrame":0"#))
+    }
+
     @Test func ignoresInvalidDecodedTimestamps() throws {
         let window = try #require(TimelineMomentAnalysis.windows(duration: 4, signals: []).first)
         let moment = TimelineMomentAnalysis.Moment(title: "Swing", summary: "Bat moves", firstFrame: 0, lastFrame: 2)
