@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-07 — Related tries reviewed in Best Takes; Undo forgets a learned rename
+
+- **All three apps** (agent): Best Takes gains a "Related tries" section with a gold "Find related tries" button (`enqueueTakeGrouping`), the takeGrouping job row (pause, resume, cancel, retry) and proposal rows with a relation chip (Repeated tries / Other angles / Not sure) and plain-language evidence. A proposal opens in the existing review page (compare, Keep all, Skip, Trash with Undo) with a "Save as group" button that prefills the manual group editor; review moves to the next proposal after a decision.
+- **IPC 1.22 `unlearnNames`** (both engines, unit tests, conformance `names-undo-forgets-learned-sample`): undoing a rename from a learned-name preview deletes its `nameStyle` sample. The apps send it from Undo, since undo is a `renameFiles` the engine can't tell apart; the Mac covers the Name style sheet, Library "Undo last rename" and Chat.
+- Checks: Rust 1,176, GTK 201, CLI 62, TUI 99, C# IpcSchema 65 (plus 63 in a scratch net10.0 build of the new C# logic), Swift 869 serial, conformance 45/45 on both engines plus the cross-engine cases. No locked files changed. Not checked on screen; WinUI not built (Mac host).
+
 ## 2026-11-07 — Library-wide related-take proposals; smart names learn style corrections; CLI tests isolated
 
 - **Best takes** (agent, catalog v31, IPC 1.21): both engines run a durable `takeGrouping` catalog job (`enqueueTakeGrouping`, `takeGroupProposals`). Capture sessions (30-minute gaps) plus required CLIP similarity (photos ≥0.90 within 120 s, videos ≥0.88 within 20 min; 0.86/0.84 with a shared user-named person; different named people never join; RAW+JPEG count as one try). Proposals are labelled repeatedAttempts / alternateViews / uncertain and stored in `take_proposals`; files, events and Keep all / Skip choices are untouched. Reruns redo only sessions whose files changed (per-file fingerprints); pause/resume/cancel and crash recovery use the existing job controls. Thresholds are uncalibrated; native review is not built. The apps label the job "Related tries".
