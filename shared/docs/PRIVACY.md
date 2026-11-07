@@ -8,6 +8,8 @@ It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 
 
 The Windows Store package includes its required Vulkan llama.cpp runtime, whisper.cpp runtime, and OpenVINO provider. These runtimes are staged from SHA-256-pinned release archives during packaging; the installed app does not fetch runtime binaries at startup.
 
+Linux packages (Flatpak, AppImage) build `llama-server` from a SHA-256-pinned llama.cpp source archive at packaging time, with a FileID patch that disables llama.cpp's outbound HTTP client (model download, remote media URLs, router proxy). The installed app never fetches it, and it serves only on loopback with a per-launch API key.
+
 The Windows Store app downloads model files only from `huggingface.co`, only after you choose to install a model. FileID verifies pinned model hashes where the model registry provides them. Your selected model and download size may be visible to your network provider as ordinary HTTPS traffic. Requests do not include your file contents, filenames, folder paths, or search history. Installed models work offline.
 
 FileID reads only files and folders you select or explicitly ask it to scan. Indexes, tags, face embeddings, OCR text, and analysis results remain in FileID's local data directory. The app does not send that data to FileID or other servers and does not include analytics, crash reporting, background update checks, or license-server checks.

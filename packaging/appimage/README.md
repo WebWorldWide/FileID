@@ -11,6 +11,12 @@ exists for users who want one download with no runtime, no sandbox, and no store
 - `fileid-linux` — the GTK4 app, and `FileIDEngine` — the engine it spawns.
 - ONNX Runtime is statically linked into `FileIDEngine`; there is no runtime
   `.so` to locate or bundle.
+- `usr/bin/RuntimeBundles/llama.cpp/` — `llama-server` and its ggml libraries,
+  built from the pinned llama.cpp b9254 source archive by
+  `platforms/linux/build/build-llama-runtime.sh` (see `../README.md`). The
+  archive is fetched by URL + SHA-256 like the tools below. Whether
+  linuxdeploy leaves this directory's `$ORIGIN` RPATHs alone has not been
+  checked on a native AppImage build yet.
 - The full **GTK4 + libadwaita** runtime, GdkPixbuf loaders, GLib schemas, the
   Adwaita icon theme and GIO modules — pulled in by `linuxdeploy-plugin-gtk`.
 
@@ -24,7 +30,7 @@ exists for users who want one download with no runtime, no sandbox, and no store
 ```
 
 Requirements on the build host: `cargo` (Rust 1.98), `curl`, `libgtk-4-dev`,
-`libadwaita-1-dev`, `pkg-config`, `build-essential`, and FUSE (for AppImages to
+`libadwaita-1-dev`, `pkg-config`, `build-essential`, `cmake`, `ninja-build`, and FUSE (for AppImages to
 self-mount at runtime). The linuxdeploy binary and GTK plugin are pinned to a
 release/commit and SHA256-verified on every run, including cached copies.
 

@@ -290,7 +290,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
         self.assertEqual(REVIEWED_SHELL_SCRIPT_SHA256, {
             "platforms/linux/src/app/tests/native_launch_smoke.sh": "6350484466b32dd622e79ca01a4fb1dfa2f3ab0fb8b26cb4031eda00e5415d55",
             "build.sh": "0bccb6ce7c8c0c65e75a95ce112d967f7a31fe1f1e911d208d992f45bda0b203",
-            "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
+            "packaging/appimage/build-appimage.sh": "c881b0a12714d4aa76a15d1b1bde7d0ab16c9e6407582a5247d45acbb4e7adac",
             "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
             "platforms/apple/run.sh": "8bcb4be432d5e3c1ad7adc1fb9474dee574e14bcaf8ddd5eede0ab51fac87455",
             "platforms/apple/scripts/assemble_app.sh": "0774144673b6e50abdec3d8626ffe076340a917c0508c6f45a96896fe883af52",
@@ -302,7 +302,8 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "platforms/apple/scripts/testflight.sh": "8a65cfb7fa84c67cb003e20dc387390986b70d650e3aead2d9c131adc9c42833",
             "platforms/apple/scripts/release.sh": "edb1fee77bdfc03b108ece894c52cce87f2551ffae04ed29d43b60533cdbec04",
             "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
-            "platforms/linux/build/build.sh": "12c0b2cf760248b5737bf2d680de0456300ebc8217f3660fdf9d1b5372c10795",
+            "platforms/linux/build/build.sh": "5db7db6bd3d34ca2b120580e403609dffe7bd56547cf7767491b901eb5f19cf4",
+            "platforms/linux/build/build-llama-runtime.sh": "fe712236753a9dcc4b8e37d9629e0a0b4856e2899eeae013aca335f87cff76a3",
             "scripts/build-tools.sh": "a51e97da6eea88eda05eb211ee62f80d4274b683bf7aaba921ad06c71f3323ee",
             "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
             "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",

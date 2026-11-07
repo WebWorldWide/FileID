@@ -481,7 +481,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     ai_row.append(&ai);
     ai_row.append(&v3::label("Summarize with local AI", &["v3-meta"]));
     ai_row.set_tooltip_text(Some(
-        "Needs a local llama.cpp runtime, which Linux packages don't include yet. Answers list matching files only.",
+        "Writing answers with a local model isn't available on Linux yet. Answers list matching files only.",
     ));
     options.append(&ai_row);
     let model_chip = v3::accent("Chat model: none", Tone::Ai, false);

@@ -54,3 +54,4 @@ pub(crate) mod resident_service;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;
+pub use native_runtime::llama_server_available;
