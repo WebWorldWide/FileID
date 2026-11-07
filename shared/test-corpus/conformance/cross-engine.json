@@ -307,5 +307,276 @@
         }
       }
     ]
+  },
+  {
+    "name": "cross-names-learned-style",
+    "description": "Smart-name style samples recorded by Swift are read by Rust and the other way round: both derive the same preferences from one catalog, apply them to the same name, and a reset in Rust is seen by Swift.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "swift"
+    ],
+    "start": "swift",
+    "tree": [
+      {
+        "path": "learn/IMG_0001.jpg",
+        "content": "learn/IMG_0001.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 51,
+          "kind": "image",
+          "vlm_proposed_name": "Beach Sunset"
+        }
+      },
+      {
+        "path": "learn/IMG_0002.jpg",
+        "content": "learn/IMG_0002.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 52,
+          "kind": "image",
+          "vlm_proposed_name": "Dog Park"
+        }
+      },
+      {
+        "path": "learn/IMG_0003.jpg",
+        "content": "learn/IMG_0003.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 53,
+          "kind": "image",
+          "vlm_proposed_name": "Snow Day"
+        }
+      },
+      {
+        "path": "learn/IMG_0004.jpg",
+        "content": "learn/IMG_0004.jpg",
+        "mtime": 1000,
+        "row": {
+          "id": 54,
+          "kind": "image",
+          "vlm_proposed_name": "Kids Playing Soccer"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift records two samples",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 51,
+              "proposed": "beach-sunset.jpg",
+              "applied": "Beach_Sunset.jpg"
+            },
+            {
+              "fileID": 52,
+              "proposed": "dog-park.jpg",
+              "applied": "Dog_Park.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust adds the third",
+        "catalog": {
+          "action": "learnNames",
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          },
+          "nameEdits": [
+            {
+              "fileID": 53,
+              "proposed": "snow-day.jpg",
+              "applied": "Snow_Day.jpg"
+            }
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "rust applies them",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            54
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 54,
+              "text": "Kids_Playing_Soccer.jpg",
+              "evidenceID": "proposedName|learned:separator,case"
+            }
+          ]
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift sees the same preferences",
+        "catalog": {
+          "action": "namePreferences"
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "_",
+                "evidenceID": "separator"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "namePreference",
+                "text": "title",
+                "evidenceID": "case"
+              },
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "3"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "swift applies them",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            54
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40,
+            "learn": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 54,
+              "text": "Kids_Playing_Soccer.jpg",
+              "evidenceID": "proposedName|learned:separator,case"
+            }
+          ]
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust resets",
+        "catalog": {
+          "action": "resetNamePreferences"
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "0"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift sees no samples",
+        "catalog": {
+          "action": "namePreferences"
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 0,
+                "path": "",
+                "kind": "nameSamples",
+                "text": "0"
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]

@@ -705,7 +705,17 @@ pub struct CatalogRequest {
     /// reads the stored proposals as takeGroups with relation and evidence, ranked like
     /// autoTakeGroups and limited by limit (default 100), and returns the job in jobs. Proposals
     /// overlapping a saved event are left out and Keep all / Skip choices apply as for
-    /// autoTakeGroups.
+    /// autoTakeGroups. Schema 1.21.0 adds local learning of style corrections: learnNames records,
+    /// for each nameEdits entry, the name the user applied after a proposeNames preview (naming is
+    /// the style the preview used); the engine stores it with the unlearned name it would propose
+    /// for that file, keeps the newest 200 and never sends them anywhere. namePreferences lists
+    /// what the newest 50 show and resetNamePreferences forgets them all; both learnNames and these
+    /// reply with hits of kind namePreference (fileID 0, path empty, evidenceID the preference:
+    /// separator, case, leadingDate, trailingDate, dateFormat, people, words or dropWords, text its
+    /// value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the
+    /// number of stored samples. proposeNames applies them only when naming.learn is true;
+    /// evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'),
+    /// naming the preferences that changed that file's name.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -754,6 +764,10 @@ pub struct CatalogRequest {
     pub take_decision: Option<CatalogTakeDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming: Option<CatalogNaming>,
+    /// learnNames only (schema 1.21.0): the names the user applied after a proposeNames preview,
+    /// one per renamed file (a companion group's leader only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_edits: Option<Vec<CatalogNameEdit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -828,6 +842,21 @@ pub struct CatalogNaming {
     /// leads with it. Omitted means false. Files without a capture date get no date.
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_date: bool,
+    /// proposeNames only (schema 1.21.0): apply the preferences learned from learnNames samples.
+    /// Omitted means false, so evaluations and older apps get the unlearned names.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub learn: bool,
+}
+
+/// One applied smart name for learnNames: proposed is the file name the preview showed and applied
+/// the file name the user renamed it to (the same text when accepted unedited).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogNameEdit {
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub proposed: String,
+    pub applied: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

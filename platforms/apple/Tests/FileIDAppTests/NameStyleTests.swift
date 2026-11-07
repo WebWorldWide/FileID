@@ -135,4 +135,39 @@ struct NameStyleTests {
         #expect(CatalogWrites.groupedChunks(renames, size: 2).map { $0.map(\.fileID) } == [[1], [2, 3], [4, 5, 6]])
         #expect(CatalogWrites.groupedChunks(renames, size: 250).map { $0.map(\.fileID) } == [[1, 2, 3, 4, 5, 6]])
     }
+
+    @Test func learnedReasonsSummaryAndEdits() {
+        let hits = [hit(1, "IMG_1.jpg", "Kids_Soccer.jpg", "proposedName|learned:separator,case"),
+                    hit(3, "DSC_1.JPG", "Red_Barn.JPG", "proposedName|learned:case|group:3"),
+                    hit(2, "DSC_1.ARW", "Red_Barn.ARW", "proposedName|learned:case|group:3"),
+                    hit(4, "IMG_4.jpg", "beach.jpg", "tags")]
+        var rows = NameStyle.rows(from: hits, previous: [])
+        #expect(rows.map(\.reason) == ["proposedName", "proposedName", "proposedName", "tags"])
+        #expect(rows.map(\.learned) == [["separator", "case"], ["case"], ["case"], []])
+        #expect(rows[2].group == 3 && rows[2].suffix == ".ARW")
+        #expect(NameStyle.reasonChip(rows[0]) == "From the AI name · your style")
+        #expect(NameStyle.reasonChip(rows[3]) == "From tags")
+        #expect(NameStyle.learnedHelp(rows[0].learned) == "Learned from your renames: uses your word separator, uses your capitals")
+        #expect(NameStyle.learnedHelp([]) == nil)
+        NameStyle.edit(&rows, fileID: 1, "Kids Soccer Final.jpg")
+        let edits = NameStyle.edits(rows, renamed: [1, 2, 3])
+        #expect(edits == [CatalogNameEdit(fileID: 1, proposed: "Kids_Soccer.jpg", applied: "Kids Soccer Final.jpg"),
+                          CatalogNameEdit(fileID: 3, proposed: "Red_Barn.JPG", applied: "Red_Barn.JPG")])
+        let request = NameStyle.learnRequest(id: "l", edits: edits, naming: CatalogNaming(style: "short", maxLength: 40))
+        #expect(request.action == "learnNames" && request.nameEdits == edits)
+        #expect(NameStyle.preferencesRequest(id: "p", reset: true).action == "resetNamePreferences")
+        #expect(NameStyle.naming(style: "short", maxLength: 40, includePeople: false, includeEvent: false, includeDate: false, learn: true).learn)
+    }
+
+    @Test func learnedPreferencesSummary() {
+        let pref = { (key: String, text: String) in CatalogHit(fileID: 0, path: "", kind: "namePreference", text: text, evidenceID: key) }
+        let learned = NameStyle.learned(from: [pref("separator", "_"), pref("leadingDate", "end"), pref("dateFormat", "compact"),
+                                               pref("words", "2"), pref("dropWords", "outdoor"),
+                                               CatalogHit(fileID: 0, path: "", kind: "nameSamples", text: "12")])
+        #expect(learned.samples == 12)
+        #expect(NameStyle.learnedSummary(learned, enabled: true)
+                == "From 12 renames: underscores between words, the date at the end, dates like 20230704, at most 2 words, without \u{201C}outdoor\u{201D}.")
+        #expect(NameStyle.learnedSummary(NameStyle.Learned(samples: 2), enabled: true) == "No clear preference yet from 2 renames.")
+        #expect(NameStyle.learnedSummary(learned, enabled: false) == "Names follow the style above only.")
+    }
 }

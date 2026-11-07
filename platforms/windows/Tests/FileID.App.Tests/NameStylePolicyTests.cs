@@ -191,4 +191,51 @@ public sealed class NameStylePolicyTests
         NameStylePolicy.Edit(rows, 11, "bad/name.JPG");
         Assert.Equal(new[] { new RenameEntry(14, "lone-hill.ARW") }, NameStylePolicy.Renames(rows));
     }
+
+    [Fact]
+    public void LearnedReasonsChipsAndEdits()
+    {
+        var hits = new[]
+        {
+            Hit(1, "IMG_1.jpg", "Kids_Soccer.jpg", "proposedName|learned:separator,case"),
+            Hit(3, "DSC_1.JPG", "Red_Barn.JPG", "proposedName|learned:case|group:3"),
+            Hit(2, "DSC_1.ARW", "Red_Barn.ARW", "proposedName|learned:case|group:3"),
+            Hit(4, "IMG_4.jpg", "beach.jpg", "tags"),
+        };
+        var rows = NameStylePolicy.Rows(hits, Array.Empty<NameProposalRow>());
+        Assert.Equal(new[] { "proposedName", "proposedName", "proposedName", "tags" }, rows.Select(r => r.Reason));
+        Assert.Equal(new[] { "separator", "case" }, rows[0].Learned);
+        Assert.Equal((3L, ".ARW"), (rows[2].Group!.Value, rows[2].Suffix));
+        Assert.Equal("From the AI name · your style", NameStylePolicy.ReasonChip(rows[0]));
+        Assert.Equal("From tags", NameStylePolicy.ReasonChip(rows[3]));
+        Assert.Equal("Learned from your renames: uses your word separator, uses your capitals", NameStylePolicy.LearnedHelp(rows[0].Learned));
+        Assert.Null(NameStylePolicy.LearnedHelp(Array.Empty<string>()));
+        NameStylePolicy.Edit(rows, 1, "Kids Soccer Final.jpg");
+        var edits = NameStylePolicy.Edits(rows, new long[] { 1, 2, 3 });
+        Assert.Equal(new[] { new CatalogNameEdit(1, "Kids_Soccer.jpg", "Kids Soccer Final.jpg"), new CatalogNameEdit(3, "Red_Barn.JPG", "Red_Barn.JPG") }, edits);
+        var naming = NameStylePolicy.Naming("short", 40, false, false, false, learn: true);
+        Assert.True(naming.Learn);
+        var request = NameStylePolicy.LearnRequest("l", edits, naming);
+        Assert.Equal("learnNames", request.Action);
+        var wire = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        Assert.Contains("\"learn\":true", wire);
+        Assert.Contains("\"nameEdits\":[{\"fileID\":1", wire);
+        Assert.DoesNotContain("\"learn\"", JsonSerializer.Serialize(NameStylePolicy.Naming("short", 40, false, false, false), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        Assert.Equal("resetNamePreferences", NameStylePolicy.PreferencesRequest("p", true).Action);
+    }
+
+    [Fact]
+    public void LearnedSummaryReadsPreferences()
+    {
+        static CatalogHit Pref(string key, string text) => new(0, "", "namePreference", text, key, null, null);
+        var count = new CatalogHit(0, "", "nameSamples", "12", null, null, null);
+        var hits = new[] { Pref("separator", "_"), Pref("leadingDate", "end"), Pref("dateFormat", "compact"), Pref("words", "2"), Pref("dropWords", "outdoor"), count };
+        var (text, samples) = NameStylePolicy.LearnedSummary(hits, true);
+        Assert.Equal(12, samples);
+        Assert.Equal("From 12 renames: underscores between words, the date at the end, dates like 20230704, at most 2 words, without \u201Coutdoor\u201D.", text);
+        Assert.Equal("No clear preference yet from 2 renames.", NameStylePolicy.LearnedSummary(new[] { count with { Text = "2" } }, true).Text);
+        Assert.Equal("Names follow the style above only.", NameStylePolicy.LearnedSummary(hits, false).Text);
+        Assert.Equal(("Edit names before you rename them and FileID will follow your style.", 0L), NameStylePolicy.LearnedSummary(Array.Empty<CatalogHit>(), true));
+    }
 }
+

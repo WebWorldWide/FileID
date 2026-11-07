@@ -330,6 +330,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "proposeNames" => {
             result.hits = super::catalog_names::propose(conn, request)?;
         }
+        "learnNames" => result.hits = super::catalog_names::learn(conn, request)?,
+        "namePreferences" => result.hits = super::catalog_names::preferences(conn)?,
+        "resetNamePreferences" => result.hits = super::catalog_names::reset(conn)?,
         "rankTakesWithGoal" => {
             let goal = request.query.as_deref().unwrap_or("").trim();
             let ids = request.file_ids.as_deref().unwrap_or(&[]);

@@ -17,5 +17,6 @@ pub(crate) mod zip;
 
 pub mod smart_name;
 pub(crate) mod smart_name_companions;
+pub(crate) mod smart_name_learning;
 pub(crate) mod smart_name_style;
 pub(crate) mod model_memory;

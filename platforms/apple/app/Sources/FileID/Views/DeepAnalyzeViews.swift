@@ -535,7 +535,7 @@ struct DeepAnalyzeView: View {
                           : "Name the files chosen in Library in the style below")
                 }
                 Divider().opacity(0.3)
-                NameStyleControls()
+                NameStyleControls(engine: engine)
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
         }

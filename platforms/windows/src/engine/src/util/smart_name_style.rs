@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use super::smart_name_learning::Learned;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Style {
     Short,
@@ -35,6 +37,7 @@ pub struct Options {
     pub people: bool,
     pub event: bool,
     pub date: bool,
+    pub learned: Learned,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,6 +58,7 @@ pub struct Outcome {
     pub stem: Option<String>,
     pub reason: &'static str,
     pub source: &'static str,
+    pub learned: Vec<&'static str>,
 }
 
 pub const MIN_LENGTH: usize = 4;
@@ -94,7 +98,7 @@ fn is_mark(c: char) -> bool {
     matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
 }
 
-fn is_word_char(c: char) -> bool {
+pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphabetic() || c.is_numeric() || is_mark(c)
 }
 
@@ -207,9 +211,54 @@ fn first_sentence(text: &str) -> &str {
     text.split(['.', '!', '?', '\n']).next().unwrap_or("")
 }
 
+pub fn upper(text: &str) -> String {
+    text.chars().flat_map(char::to_uppercase).collect()
+}
+
+fn cased(word: &str, letter_case: Option<&str>) -> String {
+    match letter_case {
+        Some("upper") => upper(word),
+        Some("title") => {
+            let mut chars = word.chars();
+            chars.next().map(|first| upper(&first.to_string()) + chars.as_str()).unwrap_or_default()
+        }
+        _ => word.to_string(),
+    }
+}
+
+fn formatted_date(date: &str, format: Option<&str>) -> String {
+    match format {
+        Some("underscore") => date.replace('-', "_"),
+        Some("dotted") => date.replace('-', "."),
+        Some("compact") => date.replace('-', ""),
+        Some("month") => date.chars().take(7).collect(),
+        _ => date.to_string(),
+    }
+}
+
+/// The name in `options`' style with its learned preferences applied, and the
+/// preferences that changed it: each one whose removal alone gives another outcome.
 pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
-    let none = |reason, source| Outcome { stem: None, reason, source };
-    let pw = &evidence.person_words;
+    let mut outcome = build(evidence, options);
+    for key in options.learned.active_keys() {
+        let alternative = build(evidence, &Options { learned: options.learned.without(key), ..options.clone() });
+        if alternative.stem != outcome.stem || alternative.reason != outcome.reason {
+            outcome.learned.push(key);
+        }
+    }
+    outcome
+}
+
+fn build(evidence: &Evidence, options: &Options) -> Outcome {
+    let none = |reason, source| Outcome { stem: None, reason, source, learned: Vec::new() };
+    let learned = &options.learned;
+    let extended: HashSet<String>;
+    let pw = if learned.drop_words.is_empty() {
+        &evidence.person_words
+    } else {
+        extended = evidence.person_words.iter().chain(&learned.drop_words).cloned().collect();
+        &extended
+    };
     let chapter = evidence.chapter.as_deref().map(|t| words(t, pw)).unwrap_or_default();
     let stored = evidence.stored_name.as_deref().map(|t| words(t, pw)).unwrap_or_default();
     let description = evidence.description.as_deref().map(|t| words(first_sentence(t), pw)).unwrap_or_default();
@@ -239,13 +288,27 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
         reason = "event";
     }
     core.truncate(options.style.core_limit());
-    let mut people: Vec<String> = if options.people { evidence.people.clone() } else { Vec::new() };
+    let mut people: Vec<String> =
+        if options.people && !learned.omit_people { evidence.people.clone() } else { Vec::new() };
     people.sort();
     people.dedup();
     if people.len() > 2 {
         people.clear();
     }
-    let date = if options.style == Style::DateFirst || options.date { evidence.date.clone() } else { None };
+    let mut date_first = options.style == Style::DateFirst;
+    let mut date = if date_first || options.date { evidence.date.clone() } else { None };
+    if date.is_some() {
+        let change = if date_first { learned.leading_date.as_deref() } else { learned.trailing_date.as_deref() };
+        match change {
+            Some("none") => date = None,
+            Some("end") => date_first = false,
+            Some("start") => date_first = true,
+            _ => {}
+        }
+    }
+    let date = date.map(|d| formatted_date(&d, learned.date_format.as_deref()));
+    let separator = learned.separator.as_deref().unwrap_or("-");
+    let letter_case = learned.letter_case.as_deref();
 
     let render = |pick: &Pick| -> String {
         let mut seen = HashSet::new();
@@ -257,18 +320,21 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
             .chain(event.iter().filter(|_| pick.event))
             .chain(core.iter().take(pick.core))
             .filter(|w| seen.insert(w.as_str()))
-            .cloned()
+            .map(|w| cased(w, letter_case))
             .collect::<Vec<_>>()
-            .join("-");
-        match (&date, pick.date, options.style) {
-            (Some(d), true, Style::DateFirst) => format!("{d} {body}"),
-            (Some(d), true, _) => format!("{body}-{d}"),
+            .join(separator);
+        match (&date, pick.date, date_first) {
+            (Some(d), true, true) => format!("{d}{}{body}", if separator == "-" { " " } else { separator }),
+            (Some(d), true, false) => format!("{body}{separator}{d}"),
             _ => body,
         }
     };
     let fits = |pick: &Pick| {
         let text = render(pick);
-        text.chars().count() <= options.max_length && text.len() <= MAX_STEM_BYTES
+        let words = if pick.event { event.len() } else { 0 } + pick.core;
+        text.chars().count() <= options.max_length
+            && text.len() <= MAX_STEM_BYTES
+            && learned.max_words.is_none_or(|cap| words <= cap)
     };
     let mut pick = Pick { people: vec![false; people.len()], core: 1, date: false, event: false };
     if !fits(&pick) {
@@ -298,13 +364,13 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
         core_open = try_with(&mut pick, &|p| p.core = next);
     }
     let stem = render(&pick);
-    if RESERVED.contains(&stem.as_str()) {
+    if RESERVED.contains(&lower(&stem).as_str()) {
         return none("reserved", reason);
     }
     if lower(&stem) == lower(&evidence.original_stem) {
         return none("unchanged", reason);
     }
-    Outcome { stem: Some(stem), reason, source: reason }
+    Outcome { stem: Some(stem), reason, source: reason, learned: Vec::new() }
 }
 
 #[derive(Clone)]
@@ -380,6 +446,7 @@ mod tests {
                 people: case.include_people,
                 event: case.include_event,
                 date: case.include_date,
+                learned: Learned::default(),
             };
             let outcome = propose(&evidence, &options);
             assert_eq!(outcome.stem, case.expected, "{}", case.name);
