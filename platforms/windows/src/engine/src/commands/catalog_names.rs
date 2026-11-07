@@ -124,6 +124,7 @@ impl Run<'_> {
             evidence_id: Some(reason),
             start_seconds: None,
             page: None,
+            selection_match: None,
         });
     }
 
@@ -318,6 +319,7 @@ pub(crate) fn preferences(conn: &Connection) -> Result<Vec<CatalogHit>> {
         evidence_id: key.map(str::to_string),
         start_seconds: None,
         page: None,
+        selection_match: None,
     };
     let mut hits: Vec<CatalogHit> = learning::KEYS
         .into_iter()

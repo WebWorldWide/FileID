@@ -48,13 +48,13 @@ fn stop_summary(conversation: &str) -> bool {
         .is_some()
 }
 
-struct Claim {
+pub(super) struct Claim {
     conversation: String,
     request: String,
 }
 
 impl Claim {
-    fn take(request: &ChatRequest, cancel: &Arc<AtomicBool>) -> Result<Self> {
+    pub(super) fn take(request: &ChatRequest, cancel: &Arc<AtomicBool>) -> Result<Self> {
         let mut running = summaries().lock();
         if running.contains_key(&request.conversation_id) {
             bail!("A local model summary is still running for this conversation.")
@@ -88,6 +88,13 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     let model = (request.action == "send" && request.use_model == Some(true))
         .then(|| summary_model(request.model_kind.as_deref()))
         .flatten();
+    if request.action == "send" && request.scope_file_ids.is_some() {
+        match database {
+            Some(database) => super::chat_selection::send(sink, database, request, model).await,
+            None => emit(&sink, failed(id, conversation, "The catalog database is unavailable".into())).await,
+        }
+        return;
+    }
     if let (Some(model), Some(database)) = (model, database.clone()) {
         if let Err(error) = send_with_model(&sink, database, request, &model).await {
             emit(&sink, failed(id, conversation, error.to_string())).await;
@@ -133,7 +140,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     emit(&sink, response).await;
 }
 
-async fn emit(sink: &Sink, response: ChatResponse) {
+pub(super) async fn emit(sink: &Sink, response: ChatResponse) {
     sink.send(IpcEvent {
         t: chrono::Utc::now(),
         payload: EventPayload::ChatResponse(Wrap::new(response)),
@@ -141,7 +148,7 @@ async fn emit(sink: &Sink, response: ChatResponse) {
     .await;
 }
 
-fn failed(request_id: String, conversation_id: String, message: String) -> ChatResponse {
+pub(super) fn failed(request_id: String, conversation_id: String, message: String) -> ChatResponse {
     ChatResponse {
         request_id,
         conversation_id,
@@ -179,7 +186,7 @@ fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, se
     }
 }
 
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+pub(super) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(work).await.map_err(|error| anyhow!(error))?
 }
 
@@ -392,7 +399,7 @@ fn model_note(no_hits: bool) -> &'static str {
     }
 }
 
-fn validate(request: &ChatRequest) -> Result<()> {
+pub(super) fn validate(request: &ChatRequest) -> Result<()> {
     if request.request_id.is_empty()
         || request.request_id.chars().count() > 200
         || request.conversation_id.is_empty()
@@ -492,7 +499,7 @@ fn exact_score(blob: &[u8], wanted: &[f32]) -> f32 {
 }
 
 fn document_hit(id: i64, path: String, text: String) -> CatalogHit {
-    CatalogHit { file_id: id, path, kind: "documentText".into(), text, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None }
+    CatalogHit { file_id: id, path, kind: "documentText".into(), text, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None, selection_match: None }
 }
 
 /// Reference implementation: streams every stored vector for each question.
@@ -764,6 +771,11 @@ fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semanti
             ("completed", "Conversation deleted.".to_owned(), vec![], vec![])
         }
         "cancel" => ("cancelled", "No model response is running on this adapter.".to_owned(), vec![], vec![]),
+        "send" if request.scope_file_ids.is_some() => {
+            let (message, hits) = super::chat_selection::evidence_answer(conn, request)?;
+            save_turn(conn, &request.conversation_id, &[("user", request.text.as_deref().unwrap_or_default()), ("assistant", &message)])?;
+            ("completed", message, hits, vec![])
+        }
         "send" => {
             let prepared = prepare_send(conn, request, semantic)?;
             let message = if request.use_model == Some(true) && prepared.summarize {
@@ -970,7 +982,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
 }
 
-fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) -> Result<()> {
+pub(super) fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) -> Result<()> {
     let tx = conn.transaction()?;
     for (role, content) in turns {
         tx.execute(
@@ -988,7 +1000,7 @@ fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) 
     Ok(())
 }
 
-fn respond(
+pub(super) fn respond(
     conn: &Connection,
     request: &ChatRequest,
     status: &str,
@@ -1150,6 +1162,7 @@ mod tests {
                 evidence_id: None,
                 start_seconds: None,
                 page: None,
+                selection_match: None,
             })
             .collect();
         let prompt = evidence_prompt("grass", &hits, 3);

@@ -487,6 +487,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                     evidence_id: None,
                     start_seconds: None,
                     page: None,
+                    selection_match: None,
                 })
                 .collect();
             finish(proposed, hits)
@@ -590,7 +591,7 @@ fn person_files(conn: &Connection, people: &[i64]) -> Result<Vec<CatalogHit>> {
         "SELECT DISTINCT f.id,f.path_text,f.kind FROM face_prints p JOIN files f ON f.id=p.file_id WHERE p.person_id IN (SELECT value FROM json_each(?1)) AND f.failed=0 ORDER BY f.id DESC LIMIT ?2",
     )?;
     let rows = statement.query_map(params![serde_json::to_string(people)?, SHOWN as i64], |row| {
-        Ok(CatalogHit { file_id: row.get(0)?, path: row.get(1)?, kind: row.get(2)?, text: String::new(), evidence_id: None, start_seconds: None, page: None })
+        Ok(CatalogHit { file_id: row.get(0)?, path: row.get(1)?, kind: row.get(2)?, text: String::new(), evidence_id: None, start_seconds: None, page: None, selection_match: None })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
