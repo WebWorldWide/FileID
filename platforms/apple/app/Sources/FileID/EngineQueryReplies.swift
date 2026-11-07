@@ -11,20 +11,32 @@ final class EngineQueryReplies {
     static let mergeSuggestionsTimeout: Duration = .seconds(60)
     static let textEmbeddingTimeout: Duration = .seconds(30)
     static let videoThumbnailTimeout: Duration = .seconds(15)
+    static let faceReviewTimeout: Duration = .seconds(60)
 
     private let merges: ReplyWaiters<Int, [MergeSuggestionPair]>
     private let embeddings: ReplyWaiters<String, [Float]>
     private let thumbnails: ReplyWaiters<String, VideoFrameReply>
+    private let faceReviews: ReplyWaiters<String, FaceReviewPage>
 
     init(mergeTimeout: Duration = mergeSuggestionsTimeout,
          embeddingTimeout: Duration = textEmbeddingTimeout,
-         thumbnailTimeout: Duration = videoThumbnailTimeout) {
+         thumbnailTimeout: Duration = videoThumbnailTimeout,
+         faceReviewTimeout: Duration = faceReviewTimeout) {
         merges = ReplyWaiters(timeout: mergeTimeout)
         embeddings = ReplyWaiters(timeout: embeddingTimeout)
         thumbnails = ReplyWaiters(timeout: thumbnailTimeout)
+        faceReviews = ReplyWaiters(timeout: faceReviewTimeout)
     }
 
-    var waiting: Int { merges.count + embeddings.count + thumbnails.count }
+    var waiting: Int { merges.count + embeddings.count + thumbnails.count + faceReviews.count }
+
+    /// Each face review command carries its own request id, which the reply echoes.
+    func faceReview(send: (String) -> Bool) async -> FaceReviewPage? {
+        let requestID = "review-" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        return await faceReviews.wait(for: requestID) { send(requestID) }
+    }
+
+    func deliver(_ reply: FaceReviewPage) { faceReviews.resolve(reply.requestID, with: reply) }
 
     /// `findMergeSuggestions` carries no request id, so one reply answers
     /// every caller waiting at that moment.
@@ -88,6 +100,7 @@ final class EngineQueryReplies {
         merges.resolveAll(with: nil)
         embeddings.resolveAll(with: nil)
         thumbnails.resolveAll(with: nil)
+        faceReviews.resolveAll(with: nil)
     }
 }
 
