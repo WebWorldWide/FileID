@@ -1,0 +1,1055 @@
+[
+ {
+  "name": "face-review-list-pages-and-filters",
+  "description": "listFaceReview pages pending suggestions best score first, names people (display name, else first and last name, unnamed omitted), filters by person, hides suggestions from another face space, and refuses bad paging; a bad request id gets an error and no reply.",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg')",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,'Alex',0,1,1)",
+   "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(2,0,2,1)",
+   "INSERT INTO persons(id,first_name,last_name,created_at,representative_face_id,file_count) VALUES(3,'Sam','Lee',0,5,1)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(1,1,1,X'00','b1','m','p',0.5),(2,2,2,X'00','b2','m','p',0.5),(5,2,3,X'00','b5','m','p',0.5),(3,3,NULL,X'00','b3','m','p',0.5),(4,4,NULL,X'00','b4','m','p',0.5),(6,2,NULL,X'00','b6','m','p',0.5),(7,3,NULL,X'00','b7','old','p',0.5),(8,4,1,X'00','b8','m','p',0.9)",
+   "UPDATE persons SET file_count=2 WHERE id=1",
+   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(3,'m|p','suggested',100),(4,'m|p','uncertain',101),(6,'m|p','ambiguous',102),(7,'old|p','suggested',103)",
+   "INSERT INTO face_review_candidates(face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at) VALUES(3,1,0.81,'suggested',2,0.2,'m|p',100),(4,2,0.47,'uncertain',1,0.3,'m|p',101),(6,3,0.6,'ambiguous',1,0.58,'m|p',102),(7,1,0.99,'suggested',NULL,NULL,'m|p',103)"
+  ],
+  "steps": [
+   {
+    "label": "first page",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-1",
+      "limit": 2
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-1"
+    },
+    "expect": {
+     "action": "list",
+     "status": "ok",
+     "total": 3,
+     "offset": 0,
+     "items": [
+      {
+       "faceID": 3,
+       "fileID": 3,
+       "path": "{root}/3.jpg",
+       "bbox": "b3",
+       "personID": 1,
+       "personName": "Alex",
+       "representativeFaceID": 1,
+       "score": 0.81,
+       "reason": "suggested",
+       "runnerUpPersonID": 2,
+       "runnerUpScore": 0.2,
+       "createdAt": 100
+      },
+      {
+       "faceID": 6,
+       "personID": 3,
+       "personName": "Sam Lee",
+       "reason": "ambiguous",
+       "runnerUpName": "Alex",
+       "runnerUpScore": 0.58
+      }
+     ]
+    }
+   },
+   {
+    "label": "second page",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-2",
+      "offset": 2,
+      "limit": 2
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-2"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 3,
+     "offset": 2,
+     "items": [
+      {
+       "faceID": 4,
+       "personID": 2,
+       "reason": "uncertain",
+       "score": 0.47,
+       "runnerUpName": "Alex"
+      }
+     ]
+    }
+   },
+   {
+    "label": "one person",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-3",
+      "personID": 2
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-3"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 1,
+     "items": {
+      "$tol": "count",
+      "value": 1
+     }
+    }
+   },
+   {
+    "label": "unnamed person has no name",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-4",
+      "personID": 2
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-4"
+    },
+    "expect": {
+     "items": [
+      {
+       "faceID": 4,
+       "personName": null
+      }
+     ]
+    }
+   },
+   {
+    "label": "bad limit",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-5",
+      "limit": 0
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-5"
+    },
+    "expect": {
+     "status": "refused",
+     "total": 0,
+     "items": [],
+     "message": "Ask for 1 to 200 suggestions from offset 0 or later."
+    }
+   },
+   {
+    "label": "too many",
+    "command": {
+     "listFaceReview": {
+      "requestID": "list-6",
+      "limit": 201
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "list-6"
+    },
+    "expect": {
+     "status": "refused"
+    }
+   },
+   {
+    "label": "bad request id",
+    "command": {
+     "listFaceReview": {
+      "requestID": "bad id"
+     }
+    },
+    "await": "error",
+    "filter": {
+     "kind": "invalid_face_review_request"
+    },
+    "expect": {
+     "kind": "invalid_face_review_request"
+    }
+   },
+   {
+    "label": "nothing changed",
+    "db": "SELECT COUNT(*) FROM face_review_candidates",
+    "expect": [
+     [
+      4
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "face-review-accept-and-undo",
+  "description": "Accept assigns the face, recounts the person, settles the suggestion and logs one face_review operation; Undo by operation id puts the face and the suggestion back once.",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "wrong person",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-1",
+      "faceID": 3,
+      "personID": 2,
+      "resolution": "accept"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-1"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "This suggestion changed. Refresh the review list."
+    }
+   },
+   {
+    "label": "bad resolution",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-2",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "maybe"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-2"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "Choose accept, reject or ignore."
+    }
+   },
+   {
+    "label": "accept",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-3",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "accept"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-3"
+    },
+    "expect": {
+     "action": "resolve",
+     "status": "ok",
+     "faceID": 3,
+     "personID": 1,
+     "total": 2,
+     "offset": 0,
+     "items": [],
+     "operationID": {
+      "$tol": "present"
+     }
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "assigned",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=3),(SELECT file_count FROM persons WHERE id=1),(SELECT representative_face_id FROM persons WHERE id=1),(SELECT outcome FROM face_assignment_assessed WHERE face_id=3),(SELECT COUNT(*) FROM face_review_candidates WHERE face_id=3)",
+    "expect": [
+     [
+      1,
+      3,
+      1,
+      "accepted",
+      0
+     ]
+    ]
+   },
+   {
+    "label": "logged",
+    "db": "SELECT c.kind,c.file_id,o.state,json_extract(o.plan_json,'$.type'),json_extract(c.after_json,'$.resolution'),json_extract(c.before_json,'$.candidate.reason') FROM catalog_corrections c JOIN catalog_operations o ON o.id=c.id",
+    "expect": [
+     [
+      "face_review",
+      3,
+      "completed",
+      "faceReview",
+      "accept",
+      "suggested"
+     ]
+    ]
+   },
+   {
+    "label": "resolved once",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-4",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "accept"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-4"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "This suggestion changed. Refresh the review list."
+    }
+   },
+   {
+    "label": "undo",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "u-1",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "u-1"
+    },
+    "expect": {
+     "action": "undo",
+     "status": "ok",
+     "faceID": 3,
+     "total": 3,
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "restored",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=3),(SELECT file_count FROM persons WHERE id=1),(SELECT outcome FROM face_assignment_assessed WHERE face_id=3),(SELECT state FROM catalog_operations)",
+    "expect": [
+     [
+      null,
+      2,
+      "suggested",
+      "undone"
+     ]
+    ]
+   },
+   {
+    "label": "suggestion back",
+    "db": "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at FROM face_review_candidates WHERE face_id=3",
+    "expect": [
+     [
+      3,
+      1,
+      0.81,
+      "suggested",
+      2,
+      0.2,
+      "m|p",
+      100
+     ]
+    ]
+   },
+   {
+    "label": "undo once",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "u-2",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "u-2"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "There is nothing to undo for this suggestion."
+    }
+   }
+  ]
+ },
+ {
+  "name": "face-review-accept-refused-when-person-in-photo",
+  "description": "Accept is refused when the suggested person is already in the same photo; nothing changes.",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "accept",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-1",
+      "faceID": 6,
+      "personID": 3,
+      "resolution": "accept"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-1"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "That person is already in this photo."
+    }
+   },
+   {
+    "label": "unchanged",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=6),(SELECT COUNT(*) FROM face_review_candidates),(SELECT COUNT(*) FROM catalog_operations)",
+    "expect": [
+     [
+      null,
+      4,
+      0
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "face-review-reject-and-undo",
+  "description": "Not this person stores a constraint against the person's representative face by file and box; Undo removes it and restores the suggestion. Undo after the face moved is refused.",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "reject",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-1",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "reject"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-1"
+    },
+    "expect": {
+     "status": "ok",
+     "faceID": 3,
+     "total": 2
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "constraint",
+    "db": "SELECT file_id,bbox,anchor_file_id,anchor_bbox,source FROM face_identity_constraints",
+    "expect": [
+     [
+      3,
+      "b3",
+      1,
+      "b1",
+      "review"
+     ]
+    ]
+   },
+   {
+    "label": "rejected",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=3),(SELECT outcome FROM face_assignment_assessed WHERE face_id=3),(SELECT json_extract(after_json,'$.constraintCreated') FROM catalog_corrections)",
+    "expect": [
+     [
+      null,
+      "rejected",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "undo",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "u-1",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "u-1"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 3
+    }
+   },
+   {
+    "label": "forgotten",
+    "db": "SELECT COUNT(*) FROM face_identity_constraints",
+    "expect": [
+     [
+      0
+     ]
+    ]
+   },
+   {
+    "label": "suggestion back",
+    "db": "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at FROM face_review_candidates WHERE face_id=3",
+    "expect": [
+     [
+      3,
+      1,
+      0.81,
+      "suggested",
+      2,
+      0.2,
+      "m|p",
+      100
+     ]
+    ]
+   },
+   {
+    "label": "reject again",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-2",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "reject"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-2"
+    },
+    "expect": {
+     "status": "ok"
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "user moves it",
+    "command": {
+     "reassignFace": {
+      "faceID": 3,
+      "destinationPersonID": 2
+     }
+    },
+    "await": "bulkActionResult",
+    "expect": {
+     "succeeded": 1
+    }
+   },
+   {
+    "label": "undo refused",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "u-2",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "u-2"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "This face was moved since, so nothing changed."
+    }
+   }
+  ]
+ },
+ {
+  "name": "face-review-ignore-and-undo",
+  "description": "Ignore files the face under a new Unknown person; Undo takes it back out and deletes that empty person.",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "ignore",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "r-1",
+      "faceID": 4,
+      "personID": 2,
+      "resolution": "ignore"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "r-1"
+    },
+    "expect": {
+     "status": "ok",
+     "faceID": 4,
+     "personID": {
+      "$tol": "present"
+     },
+     "total": 2
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "unknown person",
+    "db": "SELECT p.is_unknown,p.file_count,p.representative_face_id,p.name FROM persons p JOIN face_prints f ON f.person_id=p.id WHERE f.id=4",
+    "expect": [
+     [
+      1,
+      1,
+      4,
+      null
+     ]
+    ]
+   },
+   {
+    "label": "outcome",
+    "db": "SELECT outcome FROM face_assignment_assessed WHERE face_id=4",
+    "expect": [
+     [
+      "ignored"
+     ]
+    ]
+   },
+   {
+    "label": "undo",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "u-1",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "u-1"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 3
+    }
+   },
+   {
+    "label": "back",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=4),(SELECT COUNT(*) FROM persons),(SELECT outcome FROM face_assignment_assessed WHERE face_id=4)",
+    "expect": [
+     [
+      null,
+      3,
+      "uncertain"
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "people-reassign-records-a-correction",
+  "description": "Moving a face out of a person by hand stores a reassign constraint against the person's new representative face, logs a face_reassign correction and settles the face's review state.",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "move",
+    "command": {
+     "reassignFace": {
+      "faceID": 1,
+      "destinationPersonID": 2
+     }
+    },
+    "await": "bulkActionResult",
+    "expect": {
+     "succeeded": 1,
+     "failed": 0
+    }
+   },
+   {
+    "label": "constraint",
+    "db": "SELECT file_id,bbox,anchor_file_id,anchor_bbox,source FROM face_identity_constraints",
+    "expect": [
+     [
+      1,
+      "b1",
+      4,
+      "b8",
+      "reassign"
+     ]
+    ]
+   },
+   {
+    "label": "correction",
+    "db": "SELECT kind,file_id,json_extract(before_json,'$.personID'),json_extract(after_json,'$.personID') FROM catalog_corrections",
+    "expect": [
+     [
+      "face_reassign",
+      1,
+      1,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "settled",
+    "db": "SELECT outcome FROM face_assignment_assessed WHERE face_id=1",
+    "expect": [
+     [
+      "manual"
+     ]
+    ]
+   },
+   {
+    "label": "suggestion settled",
+    "command": {
+     "reassignFace": {
+      "faceID": 3,
+      "destinationPersonID": 1
+     }
+    },
+    "await": "bulkActionResult",
+    "expect": {
+     "succeeded": 1
+    }
+   },
+   {
+    "label": "no longer pending",
+    "db": "SELECT (SELECT COUNT(*) FROM face_review_candidates WHERE face_id=3),(SELECT outcome FROM face_assignment_assessed WHERE face_id=3)",
+    "expect": [
+     [
+      0,
+      "manual"
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "cross-face-review-resolve-and-undo",
+  "description": "Swift accepts a suggestion and Rust undoes it from the shared operation log; Rust rejects one and Swift undoes it, so both engines read each other's face_review journal.",
+  "requires": [
+   "swift",
+   "rust"
+  ],
+  "engines": [
+   "swift"
+  ],
+  "start": "swift",
+  "extends": "face-review-list-pages-and-filters",
+  "steps": [
+   {
+    "label": "swift accepts",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-1",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "accept"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-1"
+    },
+    "expect": {
+     "status": "ok",
+     "personID": 1,
+     "total": 2
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "restart": "rust"
+   },
+   {
+    "label": "rust lists",
+    "command": {
+     "listFaceReview": {
+      "requestID": "x-2"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-2"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    }
+   },
+   {
+    "label": "rust undoes",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-3",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-3"
+    },
+    "expect": {
+     "status": "ok",
+     "faceID": 3,
+     "total": 3
+    }
+   },
+   {
+    "label": "rust rejects",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-4",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "reject"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-4"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "restart": "swift"
+   },
+   {
+    "label": "swift lists",
+    "command": {
+     "listFaceReview": {
+      "requestID": "x-5"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-5"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    }
+   },
+   {
+    "label": "swift undoes",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-6",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-6"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 3
+    }
+   },
+   {
+    "label": "back to start",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=3),(SELECT COUNT(*) FROM face_identity_constraints),(SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
+    "expect": [
+     [
+      null,
+      0,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "suggestion back",
+    "db": "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at FROM face_review_candidates WHERE face_id=3",
+    "expect": [
+     [
+      3,
+      1,
+      0.81,
+      "suggested",
+      2,
+      0.2,
+      "m|p",
+      100
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "face-review-clustering-queues-new-faces",
+  "description": "With people already in the face space, runFaceClustering keeps new faces out of the full pass, compares them with person centroids and queues a suggestion without assigning; a face close to nobody is recorded as unmatched. Swift needs the installed face model, so this runs on Rust only.",
+  "engines": [
+   "rust"
+  ],
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg')",
+   "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(1,'rev','p',0),(2,'rev','p',0),(3,'rev','p',0),(4,'rev','p',0),(5,'rev','p',0),(6,'rev','p',0),(7,'rev','p',0)",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,'Alex',0,1,4)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality,embedding_model,processing_version,source_revision) VALUES(1,1,1,X'00','b1',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(2,2,1,X'00','b2',X'a4707d3fcdcc4c3d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(3,3,1,X'00','b3',X'48e17a3fcdcc4cbd000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(4,4,1,X'00','b4',X'0000803f0ad7a33c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(5,5,NULL,X'00','b5',X'ec51783fcdcccc3d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(6,6,NULL,X'00','b6',X'000000000000803f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev')",
+   "DELETE FROM face_assignment_assessed",
+   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(1,'m|p','baseline',0),(2,'m|p','baseline',0),(3,'m|p','baseline',0),(4,'m|p','baseline',0)"
+  ],
+  "steps": [
+   {
+    "label": "cluster",
+    "command": {
+     "runFaceClustering": {}
+    },
+    "await": "faceClusteringComplete",
+    "abortOnError": true,
+    "expect": {
+     "reviewQueued": 1
+    }
+   },
+   {
+    "label": "nothing assigned",
+    "db": "SELECT id,person_id FROM face_prints WHERE id IN (5,6) ORDER BY id",
+    "expect": [
+     [
+      5,
+      null
+     ],
+     [
+      6,
+      null
+     ]
+    ]
+   },
+   {
+    "label": "suggestion",
+    "db": "SELECT f.person_id IS NOT NULL,c.reason,c.score>0.95,c.runner_up_person_id,c.namespace FROM face_review_candidates c JOIN face_prints f ON f.id=c.face_id WHERE c.face_id=5",
+    "expect": [
+     [
+      0,
+      "suggested",
+      1,
+      null,
+      "m|p"
+     ]
+    ]
+   },
+   {
+    "label": "outcomes",
+    "db": "SELECT face_id,outcome FROM face_assignment_assessed WHERE face_id IN (5,6) ORDER BY face_id",
+    "expect": [
+     [
+      5,
+      "suggested"
+     ],
+     [
+      6,
+      "unmatched"
+     ]
+    ]
+   },
+   {
+    "label": "listed",
+    "command": {
+     "listFaceReview": {
+      "requestID": "c-1"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "c-1"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 1,
+     "items": [
+      {
+       "faceID": 5,
+       "personName": "Alex",
+       "reason": "suggested"
+      }
+     ]
+    }
+   },
+   {
+    "label": "cluster again",
+    "command": {
+     "runFaceClustering": {}
+    },
+    "await": "faceClusteringComplete",
+    "abortOnError": true,
+    "expect": {
+     "reviewQueued": 1
+    }
+   },
+   {
+    "label": "still unassigned",
+    "db": "SELECT person_id FROM face_prints WHERE id=5",
+    "expect": [
+     [
+      null
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "face-review-clustering-opt-in-auto-assign",
+  "description": "FILEID_FACE_REVIEW_AUTO_ASSIGN=1 assigns a confident new face (cosine at least 0.55, margin at least 0.05) instead of queueing it. Rust only, as above.",
+  "engines": [
+   "rust"
+  ],
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg')",
+   "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(1,'rev','p',0),(2,'rev','p',0),(3,'rev','p',0),(4,'rev','p',0),(5,'rev','p',0),(6,'rev','p',0),(7,'rev','p',0)",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,'Alex',0,1,4)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality,embedding_model,processing_version,source_revision) VALUES(1,1,1,X'00','b1',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(2,2,1,X'00','b2',X'a4707d3fcdcc4c3d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(3,3,1,X'00','b3',X'48e17a3fcdcc4cbd000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(4,4,1,X'00','b4',X'0000803f0ad7a33c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(5,5,NULL,X'00','b5',X'ec51783fcdcccc3d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev'),(6,6,NULL,X'00','b6',X'000000000000803f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',0.9,'m','p','rev')",
+   "DELETE FROM face_assignment_assessed",
+   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(1,'m|p','baseline',0),(2,'m|p','baseline',0),(3,'m|p','baseline',0),(4,'m|p','baseline',0)"
+  ],
+  "env": {
+   "FILEID_FACE_REVIEW_AUTO_ASSIGN": "1"
+  },
+  "steps": [
+   {
+    "label": "cluster",
+    "command": {
+     "runFaceClustering": {}
+    },
+    "await": "faceClusteringComplete",
+    "abortOnError": true,
+    "expect": {
+     "reviewQueued": 0
+    }
+   },
+   {
+    "label": "assigned",
+    "db": "SELECT f.person_id,a.outcome FROM face_prints f JOIN face_assignment_assessed a ON a.face_id=f.id WHERE f.id=5",
+    "expect": [
+     [
+      1,
+      "assigned"
+     ]
+    ]
+   }
+  ]
+ }
+]
