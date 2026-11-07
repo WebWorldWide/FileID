@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-07 — Private labelled eval sets rebuilt; new baselines
+
+- **Rebuilt** (agent, owner-approved, copied read-only from the Adlon drive into `~/Library/Developer/FileIDEval`; nothing in the repo): People 365 photos across 18 events with 902 labelled boxes (615 identity faces, 103 anonymous ids, 67 small faces; 25 ids with ≥5 faces, 15 ids in both splits); timeline 18 videos with 104 intervals (34 fast actions, mostly sports; 19 cuts). Held-out has only one cut, so held-out cut numbers mean nothing.
+- **People baseline** (Swift, tune / held-out): detection 0.836 / 0.796; pairwise precision 0.773 / 0.741, recall 0.495 / 0.555; B-cubed F1 0.675 / 0.682; small faces 5/33 / 1/34. 2026 events reach precision 0.95 / 0.96; 2010–15 events only 0.53 / 0.40, because children and babies merge across years (some may be true links the labels leave split).
+- **Timeline baseline** (Swift, Qwen3-VL 2B, tune / held-out): moment recall 0.772 / 0.778, precision at IoU 0.3 0.52 / 0.344, fast actions 10/22 / 8/12, 24.5 s per video; candidates mode scene recall 0.298 / 0.333, activity-window recall 0.772 / 0.741.
+- Not comparable with the 2026-11-06 numbers: new set, new labels.
+
 ## 2026-11-07 — Face review queue rebuilt as suggestions only (catalog v32, IPC 1.23)
 
 - **Both engines** (agent; owner-approved digest refresh for `server.rs`, `client.rs`, `bulk.rs`, Mac `EngineClient.swift`, Linux `engine_client.rs`, each a few lines with no network code): new faces in a face space that already has people are kept out of the full clustering pass, compared with person centroids in the same model and processing space, and queued for review as suggested (cosine ≥0.55, margin ≥0.05), ambiguous or uncertain (0.40–0.55). Nothing is assigned unless `FILEID_FACE_REVIEW_AUTO_ASSIGN=1`. Unknown people, people already in the photo and rejected people never receive a face. Catalog v32 marks every existing face `baseline`, so an upgrade never queues the existing library. `listFaceReview`, `resolveFaceReview` (accept, not this person, ignore) and `undoFaceReview` are journaled as `face_review` operations; `reassignFace` now records a constraint and a correction.
