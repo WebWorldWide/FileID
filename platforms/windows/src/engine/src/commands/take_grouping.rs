@@ -445,7 +445,7 @@ fn process(conn: &mut Connection, session: &Session, processed: usize, total: us
     let members =
         serde_json::to_string(&session.files.iter().map(|f| f.id).collect::<Vec<_>>())?;
     tx.execute(
-        "DELETE FROM take_proposals WHERE session=?1 OR EXISTS (SELECT 1 FROM json_each(take_proposals.file_ids_json) j WHERE j.value IN (SELECT value FROM json_each(?2)))",
+        "DELETE FROM take_proposals WHERE session=?1 OR session IN (SELECT session FROM take_proposal_files WHERE file_id IN (SELECT value FROM json_each(?2)))",
         params![session.key, members],
     )?;
     let stamp = now();

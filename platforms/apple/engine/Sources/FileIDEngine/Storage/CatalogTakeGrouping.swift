@@ -329,7 +329,7 @@ actor CatalogTakeGrouping {
         try requireRunning(db)
         let proposals = try cluster(db, session: session)
         let members = String(decoding: try JSONEncoder().encode(session.files.map(\.id)), as: UTF8.self)
-        try db.execute(sql: "DELETE FROM take_proposals WHERE session=? OR EXISTS (SELECT 1 FROM json_each(take_proposals.file_ids_json) j WHERE j.value IN (SELECT value FROM json_each(?)))",
+        try db.execute(sql: "DELETE FROM take_proposals WHERE session=? OR session IN (SELECT session FROM take_proposal_files WHERE file_id IN (SELECT value FROM json_each(?)))",
                        arguments: [session.key, members])
         let now = Date().timeIntervalSince1970
         for proposal in proposals {
