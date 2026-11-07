@@ -12,7 +12,7 @@ actor CatalogTakeGrouping {
     static let jobID = "take-grouping"
     static let kind = "takeGrouping"
     static let version = "related-takes-v1"
-    static let model = "mobileclip_s2"
+    static var model: String { CLIPEmbeddingSpace.modelID }
     static let dimension = 512
     static let sessionGap = 1800.0
     static let maxSessionFiles = 2000
@@ -320,7 +320,7 @@ actor CatalogTakeGrouping {
 
     private static func session(_ media: String, _ files: [File]) -> Session {
         let ids = files.map(\.id).sorted().map(String.init).joined(separator: ",")
-        let digest = SHA256.hash(data: Data("\(version)|\(media)|\(ids)".utf8))
+        let digest = SHA256.hash(data: Data("\(version)|\(model)|\(media)|\(ids)".utf8))
         let hex = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
         return Session(key: "\(media)-\(hex)", media: media, files: files)
     }

@@ -21,7 +21,6 @@ use std::time::{Duration, Instant};
 pub const JOB_ID: &str = "take-grouping";
 pub const JOB_KIND: &str = "takeGrouping";
 const VERSION: &str = "related-takes-v1";
-const MODEL: &str = "mobileclip_s2";
 const DIMENSION: usize = 512;
 const SESSION_GAP: f64 = 1800.0;
 const MAX_SESSION_FILES: usize = 2000;
@@ -83,6 +82,10 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
+fn model() -> &'static str {
+    crate::models::clip_space::model_id()
+}
+
 fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
@@ -108,7 +111,7 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
 
 pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
     let stamp = now();
-    let recipe = serde_json::json!({"version": VERSION, "model": MODEL}).to_string();
+    let recipe = serde_json::json!({"version": VERSION, "model": model()}).to_string();
     conn.execute(
         "INSERT OR IGNORE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,?2,'[]',?3,'queued',0,?4,?4)",
         params![JOB_ID, JOB_KIND, recipe, stamp],
@@ -336,7 +339,7 @@ fn eligible(conn: &Connection) -> Result<Vec<(&'static str, File)>> {
            AND NOT EXISTS (SELECT 1 FROM catalog_event_files ef WHERE ef.file_id=f.id)
          ORDER BY f.id",
     )?;
-    let mut rows = statement.query(params![MODEL, (DIMENSION * 4) as i64])?;
+    let mut rows = statement.query(params![model(), (DIMENSION * 4) as i64])?;
     let mut hashes: HashSet<Vec<u8>> = HashSet::new();
     let mut files = Vec::new();
     while let Some(row) = rows.next()? {
@@ -427,7 +430,8 @@ fn session(media: &'static str, files: Vec<File>) -> Session {
     let mut ids: Vec<i64> = files.iter().map(|f| f.id).collect();
     ids.sort_unstable();
     let text = format!(
-        "{VERSION}|{media}|{}",
+        "{VERSION}|{}|{media}|{}",
+        model(),
         ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
     );
     let digest = Sha256::digest(text.as_bytes());
@@ -502,7 +506,7 @@ fn cluster(conn: &Connection, session: &Session) -> Result<Vec<Proposal>> {
     let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(session.files.len());
     for file in &session.files {
         let blob: Option<Vec<u8>> =
-            statement.query_row(params![file.id, MODEL], |r| r.get(0)).optional()?;
+            statement.query_row(params![file.id, model()], |r| r.get(0)).optional()?;
         vectors.push(blob.as_deref().and_then(unit_vector));
     }
     let mut active: Vec<Group> = Vec::new();

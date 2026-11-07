@@ -15,8 +15,8 @@ fn file(conn: &Connection, id: i64, path: &str, time: f64, camera: Option<&str>,
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,'mobileclip_s2')",
-        params![id, blob(vector.0, vector.1)],
+        "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
+        params![id, blob(vector.0, vector.1), model()],
     )
     .unwrap();
 }
