@@ -24,6 +24,9 @@ struct ChatWorkbench: View {
     @State private var player: AVPlayer?
     @State private var openedSource: Int?
     @State private var sourcesExpanded = false
+    @State private var chosen: Set<Int64> = []
+    @State private var selectionNote: String?
+    @State private var scopedRequest = ""
 
     private var isPage: Bool { onClose == nil }
     private var modelName: String { AIModelKind(rawValue: chatModelKind)?.displayName ?? "Local model" }
@@ -62,6 +65,9 @@ struct ChatWorkbench: View {
             if response.requestID == activeRequest || response.actions != nil { actions = (response.actions ?? []).filter(ChatActions.isRunnable) }
             busy = ["retrieving", "queued", "streaming"].contains(response.status)
             if busy, response.requestID != historyRequest { activeRequest = response.requestID }
+            if response.status == "completed", response.requestID == scopedRequest, let narrowed = ChatScope.narrowed(from: response.hits) {
+                withAnimation(Theme.springStandard) { handoff.chatScope = narrowed }
+            }
         }
         .sheet(isPresented: $modelsPresented) {
             ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: chatModelKind)) { chatModelKind = $0.rawValue }
@@ -92,6 +98,7 @@ struct ChatWorkbench: View {
                                 MetaText(message.isEmpty ? "Searching your library…" : message, color: Theme.ai)
                             }
                             .accessibilityElement(children: .combine)
+                            if hasSelectionResults { selectionStrip.padding(.leading, 12) }
                         }
                     }
                     .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16)
@@ -172,7 +179,9 @@ struct ChatWorkbench: View {
             Text(entry.text).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1).textSelection(.enabled)
                 .lineSpacing(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if isLastAnswer && !hits.isEmpty {
+            if isLastAnswer && !busy && hasSelectionResults {
+                selectionStrip
+            } else if isLastAnswer && !hits.isEmpty {
                 FlowLayout(spacing: 6) {
                     ForEach(Array(hits.prefix(8).enumerated()), id: \.offset) { index, hit in
                         CitationChip(index: index + 1, hit: hit, active: openedSource == index) { open(hit, index: index) }
@@ -188,8 +197,11 @@ struct ChatWorkbench: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let scope = handoff.chatScope {
+                ChatScopeChip(scope: scope) { withAnimation(Theme.springStandard) { handoff.chatScope = nil } }
+            }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Ask about your files…", text: $input, axis: .vertical)
+                TextField(handoff.chatScope == nil ? "Ask about your files…" : "Ask about the selected files…", text: $input, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.body(13.5))
                     .foregroundStyle(Theme.text1)
@@ -349,6 +361,9 @@ struct ChatWorkbench: View {
         activeRequest = requestID
         actions = []
         busy = true
+        let scope = handoff.chatScope?.fileIDs
+        scopedRequest = scope == nil ? "" : requestID
+        chosen = []; selectionNote = nil
         Task {
             // The engine fuses CLIP picture matches with keyword evidence when the
             // Search by description model is installed; nothing is downloaded here.
@@ -356,9 +371,34 @@ struct ChatWorkbench: View {
             guard activeRequest == requestID else { return }
             let request = ChatRequest(requestID: requestID, conversationID: conversationID, action: "send", text: text, useModel: useModel,
                                       modelKind: chatModelKind, context: handoff.context, queryVector: vector,
-                                      embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID)
+                                      embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, scopeFileIDs: scope)
             if engine.send(.chatRequest(request: request)) { input = ""; openedSource = nil }
             else { busy = false; message = "FileID is still getting ready. Try again in a moment." }
+        }
+    }
+
+    private var hasSelectionResults: Bool { hits.contains { $0.match != nil } }
+
+    private var selectionStrip: some View {
+        SelectionResultsStrip(hits: hits, chosen: $chosen, note: selectionNote,
+                              onOpen: { hit in open(hit, index: hits.firstIndex(of: hit) ?? 0) },
+                              onAsk: { ids in
+                                  withAnimation(Theme.springStandard) { handoff.chatScope = ChatScope.selected(ids, from: hits) }
+                                  chosen = []; inputFocused = true
+                              },
+                              onGroup: makeGroup)
+    }
+
+    /// Saves the chosen answer files as a Best Takes group.
+    private func makeGroup(_ ids: [Int64]) {
+        let question = messages.last(where: { $0.role == "user" })?.text ?? "Picked in Chat"
+        let title = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let request = CatalogRequest(requestID: UUID().uuidString, action: "saveEvent",
+                                     event: CatalogEvent(id: UUID().uuidString, title: title, goal: title, fileIDs: ids))
+        selectionNote = "Saving the group…"
+        Task {
+            let response = await TakeRequests.send(engine, request, timeout: 30)
+            selectionNote = response?.status == "ok" ? "Saved \(ids.count) files as a group in Best Takes." : (response?.message ?? "The group couldn't be saved. Try again.")
         }
     }
 
@@ -367,7 +407,7 @@ struct ChatWorkbench: View {
         let request = ChatRequest(requestID: UUID().uuidString, conversationID: conversationID, action: action)
         if action == "history" { historyRequest = request.requestID }
         if engine.send(.chatRequest(request: request)) {
-            if action == "clear" { messages = []; hits = []; actions = []; player?.pause(); player = nil; openedSource = nil }
+            if action == "clear" { messages = []; hits = []; actions = []; chosen = []; selectionNote = nil; player?.pause(); player = nil; openedSource = nil }
         } else { message = "FileID is still getting ready. Try again in a moment." }
     }
 }
