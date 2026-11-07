@@ -1258,9 +1258,9 @@ mod tests {
         let got: Vec<(i64, &str, &str)> =
             samples.iter().map(|e| (e.file_id, e.proposed.as_str(), e.applied.as_str())).collect();
         assert_eq!(got, [(1, "Kids_Soccer.jpg", "Kids Soccer Final.jpg"), (3, "Red_Barn.JPG", "Red_Barn.JPG")]);
-        let request = learn_request(samples, naming(&NamingSettings::default()));
-        assert_eq!(request.action, "learnNames");
-        assert_eq!(request.name_edits.as_ref().map(Vec::len), Some(2));
+        let learn = learn_request(samples, naming(&NamingSettings::default()));
+        assert_eq!(learn.action, "learnNames");
+        assert_eq!(learn.name_edits.as_ref().map(Vec::len), Some(2));
         assert_eq!(preferences_request(true).action, "resetNamePreferences");
         let wire = serde_json::to_value(request(vec![1], naming(&NamingSettings::default()))).unwrap();
         assert_eq!(wire["naming"]["learn"], true);
