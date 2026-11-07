@@ -57,7 +57,7 @@ class Rules:
         self.activity_change = 0.02
         self.activity_pad_seconds = 0.5
         self.merge_gap_seconds = 1.0
-        self.max_window_seconds = 4.0
+        self.max_window_seconds = 2.5
         self.max_window_frames = 6
         for key, value in overrides.items():
             if not hasattr(self, key):
@@ -382,7 +382,30 @@ def run_full(args, labels_doc):
         drafts = connection.execute("SELECT start_seconds, end_seconds FROM catalog_chapters WHERE file_id=? AND id NOT LIKE 'timeline-moment:%'", (fid,)).fetchall()
         scored[video["id"]] = score_video(video, {"moments": moments, "scenes": scene_rows, "windows": windows, "drafts": drafts})
     connection.close()
-    return scored, elapsed
+    return scored, elapsed, video_timing(state)
+
+
+def video_timing(state: Path):
+    """Per-video timeline job time and visual-model sequence calls from the engine's JSON log."""
+    per_video, sequences = [], []
+    log = state / "FileID/logs/scan.jsonl"
+    if not log.exists():
+        return None
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        extra = event.get("extra") or {}
+        if event.get("ev") == "timeline_scene_timing":
+            per_video.append(extra.get("totalMs", 0) / 1000)
+        elif event.get("ev") == "deep_sequence_timing":
+            sequences.append(extra.get("totalMs", 0) / 1000)
+    if not per_video:
+        return None
+    return {"videos": len(per_video), "meanVideoSeconds": round(statistics.mean(per_video), 1),
+            "medianVideoSeconds": round(statistics.median(per_video), 1), "totalVideoSeconds": round(sum(per_video), 1),
+            "sequenceCalls": len(sequences), "sequenceSeconds": round(sum(sequences), 1)}
 
 
 def summary(name, block):
@@ -419,8 +442,9 @@ def main():
         meta["rules"] = rules.as_dict()
         scored = run_candidates(args, labels_doc, rules)
     else:
-        scored, elapsed = run_full(args, labels_doc)
+        scored, elapsed, timing = run_full(args, labels_doc)
         meta["seconds"] = round(elapsed, 1)
+        meta["timing"] = timing
         meta["model"] = args.model
     changes = diff_snapshots(before, live_state_snapshot())
     meta["liveStateChanges"] = changes
@@ -432,6 +456,8 @@ def main():
     out.write_text(json.dumps(report, indent=1))
     for key in ("all", *labels_doc.get("split", {}).keys()):
         print(summary(key, report[key]))
+    if meta.get("timing"):
+        print("timing", meta["timing"])
     if changes:
         print("WARNING: the live FileID state changed:", *changes, sep="\n  ", file=sys.stderr)
         return 1
