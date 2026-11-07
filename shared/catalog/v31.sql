@@ -1,0 +1,3 @@
+CREATE TABLE take_proposals (group_key TEXT PRIMARY KEY,session TEXT NOT NULL,media TEXT NOT NULL CHECK(media IN ('photos','videos')),relation TEXT NOT NULL CHECK(relation IN ('repeatedAttempts','alternateViews','uncertain')),file_ids_json TEXT NOT NULL,evidence_json TEXT NOT NULL,similarity REAL NOT NULL CHECK(similarity BETWEEN 0 AND 1),captured_at REAL NOT NULL,proposed_at REAL NOT NULL);
+CREATE INDEX take_proposals_session ON take_proposals(session);
+CREATE TABLE take_proposal_files (file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,session TEXT NOT NULL,fingerprint TEXT NOT NULL);
