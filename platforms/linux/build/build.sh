@@ -7,6 +7,8 @@
 #
 # By default stages into platforms/linux/dist/fileid/ with the engine binary placed
 # next to the app binary so EngineClient::locate_engine_binary() finds it.
+# FILEID_LINUX_LLAMA_DIR=/abs/dir stages a runtime made by build-llama-runtime.sh
+# into RuntimeBundles/llama.cpp beside the engine.
 #
 # Requires (Debian/Ubuntu): build-essential libgtk-4-dev libadwaita-1-dev
 # Requires (Fedora):        gcc gtk4-devel libadwaita-devel
@@ -95,6 +97,28 @@ if [[ -n "${FILEID_LINUX_MEDIA_DIR:-}" ]]; then
   ( cd "$DIST_DIR/media" && sha256sum --check --status SHA256SUMS ) || fail "staged media checksum mismatch"
   mapfile -d '' media_binaries < <(find "$DIST_DIR/media" -type f \( -name 'ffmpeg' -o -name 'ffprobe' -o -name '*.so*' \) -print0)
   python3 "$REPO_ROOT/shared/scripts/check_binary_privacy.py" "${media_binaries[@]}" || fail "media privacy gate failed"
+fi
+if [[ -n "${FILEID_LINUX_LLAMA_DIR:-}" ]]; then
+  llama_source="$FILEID_LINUX_LLAMA_DIR"
+  [[ "$llama_source" = /* && -d "$llama_source" && ! -L "$llama_source" ]] || fail "FILEID_LINUX_LLAMA_DIR must be an absolute regular directory"
+  llama_source="$(realpath -e "$llama_source")"
+  [[ -z "$(find "$llama_source" -mindepth 1 -type d -print -quit)" ]] || fail "llama runtime cannot contain subdirectories"
+  while IFS= read -r -d '' link; do
+    target="$(readlink "$link")"
+    [[ "$target" != */* && -f "$llama_source/$target" ]] || fail "llama runtime contains an external or broken link"
+  done < <(find "$llama_source" -mindepth 1 -type l -print0)
+  for required in llama-server SHA256SUMS LICENSE THIRD-PARTY-NOTICES.txt; do
+    [[ -f "$llama_source/$required" ]] || fail "llama runtime is missing $required (build it with build-llama-runtime.sh)"
+  done
+  ( cd "$llama_source" && sha256sum --check --strict --status SHA256SUMS ) || fail "llama runtime checksum mismatch"
+  llama_dest="$DIST_DIR/RuntimeBundles/llama.cpp"
+  [[ ! -e "$llama_dest" && ! -L "$llama_dest" ]] || fail "llama runtime staging already exists; use a fresh FILEID_LINUX_DIST_DIR"
+  mkdir -p "$llama_dest"
+  cp -a "$llama_source/." "$llama_dest/"
+  ( cd "$llama_dest" && sha256sum --check --strict --status SHA256SUMS ) || fail "staged llama runtime checksum mismatch"
+  mapfile -d '' llama_binaries < <(find "$llama_dest" -type f \( -name 'llama-server' -o -name '*.so*' \) -print0)
+  python3 "$REPO_ROOT/shared/scripts/check_binary_privacy.py" "${llama_binaries[@]}" || fail "llama runtime privacy gate failed"
+  ok "llama.cpp runtime: $llama_dest"
 fi
 step "Privacy gate — checking telemetry markers"
 python3 "$REPO_ROOT/shared/scripts/check_binary_privacy.py" "$DIST_DIR/fileid-linux" "$DIST_DIR/FileIDEngine" || fail "privacy gate failed"

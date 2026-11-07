@@ -1,4 +1,4 @@
-name: Packaging (Linux — Flatpak)
+name: Packaging (Linux — Flatpak + llama.cpp runtime)
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
   flatpak:
     name: Flatpak (GNOME 49) — x64
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           python packaging/flatpak/generate-cargo-sources.py --check
           python packaging/flatpak/test_generate_cargo_sources.py
+          python3 -I platforms/linux/build/test_llama_runtime.py
 
       - name: Install flatpak + flatpak-builder
         run: |
@@ -72,9 +73,19 @@ jobs:
       - name: Privacy scan exact Flatpak payload
         run: |
           set -euo pipefail
+          mapfile -d '' llama < <(find build-dir/files/lib/fileid/llama.cpp -type f \( -name llama-server -o -name '*.so*' \) -print0)
           python3 shared/scripts/check_binary_privacy.py \
             build-dir/files/bin/fileid-linux \
-            build-dir/files/bin/FileIDEngine
+            build-dir/files/bin/FileIDEngine \
+            "${llama[@]}"
+
+      - name: Run the bundled llama-server inside the Flatpak runtime
+        run: |
+          set -euo pipefail
+          manifest=packaging/flatpak/io.github.fileid.FileID.yaml
+          flatpak-builder --run build-dir "$manifest" /app/lib/fileid/llama.cpp/llama-server --version
+          flatpak-builder --run build-dir "$manifest" python3 -I - /app/lib/fileid/llama.cpp \
+            < platforms/linux/build/probe_llama_runtime.py
 
       - name: Bundle the .flatpak
         run: |
@@ -91,3 +102,59 @@ jobs:
             FileID.flatpak
             FileID.flatpak.sha256
           if-no-files-found: error
+
+  llama-runtime:
+    name: llama.cpp runtime (${{ matrix.backend }}) — x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, vulkan]
+    env:
+      BACKEND: ${{ matrix.backend }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+          if [ "$BACKEND" = vulkan ]; then
+            sudo apt-get install -y --no-install-recommends glslc libvulkan-dev spirv-headers mesa-vulkan-drivers
+          fi
+
+      - name: Fetch the pinned llama.cpp source archive
+        run: |
+          set -euo pipefail
+          curl --fail --show-error --location --retry 3 \
+            -o "$RUNNER_TEMP/llama.cpp-b9254.tar.gz" \
+            https://codeload.github.com/ggml-org/llama.cpp/tar.gz/e947228222147356bc7e64154d3439e142481632
+
+      - name: Build with the shared builder (verifies the archive SHA-256)
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ "$BACKEND" = vulkan ]; then extra=(--vulkan); fi
+          platforms/linux/build/build-llama-runtime.sh \
+            --archive "$RUNNER_TEMP/llama.cpp-b9254.tar.gz" \
+            --output "$RUNNER_TEMP/llama-runtime" "${extra[@]}"
+
+      - name: Version, checksums and outbound-HTTP refusal
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/llama-runtime/llama-server" --version
+          "$RUNNER_TEMP/llama-runtime/llama-server" --list-devices
+          if [ "$BACKEND" = vulkan ]; then
+            GGML_VK_VISIBLE_DEVICES=0 "$RUNNER_TEMP/llama-runtime/llama-server" --list-devices | tee "$RUNNER_TEMP/devices.txt"
+            grep -q '^ *Vulkan0: ' "$RUNNER_TEMP/devices.txt"
+          fi
+          python3 -I platforms/linux/build/probe_llama_runtime.py "$RUNNER_TEMP/llama-runtime"
+
+      - name: Privacy scan runtime binaries
+        run: |
+          set -euo pipefail
+          mapfile -d '' llama < <(find "$RUNNER_TEMP/llama-runtime" -type f \( -name llama-server -o -name '*.so*' \) -print0)
+          python3 shared/scripts/check_binary_privacy.py "${llama[@]}"

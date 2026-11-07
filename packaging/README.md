@@ -1,8 +1,9 @@
 # FileID — Linux packaging
 
 How the GTK4 app reaches desktop Linux. Every channel wraps the same two
-binaries (`fileid-linux` + the spawned `FileIDEngine`) and reuses the desktop,
-AppStream, and icon assets in [`platforms/linux/data/`](../platforms/linux/data/).
+binaries (`fileid-linux` + the spawned `FileIDEngine`), plus the llama.cpp
+runtime where noted below, and reuses the desktop, AppStream, and icon assets
+in [`platforms/linux/data/`](../platforms/linux/data/).
 
 ## Distro support matrix
 
@@ -17,16 +18,47 @@ Flatpak is primary because it carries a stable GTK/libadwaita runtime while the
 application remains native GTK4. The current GNOME 49 runtime is backward
 compatible with the app's GTK 4.14/libadwaita 1.5 API floor.
 
-## Deep Analyze runtime
+## Deep Analyze runtime (llama.cpp)
 
-The packages install FileID's engine and model downloader, but they do not yet
-bundle a reviewed llama.cpp executable. Scan tags, faces, CLIP search, Cleanup,
-and Restructure are unaffected. Deep Analyze is currently unavailable in the
-Flatpak because a host executable is not visible inside the sandbox. AppImage,
-AUR, Nix, and source builds require a compatible `llama-mtmd-cli` on the
-launched process's `PATH`. No optional package dependency is declared until a
-package providing the required executable/version is verified. The GTK model
-picker discloses this before users download VLM weights.
+Deep Analyze, speech and chat generation run through `llama-server`. Linux
+packages build it from the pinned llama.cpp b9254 source (commit
+`e947228222147356bc7e64154d3439e142481632`, archive SHA-256
+`b45827df371f9a418680f0137f58a3a27e0e577b4c5e99e54519eea28be67241`) with
+[`platforms/linux/build/build-llama-runtime.sh`](../platforms/linux/build/build-llama-runtime.sh).
+The builder never downloads: the channel fetches the archive and the builder
+verifies it, the vendored license sources, and the three files the FileID patch
+changes, then applies
+[`llama-b9254-no-outbound.patch`](../platforms/linux/build/patches/llama-b9254-no-outbound.patch)
+and checks the patched hashes. The patch disables llama.cpp's outbound HTTP
+client (model download, remote image/audio URLs, router proxy); the loopback
+inference server that the engine talks to is unchanged.
+
+The build is CPU-only, shared-library, with every ggml CPU variant loaded at run
+time (`GGML_BACKEND_DL` + `GGML_CPU_ALL_VARIANTS`), so one build runs on any
+x86-64 CPU and uses AVX2/AVX-512 where present (aarch64 gets the ARMv8/v9
+variants; only x86-64 is CI-built so far). OpenSSL, the web UI, the
+prebuilt-UI fetch, LLGuidance, RPC, KleidiAI and OpenMP are off. The staged
+directory holds `llama-server`, its `lib*.so*`, `LICENSE`,
+`THIRD-PARTY-NOTICES.txt` (llama.cpp/ggml, cpp-httplib, nlohmann/json, stb_image,
+miniaudio, subprocess.h) and `SHA256SUMS`.
+
+| Channel | Runtime location | Status |
+|---|---|---|
+| Flatpak | `/app/lib/fileid/llama.cpp/` (module `llama-runtime`, source archive pinned in the manifest) | CI builds it in the offline sandbox and runs `llama-server --version` plus the outbound-HTTP probe inside the runtime |
+| AppImage | `usr/bin/RuntimeBundles/llama.cpp/` | `build-appimage.sh` fetches and builds it; the AppImage itself is still a native build gate |
+| `build.sh` (dev) | `dist/fileid/RuntimeBundles/llama.cpp/` | opt-in: `FILEID_LINUX_LLAMA_DIR=<builder output>` |
+| AUR, Nix | not bundled yet | the PKGBUILD pins the v0.1.0 tag, which predates the builder; add it at the next release cut. Until then set `FILEID_LLAMA_SERVER` |
+
+The engine looks for `llama-server` in this order: `FILEID_LLAMA_SERVER`, the
+models folder (`llama.cpp-cuda/`, `llama.cpp/`), `RuntimeBundles/llama.cpp/`
+beside the engine, then `../lib/fileid/llama.cpp/` relative to the engine's
+folder. Each candidate must be an executable 64-bit ELF for the host
+architecture; nothing is downloaded at run time. The GTK app enables Deep
+Analyze only when one is found.
+
+A Vulkan variant (`--vulkan`) builds in CI against lavapipe but is not packaged:
+it needs a check on real GPUs first, and a Vulkan backend that fails at run time
+is not retried on CPU by the engine.
 
 ## Flatpak source integrity
 
@@ -64,7 +96,9 @@ their package-managed runtime.
 The only runtime network permission is for user-initiated model downloads from
 Hugging Face. Flatpak grants `--share=network` for that purpose and never grants
 host-wide filesystem access. Build-time source downloads happen outside the
-sandbox and every input is checksum-pinned.
+sandbox and every input is checksum-pinned. The bundled `llama-server` listens
+on loopback only, with a per-launch API key, and its outbound HTTP client is
+patched out.
 
 ## Build quick reference
 

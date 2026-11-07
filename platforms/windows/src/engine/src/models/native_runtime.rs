@@ -39,7 +39,11 @@ pub(crate) fn discover_at(root: &Path, application_dir: Option<&Path>, name: &st
     if let Some(configured) = configured { return validate_binary(&configured).map(|p| vec![p]); }
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let mut dirs = vec![root.join("llama.cpp-cuda"), root.join("llama.cpp")];
-    if let Some(application_dir) = application_dir { dirs.push(application_dir.join("RuntimeBundles/llama.cpp")); }
+    if let Some(application_dir) = application_dir {
+        dirs.push(application_dir.join("RuntimeBundles/llama.cpp"));
+        #[cfg(not(windows))]
+        if let Some(prefix) = application_dir.parent() { dirs.push(prefix.join("lib/fileid/llama.cpp")); }
+    }
     let mut result = Vec::new();
     for dir in dirs {
         for path in [dir.join(format!("{name}{suffix}")), dir.join("bin").join(format!("{name}{suffix}"))] {
@@ -47,6 +51,12 @@ pub(crate) fn discover_at(root: &Path, application_dir: Option<&Path>, name: &st
         }
     }
     Ok(result)
+}
+pub fn llama_server_available() -> bool {
+    let Ok(root) = crate::paths::models_dir() else { return false };
+    let application = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_owned));
+    let configured = std::env::var_os("FILEID_LLAMA_SERVER").map(PathBuf::from);
+    discover_at(&root, application.as_deref(), "llama-server", configured).is_ok_and(|paths| !paths.is_empty())
 }
 pub(crate) async fn candidates(name: &'static str, setting: &'static str, cancel: Arc<AtomicBool>) -> Result<Vec<PathBuf>> {
     let root = crate::paths::models_dir().map_err(HostAdmissionError)?;

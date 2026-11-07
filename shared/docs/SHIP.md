@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-11-06 Linux llama.cpp runtime packaging
+
+Linux packages build `llama-server` from the pinned llama.cpp b9254 source archive (SHA-256 checked, outbound HTTP client patched out, CPU with run-time-selected ggml CPU variants) via `platforms/linux/build/build-llama-runtime.sh`; the Flatpak installs it at `/app/lib/fileid/llama.cpp`, the AppImage at `usr/bin/RuntimeBundles/llama.cpp`. The Flatpak CI job builds it in the offline sandbox and runs `--version` and a model-free outbound-HTTP probe inside the runtime; a separate CI job builds CPU and Vulkan variants on Ubuntu. Not yet done: a model-backed Deep Analyze run on native Linux hardware, the native AppImage build, aarch64, AUR/Nix bundling, and a Vulkan package after a real-GPU check. Locally verified only on macOS (pinned archive and file hashes, patch, configure and build of the same source, outbound probe against patched and unpatched builds).
+
 ## 2026-11-05 Signed App Store package
 
 `scripts/testflight.sh --package-only` (release build with `-DFILEID_APP_STORE`, Apple Distribution signing, embedded provisioning profile, installer signing) produced `platforms/apple/dist/FileID-0.1.2-1434.pkg` (102 MB) with strict `codesign --verify --deep` and `pkgutil --check-signature` passing. Not uploaded: uploading to App Store Connect and every App Store Connect decision listed below stay with the owner.
@@ -247,6 +251,9 @@ on the Developer ID cert). The major open items:
 - **Rename-heal exact-duplicate fix** — coexisting byte-identical files currently
   collapse to one row; fix so N pairs yield 2N rows and Cleanup surfaces the group.
 - **Packaging + signing (Windows)** — WiX MSI + Authenticode EV cert.
+- **Linux llama.cpp runtime** — Flatpak and AppImage build a pinned CPU `llama-server`
+  (b9254, outbound HTTP patched out); still needs a model-backed native Linux run,
+  the native AppImage build, aarch64, AUR/Nix bundling and a GPU-checked Vulkan variant.
 - **Per-vendor on-hardware verification** — see the matrix below.
 
 ## Appendix — Windows per-vendor verification matrix
