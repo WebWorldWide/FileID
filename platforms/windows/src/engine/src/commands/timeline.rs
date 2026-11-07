@@ -10,6 +10,7 @@ use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogChapter, CatalogRequest, CatalogResponse, EventPayload, IpcEvent, Wrap};
 use crate::models::resident_service::{ResidentLease, ResidentService};
 use crate::pipeline::timeline_analysis as analysis;
+use crate::pipeline::video_scene_selection as scene_selection;
 use anyhow::{anyhow, bail, Context, Result};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -594,7 +595,8 @@ async fn process<M: FrameModel>(
             .await?;
         }
 
-        let signals = scan_signals(id, file_id, &source, duration, cancel, database).await?;
+        let scan = scan_signals(id, file_id, &source, duration, cancel, database).await?;
+        let signals = scan.signals;
         let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
         let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
         for seconds in analysis::sample_times(duration, job.recipe.interval_seconds, &signals) {
@@ -654,12 +656,17 @@ async fn process<M: FrameModel>(
         }
 
         if job.recipe.timeline_mode.as_deref() == Some("moments") {
+            let grid = if scan.complete {
+                activity_grid(&source, duration, scan.signatures, cancel).await?
+            } else {
+                None
+            };
             analyze_moments(
                 id,
                 file_id,
                 &source,
                 duration,
-                &signals,
+                (&signals, grid.as_deref()),
                 size,
                 version,
                 (index, total, share),
@@ -692,6 +699,13 @@ async fn process<M: FrameModel>(
     Ok(())
 }
 
+struct SignalScan {
+    signals: Vec<analysis::Signal>,
+    /// The 1 fps grayscale signatures the signals came from.
+    signatures: Vec<(f64, Vec<u8>)>,
+    complete: bool,
+}
+
 async fn scan_signals(
     id: &str,
     file_id: i64,
@@ -699,8 +713,10 @@ async fn scan_signals(
     duration: f64,
     cancel: &Arc<AtomicBool>,
     database: &Arc<Mutex<Connection>>,
-) -> Result<Vec<analysis::Signal>> {
+) -> Result<SignalScan> {
     let mut signals = Vec::new();
+    let mut signatures = Vec::new();
+    let mut complete = true;
     let mut previous: Option<Vec<u8>> = None;
     let mut start = 0.0;
     while start < duration {
@@ -721,7 +737,10 @@ async fn scan_signals(
             Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
             // Uniform sampling still covers the file; the unscanned span stays
             // recorded as incomplete signal coverage.
-            Err(_) => break,
+            Err(_) => {
+                complete = false;
+                break;
+            }
         };
         let checked = source.clone();
         with_db(database, move |conn| {
@@ -731,9 +750,66 @@ async fn scan_signals(
         .await?;
         signals.extend(analysis::signals_from_frames(&chunk, previous.as_deref()));
         previous = chunk.last().map(|(_, pixels)| pixels.clone());
+        signatures.extend(chunk);
         start = end;
     }
-    Ok(signals)
+    Ok(SignalScan { signals, signatures, complete })
+}
+
+/// Grayscale signatures every `POOL_INTERVAL` seconds, the grid the macOS engine's
+/// frame pool gives `VideoSceneSelection`: the 1 fps scan plus a second 1 fps pass
+/// offset by half a second. `None` when the offset pass fails.
+async fn activity_grid(
+    source: &Source,
+    duration: f64,
+    whole: Vec<(f64, Vec<u8>)>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Option<Vec<(f64, Vec<u8>)>>> {
+    let mut offset = Vec::new();
+    let mut start = 0.0;
+    while start < duration {
+        let end = duration.min(start + SIGNAL_CHUNK_SECONDS);
+        let from = start + scene_selection::POOL_INTERVAL;
+        if from < end {
+            let (path, flag) = (source.path.clone(), cancel.clone());
+            match blocking(move || video_export::signal_frames(&path, from, end, &flag)).await {
+                Ok(chunk) => offset.extend(chunk),
+                Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
+                Err(_) => return Ok(None),
+            }
+        }
+        start = end;
+    }
+    Ok(Some(merge_grid(whole, offset, duration)))
+}
+
+fn merge_grid(whole: Vec<(f64, Vec<u8>)>, offset: Vec<(f64, Vec<u8>)>, duration: f64) -> Vec<(f64, Vec<u8>)> {
+    let mut grid: Vec<(f64, Vec<u8>)> =
+        whole.into_iter().chain(offset).filter(|(seconds, _)| seconds.is_finite() && *seconds >= 0.0 && *seconds < duration).collect();
+    grid.sort_by(|a, b| a.0.total_cmp(&b.0));
+    grid.dedup_by(|later, earlier| later.0 - earlier.0 < 0.1);
+    grid
+}
+
+/// Moment windows and the still spans between them. With a complete signature grid
+/// these are the macOS activity windows (motion only, at most
+/// `MAX_WINDOW_SECONDS`, every grid frame); otherwise the overlapping windows
+/// that cover the whole file.
+fn moment_plan(
+    duration: f64,
+    signals: &[analysis::Signal],
+    grid: Option<&[(f64, Vec<u8>)]>,
+) -> (Vec<analysis::Window>, Vec<(f64, f64)>) {
+    let Some(grid) = grid.filter(|g| g.len() >= 2) else {
+        return (analysis::windows(duration, signals), Vec::new());
+    };
+    let windows = scene_selection::activity_windows(&scene_selection::activity_frames(grid), duration);
+    let still = scene_selection::still_spans(&windows, duration);
+    let windows = windows
+        .into_iter()
+        .map(|w| analysis::Window { start: w.start, end: w.end, times: w.times })
+        .collect();
+    (windows, still)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -742,7 +818,7 @@ async fn analyze_moments<M: FrameModel>(
     file_id: i64,
     source: &Source,
     duration: f64,
-    signals: &[analysis::Signal],
+    (signals, grid): (&[analysis::Signal], Option<&[(f64, Vec<u8>)]>),
     size: (u32, u32),
     frame_version: &str,
     (file_index, total_files, share): (usize, usize, f64),
@@ -753,9 +829,25 @@ async fn analyze_moments<M: FrameModel>(
     database: &Arc<Mutex<Connection>>,
     decoder: impl FrameDecoder,
 ) -> Result<()> {
-    let windows = analysis::windows(duration, signals);
-    if windows.is_empty() {
+    let (windows, still) = moment_plan(duration, signals, grid);
+    if windows.is_empty() && still.is_empty() {
         return Err(unreadable());
+    }
+    if !still.is_empty() {
+        let version = format!("timeline-moment-sequence-v1/{frame_version}");
+        let checked = source.clone();
+        while_running(database, id, move |conn| {
+            checked.verify(conn, file_id)?;
+            for (start, end) in still {
+                let coverage = format!("moment-still:{file_id}:{}:{version}:{}", checked.revision, analysis::millis(start));
+                upsert_coverage(conn, &coverage, file_id, start, end, "sampled", &checked.revision, &version)?;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    if windows.is_empty() {
+        return Ok(());
     }
     let mut prefetched: Option<Prefetch> = None;
     let result = moment_windows(
