@@ -86,6 +86,15 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
             });
         }
     }
+    let visible = apply_decisions(conn, groups)?;
+    let newest = visible.iter().map(|g| g.captured_at).fold(0.0, f64::max);
+    let mut ranked = rank(visible, newest);
+    ranked.truncate(limit);
+    Ok(ranked)
+}
+
+/// Drops groups inside a Keep all choice and marks those inside a Skip choice.
+pub fn apply_decisions(conn: &Connection, groups: Vec<CatalogTakeAutoGroup>) -> Result<Vec<CatalogTakeAutoGroup>> {
     let mut decisions: Vec<(String, HashSet<i64>)> = Vec::new();
     let mut statement = conn.prepare("SELECT decision,file_ids_json FROM take_group_decisions")?;
     for row in statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
@@ -105,10 +114,7 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
         }
         visible.push(group);
     }
-    let newest = visible.iter().map(|g| g.captured_at).fold(0.0, f64::max);
-    let mut ranked = rank(visible, newest);
-    ranked.truncate(limit);
-    Ok(ranked)
+    Ok(visible)
 }
 
 /// Bigger and more recent groups first: 0.6 × size (saturating at 12 tries)

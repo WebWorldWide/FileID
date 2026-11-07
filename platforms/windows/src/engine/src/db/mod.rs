@@ -128,6 +128,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
 
     crate::commands::tools::recover(&conn)?;
     crate::catalog_index::CatalogIndex::recover(&conn)?;
+    crate::commands::take_grouping::recover(&conn)?;
     Ok(conn)
 }
 

@@ -64,6 +64,11 @@ pub async fn handle(
                         .unwrap_or(false),
                     _ => false,
                 };
+                let grouping = action == "enqueueTakeGrouping"
+                    || (action == "resumeJob" && job_id.as_deref() == Some(super::take_grouping::JOB_ID));
+                if grouping {
+                    super::take_grouping::schedule(sink.clone(), database.clone());
+                }
                 if let Some(id) = queued.or(if resumed { job_id.clone() } else { None }) {
                     super::timeline::schedule(id, sink.clone(), database);
                 }
@@ -291,7 +296,10 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             {
                 bail!("This job cannot make that transition")
             }
-            if request.action == "resumeJob" && !super::timeline::is_timeline_job(&tx, id)? {
+            if request.action == "resumeJob"
+                && !super::timeline::is_timeline_job(&tx, id)?
+                && !super::take_grouping::is_job(&tx, id)?
+            {
                 bail!("This engine cannot resume that job")
             }
             let target = match request.action.as_str() {
@@ -313,6 +321,8 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "autoTakeGroups" => {
             result.take_groups = Some(super::catalog_take_auto::discover(conn, request.limit.unwrap_or(100))?);
         }
+        "enqueueTakeGrouping" => return super::take_grouping::enqueue(conn, request),
+        "takeGroupProposals" => return super::take_grouping::proposals(conn, request),
         "decideTakeGroup" => {
             let decision = request.take_decision.as_ref().ok_or_else(|| anyhow::anyhow!("Decision required"))?;
             super::catalog_take_auto::decide(conn, decision)?;
