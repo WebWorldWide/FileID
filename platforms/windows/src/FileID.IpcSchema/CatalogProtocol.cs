@@ -84,7 +84,9 @@ public sealed record CatalogTakeAutoGroup(
     string Status,
     double CapturedAt,
     double Similarity,
-    IReadOnlyList<CatalogTakeShot> Shots);
+    IReadOnlyList<CatalogTakeShot> Shots,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Relation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Evidence = null);
 
 public sealed record CatalogTakeQuality(
     long PrimaryFileID,

@@ -149,5 +149,163 @@
       {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
       {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
+  },
+  {
+    "name": "cross-takes-grouping-swift-then-rust",
+    "description": "Related-take proposals written by the Swift job are current for the Rust job and back: session keys and file fingerprints match byte for byte, so an unchanged rerun on the other engine redoes nothing and both read the same groups.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "swift"
+    ],
+    "start": "swift",
+    "extends": "takes-grouping-proposes-related-tries",
+    "steps": [
+      {
+        "label": "swift runs the job",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "swift job finishes",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": {
+            "$tol": "count",
+            "value": 3
+          }
+        },
+        "save": "swiftGroups"
+      },
+      {
+        "label": "swift stamps",
+        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
+        "save": "stamps"
+      },
+      {
+        "label": "swift fingerprints",
+        "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id",
+        "save": "files"
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust reads the same groups",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": {
+            "$var": "swiftGroups.takeGroups"
+          }
+        }
+      },
+      {
+        "label": "rust reruns",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "rust job finishes",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": {
+            "$tol": "count",
+            "value": 3
+          }
+        }
+      },
+      {
+        "label": "rust redid nothing",
+        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
+        "expect": {
+          "$var": "stamps"
+        }
+      },
+      {
+        "label": "rust keeps the fingerprints",
+        "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id",
+        "expect": {
+          "$var": "files"
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift reruns",
+        "catalog": {
+          "action": "enqueueTakeGrouping"
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "swift job finishes again",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 20,
+        "expect": {
+          "status": "ok",
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ],
+          "takeGroups": {
+            "$tol": "count",
+            "value": 3
+          }
+        }
+      },
+      {
+        "label": "swift redid nothing",
+        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
+        "expect": {
+          "$var": "stamps"
+        }
+      }
+    ]
   }
 ]

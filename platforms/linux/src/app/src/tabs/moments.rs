@@ -743,6 +743,7 @@ pub(super) fn job_title(kind: &str) -> &'static str {
     match kind {
         "timelineSample" => "Video analysis",
         "catalogIndex" => "Search index",
+        "takeGrouping" => "Related tries",
         _ => "Video analysis",
     }
 }
@@ -1418,5 +1419,6 @@ mod tests {
         assert!(!editor_valid("Intro", 6.0, 5.0));
         assert_eq!(job_state("paused"), ("Paused", Tone::Muted));
         assert_eq!(job_title("timelineSample"), "Video analysis");
+        assert_eq!(job_title("takeGrouping"), "Related tries");
     }
 }
