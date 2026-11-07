@@ -4233,3 +4233,35 @@ The generator now rejects:
 The gate fails any entry whose name or files (`transformer/`, `vae/`, `text_encoder/`) mark it as one of these.
 
 FrogNano-4B is now role `text`. Its GGUF ships the projector inherited from Qwen3.5-4B, but its card says image and video use are unsupported, so it must never be offered for Deep Analyze. The generator keeps this choice in a reviewed `ROLE_OVERRIDES` table.
+
+## 2026-11-07 — Incremental face assignment failed the held-out gate; the review queue design is recorded
+
+An agent built incremental face assignment and an uncertain-match review queue in both engines. The code was never committed and was lost when `~/Library/Developer/FileIDWorktrees` and `FileIDEval` were deleted outside the session on 2026-11-06. The design and measurements are recorded here so a restart doesn't repeat the work.
+
+**Measured (Swift engine, private labelled set; thresholds tuned on the tune half, held-out reported once):** full recluster pairwise precision/recall 0.998/0.372 tune, 0.979/0.336 held-out (baseline reproduced). Clustering the first half of each event and then assigning the rest incrementally (centroid cosine ≥ 0.55, margin ≥ 0.05; review band 0.40–0.55): tune 1.000/0.367, held-out **0.682**/0.380. Held-out new faces: 40 assigned, 18 right, 21 wrong. 12 were queued (none right) and 15 left unknown. That fails the 0.979 gate. Part of the drop is the first-half clustering itself (0.75 held-out before any incremental step), probably the lookalike pair P01/P02; unconfirmed.
+
+**Decision:** incremental assignment must not auto-assign by default. Confident matches go to the review queue as suggestions; an opt-in switch may auto-assign at 0.55/0.05. Retune when the labelled set has more identities.
+
+**Design to reimplement:**
+- **One shared v31 migration:**
+  - `face_assignment_assessed`: one row per face with its namespace and outcome. It is backfilled as `baseline` for every embedded face, so an upgrade never revisits the existing library.
+  - `face_review_candidates`: face, person, score, reason (suggested, uncertain or ambiguous), runner-up and namespace. A row is removed when its face or person is deleted.
+  - `face_identity_constraints`: rejected suggestions stored as face-to-anchor-face pairs with stable file+bbox keys, so they survive the Rust full path recreating person IDs.
+- **Candidates:** unassessed, unassigned faces with current provenance. They are compared only with person centroids in the same model and processing namespace.
+- **Who can receive a face:**
+  - Unknown people, people already in the same photo, rejected people and people under a different-people verdict count toward the margin but never receive the face.
+  - A face whose best match is an unknown person stays unknown.
+  - Faces are decided best score first, all in one transaction.
+  - Names and unknown records are never rewritten.
+- **Resolving a suggestion:**
+  - Accept assigns the face, but refuses if that person is already in the same photo.
+  - Reject stores a constraint against the person's representative face.
+  - Ignore files the face under a new Unknown person.
+  - Each resolution is logged in `catalog_operations`/`catalog_corrections` (kind `face_review`), and Undo takes the operation ID.
+- **IPC:** `listFaceReview` (optional person, offset, limit ≤ 200), `resolveFaceReview` and `undoFaceReview`, plus one reply event. `runFaceClustering` keeps its wire shape.
+- **Digest-locked files this needs** (owner approval for a digest refresh):
+  - `server.rs`: its command match is exhaustive.
+  - Mac `EngineClient.swift`: its event switch has no default.
+  - Shared engine `client.rs` and Linux `engine_client.rs`: they build `FaceClusteringResult` and `CatalogResponse` literals.
+  - `bulk.rs`: Rust `reassignFace` has to record a correction.
+
