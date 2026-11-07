@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-07 — Linux packages ship a pinned llama.cpp llama-server
+
+- **Linux runtime** (agent, reviewed from the archived `parity/completion-runtime` builder): llama.cpp b9254 (`e947228…`, archive SHA-256 `b45827df…`) and its no-outbound patch still verify. `platforms/linux/build/build-llama-runtime.sh` builds a CPU `llama-server` offline (shared ggml with all CPU variants so any x86-64 CPU runs it; OpenSSL, web UI, LLGuidance, RPC and OpenMP off; outbound HTTP patched out) and stages it with its licence, `THIRD-PARTY-NOTICES.txt` and `SHA256SUMS`. Flatpak installs it at `/app/lib/fileid/llama.cpp`; AppImage and dev builds use `RuntimeBundles/llama.cpp`.
+- **Engine and GTK:** the engine also finds `../lib/fileid/llama.cpp` on non-Windows hosts (`llama_server_available()`); the GTK app enables Deep Analyze from engine discovery instead of `FLATPAK_ID`. The owner approved the `settings.rs` digest refresh: the Settings note now says packaged builds include llama-server and source builds can point `FILEID_LLAMA_SERVER` at one.
+- **Verification:** on the Mac, the same patched source built and `--version` reported b9254. A model-free probe passed on the patched build and caught outbound HTTP on an unpatched one. Engine and GTK tests and all gates pass. The Flatpak job and the new `llama-runtime` CPU/Vulkan jobs on ubuntu-24.04 run in CI; no Linux build has run yet.
+
 ## 2026-11-07 — Related tries reviewed in Best Takes; Undo forgets a learned rename
 
 - **All three apps** (agent): Best Takes gains a "Related tries" section with a gold "Find related tries" button (`enqueueTakeGrouping`), the takeGrouping job row (pause, resume, cancel, retry) and proposal rows with a relation chip (Repeated tries / Other angles / Not sure) and plain-language evidence. A proposal opens in the existing review page (compare, Keep all, Skip, Trash with Undo) with a "Save as group" button that prefills the manual group editor; review moves to the next proposal after a decision.
