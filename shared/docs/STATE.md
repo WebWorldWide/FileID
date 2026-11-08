@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-08 — Plan for moving macOS onto the shared Rust engine
+
+- `shared/docs/CONVERGENCE.md` (planning agent, read-only survey of both engines): per-subsystem inventory with parity and Apple-only dependencies, the adapter architecture (in-process Swift `FileIDAppleKit` behind one reviewed C interface; ONNX via `ort`'s CoreML EP; MLX stays in Swift; no new crates), and 11 stages with acceptance gates, rollback and estimates (about 25–38 engineer-weeks). Key finding: the app cannot route some commands to each engine at once (two SQLite writers), so the switch is whole-engine at spawn and "subsystem by subsystem" is the readiness order. Owner decisions listed before Stage 0.
+
 ## 2026-11-08 — Search tells good matches from look-alikes; Best Takes finds small faces in group shots
 
 - **Search and Chat (both engines; no IPC change, no locked files):** text search ranks photos by how far their "a photo of <words>." CLIP score beats a generic-photo baseline (`shared/models/clip-search-baseline.json`); a margin ≥ 0.035 or keyword evidence (tags, OCR, descriptions) makes a good match. Replies say "3 good matches, 40 weaker." Chat leaves look-alikes out ("No photos clearly show “dog”…") unless asked for the closest. On a 70-query labelled set over the 365 people photos, held-out: precision 0.79, recall 0.54, absent subjects answered "none" 10 of 11 (no floor: 0.04 / 1.00 / 0 of 11). Rust's CLIP tokenizer now splits punctuation like the Mac's (vectors within 5e-7). A 90k-file library may still report a few "good" matches for an absent subject (3 false-good pairs of 4,015 on held-out).
