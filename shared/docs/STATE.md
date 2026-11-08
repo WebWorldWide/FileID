@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-08 — Eye openness in the shared engine; Qwen3.5 0.8B measured and not adopted
+
+- **Shared engine** (agent, owner-approved download): Best Takes judges eye openness from MediaPipe Face Mesh V2 (Apache-2.0, 4.9 MB ONNX pinned at `naklitechie/face-landmarks-onnx` @ `575c3381`; all 219 weight tensors checked identical to Google's official `face_landmarker.task`, and to a second independent conversion), used only when installed (`downloadModel face_mesh`; take-score cache id `yunet-mesh-v1`). On 825 newly labelled faces (private eval), held-out eyes-closed precision/recall 0.82 / 0.68 versus 0.76 / 0.31 for the Mac's Vision check; 9.6 ms per face. First crops came from labelled boxes, not YuNet (not installed here).
+- **Qwen3.5 0.8B** (Apache-2.0) for tag/rename passes: blinded 120-photo comparison against Qwen3-VL 2B, 2B won 105, ties 11, 0.8B won 4; 0.8B was 2.6× faster and used 1 GB less but misread objects, dropped people and invented names. Not adopted; nothing added to the manifest or apps for it.
+- Rust 1,245 tests, clippy/fmt; conformance Rust 60, Swift 68, 0 fail; licence, egress and manifest gates pass. Downloaded models are kept in `~/Library/Developer/FileIDModels-eval` (never the live model folders).
+
 ## 2026-11-08 — Search tells good matches from look-alikes; Best Takes finds small faces in group shots
 
 - **Search and Chat (both engines; no IPC change, no locked files):** text search ranks photos by how far their "a photo of <words>." CLIP score beats a generic-photo baseline (`shared/models/clip-search-baseline.json`); a margin ≥ 0.035 or keyword evidence (tags, OCR, descriptions) makes a good match. Replies say "3 good matches, 40 weaker." Chat leaves look-alikes out ("No photos clearly show “dog”…") unless asked for the closest. On a 70-query labelled set over the 365 people photos, held-out: precision 0.79, recall 0.54, absent subjects answered "none" 10 of 11 (no floor: 0.04 / 1.00 / 0 of 11). Rust's CLIP tokenizer now splits punctuation like the Mac's (vectors within 5e-7). A 90k-file library may still report a few "good" matches for an absent subject (3 false-good pairs of 4,015 on held-out).
