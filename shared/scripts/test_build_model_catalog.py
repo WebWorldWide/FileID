@@ -65,12 +65,52 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(catalog.upstream_of(chain)[0], "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
         self.assertIsNone(self.check(chain))
 
+    def test_fine_tune_named_after_its_base_is_rejected(self) -> None:
+        chain = [
+            hop("bartowski/EVA-Qwen2.5-14B-v0.2-GGUF"),
+            hop("EVA-UNIT-01/EVA-Qwen2.5-14B-v0.2", "qwen2"),
+            hop("Qwen/Qwen2.5-14B", "qwen2"),
+        ]
+        self.assertIn("named after its base", self.check(chain))
+
+    def test_pruned_derivative_is_rejected(self) -> None:
+        chain = [
+            hop("mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit-REAP-19B", "qwen3_5_moe"),
+            hop("Qwen/Qwen3.6-35B-A3B", "qwen3_5_moe"),
+        ]
+        self.assertIn("resized derivative", self.check(chain))
+
     def test_matching_conversion_passes(self) -> None:
         chain = [
             hop("lmstudio-community/Phi-3.1-mini-4k-instruct-GGUF"),
             hop("microsoft/Phi-3-mini-4k-instruct", "phi3"),
         ]
         self.assertIsNone(self.check(chain))
+
+
+class LineageTests(unittest.TestCase):
+    def test_reviewed_upstream_replaces_the_card_base(self) -> None:
+        repo = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        cache = {"Qwen/Qwen2.5-7B-Instruct": {"id": "Qwen/Qwen2.5-7B-Instruct", "config": {"model_type": "qwen2"}}}
+        _, info = hop(repo, "qwen2", base_model="Qwen/Qwen2.5-7B")
+        chain = catalog.lineage(repo, cache, info=info)
+        self.assertEqual([name for name, _ in chain], [repo, "Qwen/Qwen2.5-7B-Instruct"])
+        upstream, upstream_info = catalog.upstream_of(chain)
+        self.assertIsNone(catalog.identity_problem(chain, upstream, upstream_info))
+
+    def test_moved_repository_takes_its_redirected_id(self) -> None:
+        cache = {"rednote-hilab/dots.ocr": {"id": "dots-studio/dots.ocr"}}
+        _, info = hop("ggml-org/dots.ocr-GGUF", base_model="rednote-hilab/dots.ocr")
+        chain = catalog.lineage("ggml-org/dots.ocr-GGUF", cache, info=info)
+        self.assertEqual(chain[1][0], "dots-studio/dots.ocr")
+
+
+class DedupTests(unittest.TestCase):
+    def test_one_publisher_prefers_4bit_mlx_over_full_precision(self) -> None:
+        ranks = {repo: catalog.mlx_quant_rank(repo) for repo in
+                 ["Qwen/Qwen3-30B-A3B-MLX-4bit", "Qwen/Qwen3-30B-A3B-MLX-8bit", "mlx-community/MiniCPM-V-4.7-35B-A3B-mxfp4",
+                  "Qwen/Qwen3-30B-A3B-MLX-bf16"]}
+        self.assertEqual(sorted(ranks, key=ranks.get), list(ranks))
 
 
 class LicenseReferenceTests(unittest.TestCase):
@@ -94,7 +134,7 @@ class LicenseReferenceTests(unittest.TestCase):
         for name in ["deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen2-VL-72B-Instruct",
                      "apple/FastVLM-1.5B", "LiquidAI/LFM2-VL-450M", "google/embeddinggemma-2",
                      "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated", "OBLITERATUS/Qwen3.8-27B-OBLITERATED",
-                     "cognitivecomputations/Dolphin-Mistral-24B-Venice-Edition", "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1"]:
+                     "cognitivecomputations/Dolphin-Mistral-24B-Venice-Edition", "dphn/Dolphin3.0-Qwen2.5-1.5B", "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1"]:
             with self.subTest(name=name):
                 self.assertIsNotNone(catalog.restricted_reason(name))
         for name in ["Qwen/Qwen2.5-32B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct", "HuggingFaceTB/SmolLM2-1.7B-Instruct",
@@ -128,6 +168,9 @@ class LanguageModelTests(unittest.TestCase):
 
     def test_frognano_is_never_offered_as_vision(self) -> None:
         self.assertEqual(catalog.ROLE_OVERRIDES["microsoft/FrogNano-4B-2609"], "text")
+
+    def test_language_model_only_build_is_text(self) -> None:
+        self.assertEqual(catalog.ROLE_OVERRIDES["mlx-community/gemma-3n-E2B-it-lm-4bit"], "text")
 
 
 if __name__ == "__main__":

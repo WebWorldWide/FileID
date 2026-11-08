@@ -37,6 +37,7 @@ from check_model_license_policy import (  # noqa: E402
     identity_mismatch,
     non_llm,
     restricted_reason,
+    _sizes,
 )
 
 API = "https://huggingface.co/api"
@@ -77,10 +78,34 @@ NON_LLM_PIPELINES = {
     "unconditional-image-generation",
 }
 NON_LLM_LIBRARIES = {"diffusers", "mflux"}
-# Reviewed roles that override what the repository's files suggest.
-# FrogNano's GGUF ships the projector inherited from Qwen3.5-4B, but its card
-# says image and video input are unsupported, so it is never a vision model.
-ROLE_OVERRIDES = {"microsoft/FrogNano-4B-2609": "text"}
+# Reviewed roles that override what the repository's files suggest, keyed by
+# conversion repository or upstream. FrogNano's GGUF ships the projector
+# inherited from Qwen3.5-4B, but its card says image and video input are
+# unsupported. The gemma-3n `-lm` build holds only language-model tensors.
+ROLE_OVERRIDES = {
+    "microsoft/FrogNano-4B-2609": "text",
+    "mlx-community/gemma-3n-E2B-it-lm-4bit": "text",
+}
+# Reviewed base models for repositories whose card declares the wrong one
+# (a -pt/base checkpoint, a backbone, a private training checkpoint or a
+# pre-rename organisation). Each conversion's README names the release it was
+# converted from; the upstream's license and lineage are still checked.
+# smollm-360M-instruct-add-basics has the same safetensors SHA256 as
+# SmolLM-360M-Instruct (v0.2); the 1.7B sibling's checkpoint is private.
+UPSTREAM_OVERRIDES = {
+    "mlx-community/Qwen2.5-0.5B-Instruct-4bit": "Qwen/Qwen2.5-0.5B-Instruct",
+    "mlx-community/Qwen2.5-1.5B-Instruct-4bit": "Qwen/Qwen2.5-1.5B-Instruct",
+    "mlx-community/Qwen2.5-7B-Instruct-4bit": "Qwen/Qwen2.5-7B-Instruct",
+    "mlx-community/Qwen2.5-14B-Instruct-4bit": "Qwen/Qwen2.5-14B-Instruct",
+    "mlx-community/Qwen2.5-32B-Instruct-4bit": "Qwen/Qwen2.5-32B-Instruct",
+    "mlx-community/gemma-3-4b-it-8bit": "google/gemma-3-4b-it",
+    "mlx-community/gemma-3-12b-it-4bit": "google/gemma-3-12b-it",
+    "mlx-community/olmOCR-2-7B-1025-mlx-8bit": "allenai/olmOCR-2-7B-1025",
+    "mlx-community/PaddleOCR-VL-1.5-4bit": "PaddlePaddle/PaddleOCR-VL-1.5",
+    "HuggingFaceTB/smollm-360M-instruct-v0.2-Q8_0-GGUF": "HuggingFaceTB/SmolLM-360M-Instruct",
+    "HuggingFaceTB/smollm-1.7B-instruct-v0.2-Q8_0-GGUF": "HuggingFaceTB/SmolLM-1.7B-Instruct",
+    "unsloth/GLM-4-32B-0414-GGUF": "zai-org/GLM-4-32B-0414",
+}
 # Words that make a different model of the same family and size; a
 # conversion and its declared base must agree on them.
 VARIANT_WORDS = {"instruct", "it", "chat", "thinking", "reasoning", "vl", "coder", "math", "embedding", "reranker", "ocr"}
@@ -219,7 +244,8 @@ def license_chain(chain: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
 
 def lineage(repo: str, cache: dict, info: dict | None = None) -> list[tuple[str, dict]]:
     """The repo followed by its base_model ancestors (at most 4 hops). An
-    ancestor Hugging Face cannot resolve keeps an empty info."""
+    ancestor Hugging Face cannot resolve keeps an empty info. A moved
+    repository is named by the id Hugging Face redirects it to."""
     chain: list[tuple[str, dict]] = []
     current, current_info = repo, info
     while current and len(chain) < 5 and all(current != seen for seen, _ in chain):
@@ -228,8 +254,9 @@ def lineage(repo: str, cache: dict, info: dict | None = None) -> list[tuple[str,
             if current_info is None:
                 current_info = get(f"models/{current}") or {}
                 cache[current] = current_info
+            current = current_info.get("id") or current
         chain.append((current, current_info))
-        current, current_info = base_model_of(current_info), None
+        current, current_info = UPSTREAM_OVERRIDES.get(current) or base_model_of(current_info), None
     return chain
 
 
@@ -289,6 +316,10 @@ def identity_problem(chain: list[tuple[str, dict]], upstream: str, upstream_info
     mismatch = identity_mismatch(declared, family_of(declared), repo, upstream)
     if mismatch:
         return mismatch
+    if not re.sub(r"[^a-z0-9]", "", held.lower()).startswith(re.sub(r"[^a-z0-9]", "", family_of(declared).lower())):
+        return f"repo {repo} holds {held}, a derivative named after its base {upstream}"
+    if _sizes(held) - _sizes(declared):
+        return f"repo {repo} holds {held}, a resized derivative of {upstream}"
     if variant_words(held) != variant_words(declared):
         return f"repo {repo} is {sorted(variant_words(held))}, declared base {upstream} is {sorted(variant_words(declared))}"
     held_architecture, declared_architecture = architecture_family(info), architecture_family(upstream_info)
@@ -335,6 +366,16 @@ def gguf_files(repo: str, sha: str) -> list[dict] | None:
 
 def is_split(path: str) -> bool:
     return bool(re.search(r"-\d{5}-of-\d{5}\.gguf$", path))
+
+
+def mlx_quant_rank(repo: str) -> int:
+    """Among one publisher's MLX builds of a model, prefer 4-bit, then larger
+    quantizations, then unrecognised ones, then full-precision weights."""
+    order = ["4bit", "5bit", "6bit", "8bit", "3bit"]
+    name = repo.lower()
+    if re.search(r"bf16|fp16", name):
+        return len(order) + 1
+    return next((index for index, quant in enumerate(order) if quant in name), len(order))
 
 
 def tier_for(resident_gb: float) -> str:
@@ -515,7 +556,7 @@ def main() -> int:
         if not_language_model(info, base_repo, base_info):
             reject("not a language model", info["id"])
             continue
-        rank = PUBLISHERS.index(info["id"].split("/", 1)[0])
+        rank = (PUBLISHERS.index(info["id"].split("/", 1)[0]), mlx_quant_rank(info["id"]) if info["_format"] == "mlx" else 0)
         key = (base_repo, info["_format"])
         if key in chosen and chosen[key][0] <= rank:
             continue
@@ -524,7 +565,7 @@ def main() -> int:
         if not entry or entry["estimatedResidentGB"] > args.max_resident_gb:
             reject("no usable artifact or too large", info["id"])
             continue
-        entry["role"] = ROLE_OVERRIDES.get(base_repo, entry["role"])
+        entry["role"] = ROLE_OVERRIDES.get(info["id"]) or ROLE_OVERRIDES.get(base_repo, entry["role"])
         chosen[key] = (rank, entry)
 
     entries = sorted((entry for _, entry in chosen.values()), key=lambda e: (e["role"], e["format"], e["estimatedResidentGB"], e["id"]))

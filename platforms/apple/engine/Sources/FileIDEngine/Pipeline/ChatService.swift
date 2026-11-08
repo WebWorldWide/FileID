@@ -392,18 +392,45 @@ actor ChatService {
         return recent.isEmpty ? "" : "Earlier in this conversation:\n" + recent.joined(separator: "\n") + "\n"
     }
 
-    static func evidencePrompt(request: String, hits: [CatalogHit], limit: Int = 8, history: String = "") -> String {
+    /// `details` adds each file's capture date and recognised people, so an
+    /// answer about "winter photos of Alex" can confirm both instead of denying them.
+    static func evidencePrompt(request: String, hits: [CatalogHit], limit: Int = 8, history: String = "", details: [Int64: [String]] = [:]) -> String {
         let shown = hits.prefix(limit)
         var lines = [history + "Request: \(request)", "Matches found: \(hits.count)\(hits.count > shown.count ? " (showing \(shown.count))" : "")", "<evidence>"]
         for (index, hit) in shown.enumerated() {
             var where_: [String] = [hit.kind]
             if let s = hit.startSeconds { where_.append(String(format: "at %.0f s", s)) }
             if let page = hit.page { where_.append("page \(page)") }
+            where_.append(contentsOf: details[hit.fileID] ?? [])
             let text = hit.text.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(400)
             lines.append("[\(index + 1)] \(URL(fileURLWithPath: hit.path).lastPathComponent) (\(where_.joined(separator: ", "))): \(text)")
         }
         lines.append("</evidence>")
         return lines.joined(separator: "\n")
+    }
+
+    /// Capture date and named people for each file's evidence line.
+    static func evidenceDetails(_ db: GRDB.Database, _ ids: [Int64]) throws -> [Int64: [String]] {
+        guard !ids.isEmpty else { return [:] }
+        let list = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+        var details: [Int64: [String]] = [:]
+        for row in try Row.fetchAll(db, sql: """
+            SELECT id, date(COALESCE(created_at,modified_at),'unixepoch','localtime') AS day FROM files
+            WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) IS NOT NULL
+            """, arguments: [list]) {
+            details[row["id"], default: []].append("taken " + (row["day"] as String))
+        }
+        var people: [Int64: [String]] = [:]
+        for row in try Row.fetchAll(db, sql: """
+            SELECT DISTINCT fp.file_id, trim(p.name) AS name FROM face_prints fp JOIN persons p ON p.id=fp.person_id
+            WHERE fp.file_id IN (SELECT value FROM json_each(?)) AND COALESCE(fp.excluded,0)=0
+              AND COALESCE(p.is_unknown,0)=0 AND length(trim(COALESCE(p.name,'')))>0
+            ORDER BY fp.file_id, name
+            """, arguments: [list]) {
+            people[row["file_id"], default: []].append(row["name"])
+        }
+        for (id, names) in people { details[id, default: []].append("people: " + names.joined(separator: ", ")) }
+        return details
     }
 
     /// Validated model proposals the user's own message asks for, resolved
@@ -444,7 +471,8 @@ actor ChatService {
                 }
                 return DeepAnalyzeRunner.isAnalysisFailure(result) || result.description.isEmpty ? nil : result.description
             }
-            let evidence = Self.evidencePrompt(request: request.text ?? "", hits: hits, history: history)
+            let details = (try? await database.pool.read { db in try Self.evidenceDetails(db, hits.prefix(8).map(\.fileID)) }) ?? [:]
+            let evidence = Self.evidencePrompt(request: request.text ?? "", hits: hits, history: history, details: details)
             if let first = await generate(evidence + "\n" + ChatActions.actionToolFormat) {
                 answer = first
                 // Some models answer with only the <actions> line. Ask again, plainly, so the user gets words.

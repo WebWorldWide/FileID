@@ -79,6 +79,9 @@ enum ChatFacts {
                 if let month = date.month {
                     parts.append("strftime('%m',\(ChatFacts.taken),'unixepoch','localtime')=?"); args.append(month)
                 }
+                if let months = date.months {
+                    parts.append("strftime('%m',\(ChatFacts.taken),'unixepoch','localtime') IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(months))
+                }
             }
             if let folder {
                 parts.append("f.path_text LIKE ? ESCAPE '\\'")

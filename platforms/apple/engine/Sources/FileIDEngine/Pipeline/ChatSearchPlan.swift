@@ -56,10 +56,13 @@ struct ChatSearchPlan: Sendable, Equatable {
             "my", "files", "file", "with", "in", "at", "around", "near", "all", "only", "just", "now",
             "these", "those", "instead", "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were",
             "do", "does", "did", "have", "has", "there", "any", "about", "that", "i", "mentioning", "mention", "mentions",
-            "named", "called", "titled", "regarding", "ones", "them", "they", "it", "its", "taken"
+            "named", "called", "titled", "regarding", "ones", "them", "they", "it", "its", "taken",
+            "he", "she", "him", "her", "his", "their"
         ]
+        // "how many of them show Alex?" and "what is he wearing?" point back at the last search.
         let refinement = followUp || normalized.contains {
-            ["only", "just", "now", "these", "those", "instead", "also", "and"].contains($0)
+            ["only", "just", "now", "these", "those", "instead", "also", "and",
+             "them", "they", "ones", "he", "she", "him", "her", "his", "their"].contains($0)
         }
         let kinds = negative ? [] : Array(Set(normalized.flatMap { aliases[$0] ?? [] })).sorted()
         var query = zip(words.indices, zip(words, normalized))

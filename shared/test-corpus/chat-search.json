@@ -11,5 +11,7 @@
   {"messages":["birthday photos and videos"],"query":"birthday","kinds":["image","video"]},
   {"messages":["all videos"],"query":"","kinds":["video"]},
   {"messages":["birthday except videos"],"query":"birthday except videos","kinds":[]},
-  {"messages":["Please find birthday “videos”"],"query":"birthday","kinds":["video"]}
+  {"messages":["Please find birthday “videos”"],"query":"birthday","kinds":["video"]},
+  {"messages":["birthday videos","show them"],"query":"birthday","kinds":["video"]},
+  {"messages":["birthday photos","is he smiling"],"query":"smiling","kinds":["image"]}
 ]

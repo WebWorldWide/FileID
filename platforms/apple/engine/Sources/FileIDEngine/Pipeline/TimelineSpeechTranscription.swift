@@ -53,12 +53,10 @@ enum TimelineSpeechTranscription {
 
     static func sweepAbandonedAudio(directory: URL = FileManager.default.temporaryDirectory, now: Date = Date()) {
         guard (try? ReadOnlyLocations.requireWritable(directory)) != nil,
-              let entries = try? FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
-              ) else { return }
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
 
-        for entry in entries where entry.lastPathComponent.hasPrefix("fileid-speech-") && entry.pathExtension == "m4a" {
+        for name in names where name.hasPrefix("fileid-speech-") && name.hasSuffix(".m4a") {
+            let entry = directory.appendingPathComponent(name)
             let identifier = String(entry.deletingPathExtension().lastPathComponent.dropFirst("fileid-speech-".count))
             guard UUID(uuidString: identifier) != nil,
                   (try? ReadOnlyLocations.requireWritable(entry)) != nil,
