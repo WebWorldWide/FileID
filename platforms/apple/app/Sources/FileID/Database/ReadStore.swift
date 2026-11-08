@@ -1015,6 +1015,26 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    public struct FaceCrop: Sendable, Equatable {
+        public let path: String
+        public let bbox: String
+    }
+
+    /// Photo and box of each face, for review previews.
+    public func faceCrops(_ ids: [Int64]) -> [Int64: FaceCrop] {
+        guard let q = queue, !ids.isEmpty else { return [:] }
+        return (try? q.read { db -> [Int64: FaceCrop] in
+            let placeholders = ids.prefix(500).map { _ in "?" }.joined(separator: ",")
+            var out: [Int64: FaceCrop] = [:]
+            for row in try Row.fetchAll(db, sql: """
+                SELECT fp.id, f.path_text, fp.bbox FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE fp.id IN (\(placeholders))
+                """, arguments: StatementArguments(ids.prefix(500).map { Int($0) })) {
+                out[row["id"]] = FaceCrop(path: row["path_text"], bbox: row["bbox"])
+            }
+            return out
+        }) ?? [:]
+    }
+
     public func totalFacePrints() -> Int {
         guard let q = queue else { return 0 }
         return (try? q.read { db in
