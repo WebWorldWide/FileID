@@ -70,6 +70,9 @@ pub(super) struct CatalogUi {
     pending_seek: Cell<Option<f64>>,
     found: RefCell<Vec<CatalogHit>>,
     best_takes: gtk::Button,
+    ask: gtk::Button,
+    picked: RefCell<std::collections::BTreeSet<usize>>,
+    pick_anchor: Cell<Option<usize>>,
 }
 
 impl CatalogUi {
@@ -563,8 +566,54 @@ impl CatalogUi {
             .set_tooltip_text(Some(super::takes_groups_model::search_tooltip(hits)));
     }
 
+    fn refresh_picks(&self) {
+        let picked = self.picked.borrow();
+        let mut child = self.hits.first_child();
+        let mut position = 0;
+        while let Some(widget) = child {
+            if widget.is::<gtk::Button>() {
+                v3::set_selected(&widget, picked.contains(&position));
+                position += 1;
+            }
+            child = widget.next_sibling();
+        }
+        let targets = ask_targets(&self.found.borrow(), &picked);
+        self.ask.set_sensitive(!targets.is_empty());
+        let label = if picked.is_empty() { "Ask about these".to_owned() } else { format!("Ask about {}", targets.len()) };
+        self.ask.set_label(&label);
+        self.ask.update_property(&[gtk::accessible::Property::Label(&format!("{label}: open Chat with {} results attached", targets.len()))]);
+    }
+
+    /// Ctrl+click adds or removes a result, Shift+click picks a range.
+    fn pick(&self, index: usize, range: bool) {
+        {
+            let mut picked = self.picked.borrow_mut();
+            match (range, self.pick_anchor.get()) {
+                (true, Some(anchor)) => picked.extend(anchor.min(index)..=anchor.max(index)),
+                _ if !picked.remove(&index) => {
+                    picked.insert(index);
+                }
+                _ => {}
+            }
+        }
+        self.pick_anchor.set(Some(index));
+        self.refresh_picks();
+    }
+
+    fn ask_chat(&self) {
+        let found = self.found.borrow();
+        let targets = ask_targets(&found, &self.picked.borrow());
+        let kinds: Vec<&str> = targets
+            .iter()
+            .map(|id| found.iter().find(|hit| hit.file_id == *id).map_or("image", |hit| if super::workbenches::is_playable_media(&hit.path) { "video" } else { "image" }))
+            .collect();
+        super::chat_handoff::ask_about(&self.ask, &targets, &kinds);
+    }
+
     fn render_hits(self: &Rc<Self>, hits: Vec<CatalogHit>) {
         self.set_found(&hits);
+        self.picked.borrow_mut().clear();
+        self.pick_anchor.set(None);
         v3::clear(&self.hits);
         self.searching.set_visible(false);
         self.result_count.set_text(&format!(
@@ -580,12 +629,13 @@ impl CatalogUi {
             empty.set_margin_start(14);
             self.hits.append(&empty);
         }
-        for hit in hits {
-            self.hits.append(&self.hit_row(hit));
+        for (index, hit) in hits.into_iter().enumerate() {
+            self.hits.append(&self.hit_row(index, hit));
         }
+        self.refresh_picks();
     }
 
-    fn hit_row(self: &Rc<Self>, hit: CatalogHit) -> gtk::Button {
+    fn hit_row(self: &Rc<Self>, index: usize, hit: CatalogHit) -> gtk::Button {
         let content = v3::vbox(2);
         let name = v3::mono(&v3::file_name(&hit.path), "s125");
         name.add_css_class("v3-medium");
@@ -612,9 +662,29 @@ impl CatalogUi {
             gtk::accessible::Property::Label(&format!("{}, {meta_text}", v3::file_name(&hit.path))),
             gtk::accessible::Property::Description(&hit.text),
         ]);
+        let modified = gtk::GestureClick::new();
+        modified.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        modified.connect_pressed(move |gesture, _, _, _| {
+            let state = gesture.current_event_state();
+            let (control, shift) = (state.contains(gtk::gdk::ModifierType::CONTROL_MASK), state.contains(gtk::gdk::ModifierType::SHIFT_MASK));
+            if !(control || shift) {
+                return;
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(ui) = weak.upgrade() {
+                ui.pick(index, shift);
+            }
+        });
+        row.add_controller(modified);
         let weak = Rc::downgrade(self);
         row.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
+                if !ui.picked.borrow().is_empty() {
+                    ui.picked.borrow_mut().clear();
+                    ui.refresh_picks();
+                }
+                ui.pick_anchor.set(Some(index));
                 ui.select(hit.clone());
             }
         });
@@ -799,6 +869,10 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let best_takes = v3::secondary("Best takes", false);
     best_takes.set_sensitive(false);
     best_takes.set_tooltip_text(Some(super::takes_groups_model::search_tooltip(&[])));
+    let ask = v3::ghost("Ask about these");
+    ask.set_sensitive(false);
+    ask.set_tooltip_text(Some("Open Chat with these results attached (Ctrl+click picks some, Shift+click a range)"));
+    count_row.append(&ask);
     count_row.append(&best_takes);
     top.append(&count_row);
     let search_notice = v3::wrapped("", &["v3-meta"]);
@@ -1015,6 +1089,9 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         pending_seek: Cell::new(None),
         found: RefCell::new(Vec::new()),
         best_takes: best_takes.clone(),
+        ask: ask.clone(),
+        picked: RefCell::new(std::collections::BTreeSet::new()),
+        pick_anchor: Cell::new(None),
     });
     ui_slot.replace(Some(Rc::downgrade(&ui)));
     wire(
@@ -1063,6 +1140,12 @@ fn wire(
     end_here: &gtk::Button,
     cancel: &gtk::Button,
 ) {
+    let weak = Rc::downgrade(ui);
+    ui.ask.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            ui.ask_chat();
+        }
+    });
     let weak = Rc::downgrade(ui);
     ui.best_takes.connect_clicked(move |button| {
         if let Some(ui) = weak.upgrade() {
@@ -1358,9 +1441,34 @@ fn subscribe(ui: &Rc<CatalogUi>) {
     });
 }
 
+/// Files the results' "Ask about" attaches: the picked rows, or every result, once each.
+fn ask_targets(found: &[CatalogHit], picked: &std::collections::BTreeSet<usize>) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
+    found
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| picked.is_empty() || picked.contains(index))
+        .map(|(_, hit)| hit.file_id)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ask_targets_picked_rows_or_every_result_once() {
+        let mut first = hit("image", None, None);
+        first.file_id = 1;
+        let mut moment = hit("sampledFrame", Some(3.0), None);
+        moment.file_id = 1;
+        let mut other = hit("image", None, None);
+        other.file_id = 2;
+        let found = vec![first, moment, other];
+        assert_eq!(ask_targets(&found, &std::collections::BTreeSet::new()), vec![1, 2]);
+        assert_eq!(ask_targets(&found, &[2].into_iter().collect()), vec![2]);
+    }
 
     fn hit(kind: &str, start: Option<f64>, page: Option<i64>) -> CatalogHit {
         CatalogHit {
@@ -1371,6 +1479,7 @@ mod tests {
             evidence_id: None,
             start_seconds: start,
             page,
+            selection_match: None,
         }
     }
 

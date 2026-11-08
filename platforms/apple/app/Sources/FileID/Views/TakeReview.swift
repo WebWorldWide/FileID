@@ -256,6 +256,19 @@ struct TakeReview: View {
         return CatalogTakeBox(x: x, y: y, width: w, height: h)
     }
 
+    /// The kept tries when only some are kept, otherwise every try, attached to a Chat question.
+    private var askButton: some View {
+        let subset = !keep.isEmpty && keep.count < qualities.count
+        let ids = qualities.map(\.primaryFileID).filter { !subset || keep.contains($0) }
+        return Button(subset ? "Ask about \(ids.count) kept" : "Ask about all \(ids.count)") {
+            ChatHandoff.shared.askAbout(ids, kinds: ids.map { _ in isVideo ? "video" : "image" })
+        }
+        .buttonStyle(.dsGhost)
+        .disabled(ids.isEmpty)
+        .help("Open Chat with these \(noun.many) attached, then ask for the exact moment you want")
+        .accessibilityLabel(subset ? "Ask Chat about the \(ids.count) kept \(noun.many)" : "Ask Chat about all \(ids.count) \(noun.many)")
+    }
+
     // MARK: - Filmstrip
 
     private var filmstrip: some View {
@@ -263,6 +276,7 @@ struct TakeReview: View {
             HStack(spacing: 10) {
                 SectionLabel("All \(qualities.count) \(noun.many) · \(keep.count) to keep")
                 Spacer(minLength: 8)
+                askButton
                 Button(zoom ? "Show whole \(noun.one)" : (isVideo ? "Zoom in" : "Zoom to face")) { withAnimation(Theme.springStandard) { zoom.toggle() } }
                     .buttonStyle(.dsGhost)
                     .help("Z")

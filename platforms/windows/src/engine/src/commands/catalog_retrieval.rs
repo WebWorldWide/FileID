@@ -11,6 +11,7 @@ fn hit(row: &Row<'_>) -> rusqlite::Result<CatalogHit> {
         evidence_id: row.get(4)?,
         start_seconds: row.get(5)?,
         page: row.get(6)?,
+        selection_match: None,
     })
 }
 pub(super) fn search(

@@ -33,6 +33,7 @@ mod chat_search;
 pub(crate) mod chat_intent;
 pub(crate) mod chat_facts;
 mod chat_actions;
+mod chat_selection;
 pub mod tools;
 pub mod models;
 pub mod roots;

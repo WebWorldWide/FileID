@@ -203,12 +203,21 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0"
                        x:Name="SelectionCountText"
                        VerticalAlignment="Center"
                        Style="{StaticResource BodyStrongTextBlockStyle}" />
-            <Button Grid.Column="1" Click="OnTagSelectedClicked"
+            <Button Grid.Column="1" x:Name="AskChatButton" Click="OnAskChatSelectedClicked"
+                    ToolTipService.ToolTip="Open Chat with only the chosen files attached"
+                    AutomationProperties.Name="Ask Chat about the selected files">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8BD;" FontSize="13"/>
+                    <TextBlock x:Name="AskChatText" Text="Ask about these"/>
+                </StackPanel>
+            </Button>
+            <Button Grid.Column="2" Click="OnTagSelectedClicked"
                     ToolTipService.ToolTip="Add tags to the chosen files"
                     AutomationProperties.Name="Tag selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
@@ -216,7 +225,7 @@
                     <TextBlock Text="Tag…"/>
                 </StackPanel>
             </Button>
-            <Button Grid.Column="2" Click="OnRenameSelectedClicked"
+            <Button Grid.Column="3" Click="OnRenameSelectedClicked"
                     ToolTipService.ToolTip="Rename the chosen files"
                     AutomationProperties.Name="Rename selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
@@ -224,7 +233,7 @@
                     <TextBlock Text="Rename…"/>
                 </StackPanel>
             </Button>
-            <Button Grid.Column="3" Click="OnTrashSelectedClicked"
+            <Button Grid.Column="4" Click="OnTrashSelectedClicked"
                     ToolTipService.ToolTip="Move the chosen files to the Recycle Bin"
                     AutomationProperties.Name="Move selected files to the Recycle Bin">
                 <StackPanel Orientation="Horizontal" Spacing="6">
@@ -232,7 +241,7 @@
                     <TextBlock Text="Trash…"/>
                 </StackPanel>
             </Button>
-            <Button Grid.Column="4" Click="OnClearSelectionClicked"
+            <Button Grid.Column="5" Click="OnClearSelectionClicked"
                     Background="Transparent"
                     BorderThickness="0"
                     ToolTipService.ToolTip="Clear selection (Esc)"

@@ -251,6 +251,7 @@ pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usi
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -307,6 +308,7 @@ pub(crate) fn extra_hits(extras: &Extras) -> Vec<CatalogHit> {
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
         .collect()
 }

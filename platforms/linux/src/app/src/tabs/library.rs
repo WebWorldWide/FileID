@@ -188,6 +188,27 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .spacing(12)
         .build();
     title_row.append(&count_label);
+    let select_all = crate::v3::ghost("Select all");
+    select_all.set_tooltip_text(Some("Select every file shown (Ctrl+click adds one, Shift+click a range)"));
+    select_all.connect_clicked(clone!(
+        #[strong]
+        selection,
+        move |_| {
+            selection.select_all();
+        }
+    ));
+    let clear_selection = crate::v3::ghost("Clear");
+    clear_selection.set_tooltip_text(Some("Unselect every file"));
+    clear_selection.update_property(&[gtk::accessible::Property::Label("Clear the selection")]);
+    clear_selection.connect_clicked(clone!(
+        #[strong]
+        selection,
+        move |_| {
+            selection.unselect_all();
+        }
+    ));
+    title_row.append(&select_all);
+    title_row.append(&clear_selection);
     for (label, page) in [("Search & Moments", "moments"), ("File Tools", "tools")] {
         let button = gtk::Button::builder()
             .label(label)
@@ -1198,6 +1219,7 @@ fn selected_rows(selection: &gtk::MultiSelection) -> Vec<(u32, FileRow)> {
 fn show_selection(selection: &gtk::MultiSelection, pane: &SelectedPane, reloaded: bool) {
     let rows = selected_rows(selection);
     super::chat_handoff::set_files(rows.iter().map(|(_, row)| row.id).collect());
+    pane.set_picked(rows.iter().map(|(_, row)| (row.id, row.kind.clone())).collect());
     let sizes: Vec<(u32, i64)> = rows.iter().map(|(position, row)| (*position, row.size_bytes)).collect();
     match picking::view(&sizes) {
         PaneView::Hidden => pane.hide(),

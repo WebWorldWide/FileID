@@ -46,6 +46,9 @@ struct ChatUi {
     hits: RefCell<Vec<CatalogHit>>,
     has_messages: Cell<bool>,
     cards: Rc<Cards>,
+    scope_row: gtk::Box,
+    scoped_request: RefCell<String>,
+    question: RefCell<String>,
 }
 
 impl ChatUi {
@@ -66,15 +69,21 @@ impl ChatUi {
         if action == "send" && text.trim().is_empty() {
             return;
         }
+        let scope = (action == "send").then(super::chat_handoff::scope).flatten();
         let request = ChatRequest {
             request_id: request_id(),
             conversation_id: CONVERSATION.into(),
             action: action.into(),
             text: (action == "send").then(|| text.chars().take(2000).collect()),
-            use_model: Some(false),
+            use_model: Some(scope.is_some()),
             context: (action == "send").then(context),
+            scope_file_ids: scope.as_ref().map(|scope| scope.file_ids.clone()),
             ..ChatRequest::default()
         };
+        if action == "send" {
+            self.scoped_request.replace(if scope.is_some() { request.request_id.clone() } else { String::new() });
+            self.question.replace(text.clone());
+        }
         let dispatch = self.state.borrow_mut().begin(&request);
         match dispatch {
             Ok(true) => {
@@ -103,8 +112,35 @@ impl ChatUi {
         self.stop.set_visible(busy);
     }
 
+    fn render_scope(&self) {
+        v3::clear(&self.scope_row);
+        let scope = super::chat_handoff::scope();
+        if let Some(scope) = &scope {
+            self.scope_row.append(&super::chat_selection::chip(scope));
+        }
+        self.scope_row.set_visible(scope.is_some());
+        self.placeholder.set_label(if scope.is_some() { "Ask about the selected files" } else { "Ask about your files" });
+    }
+
+    fn selection_strip(self: &Rc<Self>, hits: &[CatalogHit]) -> gtk::Box {
+        let weak = Rc::downgrade(self);
+        let open: Rc<dyn Fn(usize)> = Rc::new(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open_source(index);
+            }
+        });
+        super::chat_selection::strip(&self.engine, hits, &self.question.borrow(), open)
+    }
+
     fn render(self: &Rc<Self>, response: ChatResponse) {
-        self.set_busy(false);
+        let busy = matches!(response.status.as_str(), "retrieving" | "queued" | "streaming");
+        self.set_busy(busy);
+        let selection = super::chat_selection::has_results(&response.hits);
+        if response.status == "completed" && *self.scoped_request.borrow() == response.request_id
+            && let Some(narrowed) = super::chat_handoff::ChatScope::narrowed(&response.hits)
+        {
+            super::chat_handoff::set_scope(Some(narrowed));
+        }
         if response.status != "ok" || !response.message.is_empty() {
             self.status.set_label(&response.message);
         }
@@ -120,9 +156,14 @@ impl ChatUi {
         let last_answer = response.messages.iter().rposition(|m| m.role != "user");
         for (index, message) in response.messages.iter().enumerate() {
             self.messages.append(&message_row(message));
-            if Some(index) == last_answer && !response.hits.is_empty() {
+            if Some(index) == last_answer && !busy && selection {
+                self.messages.append(&self.selection_strip(&response.hits));
+            } else if Some(index) == last_answer && !busy && !response.hits.is_empty() {
                 self.messages.append(&self.citations(&response.hits));
             }
+        }
+        if busy && selection {
+            self.messages.append(&self.selection_strip(&response.hits));
         }
         self.render_sources(response.hits);
         if let Some(actions) = response.actions {
@@ -436,6 +477,9 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     if compact {
         composer_box.add_css_class("inspector");
     }
+    let scope_row = v3::hbox(0);
+    scope_row.set_visible(false);
+    composer_box.append(&scope_row);
     let input_row = v3::hbox(8);
     let composer = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
@@ -573,7 +617,11 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
         hits: RefCell::new(Vec::new()),
         has_messages: Cell::new(false),
         cards,
+        scope_row,
+        scoped_request: RefCell::new(String::new()),
+        question: RefCell::new(String::new()),
     });
+    ui.render_scope();
     ui.render_sources(Vec::new());
     for text in SUGGESTIONS {
         let content = v3::hbox(8);
@@ -666,6 +714,17 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
         });
         root.add_controller(escape);
     }
+    let weak = Rc::downgrade(ui);
+    let scope_changed: Rc<dyn Fn()> = Rc::new(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.render_scope();
+        }
+    });
+    super::chat_handoff::watch_scope(&scope_changed);
+    let keep_watching = scope_changed.clone();
+    root.connect_destroy(move |_| {
+        let _watching = &keep_watching;
+    });
     // The page and the inspector share one conversation; whichever appears
     // reloads it so both show what the other added.
     let weak = Rc::downgrade(ui);
@@ -801,6 +860,7 @@ mod tests {
             evidence_id: None,
             start_seconds: Some(75.0),
             page: None,
+            selection_match: None,
         };
         assert_eq!(citation_meta(&hit), "1:15");
         hit.start_seconds = None;

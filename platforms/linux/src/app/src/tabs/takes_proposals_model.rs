@@ -158,6 +158,7 @@ pub fn save_hits(group: &CatalogTakeAutoGroup) -> Vec<CatalogHit> {
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
         .collect()
 }

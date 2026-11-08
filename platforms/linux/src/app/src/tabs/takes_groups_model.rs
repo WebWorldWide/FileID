@@ -195,6 +195,7 @@ pub fn suggestion_hits(suggestion: &CatalogTakeGroupSuggestion) -> Vec<CatalogHi
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
         .collect()
 }
@@ -378,6 +379,7 @@ mod tests {
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         }
     }
 

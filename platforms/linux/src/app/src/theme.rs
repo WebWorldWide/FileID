@@ -632,6 +632,10 @@ button.v3-cite {
     background-color: alpha(#FFFFFF, 0.04); border: 1px solid alpha(#FFFFFF, 0.14);
 }
 button.v3-cite.selected { background-color: alpha(@fileid_gold, 0.12); border-color: alpha(@fileid_gold, 0.5); }
+.v3-scope-chip { background-color: alpha(@fileid_gold, 0.12); border: 1px solid alpha(@fileid_gold, 0.5); border-radius: 13px; padding: 0 2px 0 9px; min-height: 26px; }
+button.v3-selection-tile { padding: 0; border-radius: 10px; border: 1px solid alpha(#FFFFFF, 0.14); }
+button.v3-selection-tile.selected, button.v3-selection-tile:checked { border: 2px solid @fileid_gold; background-color: alpha(@fileid_gold, 0.08); }
+.v3-selection-badge { background-color: alpha(#000000, 0.45); border-radius: 10px; min-width: 20px; min-height: 20px; margin: 4px; font-weight: 700; }
 .v3-message { padding-left: 12px; }
 .v3-message.you { box-shadow: inset 2px 0 alpha(@fileid_gold, 0.5); }
 .v3-message.model { box-shadow: inset 2px 0 alpha(@fileid_lavender, 0.5); }
