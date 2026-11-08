@@ -1192,6 +1192,8 @@ pub(crate) async fn handle_run_face_clustering(
             if stats != face_review::AssessStats::default() {
                 tracing::info!(queued = stats.queued, assigned = stats.assigned, unmatched = stats.unmatched, "[CLUSTER] assessed new faces for review");
             }
+            let (merges, splits) = super::face_queues::refresh(&tx, model, processing, &super::face_queues::QueueSettings::from_env(), now)?;
+            tracing::info!(merges, splits, "[CLUSTER] stored merge and split suggestions");
         }
         let review_queued = face_review::pending_count(&tx)?;
         tx.commit()?;

@@ -69,6 +69,11 @@ pub async fn handle(
                 if grouping {
                     super::take_grouping::schedule(sink.clone(), database.clone());
                 }
+                if action == "enqueueFaceRefresh"
+                    || (action == "resumeJob" && job_id.as_deref() == Some(super::face_refresh::JOB_ID))
+                {
+                    super::face_refresh::schedule(sink.clone(), database.clone());
+                }
                 if let Some(id) = queued.or(if resumed { job_id.clone() } else { None }) {
                     super::timeline::schedule(id, sink.clone(), database);
                 }
@@ -299,6 +304,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             if request.action == "resumeJob"
                 && !super::timeline::is_timeline_job(&tx, id)?
                 && !super::take_grouping::is_job(&tx, id)?
+                && !super::face_refresh::is_job(&tx, id)?
             {
                 bail!("This engine cannot resume that job")
             }
@@ -323,6 +329,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         }
         "enqueueTakeGrouping" => return super::take_grouping::enqueue(conn, request),
         "takeGroupProposals" => return super::take_grouping::proposals(conn, request),
+        "enqueueFaceRefresh" => {
+            return super::face_refresh::enqueue(conn, request, super::face_refresh::current_model().as_deref());
+        }
         "decideTakeGroup" => {
             let decision = request.take_decision.as_ref().ok_or_else(|| anyhow::anyhow!("Decision required"))?;
             super::catalog_take_auto::decide(conn, decision)?;
