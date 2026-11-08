@@ -632,3 +632,45 @@ fn capture_window_reaches_files_beyond_the_ranked_hundred() {
     assert_eq!(hits.len(), 20, "all 20 old harbor photos, not only those in the ranked hundred");
     assert!(hits.iter().all(|hit| hit.file_id >= 380));
 }
+#[test]
+fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() {
+    let directory = Directory(std::env::temp_dir().join(format!("fileid-catalog-strength-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir(&directory.0).unwrap();
+    let path = directory.0.join("catalog.sqlite");
+    let writer = Arc::new(Mutex::new(db::open_writer(&path).unwrap()));
+    let index = CatalogIndex::with_scheduler(writer, path, directory.0.join("index"), ResourceScheduler::new(|| (16384, 12000), 1, 1));
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../../../shared/test-corpus/search-strength.json")).unwrap();
+    let case = &fixture["cases"][0];
+    let dense = |sparse: &serde_json::Value| {
+        let mut vector = vec![0f32; 512];
+        for (key, value) in sparse.as_object().unwrap() {
+            vector[key.parse::<usize>().unwrap()] = value.as_f64().unwrap() as f32;
+        }
+        vector
+    };
+    let ids = |key: &str| case[key].as_array().unwrap().iter().map(|id| id.as_i64().unwrap()).collect::<Vec<_>>();
+    for photo in case["photos"].as_array().unwrap() {
+        let id = photo["id"].as_i64().unwrap();
+        let blob = dense(&photo["vector"]).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let conn = index.writer.lock();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,10,100,100,'image','jpg',?3)", params![id, format!("/lib/{id}.jpg"), if id == 2 { "a red dog" } else { "" }]).unwrap();
+        conn.execute("INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, blob, clip_space::model_id()]).unwrap();
+    }
+    let query = dense(&case["query"]);
+    let semantic = request(serde_json::json!({"requestID":"s","action":"search","query":"zebra","searchMode":"semantic","queryVector":query,"embeddingModel":clip_space::model_id(),"limit":10}));
+    assert_eq!(index.judged(&semantic, &|_| None).unwrap().response.status, "error");
+    wait(&index);
+    let found = index.judged(&semantic, &|_| None).unwrap();
+    assert_eq!(found.response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), ids("order"));
+    let strong = ids("strong");
+    let weak: std::collections::HashSet<i64> = ids("order").into_iter().filter(|id| !strong.contains(id)).collect();
+    assert_eq!(found.weak, Some(weak));
+    assert_eq!(found.response.message.as_deref(), Some("3 good matches, 1 weaker."));
+    let hybrid = request(serde_json::json!({"requestID":"h","action":"search","query":"dog","searchMode":"hybrid","queryVector":query,"embeddingModel":clip_space::model_id(),"limit":10,"resultScope":"files"}));
+    let mixed = index.judged(&hybrid, &|_| None).unwrap();
+    assert_eq!(mixed.weak, Some(std::collections::HashSet::new()));
+    assert_eq!(mixed.response.message.as_deref(), Some("4 good matches."));
+    let seeded = index.judged(&request(serde_json::json!({"requestID":"f","action":"search","searchMode":"semantic","fileID":1})), &|_| None).unwrap();
+    assert!(seeded.weak.is_none());
+    assert_eq!(seeded.response.message.as_deref(), Some("Visual similarity results."));
+}

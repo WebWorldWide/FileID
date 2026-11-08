@@ -36,6 +36,7 @@ pub mod registry;
 pub mod required;
 pub mod runtime;
 pub mod scene_vocab;
+pub mod search_strength;
 pub mod face_align;
 pub mod face_geometry;
 pub mod sface;

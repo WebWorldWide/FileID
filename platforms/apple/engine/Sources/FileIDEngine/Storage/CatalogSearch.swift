@@ -14,9 +14,20 @@ enum CatalogSearch {
         }
     }
 
+    /// A search reply plus the files judged weaker look-alikes (nil when the
+    /// search was not judged: keyword-only, similar-to-a-file, or indexing).
+    struct Judged: Sendable {
+        var response: CatalogResponse
+        var weak: Set<Int64>?
+    }
+
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        try await judged(request, database: database).response
+    }
+
+    static func judged(_ request: CatalogRequest, database: Database) async throws -> Judged {
         let root = request.rootID == nil ? nil : try await database.pool.read { db in try LibraryRoots.Scope.load(db, id: request.rootID) }
-        guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, root: root, database: database) }
+        guard request.capturedFrom != nil || request.capturedTo != nil else { return labelled(try await run(request, root: root, database: database)) }
         let from = request.capturedFrom ?? 0
         let to = request.capturedTo ?? Double.greatestFiniteMagnitude
         guard from.isFinite, from >= 0, to >= from, request.capturedTo.map({ $0.isFinite }) ?? true else { throw RequestError.invalid }
@@ -24,7 +35,8 @@ enum CatalogSearch {
         guard (1...100).contains(limit) else { throw RequestError.invalid }
         var wide = request
         wide.limit = 100
-        var response = try await run(wide, root: root, database: database)
+        var result = try await run(wide, root: root, database: database)
+        var response = result.response
         let ids = String(decoding: try JSONEncoder().encode(Set(response.hits.map(\.fileID)).sorted()), as: UTF8.self)
         let inside = response.hits.isEmpty ? [] : try await database.pool.read { db in
             Set(try Int64.fetchAll(db, sql: "SELECT id FROM files WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?", arguments: [ids, from, to]))
@@ -50,10 +62,22 @@ enum CatalogSearch {
             }
             response.hits += more.prefix(limit - response.hits.count)
         }
-        return response
+        result.response = response
+        return labelled(result)
     }
 
-    private static func run(_ request: CatalogRequest, root: LibraryRoots.Scope?, database: Database) async throws -> CatalogResponse {
+    /// Good matches first, then weaker look-alikes, and a count that says so.
+    static func labelled(_ result: Judged) -> Judged {
+        guard let weak = result.weak else { return result }
+        var labelled = result
+        let good = result.response.hits.filter { !weak.contains($0.fileID) }
+        let weaker = result.response.hits.filter { weak.contains($0.fileID) }
+        labelled.response.hits = good + weaker
+        labelled.response.message = SearchStrength.summary(good: good.count, weak: weaker.count)
+        return labelled
+    }
+
+    private static func run(_ request: CatalogRequest, root: LibraryRoots.Scope?, database: Database) async throws -> Judged {
         let mode = request.searchMode ?? "keyword"
         let limit = request.limit ?? 100
         let scope = request.resultScope ?? "all"
@@ -63,7 +87,7 @@ enum CatalogSearch {
         if mode == "keyword" {
             guard !query.isEmpty, request.queryVector == nil, request.embeddingModel == nil else { throw RequestError.invalid }
             let hits = try await database.pool.read { db in select(try CatalogStore.search(db, query: query, root: root), limit: limit, filesOnly: scope == "files") }
-            return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+            return Judged(response: CatalogResponse(requestID: request.requestID, status: "ok", hits: hits))
         }
         guard mode != "hybrid" || !query.isEmpty else { throw RequestError.invalid }
         guard request.queryVector != nil || request.fileID != nil else { throw RequestError.needsVisualModel }
@@ -82,27 +106,40 @@ enum CatalogSearch {
         } else { throw RequestError.invalid }
         let index = database.vectorIndex
         guard await index.currentRevision() != nil else {
-            if await index.failed { return CatalogResponse(requestID: request.requestID, status: "error", message: "The visual search index could not be prepared. Keyword search remains available.") }
+            if await index.failed { return Judged(response: CatalogResponse(requestID: request.requestID, status: "error", message: "The visual search index could not be prepared. Keyword search remains available.")) }
             await index.prepare()
             let hits = mode == "hybrid" ? try await database.pool.read { db in select(try CatalogStore.search(db, query: query, root: root), limit: limit, filesOnly: scope == "files") } : []
-            return CatalogResponse(requestID: request.requestID, status: "indexing", message: "Preparing the local visual search index.", hits: hits)
+            return Judged(response: CatalogResponse(requestID: request.requestID, status: "indexing", message: "Preparing the local visual search index.", hits: hits))
         }
-        let candidates = try await index.refreshedMatches(vector, limit: root == nil ? min(1000, limit * 4 + 1) : 1000)
+        let judging = request.queryVector != nil && SearchStrength.applies
+        let scoring = judging ? SearchStrength.scoringVector(query: query, supplied: vector) : vector
+        let candidates = try await index.refreshedMatches(scoring, limit: root == nil ? min(1000, limit * 4 + 1) : 1000)
         let candidateIDs = String(decoding: try JSONEncoder().encode(candidates.map(\.fileID)), as: UTF8.self)
-        let hits = try await database.pool.read { db -> [CatalogHit] in
+        let (hits, weak) = try await database.pool.read { db -> ([CatalogHit], Set<Int64>?) in
             let rows = try Row.fetchAll(db, sql: "SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description,e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.failed=0 AND e.model=? AND f.id IN (SELECT value FROM json_each(?))", arguments: [CLIPEmbeddingSpace.modelID, candidateIDs])
             let byID = Dictionary(uniqueKeysWithValues: rows.map { (($0["id"] as Int64), $0) })
-            let visual = candidates.compactMap { match -> CatalogHit? in
+            var scored = candidates.compactMap { match -> (hit: CatalogHit, margin: Float)? in
                 guard match.fileID != request.fileID, let row = byID[match.fileID], root?.contains(row["path_text"]) ?? true else { return nil }
                 let blob: Data = row["embedding"]
                 let fingerprint = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
                 guard fingerprint == match.fingerprint else { return nil }
-                return CatalogHit(fileID: match.fileID, path: row["path_text"], kind: row["kind"], text: row["description"])
+                let hit = CatalogHit(fileID: match.fileID, path: row["path_text"], kind: row["kind"], text: row["description"])
+                guard judging, let embedding = CLIPEmbeddingSpace.vector(from: blob) else { return (hit, 0) }
+                return (hit, SearchStrength.score(scoring, embedding).margin)
             }
-            if mode == "semantic" { return Array(visual.prefix(limit)) }
-            return merge(keyword: try CatalogStore.search(db, query: query, root: root), visual: visual, limit: limit, filesOnly: scope == "files")
+            if judging { scored.sort { $0.margin != $1.margin ? $0.margin > $1.margin : $0.hit.fileID < $1.hit.fileID } }
+            let visual = scored.map(\.hit)
+            let weakVisual = judging ? Set(scored.filter { !SearchStrength.isStrong($0.margin) }.map(\.hit.fileID)) : nil
+            if mode == "semantic" { return (Array(visual.prefix(limit)), weakVisual) }
+            let keyword = try CatalogStore.search(db, query: query, root: root)
+            guard let weakVisual else { return (merge(keyword: keyword, visual: visual, limit: limit, filesOnly: scope == "files"), nil) }
+            let weak = weakVisual.subtracting(keyword.map(\.fileID))
+            let merged = merge(keyword: keyword, visual: visual, limit: keyword.count + visual.count, filesOnly: scope == "files")
+            let ordered = merged.filter { !weak.contains($0.fileID) } + merged.filter { weak.contains($0.fileID) }
+            return (select(ordered, limit: limit, filesOnly: scope == "files"), weak)
         }
-        return CatalogResponse(requestID: request.requestID, status: "ok", message: mode == "hybrid" ? "Keyword, catalog evidence, and visual similarity results." : "Visual similarity results.", hits: hits)
+        let message = mode == "hybrid" ? "Keyword, catalog evidence, and visual similarity results." : "Visual similarity results."
+        return Judged(response: CatalogResponse(requestID: request.requestID, status: "ok", message: message, hits: hits), weak: weak)
     }
 
     static func merge(keyword: [CatalogHit], visual: [CatalogHit], limit: Int, filesOnly: Bool = false) -> [CatalogHit] {

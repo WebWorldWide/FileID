@@ -468,18 +468,25 @@ pub(super) fn validate(request: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
-/// Ranked evidence lists beyond the lexical one, best first.
-pub(crate) type Semantic = dyn Fn(&Connection, &ChatRequest, &str) -> Vec<Vec<CatalogHit>>;
+/// Ranked evidence lists beyond the lexical one, best first, and the files
+/// the visual search judged weaker look-alikes.
+#[derive(Default)]
+pub(crate) struct Found {
+    pub(crate) lists: Vec<Vec<CatalogHit>>,
+    pub(crate) weak: std::collections::HashSet<i64>,
+}
+
+pub(crate) type Semantic = dyn Fn(&Connection, &ChatRequest, &str) -> Found;
 
 /// No semantic evidence: tests and callers without an index.
-pub(crate) fn no_semantic(_: &Connection, _: &ChatRequest, _: &str) -> Vec<Vec<CatalogHit>> {
-    vec![]
+pub(crate) fn no_semantic(_: &Connection, _: &ChatRequest, _: &str) -> Found {
+    Found::default()
 }
 
 /// CLIP text→image through the persisted HNSW graph, and BGE over stored
 /// document embeddings, when their models are installed. Never downloads.
-fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<Vec<CatalogHit>> {
-    let mut lists = Vec::new();
+fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Found {
+    let mut found = Found::default();
     let model = crate::models::clip_space::model_id();
     let vector = request
         .query_vector
@@ -495,6 +502,7 @@ fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<V
         let search: Result<crate::ipc::CatalogRequest, _> = serde_json::from_value(serde_json::json!({
             "requestID": format!("{}-visual", request.request_id),
             "action": "search",
+            "query": query,
             "searchMode": "semantic",
             "queryVector": vector,
             "embeddingModel": model,
@@ -502,17 +510,18 @@ fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<V
             "resultScope": "files",
             "rootID": request.context.as_ref().and_then(|chat| chat.root_id),
         }));
-        if let Ok(response) = search.map_err(anyhow::Error::from).and_then(|search| index.search(&search))
-            && response.status == "ok" {
-                lists.push(response.hits);
+        if let Ok(judged) = search.map_err(anyhow::Error::from).and_then(|search| index.judged(&search, &crate::models::search_strength::live_encoder))
+            && judged.response.status == "ok" {
+                found.lists.push(judged.response.hits);
+                found.weak = judged.weak.unwrap_or_default();
             }
     }
     match bge_hits(conn, query) {
-        Ok(hits) if !hits.is_empty() => lists.push(hits),
+        Ok(hits) if !hits.is_empty() => found.lists.push(hits),
         Ok(_) => {}
         Err(error) => tracing::warn!(?error, "chat document similarity skipped"),
     }
-    lists
+    found
 }
 
 static BGE_TEXT: IdleSlot<crate::models::bge_text::BgeText> = IdleSlot::new("BGE text", PARK_AFTER);
@@ -934,13 +943,19 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     } else {
         search(&plan.query)?
     };
+    let similar = crate::models::search_strength::wants_similar(&text);
+    let mut weaker: Vec<CatalogHit> = vec![];
     if !plan.query.is_empty() {
-        let extra = semantic(conn, request, &plan.query);
-        if !extra.is_empty() {
+        let found = semantic(conn, request, &plan.query);
+        if !found.lists.is_empty() {
             let scope = Filter { kinds: plan.kinds.clone(), person_ids: plan.person_ids.clone(), root: root.clone(), ..Filter::default() };
+            let lexical: std::collections::HashSet<i64> = hits.iter().map(|hit| hit.file_id).collect();
+            let is_weak = |hit: &CatalogHit| found.weak.contains(&hit.file_id) && !lexical.contains(&hit.file_id);
             let mut lists = vec![hits];
-            for list in extra {
-                lists.push(chat_facts::restrict(conn, list, &scope)?);
+            for list in found.lists {
+                let restricted = chat_facts::restrict(conn, list, &scope)?;
+                weaker.extend(restricted.iter().filter(|hit| is_weak(hit)).cloned());
+                lists.push(if similar { restricted } else { restricted.into_iter().filter(|hit| !is_weak(hit)).collect() });
             }
             hits = fuse(lists);
         }
@@ -961,6 +976,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     });
     if let Some(filter) = &extra_filter {
         hits = chat_facts::restrict(conn, hits, filter)?;
+        weaker = chat_facts::restrict(conn, weaker, filter)?;
     }
     // Search keeps its best hundred and matches words as written; fill a short
     // list from every file the subject describes (singulars too) that passes
@@ -1005,6 +1021,14 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let time = plan.time_seconds.map(|seconds| format!(" (near {})", time_label(seconds))).unwrap_or_default();
     let structure = extra_filter.map(|filter| Filter { person_names: vec![], ..filter }.qualifiers()).filter(|text| !text.is_empty()).map(|text| format!(" ({})", text.trim())).unwrap_or_default();
     let qualifiers = format!("{filter}{people}{events}{time}{structure}");
+    let weak_ids: std::collections::HashSet<i64> = weaker.iter().map(|hit| hit.file_id).collect();
+    let shown: std::collections::HashSet<i64> = hits.iter().map(|hit| hit.file_id).collect();
+    let shown_weak = if similar { hits.iter().filter(|hit| weak_ids.contains(&hit.file_id)).count() } else { weak_ids.difference(&shown).count() };
+    let sample_note = if hits.iter().any(|hit| hit.kind == "sampledFrame") {
+        " Sampled-frame descriptions remain unverified."
+    } else {
+        ""
+    };
     let explanation = if plan.query.is_empty()
         && plan.kinds.is_empty()
         && plan.person_ids.is_empty()
@@ -1012,18 +1036,35 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         && plan.time_seconds.is_none()
     {
         "Add a subject, event, time, or media type such as videos or photos. No search was run.".into()
+    } else if shown_weak > 0 {
+        format!("{}{sample_note}", weak_summary(hits.len(), shown_weak, similar, &plan.query, &qualifiers))
     } else if hits.is_empty() {
         format!("No matches {scope}{qualifiers}. Try names or a few descriptive words; files that haven't been analyzed may still contain it.")
     } else {
-        let sample_note = if hits.iter().any(|hit| hit.kind == "sampledFrame") {
-            " Sampled-frame descriptions remain unverified."
-        } else {
-            ""
-        };
         let noun = if hits.len() == 1 { "match" } else { "matches" };
         format!("Found {} {noun} {scope}{qualifiers}.{sample_note}", hits.len())
     };
     Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
+}
+
+/// Mirrors Swift `ChatService.weakSummary`: weaker look-alikes are counted, and
+/// shown only when the question asks for the closest or similar ones.
+pub(crate) fn weak_summary(found: usize, weak: usize, similar: bool, subject: &str, qualifiers: &str) -> String {
+    let looks = if weak == 1 { "look-alike" } else { "look-alikes" };
+    if similar {
+        let good = found - weak.min(found);
+        return if good == 0 {
+            format!("No photos clearly show “{subject}”{qualifiers}; showing the {weak} closest.")
+        } else {
+            format!("Found {found} matches for “{subject}”{qualifiers}: {good} good, {weak} weaker.")
+        };
+    }
+    if found == 0 {
+        format!("No photos clearly show “{subject}”{qualifiers}. {weak} weaker {looks} left out; ask for the closest to see them.")
+    } else {
+        let noun = if found == 1 { "match" } else { "matches" };
+        format!("Found {found} good {noun} for “{subject}”{qualifiers}; {weak} weaker {looks} left out.")
+    }
 }
 
 pub(super) fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) -> Result<()> {
@@ -1181,6 +1222,16 @@ mod tests {
         );
         assert_eq!(time_label(65.4), "1:05");
         assert_eq!(time_label(3_600.0), "60:00");
+    }
+
+    #[test]
+    fn weaker_look_alike_wording_matches_the_shared_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/search-strength.json")).unwrap();
+        for case in fixture["chat"].as_array().unwrap() {
+            let count = |key: &str| usize::try_from(case[key].as_u64().unwrap()).unwrap();
+            let text = weak_summary(count("found"), count("weak"), case["similar"].as_bool().unwrap(), case["subject"].as_str().unwrap(), case["qualifiers"].as_str().unwrap());
+            assert_eq!(text, case["text"].as_str().unwrap());
+        }
     }
 
     #[test]
@@ -1455,7 +1506,7 @@ mod tests {
             assert!(!database.is_locked(), "semantic scoring ran under the writer lock");
             assert!(conn.is_readonly(rusqlite::MAIN_DB).unwrap());
             CALLED.store(true, Ordering::SeqCst);
-            vec![]
+            Found::default()
         };
         prepare_unlocked_with(database, &request, &semantic).unwrap();
         assert!(CALLED.load(Ordering::SeqCst));

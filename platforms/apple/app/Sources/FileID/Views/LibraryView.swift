@@ -41,6 +41,7 @@ struct LibraryView: View {
     /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
     @State private var visualSearchPending = false
+    @State private var visualSummary: String?
     /// Persisted across launches. Empty string means "no filter" since
     /// AppStorage doesn't support optional bindings cleanly.
     @AppStorage("library.kindFilter") private var kindFilterRaw: String = ""
@@ -505,6 +506,7 @@ struct LibraryView: View {
                 kindPicker
 
                 ViewThatFits(in: .horizontal) {
+                    if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
                     MetaText("\(rows.count.formatted()) of \(shownTotal.formatted()) shown", size: 11).fixedSize()
                     MetaText("\(rows.count.formatted())/\(shownTotal.formatted())", size: 11).fixedSize()
                     Color.clear.frame(width: 0, height: 0)
@@ -815,10 +817,12 @@ struct LibraryView: View {
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
             var pageable = false
+            var summary: String?
             if let seed {
                 visualSearchPending = true
                 if let response = await catalogSearch(seedID: seed.id), response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                    summary = response.message
                 } else { newRows = [] }
             } else {
                 newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
@@ -832,6 +836,7 @@ struct LibraryView: View {
                        let response = await catalogSearch(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                         pageable = false
+                        summary = response.message
                     }
                 }
             }
@@ -846,6 +851,7 @@ struct LibraryView: View {
             rows = newRows
             tagsByFile = tags
             canLoadMore = pageable
+            visualSummary = summary
             listedQuery = seed == nil ? (query, kind) : nil
         }
     }
