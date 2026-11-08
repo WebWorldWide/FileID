@@ -1,0 +1,936 @@
+[
+ {
+  "name": "face-review-accept-all-and-undo",
+  "description": "acceptAll assigns a person's pending suggested faces best first in one face_review_bulk operation, skips a face whose photo already has the person and leaves uncertain ones; Undo puts every accepted face back; a person with nothing suggested is refused.",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,'Alex',0,1,2),(2,NULL,0,2,1)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(1,1,1,X'00','b1','m','p',0.9),(2,2,2,X'00','b2','m','p',0.9),(9,5,1,X'00','b9','m','p',0.9),(3,3,NULL,X'00','b3','m','p',0.5),(4,4,NULL,X'00','b4','m','p',0.5),(5,5,NULL,X'00','b5','m','p',0.5),(6,6,NULL,X'00','b6','m','p',0.5)",
+   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(3,'m|p','suggested',100),(4,'m|p','suggested',101),(5,'m|p','suggested',102),(6,'m|p','uncertain',103)",
+   "INSERT INTO face_review_candidates(face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at) VALUES(3,1,0.9,'suggested',2,0.2,'m|p',100),(4,1,0.8,'suggested',NULL,NULL,'m|p',101),(5,1,0.85,'suggested',NULL,NULL,'m|p',102),(6,1,0.45,'uncertain',NULL,NULL,'m|p',103)"
+  ],
+  "steps": [
+   {
+    "label": "nothing for person 2",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "a-1",
+      "personID": 2,
+      "resolution": "acceptAll"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "a-1"
+    },
+    "expect": {
+     "action": "resolve",
+     "status": "refused",
+     "message": "Nothing to accept for this person.",
+     "personID": 2,
+     "total": 4
+    }
+   },
+   {
+    "label": "accept all for Alex",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "a-2",
+      "personID": 1,
+      "resolution": "acceptAll"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "a-2"
+    },
+    "expect": {
+     "action": "resolve",
+     "status": "ok",
+     "personID": 1,
+     "acceptedFaceIDs": [
+      3,
+      4
+     ],
+     "skippedFaceIDs": [
+      5
+     ],
+     "total": 2,
+     "operationID": {
+      "$tol": "present"
+     }
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "assigned",
+    "db": "SELECT id, person_id FROM face_prints WHERE id IN (3,4,5,6) ORDER BY id",
+    "expect": [
+     [
+      3,
+      1
+     ],
+     [
+      4,
+      1
+     ],
+     [
+      5,
+      null
+     ],
+     [
+      6,
+      null
+     ]
+    ]
+   },
+   {
+    "label": "one operation",
+    "db": "SELECT c.kind, o.state, json_extract(o.plan_json,'$.count'), json_array_length(json_extract(c.before_json,'$.faces')), (SELECT file_count FROM persons WHERE id=1) FROM catalog_corrections c JOIN catalog_operations o ON o.id=c.id",
+    "expect": [
+     [
+      "face_review_bulk",
+      "completed",
+      2,
+      2,
+      4
+     ]
+    ]
+   },
+   {
+    "label": "undo",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "a-3",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "a-3"
+    },
+    "expect": {
+     "action": "undo",
+     "status": "ok",
+     "personID": 1,
+     "acceptedFaceIDs": [
+      3,
+      4
+     ],
+     "total": 4,
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "restored",
+    "db": "SELECT f.id, f.person_id, c.reason, a.outcome FROM face_prints f JOIN face_review_candidates c ON c.face_id=f.id JOIN face_assignment_assessed a ON a.face_id=f.id WHERE f.id IN (3,4) ORDER BY f.id",
+    "expect": [
+     [
+      3,
+      null,
+      "suggested",
+      "suggested"
+     ],
+     [
+      4,
+      null,
+      "suggested",
+      "suggested"
+     ]
+    ]
+   },
+   {
+    "label": "undo once",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "a-4",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "a-4"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "There is nothing to undo for this suggestion."
+    }
+   }
+  ]
+ },
+ {
+  "name": "face-queues-merge-and-undo",
+  "description": "The merge queue lists a stored suggestion with both people; merge moves the other person's faces like mergeClusters (user-merged verdict, person deleted) and Undo brings the person back under its id; notSamePerson records a user-verified verdict and dismiss hides the pair by both representative faces, each undoable; a pair that is not pending is refused.",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,NULL,0,1,1),(2,'Alex',0,2,2)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(1,1,1,X'00','b1','m','p',0.8),(2,2,2,X'00','b2','m','p',0.9),(3,3,2,X'00','b3','m','p',0.7)",
+   "INSERT INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(2,1,0.7123,'m|p',100)"
+  ],
+  "steps": [
+   {
+    "label": "list merges",
+    "command": {
+     "listFaceReview": {
+      "requestID": "m-1",
+      "queue": "merges"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-1"
+    },
+    "expect": {
+     "action": "list",
+     "status": "ok",
+     "queue": "merges",
+     "total": 1,
+     "items": [],
+     "merges": {
+      "$tol": "exact",
+      "value": [
+       {
+        "personID": 2,
+        "personName": "Alex",
+        "representativeFaceID": 2,
+        "faceCount": 2,
+        "otherPersonID": 1,
+        "otherRepresentativeFaceID": 1,
+        "otherFaceCount": 1,
+        "score": 0.7123,
+        "createdAt": 100
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "wrong direction",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "m-2",
+      "personID": 1,
+      "resolution": "merge",
+      "otherPersonID": 2
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-2"
+    },
+    "expect": {
+     "status": "refused",
+     "queue": "merges",
+     "message": "This suggestion changed. Refresh the review list.",
+     "total": 1
+    }
+   },
+   {
+    "label": "needs the other person",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "m-3",
+      "personID": 2,
+      "resolution": "merge"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-3"
+    },
+    "expect": {
+     "status": "refused",
+     "message": "Choose the other person in this merge suggestion."
+    }
+   },
+   {
+    "label": "merge",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "m-4",
+      "personID": 2,
+      "resolution": "merge",
+      "otherPersonID": 1
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-4"
+    },
+    "expect": {
+     "action": "resolve",
+     "status": "ok",
+     "queue": "merges",
+     "personID": 2,
+     "otherPersonID": 1,
+     "total": 0,
+     "operationID": {
+      "$tol": "present"
+     }
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "merged",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM persons WHERE id=1), (SELECT file_count FROM persons WHERE id=2), (SELECT same_person||vlm_model FROM face_verifications WHERE person_a=1 AND person_b=2), (SELECT kind FROM catalog_corrections)",
+    "expect": [
+     [
+      2,
+      0,
+      3,
+      "1user-merged",
+      "face_merge_review"
+     ]
+    ]
+   },
+   {
+    "label": "undo merge",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "m-5",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-5"
+    },
+    "expect": {
+     "action": "undo",
+     "status": "ok",
+     "queue": "merges",
+     "personID": 2,
+     "otherPersonID": 1,
+     "total": 1,
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "person back",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM face_verifications), (SELECT file_count FROM persons WHERE id=1), (SELECT score FROM face_merge_suggestions WHERE person_id=2 AND other_person_id=1)",
+    "expect": [
+     [
+      1,
+      0,
+      1,
+      0.7123
+     ]
+    ]
+   },
+   {
+    "label": "not the same person",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "m-6",
+      "personID": 2,
+      "resolution": "notSamePerson",
+      "otherPersonID": 1
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-6"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 0
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "verdict",
+    "db": "SELECT person_a, person_b, same_person, vlm_model, face_a, face_b, file_a, bbox_a, file_b, bbox_b FROM face_verifications",
+    "expect": [
+     [
+      1,
+      2,
+      0,
+      "user-verified",
+      1,
+      2,
+      1,
+      "b1",
+      2,
+      "b2"
+     ]
+    ]
+   },
+   {
+    "label": "undo verdict",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "m-7",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-7"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 1
+    }
+   },
+   {
+    "label": "dismiss",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "m-8",
+      "personID": 2,
+      "resolution": "dismiss",
+      "otherPersonID": 1
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-8"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 0
+    },
+    "save": {
+     "name": "op3",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "dismissed",
+    "db": "SELECT kind, file_id, bbox, other_file_id, other_bbox FROM face_queue_dismissals",
+    "expect": [
+     [
+      "merge",
+      2,
+      "b2",
+      1,
+      "b1"
+     ]
+    ]
+   },
+   {
+    "label": "undo dismiss",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "m-9",
+      "operationID": {
+       "$var": "op3"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-9"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 1
+    }
+   },
+   {
+    "label": "clean",
+    "db": "SELECT (SELECT COUNT(*) FROM face_queue_dismissals), (SELECT COUNT(*) FROM face_verifications), (SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
+    "expect": [
+     [
+      0,
+      0,
+      3
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "face-queues-split-and-undo",
+  "description": "The split queue lists a stored suggestion with preview faces; split moves the second group to a new unnamed person with a user-verified verdict between the groups, and Undo moves the faces back and removes that person; dismiss hides the split by the person's representative face and Undo forgets it.",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(5,'Kim',0,11,6)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(11,1,5,X'00','b11','m','p',0.9),(12,2,5,X'00','b12','m','p',0.8),(13,3,5,X'00','b13','m','p',0.7),(14,4,5,X'00','b14','m','p',0.6),(15,5,5,X'00','b15','m','p',0.5),(16,6,5,X'00','b16','m','p',0.4)",
+   "INSERT INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(5,0.2134,'[11,12,13]','[14,15,16]','m|p',200)"
+  ],
+  "steps": [
+   {
+    "label": "list splits",
+    "command": {
+     "listFaceReview": {
+      "requestID": "s-1",
+      "queue": "splits"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-1"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "splits",
+     "total": 1,
+     "splits": {
+      "$tol": "exact",
+      "value": [
+       {
+        "personID": 5,
+        "personName": "Kim",
+        "representativeFaceID": 11,
+        "score": 0.2134,
+        "keepCount": 3,
+        "splitCount": 3,
+        "keepFaceIDs": [
+         11,
+         12,
+         13
+        ],
+        "splitFaceIDs": [
+         14,
+         15,
+         16
+        ],
+        "createdAt": 200
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "split",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "s-2",
+      "personID": 5,
+      "resolution": "split"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-2"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "splits",
+     "personID": 5,
+     "otherPersonID": {
+      "$tol": "present"
+     },
+     "total": 0
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "moved",
+    "db": "SELECT (SELECT COUNT(DISTINCT person_id) FROM face_prints WHERE id IN (14,15,16)), (SELECT person_id FROM face_prints WHERE id=14)<>5, (SELECT file_count FROM persons WHERE id=5), (SELECT COUNT(*) FROM persons), (SELECT same_person||vlm_model||face_a||face_b FROM face_verifications)",
+    "expect": [
+     [
+      1,
+      1,
+      3,
+      2,
+      "0user-verified1114"
+     ]
+    ]
+   },
+   {
+    "label": "undo split",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "s-3",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-3"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "splits",
+     "personID": 5,
+     "total": 1
+    }
+   },
+   {
+    "label": "back",
+    "db": "SELECT (SELECT COUNT(*) FROM face_prints WHERE person_id=5), (SELECT COUNT(*) FROM persons), (SELECT COUNT(*) FROM face_verifications), (SELECT keep_json||split_json FROM face_split_suggestions)",
+    "expect": [
+     [
+      6,
+      1,
+      0,
+      "[11,12,13][14,15,16]"
+     ]
+    ]
+   },
+   {
+    "label": "dismiss",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "s-4",
+      "personID": 5,
+      "resolution": "dismiss"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-4"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "splits",
+     "total": 0
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "dismissed",
+    "db": "SELECT kind, file_id, bbox, other_file_id FROM face_queue_dismissals",
+    "expect": [
+     [
+      "split",
+      1,
+      "b11",
+      null
+     ]
+    ]
+   },
+   {
+    "label": "undo dismiss",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "s-5",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-5"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 1
+    }
+   },
+   {
+    "label": "filters by person",
+    "command": {
+     "listFaceReview": {
+      "requestID": "s-6",
+      "queue": "splits",
+      "personID": 9
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "s-6"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 0,
+     "splits": []
+    }
+   }
+  ]
+ },
+ {
+  "name": "face-refresh-backlog-recovers-and-reports",
+  "description": "A faceRefresh job left running comes back paused after a restart; the refresh queue reports the backlog of the job's model and processing by state; enqueueFaceRefresh without a face model is an error; resuming without a model fails the job with the install message.",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
+   "INSERT INTO face_prints(id,file_id,print_data,bbox,embedding_model,processing_version) VALUES(1,1,X'00','b1','old','p'),(2,2,X'00','b2','old','p'),(3,3,X'00','b3','old','p'),(4,4,X'00','b4','old','p'),(5,5,X'00','b5','old','p')",
+   "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,priority,created_at,updated_at) VALUES('face-refresh','faceRefresh','[]','{\"model\":\"m\",\"processing\":\"p\"}','running',0.4,0,1,1)",
+   "INSERT INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,updated_at) VALUES(1,'m','p','done',0,1),(2,'m','p','pending',0,1),(3,'m','p','missing',0,1),(4,'m','p','offline',0,1),(5,'m','p','failed',1,1),(1,'other','p','pending',0,1)"
+  ],
+  "steps": [
+   {
+    "label": "interrupted job is paused",
+    "catalog": {
+     "action": "jobs"
+    },
+    "expect": {
+     "status": "ok",
+     "jobs": [
+      {
+       "id": "face-refresh",
+       "kind": "faceRefresh",
+       "state": "paused",
+       "error": "Interrupted. Resume to continue; faces already updated are kept."
+      }
+     ]
+    }
+   },
+   {
+    "label": "backlog counts",
+    "command": {
+     "listFaceReview": {
+      "requestID": "f-1",
+      "queue": "refresh"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "f-1"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "refresh",
+     "total": 1,
+     "refresh": {
+      "model": "m",
+      "processing": "p",
+      "outdated": 5,
+      "total": 5,
+      "done": 1,
+      "pending": 1,
+      "missing": 1,
+      "offline": 1,
+      "failed": 1,
+      "jobID": "face-refresh",
+      "state": "paused"
+     }
+    }
+   },
+   {
+    "label": "no model to enqueue",
+    "catalog": {
+     "action": "enqueueFaceRefresh"
+    },
+    "expect": {
+     "status": "error",
+     "message": "Install the face recognition model in Settings, then update faces again."
+    }
+   },
+   {
+    "label": "resume",
+    "catalog": {
+     "action": "resumeJob",
+     "jobID": "face-refresh"
+    },
+    "expect": {
+     "status": "ok"
+    }
+   },
+   {
+    "label": "fails without a model",
+    "catalog": {
+     "action": "jobs"
+    },
+    "until": 15,
+    "expect": {
+     "status": "ok",
+     "jobs": [
+      {
+       "id": "face-refresh",
+       "state": "failed",
+       "error": "Install the face recognition model in Settings, then update faces again."
+      }
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "name": "cross-face-queues-merge-split-and-undo",
+  "description": "Swift merges a suggested pair and Rust undoes it; Rust splits a person and Swift undoes it; Rust accepts all of a person's suggestions and Swift undoes them, so both engines read each other's queue journals.",
+  "requires": [
+   "swift",
+   "rust"
+  ],
+  "engines": [
+   "swift"
+  ],
+  "start": "swift",
+  "sql": [
+   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,NULL,0,1,1),(2,'Alex',0,2,2)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(1,1,1,X'00','b1','m','p',0.8),(2,2,2,X'00','b2','m','p',0.9),(3,3,2,X'00','b3','m','p',0.7)",
+   "INSERT INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(2,1,0.7123,'m|p',100)",
+   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(5,'Kim',0,11,6)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(11,1,5,X'00','b11','m','p',0.9),(12,2,5,X'00','b12','m','p',0.8),(13,3,5,X'00','b13','m','p',0.7),(14,4,5,X'00','b14','m','p',0.6),(15,5,5,X'00','b15','m','p',0.5),(16,6,5,X'00','b16','m','p',0.4)",
+   "INSERT INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(5,0.2134,'[11,12,13]','[14,15,16]','m|p',200)",
+   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(30,12,NULL,X'00','b30','m','p',0.5)",
+   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(30,'m|p','suggested',100)",
+   "INSERT INTO face_review_candidates(face_id,person_id,score,reason,namespace,created_at) VALUES(30,2,0.9,'suggested','m|p',100)"
+  ],
+  "steps": [
+   {
+    "label": "swift merges",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-1",
+      "personID": 2,
+      "resolution": "merge",
+      "otherPersonID": 1
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-1"
+    },
+    "expect": {
+     "status": "ok",
+     "otherPersonID": 1
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "restart": "rust"
+   },
+   {
+    "label": "rust undoes the merge",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-2",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-2"
+    },
+    "expect": {
+     "status": "ok",
+     "personID": 2,
+     "otherPersonID": 1,
+     "total": 1
+    }
+   },
+   {
+    "label": "rust splits",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-3",
+      "personID": 5,
+      "resolution": "split"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-3"
+    },
+    "expect": {
+     "status": "ok"
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "rust accepts all",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-4",
+      "personID": 2,
+      "resolution": "acceptAll"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-4"
+    },
+    "expect": {
+     "status": "ok",
+     "acceptedFaceIDs": [
+      30
+     ]
+    },
+    "save": {
+     "name": "op3",
+     "path": "operationID"
+    }
+   },
+   {
+    "restart": "swift"
+   },
+   {
+    "label": "swift undoes the split",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-5",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-5"
+    },
+    "expect": {
+     "status": "ok",
+     "personID": 5,
+     "total": 1
+    }
+   },
+   {
+    "label": "swift undoes accept all",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-6",
+      "operationID": {
+       "$var": "op3"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-6"
+    },
+    "expect": {
+     "status": "ok",
+     "acceptedFaceIDs": [
+      30
+     ]
+    }
+   },
+   {
+    "label": "back to start",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM face_prints WHERE person_id=5), (SELECT person_id FROM face_prints WHERE id=30), (SELECT COUNT(*) FROM face_verifications), (SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
+    "expect": [
+     [
+      1,
+      6,
+      null,
+      0,
+      3
+     ]
+    ]
+   }
+  ]
+ }
+]
