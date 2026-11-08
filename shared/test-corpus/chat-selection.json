@@ -73,6 +73,120 @@
       ]
     }
   ],
+  "checks": [
+    {
+      "criteria": "woman in a pink shirt drinking from a water bottle",
+      "checks": [
+        "woman in a pink shirt",
+        "woman drinking from a water bottle"
+      ]
+    },
+    {
+      "criteria": "the guy in the red sweatshirt tossing a bean bag",
+      "checks": [
+        "the guy in the red sweatshirt",
+        "the guy tossing a bean bag"
+      ]
+    },
+    {
+      "criteria": "a man with glasses and a beard smiling",
+      "checks": [
+        "a man with glasses",
+        "a man with a beard",
+        "a man smiling"
+      ]
+    },
+    {
+      "criteria": "four friends sitting on hay bales with pumpkins",
+      "checks": [
+        "four friends sitting on hay bales",
+        "four friends with pumpkins"
+      ]
+    },
+    {
+      "criteria": "a man in a blue suit sitting on a bench",
+      "checks": [
+        "a man in a blue suit",
+        "a man sitting on a bench"
+      ]
+    },
+    {
+      "criteria": "man wearing a hat holding a fish",
+      "checks": [
+        "man wearing a hat",
+        "man holding a fish"
+      ]
+    },
+    {
+      "criteria": "a girl with a red balloon and a dog",
+      "checks": [
+        "a girl with a red balloon",
+        "a girl with a dog"
+      ]
+    },
+    {
+      "criteria": "the boy in the blue shirt and the girl in the dress",
+      "checks": [
+        "the boy in the blue shirt",
+        "the girl in the dress"
+      ]
+    },
+    {
+      "criteria": "everyone is looking at the camera and nobody's eyes are closed",
+      "checks": [
+        "everyone is looking at the camera",
+        "nobody's eyes are closed"
+      ]
+    },
+    {
+      "criteria": "he's catching the ball with both hands",
+      "checks": []
+    },
+    {
+      "criteria": "the umpire standing near first base",
+      "checks": []
+    },
+    {
+      "criteria": "two people walking",
+      "checks": []
+    },
+    {
+      "criteria": "close-up portrait",
+      "checks": []
+    },
+    {
+      "criteria": "catcher's gear",
+      "checks": []
+    },
+    {
+      "criteria": "someone drinking from a water bottle",
+      "checks": []
+    },
+    {
+      "criteria": "the black and white photo",
+      "checks": []
+    },
+    {
+      "criteria": "a man looking down at his phone",
+      "checks": []
+    },
+    {
+      "criteria": "the wedding ring on her hand",
+      "checks": []
+    },
+    {
+      "criteria": "standing in front of the boat docks",
+      "checks": []
+    },
+    {
+      "criteria": "kids, dogs, and a swing",
+      "checks": [
+        "kids",
+        "dogs",
+        "a swing"
+      ]
+    }
+  ],
   "verdicts": [
     {
       "raw": "{\"answer\": \"yes\", \"reason\": \"Both hands are on the ball.\"}",
@@ -118,6 +232,84 @@
       "raw": "",
       "answer": "unsure",
       "reason": "The model's answer was unclear."
+    }
+  ],
+  "combine": [
+    {
+      "first": [
+        "yes",
+        "He is swinging."
+      ],
+      "confirmations": [],
+      "answer": "yes",
+      "reason": "He is swinging."
+    },
+    {
+      "first": [
+        "yes",
+        "He is swinging."
+      ],
+      "confirmations": [
+        "yes",
+        "yes"
+      ],
+      "answer": "yes",
+      "reason": "He is swinging."
+    },
+    {
+      "first": [
+        "yes",
+        "A player in a cap."
+      ],
+      "confirmations": [
+        "yes",
+        "no"
+      ],
+      "answer": "no",
+      "reason": ""
+    },
+    {
+      "first": [
+        "yes",
+        "A player in a cap."
+      ],
+      "confirmations": [
+        "unsure"
+      ],
+      "answer": "unsure",
+      "reason": "The model wasn't sure it clearly shows all of that."
+    },
+    {
+      "first": [
+        "yes",
+        "A player in a cap."
+      ],
+      "confirmations": [
+        "unsure",
+        "no"
+      ],
+      "answer": "no",
+      "reason": ""
+    },
+    {
+      "first": [
+        "no",
+        ""
+      ],
+      "confirmations": [
+        "yes"
+      ],
+      "answer": "no",
+      "reason": ""
+    },
+    {
+      "first": [
+        "unsure",
+        "Too dark to tell."
+      ],
+      "confirmations": [],
+      "answer": "unsure",
+      "reason": "Too dark to tell."
     }
   ],
   "ranking": [

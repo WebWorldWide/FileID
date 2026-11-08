@@ -89,6 +89,10 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
         .then(|| summary_model(request.model_kind.as_deref()))
         .flatten();
     if request.action == "send" && request.scope_file_ids.is_some() {
+        let model = model.and_then(|requested| {
+            let available = crate::platform::available_memory_mb() as f64 / 1024.0;
+            super::chat_selection::check_model(available, |kind| crate::models::vlm::find_weights(kind).is_some(), Some(requested))
+        });
         match database {
             Some(database) => super::chat_selection::send(sink, database, request, model).await,
             None => emit(&sink, failed(id, conversation, "The catalog database is unavailable".into())).await,
