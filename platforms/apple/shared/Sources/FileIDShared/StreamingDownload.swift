@@ -461,16 +461,29 @@ private func downloadRange(
     }
 }
 
+struct VolumeCapacity: Sendable {
+    let important: Int64?
+    let available: Int64?
+}
+
+func readVolumeCapacity(_ dir: URL) -> VolumeCapacity {
+    let values = try? dir.resourceValues(
+        forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+    return VolumeCapacity(important: values?.volumeAvailableCapacityForImportantUsage,
+                          available: values?.volumeAvailableCapacity.map(Int64.init))
+}
+
 /// Free bytes on the volume that will hold `url`, using the OS's
 /// "important usage" capacity (what it will actually free up for a
-/// foreground download) rather than the raw count.
-func volumeFreeBytes(forItemAt url: URL) -> Int64? {
+/// foreground download) rather than the raw count. macOS sometimes reports
+/// that as 0 with space free, so 0 or nil falls back to the raw count.
+func volumeFreeBytes(forItemAt url: URL,
+                     read: (URL) -> VolumeCapacity = readVolumeCapacity) -> Int64? {
     let dir = url.deletingLastPathComponent()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    guard let values = try? dir.resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-          let avail = values.volumeAvailableCapacityForImportantUsage else { return nil }
-    return avail
+    let capacity = read(dir)
+    if let important = capacity.important, important > 0 { return important }
+    return capacity.available ?? capacity.important
 }
 
 /// Free-disk preflight before a multi-GB fetch — mirrors the small CLIP /
@@ -482,10 +495,11 @@ func volumeFreeBytes(forItemAt url: URL) -> Int64? {
 /// destination volume — a fixed 2× there false-rejects fetches that fit when
 /// free space is between 1× and 2×. Skipped when `approxBytes <= 0` (size
 /// unknown) or when free space can't be read.
-func preflightDiskSpace(dest: URL, approxBytes: Int64, peakMultiplier: Int64 = 2) throws {
+func preflightDiskSpace(dest: URL, approxBytes: Int64, peakMultiplier: Int64 = 2,
+                        read: (URL) -> VolumeCapacity = readVolumeCapacity) throws {
     guard approxBytes > 0 else { return }
     let needed = approxBytes * max(1, peakMultiplier)
-    guard let free = volumeFreeBytes(forItemAt: dest) else { return }
+    guard let free = volumeFreeBytes(forItemAt: dest, read: read) else { return }
     if free < needed {
         throw StreamingDownloadError.insufficientDiskSpace(needed: needed, available: free)
     }

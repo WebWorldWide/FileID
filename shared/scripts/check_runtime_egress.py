@@ -141,7 +141,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "2eefb4969e67826e4e426f0670e9d46533413a12456d31ac81b79013a72ebd55",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
-  "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "a2d6d7bea0e6d024080d84fb708390c64b60cf3ae991d2e7dba7e61dc56010fb",
+  "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "8220ffe36dcf6fd60c9afa9ab203e926b7a4e5a8ab2d18e7e0fcc6ce2a4b34ca",
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
   "platforms/cli/src/runtime.rs": "e86dcc98ce5482b51f23a79b59d567319c1a22d72cae535c7eaeca91e73346af",
   "platforms/linux/src/app/src/engine_client.rs": "f5ce11c61b2b9cbef31acb415dbf89f6631850a5aa6d7f5aaa8a9ab5d5ad9e5e",
