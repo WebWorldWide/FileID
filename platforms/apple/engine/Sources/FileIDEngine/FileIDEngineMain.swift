@@ -118,6 +118,7 @@ struct FileIDEngineMain {
             await TimelineAnalysis.shared.recover(database: database)
             await MediaTools.shared.recover(database: database)
             await CatalogTakeGrouping.recover(database: database)
+            await FaceRefreshJob.recover(database: database)
             try? await database.vectorIndex.recover()
             await TrashJournal.reconcile(database: database)
             await PathMoveJournal.reconcile(database: database)
@@ -266,12 +267,16 @@ struct FileIDEngineMain {
                 response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)
             } else if request.action == "enqueueTakeGrouping" {
                 response = await CatalogTakeGrouping.shared.enqueue(request, database: database, sink: sink)
+            } else if request.action == "enqueueFaceRefresh" {
+                response = await FaceRefreshJob.shared.enqueue(request, database: database, sink: sink)
             } else if ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) {
                 let kind = try? await database.pool.read { db in try String.fetchOne(db, sql: "SELECT kind FROM catalog_jobs WHERE id=?", arguments: [request.jobID ?? ""]) }
                 if kind == "timelineSample" {
                     response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
                 } else if kind == CatalogTakeGrouping.kind {
                     response = await CatalogTakeGrouping.shared.control(request, database: database, sink: sink)
+                } else if kind == FaceRefreshJob.kind {
+                    response = await FaceRefreshJob.shared.control(request, database: database, sink: sink)
                 } else if kind == CatalogIndexJob.kind {
                     response = await CatalogStore.handle(request, database: database)
                 } else {
@@ -1015,10 +1020,12 @@ struct FileIDEngineMain {
                 database: database, faceID: faceID,
                 destinationPersonID: destinationPersonID, createNewPerson: createNewPerson
             )))
-        case .listFaceReview(let requestID, let personID, let offset, let limit):
-            await emitFaceReview(.list(requestID: requestID, personID: personID, offset: offset, limit: limit), database: database, sink: sink)
-        case .resolveFaceReview(let requestID, let faceID, let personID, let resolution):
-            await emitFaceReview(.resolve(requestID: requestID, faceID: faceID, personID: personID, resolution: resolution),
+        case .listFaceReview(let requestID, let personID, let offset, let limit, let queue):
+            await emitFaceReview(.list(requestID: requestID, personID: personID, offset: offset, limit: limit, queue: queue),
+                                 database: database, sink: sink)
+        case .resolveFaceReview(let requestID, let faceID, let personID, let resolution, let otherPersonID):
+            await emitFaceReview(.resolve(requestID: requestID, faceID: faceID, personID: personID, resolution: resolution,
+                                          otherPersonID: otherPersonID),
                                  database: database, sink: sink)
         case .undoFaceReview(let requestID, let operationID):
             await emitFaceReview(.undo(requestID: requestID, operationID: operationID), database: database, sink: sink)
