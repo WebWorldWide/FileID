@@ -395,6 +395,12 @@ impl Segmented {
         self.handlers.borrow_mut().push(Rc::new(handler));
     }
 
+    pub fn set_label(&self, index: usize, text: &str) {
+        if let Some(button) = self.buttons.get(index) {
+            button.set_label(text);
+        }
+    }
+
     pub fn set_enabled(&self, index: usize, enabled: bool) {
         if let Some(button) = self.buttons.get(index) {
             button.set_sensitive(enabled);
