@@ -4484,3 +4484,7 @@ P and R are macro precision and recall over present queries; "found" is the shar
 | scoreTakes per photo, debug engine (all / group shots) | 319 / 321 ms | 361 / 381 ms |
 
 The Rust engine applies the same rule with YuNet when its weights are installed (and skips tiling with no detector); YuNet isn't installed here, so it is covered by the shared `take-face-tiles.json` fixture and unit tests only. Eye state isn't labelled, so whether the 7 extra eyes-closed flags on group shots are right is unmeasured.
+
+## 2026-11-08 — The on-demand "Suggest merges" sheet stays beside the merge queue
+
+Owner decision: People keeps the older on-demand "Suggest merges" sheet next to the durable merge queue (catalog v33). The queue only lists pairs at centroid cosine ≥ 0.55 that clustering rebuilt, with every Merge / Not the same person / Dismiss journaled for Undo; the sheet asks the engine for suggestions on demand at the moment the user wants them. Both stay in all three apps; neither replaces the other.
