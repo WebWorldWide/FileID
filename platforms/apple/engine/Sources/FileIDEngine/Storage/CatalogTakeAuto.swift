@@ -288,8 +288,13 @@ enum CatalogTakeAuto {
     /// model is left alone.
     static func goalModel(loaded: AIModelKind?, ramGB: Double, installed: (AIModelKind) -> Bool) -> AIModelKind? {
         if let loaded { return loaded.supportsVision ? loaded : nil }
+        return visionModels(ramGB: ramGB, installed: installed).first
+    }
+
+    /// Installed vision models this Mac can hold, best first.
+    static func visionModels(ramGB: Double, installed: (AIModelKind) -> Bool) -> [AIModelKind] {
         let candidates = AIModelKind.recommendedFor(ramGB: ramGB) + AIModelKind.favorites
-        return candidates.first { $0.supportsVision && $0.fits(ramGB: ramGB) && installed($0) }
+        return candidates.filter { $0.supportsVision && $0.fits(ramGB: ramGB) && installed($0) }
     }
 
     /// Like Chat, a goal check wakes an installed model when none is loaded
