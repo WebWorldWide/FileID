@@ -8,6 +8,9 @@
 - **Selection checks** (`DeepAnalyze.swift`): `benchmarkPass` takes an image side; only the selection check passes 672 (same as Rust), model benchmarks and goal checks keep 448. Not re-measured; the earlier run found +2 of 25 matches for +44 % time on 4B.
 - Owner decision recorded: the on-demand "Suggest merges" sheet stays beside the merge queue.
 - **Checks:** Swift 946 serial (177 + 125 + 644), Rust 1,245 (1,242 lib + 3), conformance Swift 68 / Rust 60 (with peer engines), gates (egress with the four refreshed digests, its 29 tests, current docs, IPC DTOs). No URL, socket, HTTP client or process launch added. Live HF cache and FileID state untouched.
+## 2026-11-08 — Plan for moving macOS onto the shared Rust engine
+
+- `shared/docs/CONVERGENCE.md` (planning agent, read-only survey of both engines): per-subsystem inventory with parity and Apple-only dependencies, the adapter architecture (in-process Swift `FileIDAppleKit` behind one reviewed C interface; ONNX via `ort`'s CoreML EP; MLX stays in Swift; no new crates), and 11 stages with acceptance gates, rollback and estimates (about 25–38 engineer-weeks). Key finding: the app cannot route some commands to each engine at once (two SQLite writers), so the switch is whole-engine at spawn and "subsystem by subsystem" is the readiness order. Owner decisions listed before Stage 0.
 
 ## 2026-11-08 — Search tells good matches from look-alikes; Best Takes finds small faces in group shots
 
