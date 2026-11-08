@@ -26,6 +26,11 @@ existing people and queued for review (FILEID_FACE_REVIEW_AUTO_ASSIGN=1 assigns
 confident ones instead). It reports whether each new face's top suggestion is its
 labelled identity, per reason and split, and checks that the default run changed no
 assignment.
+
+Every run also scores the merge and split suggestion queues the run stored: a merge
+suggestion is right when both people's labelled faces have the same majority identity;
+a split suggestion is right when the group that stays and the group that would move
+have different majority identities.
 """
 from __future__ import annotations
 
@@ -103,7 +108,8 @@ def checkpoint(database: Path):
 
 
 PEOPLE_TABLES = ("persons", "face_verifications", "face_verdicts", "person_merge_links",
-                 "face_review_candidates", "face_identity_constraints", "face_assignment_assessed")
+                 "face_review_candidates", "face_identity_constraints", "face_assignment_assessed",
+                 "face_merge_suggestions", "face_split_suggestions", "face_queue_dismissals")
 
 
 def tables_of(connection):
@@ -392,6 +398,46 @@ def evaluate(labels, assigned):
     return report
 
 
+def queue_report(labels, assigned, database: Path):
+    """Score the stored merge and split suggestions against the labels."""
+    connection = sqlite3.connect(database)
+    tables = tables_of(connection)
+    merges = list(connection.execute("SELECT person_id, other_person_id, score FROM face_merge_suggestions")) \
+        if "face_merge_suggestions" in tables else []
+    splits = list(connection.execute("SELECT person_id, keep_json, split_json, score FROM face_split_suggestions")) \
+        if "face_split_suggestions" in tables else []
+    connection.close()
+    identity_of_face = {}
+    votes = defaultdict(Counter)
+    for face in labels:
+        det = assigned.get(face["id"])
+        if det is None or not face["identity"].startswith("P"):
+            continue
+        identity_of_face[det["id"]] = face["identity"]
+        if det["person"] is not None:
+            votes[det["person"]][face["identity"]] += 1
+    majority = {person: counts.most_common(1)[0][0] for person, counts in votes.items()}
+
+    def group_identity(faces):
+        counts = Counter(identity_of_face[face] for face in faces if face in identity_of_face)
+        return counts.most_common(1)[0][0] if counts else None
+
+    merge_block = {"suggested": len(merges), "labelled": 0, "correct": 0}
+    for keep, other, _ in merges:
+        if keep in majority and other in majority:
+            merge_block["labelled"] += 1
+            merge_block["correct"] += int(majority[keep] == majority[other])
+    split_block = {"suggested": len(splits), "labelled": 0, "correct": 0}
+    for _, keep, moved, _ in splits:
+        stay, go = group_identity(json.loads(keep)), group_identity(json.loads(moved))
+        if stay and go:
+            split_block["labelled"] += 1
+            split_block["correct"] += int(stay != go)
+    for block in (merge_block, split_block):
+        block["precision"] = round(block["correct"] / block["labelled"], 4) if block["labelled"] else None
+    return {"merges": merge_block, "splits": split_block}
+
+
 def split_reports(labels, assigned, split):
     out = {"all": evaluate(labels, assigned)}
     for name, events in (split or {}).items():
@@ -458,6 +504,7 @@ def main():
     if incremental:
         report["incremental"] = incremental_reports(labels, assigned, labels_doc.get("split"),
                                                     set(incremental["heldHashes"]), incremental["candidates"])
+    report["queues"] = queue_report(labels, assigned, database_path(state))
     report["meta"] = meta
     connection = sqlite3.connect(database_path(state))
     report["meta"]["persons"] = connection.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
@@ -476,6 +523,9 @@ def main():
     if incremental:
         print(f"earlier faces whose group changed: {incremental['earlierFacesWhoseGroupChanged']}, "
               f"new faces assigned: {incremental['newFacesAssigned']}")
+    for name, block in report["queues"].items():
+        print(f"{name} queue: {block['suggested']} suggested, {block['labelled']} labelled, "
+              f"{block['correct']} right, P {block['precision']}")
     print(f"persons {report['meta']['persons']}, engine faces {report['meta']['engineFaces']}; report {out}")
     return 1 if changes else 0
 
