@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-07 — Ask Chat about selected photos (IPC 1.24)
+
+- **All three apps and both engines** (agent; no locked files): select photos or videos in Library, Best Takes or Search & Moments (⌘/⇧-click on Mac, Ctrl/Shift on WinUI and GTK, plus Select all/Clear) and choose "Ask about N". Chat opens with a removable "12 selected photos" chip and answers only from those files (`ChatRequest.scopeFileIDs`, 1–2,000). Files are ranked by stored evidence (CLIP, tags/description/name words, named people), then the vision model checks each one (all of them up to 60, else the 60 best) with a strict yes/no/unsure question. Matches come first, then "Not sure", each with a reason (`CatalogHit.match`); the answer says honestly when none match. Answer tiles can be picked again to narrow the next question, opened, or saved as a Best Takes group. Without a model the ranked files are all "unsure" and the answer says nothing was checked.
+- **Mac e2e** (Qwen3-VL 2B, isolated model copy, 14 questions over baseball bursts): recall 0.95; precision 0.42 / 0.30 / 0.27 at 10 / 30 / 60 photos, about 1.2 s per photo (60 photos: 74 s total, first match 12.6 s). Specific questions (swinging, flag, pink shirt, black-and-white, umpire) are clean; loose ones ("close-up portrait", "two people walking") produce most false positives. Not yet exact enough; a 4B run and criteria splitting are next.
+- The Rust engine checks through the resident llama-server lease; not yet run against a real GGUF model. Earlier e2e runs before isolation rewrote the empty `.fileid-installed` marker in the owner's Qwen3-VL 2B folder (model files untouched).
+- Checks: Rust 1,203, GTK 209, CLI 62, TUI 99, C# IPC 70, Swift 608 serial, conformance Rust 54 / Swift 52 including `chat-selection-answers-only-from-the-attached-files`.
+
 ## 2026-11-07 — Fast model loads; Chat grounded in dates and people; goal checks wake a model
 
 - **Mac load speed** (agent; `shared/scripts/bench_model_load.py`, M1 Pro, release builds, load average 7–32 during runs):
