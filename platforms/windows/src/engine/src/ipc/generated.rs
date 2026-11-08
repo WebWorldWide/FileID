@@ -916,6 +916,19 @@ pub struct ChatRequest {
     pub query_vector: Option<Vec<f32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// Schema 1.24.0: files the user attached to the question ("12 selected photos"). A send with
+    /// it answers only from these files: the engine never returns, counts or proposes anything
+    /// outside them. It ranks the photos and videos among them by stored evidence (CLIP picture
+    /// match against queryVector, tags, descriptions, file names, named people) and, when useModel
+    /// is true and a local vision model is ready, checks the most likely files (every one when 60
+    /// or fewer) with a strict yes/no/unsure question. Hits come back matches first
+    /// (CatalogHit.match yes), then the ones the model wasn't sure about (match unsure); files that
+    /// don't match are left out, and text is a one-sentence reason. Without a model every hit is
+    /// unsure and the message says nothing was checked. Unknown, failed and non-media IDs are
+    /// dropped; context.rootID still applies. Duplicates are ignored. history, clear and cancel
+    /// ignore it.
+    #[serde(rename = "scopeFileIDs", default, skip_serializing_if = "Option::is_none")]
+    pub scope_file_ids: Option<Vec<i64>>,
 }
 
 /// What the user is looking at, so a send can resolve 'this person', 'these files' or 'this
@@ -1593,6 +1606,12 @@ pub struct CatalogHit {
     pub start_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<i64>,
+    /// Schema 1.24.0: set only on answers to a chat send with scopeFileIDs. yes: the local vision
+    /// model saw the requested thing in this file. unsure: the model couldn't tell, or no model
+    /// checked it (evidence ranking only). Files the model judged not to match are never returned.
+    /// text then holds the one-sentence reason.
+    #[serde(rename = "match", default, skip_serializing_if = "Option::is_none")]
+    pub selection_match: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

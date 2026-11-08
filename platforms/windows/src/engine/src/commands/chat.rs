@@ -48,13 +48,13 @@ fn stop_summary(conversation: &str) -> bool {
         .is_some()
 }
 
-struct Claim {
+pub(super) struct Claim {
     conversation: String,
     request: String,
 }
 
 impl Claim {
-    fn take(request: &ChatRequest, cancel: &Arc<AtomicBool>) -> Result<Self> {
+    pub(super) fn take(request: &ChatRequest, cancel: &Arc<AtomicBool>) -> Result<Self> {
         let mut running = summaries().lock();
         if running.contains_key(&request.conversation_id) {
             bail!("A local model summary is still running for this conversation.")
@@ -88,6 +88,13 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     let model = (request.action == "send" && request.use_model == Some(true))
         .then(|| summary_model(request.model_kind.as_deref()))
         .flatten();
+    if request.action == "send" && request.scope_file_ids.is_some() {
+        match database {
+            Some(database) => super::chat_selection::send(sink, database, request, model).await,
+            None => emit(&sink, failed(id, conversation, "The catalog database is unavailable".into())).await,
+        }
+        return;
+    }
     if let (Some(model), Some(database)) = (model, database.clone()) {
         if let Err(error) = send_with_model(&sink, database, request, &model).await {
             emit(&sink, failed(id, conversation, error.to_string())).await;
@@ -133,7 +140,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     emit(&sink, response).await;
 }
 
-async fn emit(sink: &Sink, response: ChatResponse) {
+pub(super) async fn emit(sink: &Sink, response: ChatResponse) {
     sink.send(IpcEvent {
         t: chrono::Utc::now(),
         payload: EventPayload::ChatResponse(Wrap::new(response)),
@@ -141,7 +148,7 @@ async fn emit(sink: &Sink, response: ChatResponse) {
     .await;
 }
 
-fn failed(request_id: String, conversation_id: String, message: String) -> ChatResponse {
+pub(super) fn failed(request_id: String, conversation_id: String, message: String) -> ChatResponse {
     ChatResponse {
         request_id,
         conversation_id,
@@ -179,7 +186,7 @@ fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, se
     }
 }
 
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+pub(super) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(work).await.map_err(|error| anyhow!(error))?
 }
 
@@ -195,22 +202,25 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
             let message = if prepared.summarize { format!("{}{}", prepared.message, model_note(true)) } else { prepared.message.clone() };
             save_turn(&mut conn, &req.conversation_id, &[("user", &prepared.text), ("assistant", &message)])?;
             let response = respond(&conn, &req, "completed", message, prepared.hits.clone(), prepared.actions.clone())?;
-            return Ok((prepared, response, String::new()));
+            return Ok((prepared, response, (String::new(), HashMap::new())));
         }
         let history = history_block(&recent_turns(&conn, &req.conversation_id)?, 4, 300);
+        let shown: Vec<i64> = prepared.hits.iter().take(SUMMARY_EVIDENCE).map(|hit| hit.file_id).collect();
+        let details = evidence_details(&conn, &shown)?;
         save_turn(&mut conn, &req.conversation_id, &[("user", &prepared.text)])?;
         let message = "Results are ready. The local model will summarize their evidence when its current work finishes.";
         let response = respond(&conn, &req, "queued", message.into(), prepared.hits.clone(), vec![])?;
-        Ok((prepared, response, history))
+        Ok((prepared, response, (history, details)))
     })
     .await?;
+    let (history, details) = history;
     if queued.status != "queued" {
         emit(sink, queued).await;
         return Ok(());
     }
     let hits = queued.hits.clone();
     emit(sink, queued).await;
-    let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE));
+    let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
     let answer = summarize(model, &plain, cancel.clone()).await;
     let cancelled = cancel.load(Ordering::Acquire);
     let (status, message) = match answer {
@@ -306,6 +316,38 @@ fn recent_turns(conn: &Connection, conversation_id: &str) -> Result<Vec<(String,
 }
 
 /// Last turns of the conversation for the model prompt. Mirrors macOS `ChatService.historyBlock`.
+/// Capture date and named people for each file's evidence line.
+pub(crate) fn evidence_details(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+    let mut details: HashMap<i64, Vec<String>> = HashMap::new();
+    if ids.is_empty() {
+        return Ok(details);
+    }
+    let list = serde_json::to_string(ids)?;
+    let mut dates = conn.prepare(
+        "SELECT id, date(COALESCE(created_at,modified_at),'unixepoch','localtime') FROM files
+         WHERE id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) IS NOT NULL",
+    )?;
+    for row in dates.query_map([&list], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))? {
+        let (file, day) = row?;
+        details.entry(file).or_default().push(format!("taken {day}"));
+    }
+    let mut names = conn.prepare(
+        "SELECT DISTINCT fp.file_id, trim(p.name) AS name FROM face_prints fp JOIN persons p ON p.id=fp.person_id
+         WHERE fp.file_id IN (SELECT value FROM json_each(?1)) AND COALESCE(fp.excluded,0)=0
+           AND COALESCE(p.is_unknown,0)=0 AND length(trim(COALESCE(p.name,'')))>0
+         ORDER BY fp.file_id, name",
+    )?;
+    let mut people: HashMap<i64, Vec<String>> = HashMap::new();
+    for row in names.query_map([&list], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))? {
+        let (file, name) = row?;
+        people.entry(file).or_default().push(name);
+    }
+    for (file, names) in people {
+        details.entry(file).or_default().push(format!("people: {}", names.join(", ")));
+    }
+    Ok(details)
+}
+
 pub(crate) fn history_block(turns: &[(String, String)], max_turns: usize, max_chars: usize) -> String {
     let start = turns.len().saturating_sub(max_turns);
     let lines: Vec<String> = turns[start..]
@@ -328,7 +370,9 @@ pub(crate) fn history_block(turns: &[(String, String)], max_turns: usize, max_ch
 }
 
 /// Numbered one-line evidence. Mirrors macOS `ChatService.evidencePrompt`.
-pub(crate) fn evidence_prompt(request: &str, hits: &[CatalogHit], limit: usize) -> String {
+/// `details` adds each file's capture date and recognised people, so an
+/// answer about "winter photos of Alex" can confirm both instead of denying them.
+pub(crate) fn evidence_prompt(request: &str, hits: &[CatalogHit], limit: usize, details: &HashMap<i64, Vec<String>>) -> String {
     let shown = &hits[..hits.len().min(limit)];
     let showing = if hits.len() > shown.len() { format!(" (showing {})", shown.len()) } else { String::new() };
     let mut lines = vec![
@@ -343,6 +387,9 @@ pub(crate) fn evidence_prompt(request: &str, hits: &[CatalogHit], limit: usize) 
         }
         if let Some(page) = hit.page {
             place.push(format!("page {page}"));
+        }
+        if let Some(extra) = details.get(&hit.file_id) {
+            place.extend(extra.iter().cloned());
         }
         let text: String = hit
             .text
@@ -392,7 +439,7 @@ fn model_note(no_hits: bool) -> &'static str {
     }
 }
 
-fn validate(request: &ChatRequest) -> Result<()> {
+pub(super) fn validate(request: &ChatRequest) -> Result<()> {
     if request.request_id.is_empty()
         || request.request_id.chars().count() > 200
         || request.conversation_id.is_empty()
@@ -492,7 +539,7 @@ fn exact_score(blob: &[u8], wanted: &[f32]) -> f32 {
 }
 
 fn document_hit(id: i64, path: String, text: String) -> CatalogHit {
-    CatalogHit { file_id: id, path, kind: "documentText".into(), text, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None }
+    CatalogHit { file_id: id, path, kind: "documentText".into(), text, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None, selection_match: None }
 }
 
 /// Reference implementation: streams every stored vector for each question.
@@ -764,6 +811,11 @@ fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semanti
             ("completed", "Conversation deleted.".to_owned(), vec![], vec![])
         }
         "cancel" => ("cancelled", "No model response is running on this adapter.".to_owned(), vec![], vec![]),
+        "send" if request.scope_file_ids.is_some() => {
+            let (message, hits) = super::chat_selection::evidence_answer(conn, request)?;
+            save_turn(conn, &request.conversation_id, &[("user", request.text.as_deref().unwrap_or_default()), ("assistant", &message)])?;
+            ("completed", message, hits, vec![])
+        }
         "send" => {
             let prepared = prepare_send(conn, request, semantic)?;
             let message = if request.use_model == Some(true) && prepared.summarize {
@@ -970,7 +1022,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
 }
 
-fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) -> Result<()> {
+pub(super) fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) -> Result<()> {
     let tx = conn.transaction()?;
     for (role, content) in turns {
         tx.execute(
@@ -988,7 +1040,7 @@ fn save_turn(conn: &mut Connection, conversation: &str, turns: &[(&str, &str)]) 
     Ok(())
 }
 
-fn respond(
+pub(super) fn respond(
     conn: &Connection,
     request: &ChatRequest,
     status: &str,
@@ -1140,6 +1192,34 @@ mod tests {
     }
 
     #[test]
+    fn evidence_names_the_capture_date_and_recognised_people() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,file_count,created_at,is_unknown) VALUES (1,'Alex',0,0,0),(2,'Blake',0,0,0),(3,'Hidden',0,0,1),(4,NULL,0,0,0);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES (1,'/p/1.jpg',1,1,0,'image','jpg',1688472000),(2,'/p/2.jpg',2,1,0,'image','jpg',NULL),(3,'/p/3.jpg',3,1,0,'image','jpg',NULL);
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox) VALUES (1,1,x'00',''),(1,2,x'00',''),(1,3,x'00',''),(2,4,x'00',''),(3,2,x'00','');
+             UPDATE face_prints SET excluded=1 WHERE file_id=3;",
+        )
+        .unwrap();
+        let day: String = conn.query_row("SELECT date(1688472000,'unixepoch','localtime')", [], |row| row.get(0)).unwrap();
+        let details = evidence_details(&conn, &[1, 2, 3]).unwrap();
+        assert_eq!(details, HashMap::from([(1, vec![format!("taken {day}"), "people: Alex, Blake".to_owned()])]));
+        let hit = |id: i64, text: &str| CatalogHit {
+            file_id: id,
+            path: format!("/p/{id}.jpg"),
+            kind: "image".into(),
+            text: text.into(),
+            evidence_id: None,
+            start_seconds: None,
+            page: None,
+            selection_match: None,
+        };
+        let prompt = evidence_prompt("photos of Alex", &[hit(1, "two people"), hit(2, "a field")], 8, &details);
+        assert!(prompt.contains(&format!("[1] 1.jpg (image, taken {day}, people: Alex, Blake): two people")));
+        assert!(prompt.contains("[2] 2.jpg (image): a field"));
+    }
+
+    #[test]
     fn evidence_prompt_is_numbered_and_bounded() {
         let hits: Vec<CatalogHit> = (1..=10)
             .map(|i| CatalogHit {
@@ -1150,9 +1230,10 @@ mod tests {
                 evidence_id: None,
                 start_seconds: None,
                 page: None,
+                selection_match: None,
             })
             .collect();
-        let prompt = evidence_prompt("grass", &hits, 3);
+        let prompt = evidence_prompt("grass", &hits, 3, &HashMap::new());
         assert!(prompt.starts_with("Request: grass\nMatches found: 10 (showing 3)\n<evidence>\n"));
         assert!(prompt.contains("[1] IMG_1.jpg (image): Tags: grass sky"));
         assert!(prompt.contains("[3] IMG_3.jpg"));
@@ -1165,7 +1246,7 @@ mod tests {
             page: Some(3),
             ..hits[0].clone()
         };
-        let prompt = evidence_prompt("party", std::slice::from_ref(&timed), 8);
+        let prompt = evidence_prompt("party", std::slice::from_ref(&timed), 8, &HashMap::new());
         assert!(prompt.contains("Matches found: 1\n"));
         let line = prompt.lines().find(|line| line.starts_with("[1]")).unwrap();
         assert!(line.starts_with("[1] IMG_1.jpg (passage, at 12 s, page 3): xxx"));

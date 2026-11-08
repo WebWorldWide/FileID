@@ -106,6 +106,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     private readonly StackPanel _filmstrip = new() { Spacing = 8, Visibility = Visibility.Collapsed };
     private readonly TextBlock _stripHeader = SectionLabel("All 0 photos · 0 to keep");
     private readonly Button _zoomButton = Ghost(new Button { Content = "Zoom to face", MinHeight = 28 });
+    private readonly Button _askChat = Ghost(new Button { Content = "Ask about all", MinHeight = 28 });
     private readonly StackPanel _strip = new() { Orientation = Orientation.Horizontal, Spacing = TileGap, Padding = new Thickness(4) };
     private readonly ScrollViewer _stripScroll;
     private readonly ContentControl _stripHost;
@@ -265,10 +266,15 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         var stripTop = new Grid { ColumnSpacing = 10 };
         stripTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         stripTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        stripTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _stripHeader.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(_zoomButton, 1);
+        Grid.SetColumn(_askChat, 1);
+        Grid.SetColumn(_zoomButton, 2);
         ToolTipService.SetToolTip(_zoomButton, "Z");
+        ToolTipService.SetToolTip(_askChat, "Open Chat with these tries attached, then ask for the exact moment you want");
+        _askChat.Click += (_, _) => DebugLog.SafeRun("TakesWorkbench.AskChat", AskChat);
         stripTop.Children.Add(_stripHeader);
+        stripTop.Children.Add(_askChat);
         stripTop.Children.Add(_zoomButton);
         _filmstrip.Children.Add(stripTop);
         _stripScroll = new ScrollViewer
@@ -651,7 +657,18 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             _stripHeader.Text = TakeReviewPolicy.FilmstripHeader(group, _keep, _qualities.Count);
             _zoomButton.Content = TakeReviewPolicy.ZoomLabel(group, _zoom);
+            var (_, ask) = ChatSelectionPolicy.TakeTargets(_qualities.Select(q => q.PrimaryFileID).ToArray(), _keep);
+            _askChat.Content = ask;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_askChat, $"{ask}: open Chat with these tries attached");
         }
+    }
+
+    private void AskChat()
+    {
+        if (_current is not { } group) return;
+        var (ids, _) = ChatSelectionPolicy.TakeTargets(_qualities.Select(q => q.PrimaryFileID).ToArray(), _keep);
+        var kind = group.Kind == "videos" ? "video" : "image";
+        AppViewModel.Instance.RequestChatScope(ChatSelectionPolicy.Selected(ids, ids.Select(_ => kind).ToArray()));
     }
 
     private void RebuildStrip()

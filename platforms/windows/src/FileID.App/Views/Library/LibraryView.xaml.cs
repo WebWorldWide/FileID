@@ -949,6 +949,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _ => $"{count} files selected",
         };
         SelectionBar.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SyncAskChat(count);
     }
 
     // Loads the next page of the library when the viewport is within three

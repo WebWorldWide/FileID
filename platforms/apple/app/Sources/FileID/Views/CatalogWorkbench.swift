@@ -34,6 +34,8 @@ struct CatalogWorkbench: View {
     @State private var timelineMode = "sampled"
     @State private var showingTakes = false
     @State private var captureWindow = CaptureWindow()
+    @State private var checkedRows: Set<Int> = []
+    @State private var rowAnchor: Int?
     var inline = false
 
     var body: some View {
@@ -117,6 +119,7 @@ struct CatalogWorkbench: View {
                         MetaText(resultsMeta, size: 12)
                     }
                     Spacer(minLength: 4)
+                    askButton
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(hitFileCount < 2)
@@ -125,9 +128,7 @@ struct CatalogWorkbench: View {
             }
             .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 14)
             Hairline()
-            MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, textSize: ContentTextScale.shared.size) { index in
-                if hits.indices.contains(index) { select(hits[index], at: index) }
-            }
+            MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, checked: checkedRows, textSize: ContentTextScale.shared.size, onSelect: clickRow)
             .equatable()
             .overlay {
                 if hits.isEmpty && pendingAction != "search" {
@@ -137,6 +138,38 @@ struct CatalogWorkbench: View {
             }
         }
         .background(Theme.pane, ignoresSafeAreaEdges: [])
+    }
+
+    /// ⌘-click adds a result to the selection, ⇧-click a range; a plain click opens it.
+    private func clickRow(_ index: Int) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command) {
+            if checkedRows.contains(index) { checkedRows.remove(index) } else { checkedRows.insert(index) }
+            rowAnchor = index
+        } else if flags.contains(.shift), let anchor = rowAnchor ?? selectedIndex {
+            checkedRows.formUnion(min(anchor, index)...max(anchor, index))
+        } else {
+            checkedRows = []
+            rowAnchor = index
+            if hits.indices.contains(index) { select(hits[index], at: index) }
+        }
+    }
+
+    private var askTargets: [CatalogHit] {
+        let picked = checkedRows.isEmpty ? hits : checkedRows.sorted().compactMap { hits[safe: $0] }
+        var seen = Set<Int64>()
+        return picked.filter { seen.insert($0.fileID).inserted }
+    }
+
+    private var askButton: some View {
+        let targets = askTargets
+        return Button(checkedRows.isEmpty ? "Ask about these" : "Ask about \(targets.count)") {
+            ChatHandoff.shared.askAbout(targets.map(\.fileID), kinds: targets.map { ChatScope.kind($0.path) })
+        }
+        .buttonStyle(.dsGhost)
+        .disabled(targets.isEmpty)
+        .help(checkedRows.isEmpty ? "Open Chat with every result attached (⌘-click results to pick some)" : "Open Chat with the selected results attached")
+        .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(targets.count) results" : "Ask Chat about the \(targets.count) selected results")
     }
 
     private var resultsMeta: String {
@@ -518,6 +551,7 @@ struct CatalogWorkbench: View {
         switch action {
         case "search":
             hits = response.hits
+            checkedRows = []
             resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
             hitFileCount = Set(hits.map(\.fileID)).count
             selectedIndex = nil
@@ -585,22 +619,29 @@ struct MomentResultRow: Equatable, Identifiable {
 private struct MomentResultsList: View, Equatable {
     let rows: [MomentResultRow]
     let selectedIndex: Int?
+    var checked: Set<Int> = []
     let textSize: TextSize
     let onSelect: (Int) -> Void
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.rows == rhs.rows && lhs.selectedIndex == rhs.selectedIndex && lhs.textSize == rhs.textSize
+        lhs.rows == rhs.rows && lhs.selectedIndex == rhs.selectedIndex && lhs.checked == rhs.checked && lhs.textSize == rhs.textSize
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(rows) { row in
-                    RailRow(selected: selectedIndex == row.id, action: { onSelect(row.id) }) {
+                    RailRow(selected: selectedIndex == row.id || checked.contains(row.id), action: { onSelect(row.id) }) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(row.name)
-                                .font(Theme.Font.mono(12.5, .medium)).foregroundStyle(Theme.text1)
-                                .lineLimit(1).truncationMode(.middle)
+                            HStack(spacing: 5) {
+                                if checked.contains(row.id) {
+                                    Image(systemName: "checkmark.circle.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.gold)
+                                        .accessibilityHidden(true)
+                                }
+                                Text(row.name)
+                                    .font(Theme.Font.mono(12.5, .medium)).foregroundStyle(Theme.text1)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
                             Text(row.meta).font(Theme.Font.body(11.5)).foregroundStyle(row.sampled ? Theme.ai : Theme.text3).lineLimit(1)
                             if !row.text.isEmpty {
                                 Text(row.text).font(Theme.Font.body(12)).foregroundStyle(Theme.text2).lineLimit(2)
@@ -608,7 +649,7 @@ private struct MomentResultsList: View, Equatable {
                         }
                         .padding(.vertical, 7)
                     }
-                    .accessibilityLabel("\(row.name), \(row.meta)")
+                    .accessibilityLabel("\(row.name), \(row.meta)\(checked.contains(row.id) ? ", selected for Chat" : "")")
                     .accessibilityHint(row.text)
                 }
             }

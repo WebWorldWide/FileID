@@ -142,6 +142,10 @@ impl Filter {
                 parts.push(format!("strftime('%m',{TAKEN},'unixepoch','localtime')=?"));
                 args.push(Value::Text(month.clone()));
             }
+            if let Some(months) = &date.months {
+                parts.push(format!("strftime('%m',{TAKEN},'unixepoch','localtime') IN (SELECT value FROM json_each(?))"));
+                args.push(json(months));
+            }
         }
         if let Some(folder) = &self.folder {
             // Windows catalogs store `\` separators; accept either.
@@ -247,6 +251,7 @@ pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usi
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -303,6 +308,7 @@ pub(crate) fn extra_hits(extras: &Extras) -> Vec<CatalogHit> {
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         })
         .collect()
 }
@@ -829,6 +835,11 @@ mod tests {
         let question = parse_question("how many files are not described yet");
         let filter = Filter { undescribed: true, ..Filter::default() };
         assert_eq!(answer(&conn, &question, &filter).unwrap().0, "Found 4 files not described yet, using 3.0 GB.");
+        let question = parse_question("how many winter photos");
+        let filter = Filter { kinds: vec!["image".into()], date: question.date.clone(), ..Filter::default() };
+        let (message, hits) = answer(&conn, &question, &filter).unwrap();
+        assert_eq!(message, "Found 1 photo from winter (any year), using 4.0 MB.");
+        assert_eq!(hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![5]);
         let question = parse_question("how many photos from 2023");
         let filter = Filter { kinds: vec!["image".into()], date: question.date.clone(), ..Filter::default() };
         assert_eq!(answer(&conn, &question, &filter).unwrap().0, "Found 2 photos from 2023, using 4.0 MB.");

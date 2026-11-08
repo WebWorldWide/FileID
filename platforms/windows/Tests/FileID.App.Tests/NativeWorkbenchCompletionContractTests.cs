@@ -11,7 +11,7 @@ public sealed class NativeWorkbenchCompletionContractTests
         Assert.Contains("Body.Children.Add(button)", panel, StringComparison.Ordinal);
         var chat = ReadSource("Views/Workbenches/ChatWorkbench.cs");
         Assert.Contains("ControlButton(\"Stop response\", StopAsync)", chat, StringComparison.Ordinal);
-        Assert.Contains("UseModel: action == \"send\" && ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true)", chat, StringComparison.Ordinal);
+        Assert.Contains("UseModel: action == \"send\" && (scope is not null || ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true))", chat, StringComparison.Ordinal);
         Assert.Contains("IsChecked = false, IsEnabled = ChatFrontendPolicy.SupportsModelGeneration", chat, StringComparison.Ordinal);
         Assert.Contains("_stop.IsEnabled = ChatFrontendPolicy.SupportsCancellation &&", chat, StringComparison.Ordinal);
         var chatStop = chat[chat.IndexOf("private async Task StopAsync", StringComparison.Ordinal)..chat.IndexOf("private void Apply", StringComparison.Ordinal)];

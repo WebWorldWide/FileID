@@ -42,6 +42,7 @@ fn hit(id: i64) -> CatalogHit {
         evidence_id: None,
         start_seconds: None,
         page: None,
+        selection_match: None,
     }
 }
 fn chapter() -> CatalogChapter {

@@ -35,7 +35,8 @@ public struct CatalogHit: Codable, Sendable, Equatable {
     public var evidenceID: String?
     public var startSeconds: Double?
     public var page: Int?
-    public init(fileID: Int64, path: String, kind: String, text: String, evidenceID: String? = nil, startSeconds: Double? = nil, page: Int? = nil) {
+    public var match: String?
+    public init(fileID: Int64, path: String, kind: String, text: String, evidenceID: String? = nil, startSeconds: Double? = nil, page: Int? = nil, match: String? = nil) {
         self.fileID = fileID
         self.path = path
         self.kind = kind
@@ -43,6 +44,7 @@ public struct CatalogHit: Codable, Sendable, Equatable {
         self.evidenceID = evidenceID
         self.startSeconds = startSeconds
         self.page = page
+        self.match = match
     }
 }
 

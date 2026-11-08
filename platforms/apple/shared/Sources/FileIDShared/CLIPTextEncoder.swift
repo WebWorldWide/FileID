@@ -71,36 +71,42 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         if nowLoaded { return true }
 
         let dir = Self.defaultDirectory
-        guard FileManager.default.fileExists(atPath: dir.path) else { return false }
-        guard CLIPEmbeddingSpace.verifyArtifact(at: Self.defaultModelURL, id: "clip_vitb32_text"),
-              CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("vocab.json"), id: "clip_bpe_vocab"),
-              CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("merges.txt"), id: "clip_bpe_merges") else {
-            log("FileID CLIP text: artifact verification failed; semantic search unavailable")
-            return false
-        }
-        guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
-            log("FileID CLIP text: vocab.json or merges.txt not found in \(redactPathForLog(dir.path))")
-            return false
-        }
         let modelURL = Self.defaultModelURL
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
             log("FileID CLIP text: clip_text.onnx not found at \(redactPathForLog(modelURL.path))")
             return false
         }
+        let started = CFAbsoluteTimeGetCurrent()
         do {
-            // Slow work — NO `lock` held, so isReady/embedText stay responsive.
-            lock.lock(); let existingEnv = self.env; lock.unlock()
-            let env = try existingEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
-            let opts = try ORTSessionOptions()
-            try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
-            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
-            let inputName = try session.inputNames().first
+            let built = try ModelArtifactVerification.load(verifiedBy: {
+                CLIPEmbeddingSpace.verifyArtifact(at: modelURL, id: "clip_vitb32_text")
+                    && CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("vocab.json"), id: "clip_bpe_vocab")
+                    && CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("merges.txt"), id: "clip_bpe_merges")
+            }) { () throws -> (ORTEnv, ORTSession, String?)? in
+                guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else { return nil }
+                // Slow work — NO `lock` held, so isReady/embedText stay responsive.
+                lock.lock(); let existingEnv = self.env; lock.unlock()
+                let env = try existingEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+                // CPU only: the CoreML provider splits this graph into ~110
+                // partitions, which took ~3.5 s to compile on every launch, left
+                // each compilation in the temporary folder and ran no faster.
+                let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: try ORTSessionOptions())
+                return (env, session, try session.inputNames().first)
+            }
+            guard let verified = built else {
+                log("FileID CLIP text: artifact verification failed; semantic search unavailable")
+                return false
+            }
+            guard let loaded = verified else {
+                log("FileID CLIP text: vocab.json or merges.txt not found in \(redactPathForLog(dir.path))")
+                return false
+            }
             lock.lock()
-            self.env = env
-            self.session = session
-            self.inputName = inputName
+            self.env = loaded.0
+            self.session = loaded.1
+            self.inputName = loaded.2
             lock.unlock()
-            log("FileID CLIP text: loaded ViT-B/32 ONNX from \(redactPathForLog(modelURL.path))")
+            log("FileID CLIP text: loaded ViT-B/32 ONNX from \(redactPathForLog(modelURL.path)) in \(Int((CFAbsoluteTimeGetCurrent() - started) * 1000)) ms")
             return true
         } catch {
             log("FileID CLIP text load failed: \(error)")

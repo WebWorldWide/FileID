@@ -84,6 +84,7 @@ struct LibraryView: View {
     // (live-scan throttle / filter change re-fetches only the top-200 window);
     // bulk-tag then targets every checked file, not just those still on screen.
     @State private var checkedFiles: [Int64: FileRow] = [:]
+    @State private var checkAnchor: Int64?
     @State private var bulkTagSheetOpen: Bool = false
 
     private var offlineRoots: OfflineRoots { OfflineRoots(engine.libraryRoots) }
@@ -517,6 +518,7 @@ struct LibraryView: View {
             // normal action set.
             if selectMode {
                 MetaText("\(checkedFiles.count) selected", size: 11)
+                selectionActions
                 Button {
                     if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
                 } label: { Label("Tag selected", systemImage: "tag.fill") }
@@ -574,6 +576,42 @@ struct LibraryView: View {
                 }
             )
         }
+    }
+
+    /// Select all / Clear and the hand-off to Chat for the checked files.
+    @ViewBuilder
+    private var selectionActions: some View {
+        let allShown = !rows.isEmpty && rows.allSatisfy { checkedFiles[$0.id] != nil }
+        Button(allShown ? "Clear" : "Select all") {
+            if allShown { checkedFiles.removeAll() } else { for row in rows { checkedFiles[row.id] = row } }
+        }
+        .buttonStyle(.dsGhost)
+        .help(allShown ? "Unselect every file" : "Select every file shown (⇧-click selects a range, ⌘-click adds one)")
+        .accessibilityLabel(allShown ? "Clear the selection" : "Select every file shown")
+        Button { askAboutChecked() } label: { Label("Ask about \(checkedFiles.count)", systemImage: "bubble.left.and.text.bubble.right").fixedSize() }
+            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .disabled(checkedFiles.isEmpty)
+            .help(checkedFiles.isEmpty ? "Select files first" : "Open Chat with only these files attached")
+            .accessibilityLabel("Ask Chat about the \(checkedFiles.count) selected files")
+    }
+
+    private func toggleCheck(_ row: FileRow) {
+        if checkedFiles[row.id] != nil { checkedFiles[row.id] = nil } else { checkedFiles[row.id] = row }
+        checkAnchor = row.id
+    }
+
+    /// ⇧-click: every file between the last one clicked and this one.
+    private func checkRange(_ row: FileRow) {
+        let anchor = checkAnchor ?? paneSelectedID ?? row.id
+        guard let from = rows.firstIndex(where: { $0.id == anchor }), let to = rows.firstIndex(where: { $0.id == row.id }) else { return toggleCheck(row) }
+        selectMode = true
+        for item in rows[min(from, to)...max(from, to)] { checkedFiles[item.id] = item }
+        checkAnchor = row.id
+    }
+
+    private func askAboutChecked() {
+        let ordered = rows.filter { checkedFiles[$0.id] != nil } + checkedFiles.values.filter { row in !rows.contains { $0.id == row.id } }
+        ChatHandoff.shared.askAbout(ordered.map(\.id), kinds: ordered.map(\.kind))
     }
 
     private func refreshBulkState() {
@@ -677,12 +715,12 @@ struct LibraryView: View {
             offline: offlineRoots,
             onSelect: { paneSelectedID = $0.id },
             onOpen: { openPreview($0) },
-            onToggleCheck: { row in
-                if checkedFiles[row.id] != nil { checkedFiles[row.id] = nil } else { checkedFiles[row.id] = row }
-            },
+            onToggleCheck: toggleCheck,
             onFindSimilar: { similarSeed = $0 },
             onNearEnd: { loadMore() },
-            onClearSelection: { paneSelectedID = nil })
+            onClearSelection: { paneSelectedID = nil },
+            onRangeCheck: checkRange,
+            onCommandCheck: { row in selectMode = true; toggleCheck(row) })
         .overlay(alignment: .bottom) {
             if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
         }

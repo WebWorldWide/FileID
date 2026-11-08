@@ -14,7 +14,7 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-internal sealed class ChatWorkbench : WorkbenchPanel
+internal sealed partial class ChatWorkbench : WorkbenchPanel
 {
     private readonly TextBox _input = new() { PlaceholderText = "Ask about your files (up to 2,000 characters)", MaxLength = 2000, MinWidth = 400 };
     private readonly CheckBox _useModel = new() { Content = "Written answers from local AI (not available on Windows yet)", IsChecked = false, IsEnabled = ChatFrontendPolicy.SupportsModelGeneration };
@@ -73,6 +73,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         Inputs.Children.Add(header);
         var conversation = new StackPanel();
         conversation.Children.Add(_messageList);
+        conversation.Children.Add(_selectionHost);
         conversation.Children.Add(_actionsHost);
         _messageScroll = new ScrollViewer
         {
@@ -106,6 +107,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         });
         _input.TextChanged += (_, _) => SyncSend();
         SyncSend();
+        Inputs.Children.Add(_scopeRow);
         Inputs.Children.Add(Row(_input, _send));
         ToolTipService.SetToolTip(_useModel, "Written answers need a local AI chat model, which isn't available on Windows yet");
         Inputs.Children.Add(Row(_useModel, Ghost(ActionButton("Refresh history", HistoryAsync))));
@@ -157,7 +159,9 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         Engine.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.ChatDraftRequested += OnChatDraftRequested;
+        AppViewModel.Instance.ChatScopeChanged += OnChatScopeChanged;
         UseChatDraft();
+        SyncScope();
         Run(async ct =>
         {
             var id = await ChatConversationStore.LoadOrCreateAsync(Path.Combine(AppPaths.Root, "chat-conversation-id.txt"), ct);
@@ -173,6 +177,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         Engine.PropertyChanged -= OnEngineChanged;
         AppViewModel.Instance.ChatDraftRequested -= OnChatDraftRequested;
+        AppViewModel.Instance.ChatScopeChanged -= OnChatScopeChanged;
+        DisposeSelection();
         _presentation.Invalidate();
         _request.Reset();
         _sendObservation?.Cancel();
@@ -331,7 +337,11 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         await Engine.WaitForReadyAsync(TimeSpan.FromSeconds(30), ct);
         var generation = Engine.SpawnGeneration;
         var context = action == "send" ? ChatActionPolicy.Context(SelectionRegistry.Instance.LibrarySelection, AppViewModel.Instance.FolderPath, PersonSelectionRegistry.Instance.Selection, AppViewModel.Instance.Scope?.Root.Id) : null;
-        var request = new ChatRequest(Guid.NewGuid().ToString(), id, action, text, UseModel: action == "send" && ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true), Context: context);
+        var scope = action == "send" ? AppViewModel.Instance.ChatScope : null;
+        var request = new ChatRequest(Guid.NewGuid().ToString(), id, action, text,
+            UseModel: action == "send" && (scope is not null || ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true)),
+            Context: context, ScopeFileIDs: scope?.FileIDs);
+        if (action == "send") BeginScopedSend(request);
         if (action == "history" && _request.HasActiveSend)
         {
             ChatPresentationRevision.HistoryStamp? stamp = null;
@@ -399,6 +409,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         if (action != "history") _presentation.Invalidate();
         Status.Text = ChatFrontendPolicy.StatusLine(response);
         Render(response, action);
+        if (action == "send") NarrowScope(response);
         if (action == "send" && !WorkbenchRequests.IsChatBusy(response.Status)) _sendObservation?.Cancel();
         if (action == "send" && response.Status == "completed") _input.Text = "";
         UpdateControls();
@@ -415,6 +426,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
             RenderSources(response.Hits);
             _sourcesCount.Text = ChatPresentation.SourcesCount(response.Hits.Count);
             _evidence.Select(null);
+            RenderSelection(response.Hits);
         }
         RenderChips(response.Messages);
         if (action is "send" or "clear" || response.Actions is not null) RenderActions(ChatActionPolicy.Runnable(response.Actions));

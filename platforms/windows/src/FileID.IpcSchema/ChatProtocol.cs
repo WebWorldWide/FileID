@@ -20,7 +20,8 @@ public sealed record ChatRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ModelKind = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ChatContext? Context = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<float>? QueryVector = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingModel = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingModel = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? ScopeFileIDs = null);
 public sealed record ChatRename(long FileID, string NewName);
 /// <summary>A proposed FileID action. Run it only through the existing command it maps to,
 /// and only after a confirmation card when RequiresConfirmation is true.</summary>

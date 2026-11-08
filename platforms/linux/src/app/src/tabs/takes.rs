@@ -78,6 +78,7 @@ pub(super) struct Ui {
     other_pane: ComparePane,
     strip_header: gtk::Label,
     zoom_button: gtk::Button,
+    ask_button: gtk::Button,
     strip: gtk::Box,
     strip_scroll: gtk::ScrolledWindow,
     hint: gtk::Label,
@@ -254,6 +255,9 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     strip_head.append(&strip_header);
     let zoom_button = v3::ghost("Zoom to face");
     zoom_button.set_tooltip_text(Some("Z"));
+    let ask_button = v3::ghost("Ask about all");
+    ask_button.set_tooltip_text(Some("Open Chat with these tries attached, then ask for the exact moment you want"));
+    strip_head.append(&ask_button);
     strip_head.append(&zoom_button);
     filmstrip.append(&strip_head);
     let strip = gtk::Box::builder()
@@ -322,6 +326,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
         other_pane,
         strip_header,
         zoom_button: zoom_button.clone(),
+        ask_button: ask_button.clone(),
         strip: strip.clone(),
         strip_scroll,
         hint,
@@ -346,6 +351,8 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     skip.connect_clicked(move |_| run());
     let run = with(|ui| ui.toggle_zoom());
     zoom_button.connect_clicked(move |_| run());
+    let run = with(|ui| ui.ask_chat());
+    ask_button.connect_clicked(move |_| run());
     for (best, pane) in [(true, &ui.best_pane), (false, &ui.other_pane)] {
         let weak = Rc::downgrade(&ui);
         pane.play.connect_clicked(move |_| {
@@ -840,6 +847,9 @@ impl Ui {
             );
         }
         self.refresh_zoom_button(&group);
+        let (_, ask) = model::ask_targets(&qualities, &keep);
+        self.ask_button.set_label(&ask);
+        self.ask_button.update_property(&[gtk::accessible::Property::Label(&format!("{ask}: open Chat with these tries attached"))]);
         let Some((best_index, other_index)) = model::compare_pair(&qualities, focused) else {
             return;
         };
@@ -867,6 +877,15 @@ impl Ui {
                 self.load_shot(quality, model::is_video(&group));
             }
         }
+    }
+
+    fn ask_chat(&self) {
+        let Some(group) = self.current.borrow().clone() else {
+            return;
+        };
+        let (ids, _) = model::ask_targets(&self.qualities.borrow(), &self.keep.borrow());
+        let kind = if group.kind == "videos" { "video" } else { "image" };
+        super::chat_handoff::ask_about(&self.ask_button, &ids, &vec![kind; ids.len()]);
     }
 
     fn refresh_zoom_button(&self, group: &CatalogTakeAutoGroup) {

@@ -35,6 +35,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private readonly Button _cancel;
     private readonly Button _resume;
     private readonly Button _bestTakes;
+    private readonly Button _askChat;
     private readonly DispatcherTimer _poll = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _playhead = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private bool _polling;
@@ -106,16 +107,22 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         {
             if (TakeGroupsPolicy.CanOpenFromSearch(_lastHits)) AppViewModel.Instance.RequestBestTakes(_lastHits);
         });
+        _askChat = Ghost(new Button { Content = "Ask about these", Height = 28, MinHeight = 28, IsEnabled = false });
+        ToolTipService.SetToolTip(_askChat, "Open Chat with these results attached (Ctrl+click picks some, Shift+click a range)");
+        _askChat.Click += (_, _) => DebugLog.SafeRun("CatalogWorkbench.AskChat", AskChat);
         var resultsRow = new Grid { ColumnSpacing = 8 };
         resultsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        resultsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         resultsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _resultsCount.FontSize = 12;
         _resultsCount.VerticalAlignment = VerticalAlignment.Center;
         _searchBar.HorizontalAlignment = HorizontalAlignment.Left;
         _searchBar.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(_bestTakes, 1);
+        Grid.SetColumn(_askChat, 1);
+        Grid.SetColumn(_bestTakes, 2);
         resultsRow.Children.Add(_resultsCount);
         resultsRow.Children.Add(_searchBar);
+        resultsRow.Children.Add(_askChat);
         resultsRow.Children.Add(_bestTakes);
         searchTop.Children.Add(resultsRow);
 
@@ -193,6 +200,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         });
         _hits.SelectionChanged += (_, e) => DebugLog.SafeRun("CatalogWorkbench.HitSelected", () =>
         {
+            SyncAskChat();
             if ((e.AddedItems.LastOrDefault() ?? _hits.SelectedItems.LastOrDefault()) is not FrameworkElement { Tag: CatalogHit hit })
             {
                 _fileID = null;
@@ -323,6 +331,28 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private long RequireFile() => _fileID ?? throw new InvalidOperationException("Pick a result first.");
     private void ResetEditor() { _editingID = null; _title.Text = ""; _summary.Text = ""; _start.Value = 0; _end.Value = 0; }
 
+    /// <summary>The selected results, or every result when none are selected, once per file.</summary>
+    private IReadOnlyList<CatalogHit> AskTargets()
+    {
+        var picked = SelectedHits().ToArray();
+        return (picked.Length > 0 ? picked : _lastHits).DistinctBy(hit => hit.FileID).ToArray();
+    }
+
+    private void AskChat()
+    {
+        var targets = AskTargets();
+        AppViewModel.Instance.RequestChatScope(ChatSelectionPolicy.Selected(targets.Select(hit => hit.FileID), targets.Select(hit => ChatSelectionPolicy.KindOf(hit.Path)).ToArray()));
+    }
+
+    private void SyncAskChat()
+    {
+        var picked = SelectedHits().Any();
+        var count = AskTargets().Count;
+        _askChat.IsEnabled = count > 0;
+        _askChat.Content = picked ? $"Ask about {count}" : "Ask about these";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_askChat, picked ? $"Ask Chat about the {count} selected results" : $"Ask Chat about all {count} results");
+    }
+
     private IEnumerable<CatalogHit> SelectedHits() =>
         _hits.SelectedItems.OfType<FrameworkElement>().Select(row => row.Tag).OfType<CatalogHit>();
 
@@ -331,6 +361,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private void RenderHits(IReadOnlyList<CatalogHit> hits, bool searched)
     {
         _lastHits = hits;
+        _askChat.IsEnabled = hits.Count > 0;
+        _askChat.Content = "Ask about these";
         _pendingThumbs.Clear();
         _hits.Items.Clear();
         for (var i = 0; i < hits.Count; i++)

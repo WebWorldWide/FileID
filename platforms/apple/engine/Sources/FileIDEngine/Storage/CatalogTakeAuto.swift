@@ -283,7 +283,33 @@ enum CatalogTakeAuto {
 
     // MARK: - Goal ranking
 
+    /// The description model a goal check uses: the loaded one, or else the
+    /// best installed vision model this Mac can hold. A loaded text-only
+    /// model is left alone.
+    static func goalModel(loaded: AIModelKind?, ramGB: Double, installed: (AIModelKind) -> Bool) -> AIModelKind? {
+        if let loaded { return loaded.supportsVision ? loaded : nil }
+        let candidates = AIModelKind.recommendedFor(ramGB: ramGB) + AIModelKind.favorites
+        return candidates.first { $0.supportsVision && $0.fits(ramGB: ramGB) && installed($0) }
+    }
+
+    /// Like Chat, a goal check wakes an installed model when none is loaded
+    /// (after launch) and nothing else is using the model slot.
+    private static func wakeGoalModel() async {
+        let loaded: AIModelKind?
+        switch await DeepAnalyze.shared.loadState {
+        case .ready(let kind): loaded = kind
+        case .loading: return
+        default: loaded = nil
+        }
+        guard loaded == nil, let kind = goalModel(loaded: nil, ramGB: Hardware.physicalMemoryGB, installed: { $0.isInstalledOnDisk() }),
+              await ChatService.canWake() else { return }
+        do { try await DeepAnalyze.shared.ensureLoaded(kind: kind) } catch {
+            JSONLog.shared.warn(ev: "take_goal_model_wake_failed", error: "\(error)")
+        }
+    }
+
     static func rankWithGoal(goal: String, primaryIDs: [Int64], database: Database) async throws -> CatalogTakeGoalRanking {
+        await wakeGoalModel()
         guard case .ready(let kind) = await DeepAnalyze.shared.loadState, kind.supportsVision else {
             return CatalogTakeGoalRanking(goal: goal, status: "unavailable", order: primaryIDs, metFileIDs: [],
                                           summary: "Load a description model in Describe Files to rank by a goal.")

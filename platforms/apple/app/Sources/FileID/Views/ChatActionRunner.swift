@@ -19,6 +19,7 @@ final class ChatHandoff {
     var activeTab: MainWindow.Tab = .library
     var libraryRoot: URL?
     var rootID: Int64?
+    var chatScope: ChatScope?
     @ObservationIgnored var navigate: (MainWindow.Tab) -> Void = { _ in }
     @ObservationIgnored var chooseFolder: (URL) -> Void = { _ in }
     @ObservationIgnored var store: ReadStore?

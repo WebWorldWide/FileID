@@ -56,6 +56,8 @@ struct ChatIntent: Codable, Equatable, Sendable {
         var to: [String]?
         var monthDay: String?
         var month: String?
+        /// A season without a year: these months in any year.
+        var months: [String]?
         var phrase: String = ""
     }
 
@@ -689,9 +691,13 @@ struct ChatIntent: Codable, Equatable, Sendable {
             }
         }
         let seasons = ["spring": 3, "summer": 6, "fall": 9, "autumn": 9, "winter": 12]
-        if let first = seasons[word], let y = year(next) {
-            let start = String(format: "%04d-%02d-01", y, first)
-            return Span(filter: exact([start], [start, "+3 months"], "\(word) \(y)"), length: 2)
+        if let first = seasons[word] {
+            if let y = year(next) {
+                let start = String(format: "%04d-%02d-01", y, first)
+                return Span(filter: exact([start], [start, "+3 months"], "\(word) \(y)"), length: 2)
+            }
+            let months = (0..<3).map { String(format: "%02d", (first - 1 + $0) % 12 + 1) }
+            return Span(filter: DateFilter(months: months, phrase: "\(word) (any year)"), length: 1)
         }
         if let m = month(word) {
             if let d = day(next) {
@@ -726,6 +732,8 @@ struct ChatIntent: Codable, Equatable, Sendable {
 
     /// The first date expression and the words it consumed, including its
     /// preposition. A bare year or month name needs a preposition before it.
+    static let mediaNouns: Set<String> = ["photos", "photo", "pictures", "picture", "pics", "images", "videos", "video", "clips", "shots"]
+
     private static func dateFilter(_ words: [String]) -> (DateFilter, Range<Int>)? {
         let prepositions: Set<String> = ["from", "in", "on", "during", "since", "before", "after", "of", "between", "taken", "around"]
         for index in words.indices {
@@ -733,9 +741,14 @@ struct ChatIntent: Codable, Equatable, Sendable {
             let previous = index > 0 ? words[index - 1] : ""
             let bare = (month(words[index]) != nil && span.length == 1) || (year(words[index]) != nil && span.length == 1)
             if bare && !prepositions.contains(previous) { continue }
-            let start = prepositions.contains(previous) ? index - 1 : index
+            // "winter photos", "in the summer": a season alone needs a media word after it
+            // or a preposition before it, so "spring cleaning" stays a subject.
+            let afterThe = previous == "the" && index >= 2 && prepositions.contains(words[index - 2])
+            if span.filter.months != nil, !prepositions.contains(previous), !afterThe,
+               !(index + 1 < words.count && Self.mediaNouns.contains(words[index + 1])) { continue }
+            let start = afterThe && span.filter.months != nil ? index - 2 : prepositions.contains(previous) ? index - 1 : index
             let end = index + span.length
-            let absolute = span.filter.monthDay == nil && span.filter.month == nil
+            let absolute = span.filter.monthDay == nil && span.filter.month == nil && span.filter.months == nil
             var filter = span.filter
             if previous == "since", absolute {
                 filter = DateFilter(from: span.filter.from, phrase: "since \(span.filter.phrase)")

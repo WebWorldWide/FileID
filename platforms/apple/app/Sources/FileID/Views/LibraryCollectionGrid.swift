@@ -19,6 +19,8 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var onFindSimilar: (FileRow) -> Void
     var onNearEnd: () -> Void
     var onClearSelection: () -> Void = {}
+    var onRangeCheck: (FileRow) -> Void = { _ in }
+    var onCommandCheck: (FileRow) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -183,7 +185,10 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 // second click of a double-click may land on a different tile.
                 let sameTile = self.lastClickRowID == row.id
                 self.lastClickRowID = row.id
-                if model.selectMode { model.onToggleCheck(row) }
+                let flags = NSEvent.modifierFlags
+                if flags.contains(.shift) { model.onRangeCheck(row) }
+                else if model.selectMode { model.onToggleCheck(row) }
+                else if flags.contains(.command) { model.onCommandCheck(row) }
                 else if count >= 2 && sameTile { model.onOpen(row) }
                 else { model.onSelect(row) }
             }

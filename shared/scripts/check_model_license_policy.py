@@ -29,7 +29,7 @@ RESTRICTED_MODELS = (
     (r"codestral-22b|mistral-large|pixtral-large|ministral-8b-instruct-2410|devstral-2-123b",
      "Mistral Research or revenue-capped license"),
     (r"embeddinggemma-2", "card requires the Gemma Prohibited Use Policy (owner decision 2026-11-06)"),
-    (r"abliterat|uncensor|heretic|obliterat|dolphin-(\d|mistral|llama|qwen|mixtral|yi|phi)|cognitivecomputations/",
+    (r"abliterat|uncensor|heretic|obliterat|dolphin-?(\d|mistral|llama|qwen|mixtral|yi|phi)|cognitivecomputations/|dphn/",
      "safety training removed"),
     (r"claude|(^|[^a-z])(opus|sonnet|haiku|fable|composer)-?\d|gpt-?[45]|gemini|(^|[^a-z])grok-?\d|deepseek-v\d+-pro|fuseo1",
      "named after another vendor's model (unclear provenance)"),

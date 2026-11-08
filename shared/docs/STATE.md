@@ -1,5 +1,30 @@
 # FileID — State
 
+## 2026-11-07 — Ask Chat about selected photos (IPC 1.24)
+
+- **All three apps and both engines** (agent; no locked files): select photos or videos in Library, Best Takes or Search & Moments (⌘/⇧-click on Mac, Ctrl/Shift on WinUI and GTK, plus Select all/Clear) and choose "Ask about N". Chat opens with a removable "12 selected photos" chip and answers only from those files (`ChatRequest.scopeFileIDs`, 1–2,000). Files are ranked by stored evidence (CLIP, tags/description/name words, named people), then the vision model checks each one (all of them up to 60, else the 60 best) with a strict yes/no/unsure question. Matches come first, then "Not sure", each with a reason (`CatalogHit.match`); the answer says honestly when none match. Answer tiles can be picked again to narrow the next question, opened, or saved as a Best Takes group. Without a model the ranked files are all "unsure" and the answer says nothing was checked.
+- **Mac e2e** (Qwen3-VL 2B, isolated model copy, 14 questions over baseball bursts): recall 0.95; precision 0.42 / 0.30 / 0.27 at 10 / 30 / 60 photos, about 1.2 s per photo (60 photos: 74 s total, first match 12.6 s). Specific questions (swinging, flag, pink shirt, black-and-white, umpire) are clean; loose ones ("close-up portrait", "two people walking") produce most false positives. Not yet exact enough; a 4B run and criteria splitting are next.
+- The Rust engine checks through the resident llama-server lease; not yet run against a real GGUF model. Earlier e2e runs before isolation rewrote the empty `.fileid-installed` marker in the owner's Qwen3-VL 2B folder (model files untouched).
+- Checks: Rust 1,203, GTK 209, CLI 62, TUI 99, C# IPC 70, Swift 608 serial, conformance Rust 54 / Swift 52 including `chat-selection-answers-only-from-the-attached-files`.
+
+## 2026-11-07 — Fast model loads; Chat grounded in dates and people; goal checks wake a model
+
+- **Mac load speed** (agent; `shared/scripts/bench_model_load.py`, M1 Pro, release builds, load average 7–32 during runs):
+  - Engine ready 6–13 s → 0.03 s: the temp-folder sweeps now run after ready.
+  - CLIP text runs on the CPU and checks its weights while loading: first query 3.6–4.3 s → 0.3 s, peak 1.3 GB → 0.58 GB, and no more 222 compiled CoreML models left in `$TMPDIR` per launch (about 25 GB had piled up on this Mac). It is prewarmed after ready when ≥2 GB is free.
+  - SFace and the ONNX CLIP image fallback cache their compiled CoreML program keyed by model hash, format, ORT and macOS version: SFace 1.9–2.3 s every time → 2.6 s once, then 0.33 s.
+  - The MLX CLIP image path now checks its weights while it parses. Qwen3-VL 2B / 4B load 1.4–2.0 s / 2.1–3.0 s, time to first token 0.44–0.57 s / 1.05–1.25 s; most of the VLM load is a full re-hash in the digest-locked `VLMDownloader.swift` (skipping it measured 0.6 s / 0.7 s; owner decision).
+- **Shared engine:** CLIP image and text check their weights while the session builds (about −0.2 s each).
+- **Chat (both engines):** evidence lines carry the capture date and named people, so the model no longer denies the people it was shown; pronouns ("how many of them show Alex?", "what is he wearing?") narrow the last search; a season without a year filters its three months in any year ("winter photos of Drew" → 14). On 365 eval photos with Qwen3-VL 2B: evidence 0.02–0.09 s, first token 0.8–1.9 s, total 1.6–5.9 s; 34 questions give the same counts and filters in both engines.
+- **Best Takes:** related tries finish in 0.5 s with 61 sensible proposals across 18 events; Keep all / Skip / Undo work. The Mac goal check now wakes the best installed vision model instead of answering "Load a description model" after launch (first check 7.5 s including the wake, then 2.5–3.0 s).
+- Known: semantic search has no similarity floor (CLIP scores for non-matches overlap real matches on this data); wide group shots at 7008 px have faces too small to score at 1024 px.
+
+## 2026-11-07 — Extended model catalog regenerated (323 → 309)
+
+- **Generator** (agent, read-only Hugging Face metadata, no weights downloaded): a reviewed `UPSTREAM_OVERRIDES` table keeps every hand-corrected entry whose card still names the wrong base (mlx-community Qwen2.5 Instruct, gemma-3 -it MLX, olmOCR-2 MLX, PaddleOCR-VL-1.5 MLX, SmolLM v0.2, GLM-4-32B), all at their existing pins. Moved repos resolve through the API redirect; the gemma-3n `-lm` MLX build stays text. New rejections: fine-tunes named after their base (EVA, ReadyArt), REAP-pruned builds, and Dolphin 3.0 (denylist widened for both catalogs). Duplicate builds of one upstream collapse to one, with MLX preferring 4-bit (it had picked a 70 GB bf16 build).
+- **Mac catalog:** still 218 entries; 27 now list their real release first in `bases` (Qwen2.5 Instruct/Coder, olmOCR, SmolVLM/SmolVLM2, Qwen3-30B-A3B-Instruct-2507).
+- Licence policy (default, `--catalog`, `--mac-catalog`), generator/policy tests, egress, docs, Rust engine and Swift catalog tests pass.
+
 ## 2026-11-07 — Timeline moments: timestamp-labelled frames measured, kept opt-in
 
 - **Both engines** (agent): the Mac moments request can put a `[t=12.50s]` label before each frame and ask for `start`/`end` in seconds (`FILEID_TIMELINE_FRAME_LABELS=1`; owner-approved `DeepAnalyze.swift` digest refresh, three request lines, no network code). Moment replies are now parsed tolerantly in Swift and Rust: seconds snap to the nearest frame, frame indexes still work, and a moment without a time covers its window. The Rust request is unchanged: its body is built in the digest-locked `vlm_server.rs`.

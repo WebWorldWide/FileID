@@ -51,6 +51,9 @@ pub struct DateFilter {
     pub month_day: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub month: Option<String>,
+    /// A season without a year: these months in any year.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub months: Option<Vec<String>>,
     pub phrase: String,
 }
 
@@ -947,9 +950,16 @@ fn date_at(words: &[String], index: usize) -> Option<Span> {
         "winter" => Some(12),
         _ => None,
     };
-    if let (Some(first), Some(y)) = (season, year(next)) {
-        let start = format!("{y:04}-{first:02}-01");
-        return Some(Span { filter: exact(vec![start.clone()], vec![start, "+3 months".into()], format!("{word} {y}")), length: 2 });
+    if let Some(first) = season {
+        if let Some(y) = year(next) {
+            let start = format!("{y:04}-{first:02}-01");
+            return Some(Span { filter: exact(vec![start.clone()], vec![start, "+3 months".into()], format!("{word} {y}")), length: 2 });
+        }
+        let months = (0..3).map(|offset| format!("{:02}", (first - 1 + offset) % 12 + 1)).collect();
+        return Some(Span {
+            filter: DateFilter { months: Some(months), phrase: format!("{word} (any year)"), ..DateFilter::default() },
+            length: 1,
+        });
     }
     if let Some(m) = month(word) {
         if let Some(d) = day(next) {
@@ -995,6 +1005,8 @@ fn month_day(m: u32, d: u32, length: usize) -> Span {
 
 /// The first date expression and the words it consumed, including its
 /// preposition. A bare year or month name needs a preposition before it.
+const MEDIA_NOUNS: [&str; 10] = ["photos", "photo", "pictures", "picture", "pics", "images", "videos", "video", "clips", "shots"];
+
 fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)> {
     let prepositions = ["from", "in", "on", "during", "since", "before", "after", "of", "between", "taken", "around"];
     for index in 0..words.len() {
@@ -1004,9 +1016,23 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
         if bare && !prepositions.contains(&previous) {
             continue;
         }
-        let start = if prepositions.contains(&previous) { index - 1 } else { index };
+        // "winter photos", "in the summer": a season alone needs a media word after it
+        // or a preposition before it, so "spring cleaning" stays a subject.
+        let seasonal = span.filter.months.is_some();
+        let after_the = previous == "the" && index >= 2 && prepositions.contains(&words[index - 2].as_str());
+        let media_next = words.get(index + 1).is_some_and(|word| MEDIA_NOUNS.contains(&word.as_str()));
+        if seasonal && !prepositions.contains(&previous) && !after_the && !media_next {
+            continue;
+        }
+        let start = if seasonal && after_the {
+            index - 2
+        } else if prepositions.contains(&previous) {
+            index - 1
+        } else {
+            index
+        };
         let end = index + span.length;
-        let absolute = span.filter.month_day.is_none() && span.filter.month.is_none();
+        let absolute = span.filter.month_day.is_none() && span.filter.month.is_none() && !seasonal;
         let mut filter = span.filter.clone();
         match previous {
             "since" if absolute => {

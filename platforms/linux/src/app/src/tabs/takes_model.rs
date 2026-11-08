@@ -295,6 +295,15 @@ pub fn filmstrip_header(
     )
 }
 
+/// What "Ask about…" attaches to a Chat question: the kept tries when only
+/// some are kept, otherwise every try; and its label.
+pub fn ask_targets(qualities: &[CatalogTakeQuality], keep: &BTreeSet<i64>) -> (Vec<i64>, String) {
+    let subset = !keep.is_empty() && keep.len() < qualities.len();
+    let ids: Vec<i64> = qualities.iter().map(|q| q.primary_file_id).filter(|id| !subset || keep.contains(id)).collect();
+    let label = if subset { format!("Ask about {} kept", ids.len()) } else { format!("Ask about all {}", ids.len()) };
+    (ids, label)
+}
+
 pub fn hint_line(group: &CatalogTakeAutoGroup) -> String {
     format!(
         "← → move · Space keep · Z zoom · Return keeps the marked {} and moves the rest to Trash",

@@ -54,8 +54,10 @@ actor TimelineAnalysis {
     }
 
     func recover(database: Database) async {
-        VideoFrameWorker.sweepAbandonedFrames()
-        TimelineSpeechTranscription.sweepAbandonedAudio()
+        Task.detached(priority: .utility) {
+            VideoFrameWorker.sweepAbandonedFrames()
+            TimelineSpeechTranscription.sweepAbandonedAudio()
+        }
         try? await database.pool.write { db in
             try db.execute(sql: "UPDATE catalog_jobs SET state='paused',error='Interrupted. Load the visual model and resume.',updated_at=? WHERE state IN ('running','queued') AND kind='timelineSample'", arguments: [Date().timeIntervalSince1970])
         }

@@ -151,6 +151,31 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         return files;
     }
 
+    private ChatScope? _chatScope;
+
+    /// <summary>Raised when the files attached to the next chat question change.</summary>
+    public event EventHandler? ChatScopeChanged;
+
+    /// <summary>Files attached to the next chat question, or null for the whole library.</summary>
+    public ChatScope? ChatScope
+    {
+        get => _chatScope;
+        set
+        {
+            if (Equals(_chatScope, value)) return;
+            _chatScope = value;
+            ChatScopeChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>Opens Chat with these files attached as the next question's scope.</summary>
+    public void RequestChatScope(ChatScope? scope)
+    {
+        if (scope is null) return;
+        ChatScope = scope;
+        ActiveTab = SidebarTab.Chat;
+    }
+
     public string? TakeChatDraft()
     {
         var draft = _pendingChatDraft;

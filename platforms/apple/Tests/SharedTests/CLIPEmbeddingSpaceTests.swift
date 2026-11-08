@@ -50,4 +50,18 @@ struct CLIPEmbeddingSpaceTests {
         try Data("abd".utf8).write(to: url)
         #expect(!ModelArtifactVerification.verifyFile(at: url, sha256: digest))
     }
+
+    @Test("a load runs while its weights are checked and is kept only when the check passes")
+    func verifiedLoad() throws {
+        let kept = try ModelArtifactVerification.load(verifiedBy: { true }) { 7 }
+        #expect(kept == 7)
+        let dropped = try ModelArtifactVerification.load(verifiedBy: { false }) { 7 }
+        #expect(dropped == nil)
+        let overlap = ModelArtifactVerification.self
+        let started = Date()
+        _ = try overlap.load(verifiedBy: { Thread.sleep(forTimeInterval: 0.2); return true }) { Thread.sleep(forTimeInterval: 0.2) }
+        #expect(Date().timeIntervalSince(started) < 0.39)
+        struct Failure: Error {}
+        #expect(throws: Failure.self) { _ = try ModelArtifactVerification.load(verifiedBy: { true }) { () throws -> Int in throw Failure() } }
+    }
 }

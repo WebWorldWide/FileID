@@ -23,7 +23,8 @@ public sealed record CatalogHit(
     string Text,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EvidenceID,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? StartSeconds,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Page);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Page,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Match = null);
 
 public sealed record CatalogJob(
     string Id,

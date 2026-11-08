@@ -221,7 +221,7 @@ impl CatalogIndex {
                     if seen.contains(&file_id) {
                         continue;
                     }
-                    response.hits.push(CatalogHit { file_id, path, kind, text, evidence_id: None, start_seconds: None, page: None });
+                    response.hits.push(CatalogHit { file_id, path, kind, text, evidence_id: None, start_seconds: None, page: None, selection_match: None });
                 }
             }
         }
@@ -323,6 +323,7 @@ impl CatalogIndex {
                             evidence_id: None,
                             start_seconds: None,
                             page: None,
+                            selection_match: None,
                         },
                         row.get::<_, Vec<u8>>(4)?,
                     ))

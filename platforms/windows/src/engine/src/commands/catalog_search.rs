@@ -127,6 +127,7 @@ mod tests {
             text: String::new(),
             start_seconds: None,
             page: None,
+            selection_match: None,
         }
     }
     #[test]

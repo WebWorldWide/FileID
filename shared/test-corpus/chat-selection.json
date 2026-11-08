@@ -1,0 +1,372 @@
+{
+  "description": "Shared cases for exact-match questions over a chat selection (ChatRequest.scopeFileIDs). Both engines run them: macOS ChatSelectionTests and Rust commands::chat_selection.",
+  "criteria": [
+    {
+      "text": "show me the one where he's catching the ball with both hands",
+      "criteria": "he's catching the ball with both hands",
+      "words": [
+        "catch",
+        "ball",
+        "hand"
+      ]
+    },
+    {
+      "text": "the photo where everyone is looking at the camera and nobody's eyes are closed",
+      "criteria": "everyone is looking at the camera and nobody's eyes are closed",
+      "words": [
+        "look",
+        "camera",
+        "eye",
+        "closed"
+      ]
+    },
+    {
+      "text": "Of those, only the ones where he's smiling?",
+      "criteria": "he's smiling",
+      "words": [
+        "smil"
+      ]
+    },
+    {
+      "text": "Which photos show a dog?",
+      "criteria": "a dog",
+      "words": [
+        "dog"
+      ]
+    },
+    {
+      "text": "hey out of these selected photos show me this exact thing",
+      "criteria": "this exact thing",
+      "words": [
+        "exact",
+        "thing"
+      ]
+    },
+    {
+      "text": "where",
+      "criteria": "where",
+      "words": []
+    },
+    {
+      "text": "  Kids jumping into the pool.  ",
+      "criteria": "Kids jumping into the pool",
+      "words": [
+        "kid",
+        "jump",
+        "pool"
+      ]
+    },
+    {
+      "text": "Showing goal celebrations",
+      "criteria": "goal celebrations",
+      "words": [
+        "goal",
+        "celebration"
+      ]
+    },
+    {
+      "text": "the one that has a red car",
+      "criteria": "has a red car",
+      "words": [
+        "red",
+        "car"
+      ]
+    }
+  ],
+  "verdicts": [
+    {
+      "raw": "{\"answer\": \"yes\", \"reason\": \"Both hands are on the ball.\"}",
+      "answer": "yes",
+      "reason": "Both hands are on the ball."
+    },
+    {
+      "raw": "```json\n{\"answer\":\"NO\",\"reason\":\"He is batting.\"}\n```",
+      "answer": "no",
+      "reason": "He is batting."
+    },
+    {
+      "raw": "{\"answer\": \"maybe\"}",
+      "answer": "unsure",
+      "reason": "The model's answer was unclear."
+    },
+    {
+      "raw": "Yes, it does.",
+      "answer": "unsure",
+      "reason": "The model's answer was unclear."
+    },
+    {
+      "raw": "{\"answer\": \"unsure\"}",
+      "answer": "unsure",
+      "reason": "The model couldn't tell."
+    },
+    {
+      "raw": "{\"answer\": \"yes\"}",
+      "answer": "yes",
+      "reason": "The model says it shows this."
+    },
+    {
+      "raw": "{\"answer\":\"yes\",\"reason\":\"  two\\n kids   smiling \"}",
+      "answer": "yes",
+      "reason": "two kids smiling"
+    },
+    {
+      "raw": "{\"reason\": \"x\"}",
+      "answer": "unsure",
+      "reason": "The model's answer was unclear."
+    },
+    {
+      "raw": "",
+      "answer": "unsure",
+      "reason": "The model's answer was unclear."
+    }
+  ],
+  "ranking": [
+    {
+      "name": "picture match and words",
+      "text": "show me the one where he's catching the ball with both hands",
+      "known": [],
+      "candidates": [
+        {
+          "id": 1,
+          "kind": "image",
+          "evidence": "baseball glove field IMG_0001",
+          "clip": 0.3,
+          "people": []
+        },
+        {
+          "id": 2,
+          "kind": "image",
+          "evidence": "boy catching ball",
+          "clip": 0.25,
+          "people": []
+        },
+        {
+          "id": 3,
+          "kind": "image",
+          "evidence": "",
+          "clip": null,
+          "people": []
+        },
+        {
+          "id": 4,
+          "kind": "image",
+          "evidence": "hands ball catch",
+          "clip": 0.15,
+          "people": []
+        }
+      ],
+      "order": [
+        2,
+        1,
+        4,
+        3
+      ],
+      "scores": [
+        0.4967,
+        0.4706,
+        0.3333,
+        0.0
+      ],
+      "reasons": [
+        "Not checked. Tags or description mention catching, ball.",
+        "Not checked. Ranked by picture search only.",
+        "Not checked. Tags or description mention catching, ball, hands.",
+        "Not checked. Nothing stored about it matches."
+      ]
+    },
+    {
+      "name": "named people",
+      "text": "the photo where Kyle is smiling",
+      "known": [
+        [
+          7,
+          [
+            "Kyle"
+          ]
+        ],
+        [
+          8,
+          [
+            "Ann Lee",
+            "Ann"
+          ]
+        ]
+      ],
+      "candidates": [
+        {
+          "id": 10,
+          "kind": "image",
+          "evidence": "smiling boy",
+          "clip": null,
+          "people": [
+            7
+          ]
+        },
+        {
+          "id": 11,
+          "kind": "image",
+          "evidence": "smiling",
+          "clip": null,
+          "people": []
+        },
+        {
+          "id": 12,
+          "kind": "image",
+          "evidence": "",
+          "clip": null,
+          "people": [
+            7
+          ]
+        },
+        {
+          "id": 13,
+          "kind": "image",
+          "evidence": "",
+          "clip": null,
+          "people": [
+            8
+          ]
+        }
+      ],
+      "order": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "scores": [
+        1.0,
+        0.5,
+        0.5,
+        0.0
+      ],
+      "reasons": [
+        "Not checked. Tags or description mention smiling; the person you named is in it.",
+        "Not checked. Tags or description mention smiling.",
+        "Not checked. The person you named is in it.",
+        "Not checked. Nothing stored about it matches."
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "kind": "checked",
+      "args": [
+        3,
+        1,
+        12,
+        12
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": null,
+      "message": "3 of 12 selected photos show that. 1 more might; the model wasn't sure."
+    },
+    {
+      "kind": "checked",
+      "args": [
+        1,
+        0,
+        10,
+        10
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": null,
+      "message": "1 of 10 selected photos shows that."
+    },
+    {
+      "kind": "checked",
+      "args": [
+        0,
+        2,
+        30,
+        30
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": null,
+      "message": "None of the 30 selected photos clearly show that. 2 might; the model wasn't sure."
+    },
+    {
+      "kind": "checked",
+      "args": [
+        0,
+        0,
+        60,
+        400
+      ],
+      "kinds": [
+        "image",
+        "video"
+      ],
+      "why": null,
+      "message": "None of the 400 selected files clearly show that. Checked the 60 most likely; select fewer to check every one."
+    },
+    {
+      "kind": "evidence",
+      "args": [
+        12,
+        12
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": "off",
+      "message": "Ranked 12 of 12 selected photos by stored evidence (picture search, tags, descriptions). Local AI is off, so none were checked by looking at them; turn it on to check each one."
+    },
+    {
+      "kind": "evidence",
+      "args": [
+        20,
+        45
+      ],
+      "kinds": [
+        "video"
+      ],
+      "why": "noModel",
+      "message": "Ranked 20 of 45 selected videos by stored evidence (picture search, tags, descriptions). No local vision model is ready, so none were checked by looking at them. Nothing was downloaded."
+    },
+    {
+      "kind": "evidence",
+      "args": [
+        1,
+        1
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": "notStarted",
+      "message": "Ranked 1 of 1 selected photo by stored evidence (picture search, tags, descriptions). The local vision model couldn't start, so none were checked by looking at them. Nothing was downloaded."
+    },
+    {
+      "kind": "progress",
+      "args": [
+        4,
+        12,
+        12,
+        1
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": null,
+      "message": "Checking 12 selected photos… 4 of 12 checked, 1 match so far."
+    },
+    {
+      "kind": "stopped",
+      "args": [
+        5,
+        12
+      ],
+      "kinds": [
+        "image"
+      ],
+      "why": null,
+      "message": "Stopped after checking 5 of 12 selected photos."
+    }
+  ]
+}
