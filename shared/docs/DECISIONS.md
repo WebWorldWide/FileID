@@ -4439,3 +4439,39 @@ Held-out questions only (16, never tuned on): 2B 0.58 / 0.41 / 0.33 → 0.88 / 0
 24 of the 4B's 26 false positives at 60 photos come from two questions. "Two people walking" (11): it accepts groups of three or four walking. "Close-up of a man wearing sunglasses" (13, held-out): it accepts wide shots. Without those two, 4B after is 0.96 precision at 0.90 recall, and 2B after is 0.80 at 0.90. That excludes two real failures after the fact, though, so the default follows the full held-out measurement and prefers 2B. Teaching the 4B question about framing and counting is the next step. That needs a fresh held-out set, because a framing clause written now would be tuned on these failures.
 
 **Not established.** 30 questions, one labeller, four events of one family's photos; "two people walking" stays the main false-positive source on 4B (groups of three or four walking). Qwen3-VL 8B is not installed here and was not measured. The Rust engine has the same prompts, splitting, combination and model ladder, but has not checked a real GGUF model.
+
+## 2026-11-08 — Text search judges each photo against a generic-photo baseline; take scoring tiles wide frames for small faces
+
+Semantic search had no floor: "photos of a dog" listed about 100 photos, because CLIP scores for non-matches (0.24–0.25) overlap real matches on family photos. Measured on a labelled query set: 70 queries (47 subjects present, 23 absent such as dog, beach, snow, airplane) over a scratch catalog of the 365-photo people set, every photo looked at and labelled per query (ambiguous photos, such as carousel horses for "horse", excluded from scoring). Queries were split by a hash of the text into tune (24 present / 11 absent) and held-out (24 / 11) before measuring; held-out was scored once.
+
+- **A fixed cosine floor and a query-relative z-score both fail.** A floor of 0.25 keeps 31 % of real matches and still answers 2 of 11 absent queries; z ≥ 2.5 finds something for every query, so absent subjects are never reported as missing (9 % / 0 % correct "none").
+- **The baseline cancels photos that score high for everything.** A photo is a good match when its cosine with "a photo of <words>." minus its cosine with a generic-photo baseline (the normalized mean of "a photo.", "a photo of something.", "an image.", "a picture.", "a photo of a thing.", "a photo of an object.") is at least 0.035. The same margin ranks the visual hits (ranking AP 0.53 → 0.63 tune, 0.54 → 0.66 held-out). The single "a photo of …" prompt beat the raw words and matched a five-template ensemble while costing one text encode; the baseline and margin live in `shared/models/clip-search-baseline.json` (Rust reads it, Swift mirrors it with a test).
+- **Keyword evidence counts as good.** In hybrid search a file the keyword search found (tags, descriptions, OCR, chapters) is always a good match; the stored tags alone are precise (0.94–0.96) but find few matches (recall 0.18).
+- **Nothing is hidden from a search; it is labelled.** Search replies put good matches first and say "3 good matches, 40 weaker." (seed-file "similar" searches are not judged). Chat leaves the weaker look-alikes out and says so ("Found 3 good matches for “dog”; 40 weaker look-alikes left out." / "No photos clearly show “dog”. … ask for the closest to see them."); a question with "closest", "similar", "nearest", "lookalike" or "resemble" keeps them and counts both. No IPC change: the counts are in the message, which the Mac Library now shows in place of the shown count.
+- **The engine embeds the prompt itself** from the request's words (`query`, which Chat now fills with the plan's subject) when the text model is installed, else it scores the client's vector. Chat selection checks keep the client's vector, so their calibrated CLIP floor is untouched.
+- **Rust tokenizer bug fixed on the way.** The shared engine split CLIP text on spaces only, so "dog." and "dog?" became single unknown words; it now follows OpenAI's pre-tokenization like Swift, and all 493 measured prompts embed within 5e-7 of the Mac.
+
+| Rule (good-match set) | Tune P / R / found / absent "none" | Held-out P / R / found / absent "none" |
+|---|---|---|
+| No floor | 0.04 / 1.00 / 1.00 / 0.00 | 0.04 / 1.00 / 1.00 / 0.00 |
+| Cosine ≥ 0.25 | 0.62 / 0.31 / 0.75 / 0.82 | 0.79 / 0.33 / 0.71 / 0.73 |
+| z-score ≥ 2.5 | 0.55 / 0.32 / 0.88 / 0.09 | 0.56 / 0.36 / 0.92 / 0.00 |
+| Stored tags/OCR words only | 0.94 / 0.18 / 0.38 / 1.00 | 0.96 / 0.18 / 0.50 / 1.00 |
+| **Photo prompt − baseline ≥ 0.035, or tags/OCR (chosen)** | 0.64 / 0.54 / 0.83 / 1.00 | **0.79 / 0.54 / 0.88 / 0.91** |
+| Engines, semantic mode (no keywords) | 0.64 / 0.46 / 0.83 / 1.00 | 0.75 / 0.42 / 0.79 / 0.91 |
+| Engines, hybrid as the Library sends it | 0.59 / 0.58 / 0.92 / 1.00 | 0.69 / 0.54 / 0.88 / 0.91 |
+
+P and R are macro precision and recall over present queries; "found" is the share of present queries with at least one good match. Swift and Rust return identical good-match lists for all 70 queries (68 of 70 identical full orders) on the same catalog.
+
+**Not established.** One family's 365 photos and one labeller; CLIP ViT-B/32 limits recall (eyeglasses 0.28, hay bales 0.06). The false-good rate for absent subjects was 0 / 4,015 photo-query pairs on tune and 3 / 4,015 on held-out (all "skateboard"), so a 90k-photo library may still show a few dozen "good" matches for a subject it lacks; that needs a labelled large-library check.
+
+**Take scoring: small faces in wide frames.** Take scoring detects faces on a 1024 px decode, so faces 15–30 px across in 7008 px group shots went unseen (and got no eyes check). Vision downscales internally, so a single 2048 px pass found almost nothing more (recall 0.510 → 0.516); tiles do. When the source is at least 2048 px and the first pass found no faces, a face under 40 px, or more people than faces (46 % of the set), both engines run the detector on 2×2 tiles (10 % overlap) of a 2048 px decode, keep tile faces first, add first-pass faces the tiles missed, and judge face sizes at the tile scale (`faceLongSide`, signals `take-signals-v3`). 3×3 tiles of 3072 px reached 0.714 recall at about 1.5× the tile cost, so the cheaper grid stays.
+
+| Group shots (129 photos, 574 labelled faces), Mac engine | Before | After |
+|---|---|---|
+| Face recall (IoU ≥ 0.3) | 0.510 | 0.667 |
+| Faces big enough for an eyes check | 278 | 364 |
+| Detections matching no labelled box (all 365 photos) | 2 of 525 | 4 of 648 |
+| scoreTakes per photo, debug engine (all / group shots) | 319 / 321 ms | 361 / 381 ms |
+
+The Rust engine applies the same rule with YuNet when its weights are installed (and skips tiling with no detector); YuNet isn't installed here, so it is covered by the shared `take-face-tiles.json` fixture and unit tests only. Eye state isn't labelled, so whether the 7 extra eyes-closed flags on group shots are right is unmeasured.
