@@ -1212,6 +1212,7 @@ mod tests {
             evidence_id: None,
             start_seconds: None,
             page: None,
+            selection_match: None,
         };
         let prompt = evidence_prompt("photos of Alex", &[hit(1, "two people"), hit(2, "a field")], 8, &details);
         assert!(prompt.contains(&format!("[1] 1.jpg (image, taken {day}, people: Alex, Blake): two people")));
