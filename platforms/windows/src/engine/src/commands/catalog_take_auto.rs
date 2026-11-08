@@ -275,6 +275,10 @@ struct FileRow {
 pub trait TakeFaceAnalyzer {
     fn id(&self) -> &str;
     fn faces(&mut self, rgb: &[u8], width: u32, height: u32) -> Option<Vec<Face>>;
+    /// False when no detector is installed, so wide frames are not tiled for nothing.
+    fn detects(&self) -> bool {
+        true
+    }
 }
 
 /// YuNet when its weights are installed: boxes and detector score as quality.
@@ -300,6 +304,10 @@ impl TakeFaceAnalyzer for YuNetFaces {
         } else {
             "no-faces-v1"
         }
+    }
+
+    fn detects(&self) -> bool {
+        self.model.is_some()
     }
 
     fn faces(&mut self, rgb: &[u8], width: u32, height: u32) -> Option<Vec<Face>> {
@@ -430,23 +438,45 @@ pub fn store(conn: &Connection, scored: &Scored) -> Result<()> {
 }
 
 fn image_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
-    let (rgb, w, h) = crate::pipeline::tagging::decode_image_sync(path, None).ok()?;
-    let (rgb, w, h) = fit(rgb, w, h, take_scoring::ANALYSIS_LONG_SIDE);
-    let found = faces.faces(&rgb, w, h);
+    let (source, sw, sh) = crate::pipeline::tagging::decode_image_sync(path, None).ok()?;
+    let (rgb, w, h) = fit_from(&source, sw, sh, take_scoring::ANALYSIS_LONG_SIDE);
     let luma = Luma::from_rgb(&rgb, w as usize, h as usize);
-    let complete = found.is_some();
-    Some((take_scoring::signals(&luma, found.unwrap_or_default(), None::<Vec<Box2>>), complete))
+    let Some(found) = faces.faces(&rgb, w, h) else {
+        return Some((take_scoring::signals(&luma, vec![], None::<Vec<Box2>>), false));
+    };
+    if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, None) {
+        return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), true));
+    }
+    let (wide, ww, wh) = fit_from(&source, sw, sh, take_scoring::TILE_LONG_SIDE);
+    drop(source);
+    let mut tiled = Vec::new();
+    for tile in take_scoring::tiles(ww as usize, wh as usize) {
+        let crop = crop_rgb(&wide, ww as usize, &tile);
+        let Some(found_in_tile) = faces.faces(&crop, tile.width as u32, tile.height as u32) else {
+            return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), false));
+        };
+        tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
+    }
+    let merged = take_scoring::merge_faces(&found, &tiled);
+    Some((take_scoring::signals_at(&luma, merged, None::<Vec<Box2>>, Some(ww.max(wh) as usize)), true))
 }
 
-fn fit(rgb: Vec<u8>, w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
+fn fit_from(rgb: &[u8], w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
     if w.max(h) <= long_side || w == 0 || h == 0 {
-        return (rgb, w, h);
+        return (rgb.to_vec(), w, h);
     }
     let scale = long_side as f64 / w.max(h) as f64;
     let (nw, nh) = (((w as f64 * scale).round() as u32).max(1), ((h as f64 * scale).round() as u32).max(1));
-    let resized =
-        crate::pipeline::tagging::resize_rgb_quality(&rgb, w as usize, h as usize, nw as usize, nh as usize);
-    (resized, nw, nh)
+    (crate::pipeline::tagging::resize_rgb_quality(rgb, w as usize, h as usize, nw as usize, nh as usize), nw, nh)
+}
+
+fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tile.width * tile.height * 3);
+    for row in tile.y..tile.y + tile.height {
+        let start = (row * width + tile.x) * 3;
+        out.extend_from_slice(&rgb[start..start + tile.width * 3]);
+    }
+    out
 }
 
 fn video_signals(path: &Path) -> Option<Signals> {
@@ -499,6 +529,52 @@ fn quality(q: take_scoring::Quality) -> CatalogTakeQuality {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Scripted {
+        calls: Vec<(u32, u32)>,
+        detects: bool,
+    }
+
+    impl TakeFaceAnalyzer for Scripted {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn detects(&self) -> bool {
+            self.detects
+        }
+        fn faces(&mut self, _: &[u8], width: u32, height: u32) -> Option<Vec<Face>> {
+            self.calls.push((width, height));
+            let face = Face { x: 0.45, y: 0.45, width: 0.1, height: 0.1, quality: Some(0.5), eyes_open: Some(0.9) };
+            Some(if self.calls.len() == 1 { vec![] } else { vec![face] })
+        }
+    }
+
+    #[test]
+    fn a_wide_frame_without_faces_is_tiled_and_judged_at_the_tile_scale() {
+        let directory = std::env::temp_dir().join(format!("fileid-take-tiles-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("wide.png");
+        image::RgbImage::from_fn(4096, 2048, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 128])).save(&path).unwrap();
+        let mut faces = Scripted { calls: vec![], detects: true };
+        let (signals, complete) = image_signals(&path, &mut faces).unwrap();
+        assert!(complete);
+        assert_eq!(faces.calls[0], (1024, 512));
+        assert_eq!(faces.calls.len(), 1 + take_scoring::TILE_GRID * take_scoring::TILE_GRID);
+        assert_eq!(signals.face_long_side, Some(2048));
+        assert_eq!(signals.faces.len(), 4);
+        let mut idle = Scripted { calls: vec![], detects: false };
+        let (plain, _) = image_signals(&path, &mut idle).unwrap();
+        assert_eq!(idle.calls.len(), 1);
+        assert_eq!(plain.face_long_side, None);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn crops_copy_the_tile_rows() {
+        let rgb: Vec<u8> = (0..4 * 3 * 3).map(|v| v as u8).collect();
+        let tile = take_scoring::Tile { x: 1, y: 1, width: 2, height: 2 };
+        assert_eq!(crop_rgb(&rgb, 4, &tile), vec![15, 16, 17, 18, 19, 20, 27, 28, 29, 30, 31, 32]);
+    }
 
     fn blob(first: f32, second: f32) -> Vec<u8> {
         let mut vector = vec![0.0_f32; 512];
