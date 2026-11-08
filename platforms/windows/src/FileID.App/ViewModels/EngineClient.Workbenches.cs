@@ -38,17 +38,20 @@ internal sealed partial class EngineClient
 
     public Task CancelBenchmarkAsync() => SendCommandAsync(new CancelBenchmarkCommand());
 
-    public Task<FaceReviewPage> ListFaceReviewAsync(long? personId, long offset, long limit, CancellationToken ct = default)
+    public Task<FaceReviewPage> ListFaceReviewAsync(long? personId, long offset, long limit, string? queue = null, CancellationToken ct = default)
     {
         var id = FaceReviewRequestId();
-        return SendWorkbenchAsync<FaceReviewPage>(id, new ListFaceReviewCommand(id, personId, offset, limit), TimeSpan.FromSeconds(60), ct);
+        return SendWorkbenchAsync<FaceReviewPage>(id, new ListFaceReviewCommand(id, personId, offset, limit, queue), TimeSpan.FromSeconds(60), ct);
     }
 
-    public Task<FaceReviewPage> ResolveFaceReviewAsync(long faceId, long personId, string resolution, CancellationToken ct = default)
+    public Task<FaceReviewPage> ResolveFaceReviewAsync(long? faceId, long personId, string resolution, long? otherPersonId = null, CancellationToken ct = default)
     {
         var id = FaceReviewRequestId();
-        return SendWorkbenchAsync<FaceReviewPage>(id, new ResolveFaceReviewCommand(id, faceId, personId, resolution), TimeSpan.FromSeconds(60), ct);
+        return SendWorkbenchAsync<FaceReviewPage>(id, new ResolveFaceReviewCommand(id, faceId, personId, resolution, otherPersonId), TimeSpan.FromSeconds(120), ct);
     }
+
+    public Task<FaceReviewPage> FaceRefreshStatusAsync(CancellationToken ct = default) =>
+        ListFaceReviewAsync(null, 0, 1, FaceQueuePolicy.Refresh, ct);
 
     public Task<FaceReviewPage> UndoFaceReviewAsync(string operationId, CancellationToken ct = default)
     {
