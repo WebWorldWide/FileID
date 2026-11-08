@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-08 — Exact selection answers: confirmed yeses; 2B checks when installed
+
+- **Both engines** (agent; no locked files, no IPC change): every yes from the selection check is confirmed by a second question about the whole request and each part. Requests are split into parts by deterministic shared rules (`shared/test-corpus/chat-selection.json`). Small models are asked whether it is the photo's main subject; 4B and up whether it is clearly shown, counting numbers. A no rules the photo out; an unclear reply makes it "Not sure". Checks prefer an installed Qwen3-VL 2B (it measured better than 4B on held-out questions, in half the time), else the best installed vision model that fits free memory. Rust uses the same order with the catalog 2B GGUF, then 8B, then 4B (not yet run against a real GGUF).
+- **Measured** (30 questions, 16 held-out, selections of 10/30/60 from baseball, orchard and campus copies): 2B precision 0.49/0.35/0.26 → 0.93/0.84/0.77 overall and 0.88/0.81/0.81 on held-out; recall 0.89–0.91 overall, 1.00 on held-out; 60 photos in 50 s. 4B with its question gets 0.84/0.76/0.69 in 94 s; it over-accepts counts ("two people walking") and framing ("close-up of …"). 672 px checks found +2 of 25 matches for +44% time; that needs a `DeepAnalyze.swift` digest refresh (owner decision).
+- Checks: Swift 612 serial, Rust 1,207 plus clippy/fmt, conformance Rust 54 / Swift 52, gates.
+
 ## 2026-11-07 — Mac model catalog checks each entry's first base; REAP prunes removed
 
 - `check_model_license_policy.py --mac-catalog` now also requires each Mac entry's first `bases` hop to hold the same model (no extra size, same variant words), using the generator's identity rule, which moved into the policy script so both catalogs share one definition. It flagged exactly three expert-pruned REAP builds, which were removed (218 → 215), matching the extended catalog's rejection of REAP prunes.
