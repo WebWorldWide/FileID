@@ -39,7 +39,7 @@ struct Crop {
 }
 
 impl Crop {
-    fn to_image(&self, u: f32, v: f32) -> [f32; 2] {
+    fn project(&self, u: f32, v: f32) -> [f32; 2] {
         let (lx, ly) = ((u / INPUT as f32 - 0.5) * self.side, (v / INPUT as f32 - 0.5) * self.side);
         [self.cx + lx * self.cos - ly * self.sin, self.cy + lx * self.sin + ly * self.cos]
     }
@@ -98,7 +98,7 @@ impl FaceMesh {
         if logit.is_nan() || logit < MIN_PRESENCE_LOGIT || !landmarks.iter().all(|v| v.is_finite()) {
             return Ok(None);
         }
-        Ok(Some(landmarks.chunks_exact(3).map(|p| crop.to_image(p[0], p[1])).collect()))
+        Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
     }
 }
 
@@ -107,7 +107,7 @@ fn sample(rgb: &[u8], width: usize, height: usize, crop: &Crop) -> Array4<f32> {
     let pixel = |x: usize, y: usize, c: usize| f32::from(rgb[(y * width + x) * 3 + c]);
     for v in 0..INPUT {
         for u in 0..INPUT {
-            let [x, y] = crop.to_image(u as f32 + 0.5, v as f32 + 0.5);
+            let [x, y] = crop.project(u as f32 + 0.5, v as f32 + 0.5);
             let (x, y) = ((x - 0.5).clamp(0.0, (width - 1) as f32), (y - 0.5).clamp(0.0, (height - 1) as f32));
             let (x0, y0) = (x as usize, y as usize);
             let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
@@ -149,7 +149,7 @@ fn crop_from_points(points: &[[f32; 2]]) -> Option<Crop> {
     }
     let side = (hi_x - lo_x).max(hi_y - lo_y) * MARGIN;
     let (mx, my) = ((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5);
-    (side.is_finite() && side >= 1.0).then(|| Crop { cx: mx * crop.cos - my * crop.sin, cy: mx * crop.sin + my * crop.cos, side, ..crop })
+    (side.is_finite() && side >= 1.0).then_some(Crop { cx: mx * crop.cos - my * crop.sin, cy: mx * crop.sin + my * crop.cos, side, ..crop })
 }
 
 /// Mean eye aspect ratio over both eyes: eyelid gap over eye width.
@@ -200,6 +200,7 @@ mod tests {
         assert!((closed - 0.05).abs() < 1e-6, "{closed}");
         assert!((openness(open) - 1.0).abs() < 1e-9);
         assert!(openness(closed).abs() < 1e-9);
+        assert!((openness(0.175) - crate::pipeline::take_scoring::EYES_CLOSED_BELOW).abs() < 1e-9);
         assert!(eye_aspect_ratio(&eye_points(9.0)[..10]).is_none());
     }
 
@@ -208,12 +209,12 @@ mod tests {
         let face = Detection { bbox: [100.0, 100.0, 200.0, 220.0], landmarks: [[130.0, 140.0], [170.0, 140.0], [150.0, 170.0], [135.0, 195.0], [165.0, 195.0]], score: 0.9 };
         let crop = crop_from_detection(&face);
         assert!((crop.side - 180.0).abs() < 1e-3 && (crop.cos - 1.0).abs() < 1e-6 && crop.sin.abs() < 1e-6);
-        let [x, y] = crop.to_image(128.0, 128.0);
+        let [x, y] = crop.project(128.0, 128.0);
         assert!((x - 150.0).abs() < 1e-3 && (y - 160.0).abs() < 1e-3);
         let upside_down = Detection { landmarks: [[170.0, 180.0], [130.0, 180.0], [150.0, 150.0], [0.0, 0.0], [0.0, 0.0]], ..face };
         let crop = crop_from_detection(&upside_down);
         assert!((crop.cos + 1.0).abs() < 1e-5, "{crop:?}");
-        let [_, top] = crop.to_image(128.0, 0.0);
+        let [_, top] = crop.project(128.0, 0.0);
         assert!(top > 160.0, "the crop's top row lies below the centre when the face is upside down");
     }
 
