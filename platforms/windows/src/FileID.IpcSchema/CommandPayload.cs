@@ -174,14 +174,16 @@ public sealed record ListFaceReviewCommand(
     [property: JsonPropertyName("requestID")] string RequestId,
     [property: JsonPropertyName("personID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PersonId = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Offset = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Limit = null) : CommandPayload;
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Limit = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Queue = null) : CommandPayload;
 
-/// <summary>Accept, reject or ignore one pending face suggestion (schema 1.23.0).</summary>
+/// <summary>Resolve one face suggestion, all of a person's suggested faces, or a merge or split suggestion (schema 1.23.0; 1.25.0).</summary>
 public sealed record ResolveFaceReviewCommand(
     [property: JsonPropertyName("requestID")] string RequestId,
-    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("faceID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? FaceId,
     [property: JsonPropertyName("personID")] long PersonId,
-    string Resolution) : CommandPayload;
+    string Resolution,
+    [property: JsonPropertyName("otherPersonID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? OtherPersonId = null) : CommandPayload;
 
 /// <summary>Undo one face review resolution by its operation id (schema 1.23.0).</summary>
 public sealed record UndoFaceReviewCommand(

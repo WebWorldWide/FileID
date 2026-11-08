@@ -140,13 +140,29 @@ pub enum CommandPayload {
     /// reclustering); ignore files the face under a new Unknown person. personID must match the
     /// pending suggestion, otherwise the reply is refused. Each resolution is one catalog operation
     /// (catalog_corrections kind face_review). Replies faceReview with action resolve and the
-    /// operationID to undo.
+    /// operationID to undo. Schema 1.25.0 adds: acceptAll accepts every pending suggested item of
+    /// personID best score first in one operation (kind face_review_bulk), skipping faces whose
+    /// photo already has that person (skippedFaceIDs) and listing the rest in acceptedFaceIDs;
+    /// refused when none can be accepted. merge, notSamePerson and dismiss with otherPersonID
+    /// resolve the pending merge suggestion of personID (the person kept) and otherPersonID (the
+    /// person merged in): merge moves otherPersonID's faces to personID like mergeClusters (a named
+    /// person keeps its name, an unnamed one takes the other's, a user-merged verdict links the
+    /// two) and deletes otherPersonID; notSamePerson records a different-people verdict between
+    /// their representative faces like markPersonsDifferent; dismiss hides the suggestion (by both
+    /// representative faces, so it survives reclustering). split moves the second group of
+    /// personID's pending split suggestion to a new unnamed person and records a different-people
+    /// verdict between the groups; dismiss without otherPersonID hides that split suggestion. Each
+    /// is one catalog operation (kind face_merge_review or face_split_review) that undoFaceReview
+    /// reverses; any of them is refused when the suggestion changed since it was listed.
     #[serde(rename = "resolveFaceReview")]
     ResolveFaceReview(ResolveFaceReviewPayload),
     /// Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person
     /// (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the
     /// suggestion is pending again. Refused when the face changed since. Replies faceReview with
-    /// action undo.
+    /// action undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any
+    /// of them moved since), merge (the merged person comes back under its id with its name and
+    /// faces), notSamePerson, dismiss and split (the faces return and the new person is removed);
+    /// the suggestion is pending again.
     #[serde(rename = "undoFaceReview")]
     UndoFaceReview(UndoFaceReviewPayload),
 }
@@ -741,7 +757,16 @@ pub struct CatalogRequest {
     /// the user undoes renames that learnNames recorded, it deletes, for each nameEdits entry, the
     /// newest stored sample for that fileID whose applied name equals applied (proposed is not
     /// compared; an entry with no match is ignored), so a reversed rename stops teaching a style,
-    /// then replies like namePreferences.
+    /// then replies like namePreferences. enqueueFaceRefresh (schema 1.25.0) queues the durable
+    /// face refresh job (kind faceRefresh, id face-refresh, one per library) for the engine's
+    /// current face model and processing version: faces whose stored vector is missing or from
+    /// another model, processing or file version join that version's backlog, and missing, offline
+    /// and failed items are tried again. The job re-embeds faces in face order, never changes
+    /// People, records each face as done, missing (the photo is gone), offline (its library
+    /// location is unreachable) or failed, and reports progress in jobs; listFaceReview with queue
+    /// refresh reads the counts. pauseJob, resumeJob and cancelJob control it, and an interrupted
+    /// run comes back paused and resumes where it stopped. It replies with the job in jobs, or
+    /// status error when no face model is installed.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -985,9 +1010,17 @@ pub struct PurgeExcludedPayload {
 pub struct ListFaceReviewPayload {
     #[serde(rename = "requestID")]
     pub request_id: String,
-    /// Only suggestions for this person. Omitted or null lists every person's.
+    /// Only suggestions for this person. Omitted or null lists every person's. merges: suggestions
+    /// that involve this person; splits: this person's suggestion.
     #[serde(rename = "personID", default, skip_serializing_if = "Option::is_none")]
     pub person_id: Option<i64>,
+    /// Schema 1.25.0. Which queue to read; omitted means faces. merges: suggested merges between
+    /// existing people, in merges, best score first; splits: people whose faces form two
+    /// well-separated groups, in splits, most separated first; refresh: the face refresh backlog
+    /// for the engine's current face model and processing, in refresh (items, merges and splits
+    /// empty). Every queue is read-only and stored by runFaceClustering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -999,23 +1032,44 @@ pub struct ListFaceReviewPayload {
 /// person (against the person's representative face, by file and box, so it survives reclustering);
 /// ignore files the face under a new Unknown person. personID must match the pending suggestion,
 /// otherwise the reply is refused. Each resolution is one catalog operation (catalog_corrections
-/// kind face_review). Replies faceReview with action resolve and the operationID to undo.
+/// kind face_review). Replies faceReview with action resolve and the operationID to undo. Schema
+/// 1.25.0 adds: acceptAll accepts every pending suggested item of personID best score first in one
+/// operation (kind face_review_bulk), skipping faces whose photo already has that person
+/// (skippedFaceIDs) and listing the rest in acceptedFaceIDs; refused when none can be accepted.
+/// merge, notSamePerson and dismiss with otherPersonID resolve the pending merge suggestion of
+/// personID (the person kept) and otherPersonID (the person merged in): merge moves otherPersonID's
+/// faces to personID like mergeClusters (a named person keeps its name, an unnamed one takes the
+/// other's, a user-merged verdict links the two) and deletes otherPersonID; notSamePerson records a
+/// different-people verdict between their representative faces like markPersonsDifferent; dismiss
+/// hides the suggestion (by both representative faces, so it survives reclustering). split moves
+/// the second group of personID's pending split suggestion to a new unnamed person and records a
+/// different-people verdict between the groups; dismiss without otherPersonID hides that split
+/// suggestion. Each is one catalog operation (kind face_merge_review or face_split_review) that
+/// undoFaceReview reverses; any of them is refused when the suggestion changed since it was listed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveFaceReviewPayload {
     #[serde(rename = "requestID")]
     pub request_id: String,
-    #[serde(rename = "faceID")]
-    pub face_id: i64,
+    /// accept, reject and ignore: the face. Required for those, ignored otherwise.
+    #[serde(rename = "faceID", default, skip_serializing_if = "Option::is_none")]
+    pub face_id: Option<i64>,
     #[serde(rename = "personID")]
     pub person_id: i64,
+    /// Schema 1.25.0. merge, notSamePerson and dismiss of a merge suggestion: the person merged
+    /// into personID.
+    #[serde(rename = "otherPersonID", default, skip_serializing_if = "Option::is_none")]
+    pub other_person_id: Option<i64>,
     pub resolution: String,
 }
 
 /// Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person
 /// (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the
 /// suggestion is pending again. Refused when the face changed since. Replies faceReview with action
-/// undo.
+/// undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any of them
+/// moved since), merge (the merged person comes back under its id with its name and faces),
+/// notSamePerson, dismiss and split (the faces return and the new person is removed); the
+/// suggestion is pending again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoFaceReviewPayload {
@@ -1770,8 +1824,9 @@ pub struct CatalogTakeGoalRanking {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogJob {
     pub id: String,
-    /// Worker kind, including timelineSample, catalogIndex and takeGrouping. Resume requires a
-    /// supported worker; catalogIndex permits explicit retry after failure or cancellation.
+    /// Worker kind, including timelineSample, catalogIndex, takeGrouping and faceRefresh (schema
+    /// 1.25.0). Resume requires a supported worker; catalogIndex permits explicit retry after
+    /// failure or cancellation.
     pub kind: String,
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
@@ -1913,6 +1968,29 @@ pub struct FaceReviewPage {
     pub offset: i64,
     /// list: the page, best score first. Empty for resolve and undo.
     pub items: Vec<FaceReviewItem>,
+    /// Schema 1.25.0. list: the queue read. Omitted means faces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
+    /// Schema 1.25.0. list of merges: the page; total counts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merges: Option<Vec<FaceMergeSuggestion>>,
+    /// Schema 1.25.0. list of splits: the page; total counts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub splits: Option<Vec<FaceSplitSuggestion>>,
+    /// Schema 1.25.0. list of refresh: the backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<FaceRefreshStatus>,
+    /// Schema 1.25.0. resolve merge: the person merged in (now gone); resolve split: the new
+    /// person.
+    #[serde(rename = "otherPersonID", default, skip_serializing_if = "Option::is_none")]
+    pub other_person_id: Option<i64>,
+    /// Schema 1.25.0. resolve acceptAll: the faces assigned.
+    #[serde(rename = "acceptedFaceIDs", default, skip_serializing_if = "Option::is_none")]
+    pub accepted_face_ids: Option<Vec<i64>>,
+    /// Schema 1.25.0. resolve acceptAll: suggested faces left pending because their photo already
+    /// has the person.
+    #[serde(rename = "skippedFaceIDs", default, skip_serializing_if = "Option::is_none")]
+    pub skipped_face_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1949,6 +2027,89 @@ pub struct FaceReviewItem {
     pub runner_up_score: Option<f64>,
     /// Unix seconds when the suggestion was made.
     pub created_at: f64,
+    /// Schema 1.25.0. The face failed the per-face quality gate (small, blurred or turned away);
+    /// such faces are only ever uncertain suggestions. Omitted means false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_quality: Option<bool>,
+}
+
+/// Schema 1.25.0. Two existing people whose face centroids in the same model and processing space
+/// are close, who never share a photo, are not Unknown and have no different-people verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceMergeSuggestion {
+    /// The person kept: named before unnamed, then more faces.
+    #[serde(rename = "personID")]
+    pub person_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_name: Option<String>,
+    #[serde(rename = "representativeFaceID", default, skip_serializing_if = "Option::is_none")]
+    pub representative_face_id: Option<i64>,
+    pub face_count: i64,
+    /// The person merged in.
+    #[serde(rename = "otherPersonID")]
+    pub other_person_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_name: Option<String>,
+    #[serde(rename = "otherRepresentativeFaceID", default, skip_serializing_if = "Option::is_none")]
+    pub other_representative_face_id: Option<i64>,
+    pub other_face_count: i64,
+    /// Cosine similarity of the two centroids.
+    pub score: f64,
+    pub created_at: f64,
+}
+
+/// Schema 1.25.0. A person whose faces form two well-separated groups. keep stays with the person
+/// (the group with the representative face); split would move to a new unnamed person.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceSplitSuggestion {
+    #[serde(rename = "personID")]
+    pub person_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_name: Option<String>,
+    #[serde(rename = "representativeFaceID", default, skip_serializing_if = "Option::is_none")]
+    pub representative_face_id: Option<i64>,
+    /// Cosine similarity of the two group centroids; lower is more separated.
+    pub score: f64,
+    pub keep_count: i64,
+    pub split_count: i64,
+    /// Preview faces of the group that stays, best first.
+    #[serde(rename = "keepFaceIDs")]
+    pub keep_face_ids: Vec<i64>,
+    /// Preview faces of the group that would move, best first.
+    #[serde(rename = "splitFaceIDs")]
+    pub split_face_ids: Vec<i64>,
+    pub created_at: f64,
+}
+
+/// Schema 1.25.0. The durable face refresh backlog for one face model and processing version
+/// (enqueueFaceRefresh). States: pending (not done yet), done, missing (the photo is gone from its
+/// library location), offline (the whole library location is unreachable, for example an unplugged
+/// drive), failed (decoding or embedding failed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceRefreshStatus {
+    /// The face model the backlog refreshes to; empty when no face model is installed.
+    pub model: String,
+    pub processing: String,
+    /// Faces whose stored vector is missing or from another model, processing or file version right
+    /// now.
+    pub outdated: i64,
+    pub total: i64,
+    pub done: i64,
+    pub pending: i64,
+    pub missing: i64,
+    pub offline: i64,
+    pub failed: i64,
+    /// The faceRefresh catalog job, for pauseJob, resumeJob and cancelJob.
+    #[serde(rename = "jobID", default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// The job's state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
