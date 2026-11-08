@@ -58,7 +58,7 @@ struct FaceReviewModelTests {
         fake.replies = [page("list", total: 3, items: [item(1), item(2)])]
         await model.reload()
         #expect(model.items.map(\.faceID) == [1, 2] && model.hasMore)
-        guard case .listFaceReview(_, let person, let offset, let limit) = fake.sent.last else { Issue.record("not a list"); return }
+        guard case .listFaceReview(_, let person, let offset, let limit, _) = fake.sent.last else { Issue.record("not a list"); return }
         #expect(person == 4 && offset == 0 && limit == 50)
 
         fake.replies = [page("list", total: 3, offset: 2, items: [item(2), item(3)])]
@@ -68,7 +68,7 @@ struct FaceReviewModelTests {
         fake.replies = [page("resolve", total: 9, operation: "op-1")]
         await model.resolve(model.items[0], .accept)
         #expect(model.items.map(\.faceID) == [2, 3] && model.total == 2 && model.undoOperationID == "op-1")
-        guard case .resolveFaceReview(_, 1, 1, "accept") = fake.sent.last else { Issue.record("not a resolve"); return }
+        guard case .resolveFaceReview(_, 1?, 1, "accept", nil) = fake.sent.last else { Issue.record("not a resolve"); return }
 
         fake.replies = [page("undo", total: 3), page("list", total: 3, items: [item(1), item(2), item(3)])]
         await model.undo()
