@@ -32,11 +32,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_model_license_policy import (  # noqa: E402
+    CONVERSION_SUFFIX,
+    VARIANT_WORDS,
     catalog_errors,
     gemma_terms_error,
     identity_mismatch,
     non_llm,
     restricted_reason,
+    variant_words,
     _sizes,
 )
 
@@ -106,12 +109,6 @@ UPSTREAM_OVERRIDES = {
     "HuggingFaceTB/smollm-1.7B-instruct-v0.2-Q8_0-GGUF": "HuggingFaceTB/SmolLM-1.7B-Instruct",
     "unsloth/GLM-4-32B-0414-GGUF": "zai-org/GLM-4-32B-0414",
 }
-# Words that make a different model of the same family and size; a
-# conversion and its declared base must agree on them.
-VARIANT_WORDS = {"instruct", "it", "chat", "thinking", "reasoning", "vl", "coder", "math", "embedding", "reranker", "ocr"}
-CONVERSION_SUFFIX = re.compile(
-    r"([-_](gguf|mlx|q\d[\w]*|iq\d\w*|[2-8]-?bit|bf16|fp16|f16|mxfp4\w*|dwq|optiq|awq|gptq|int[48]|lm))+$", re.I
-)
 EXCLUDE = re.compile(
     r"abliterat|uncensor|nsfw|heretic|lora-|-lora|roleplay|merge|test|-pt-|base-gguf|-base$|-base-|draft|mtp|speculative"
     r"|imatrix|bitnet|madlad|coder|safeguard|phone|guard-|-guard|embedding-gemma-test",
@@ -272,10 +269,6 @@ def model_name(repo: str) -> str:
 
 def family_of(name: str) -> str:
     return re.split(r"[-_]\d", name, maxsplit=1)[0]
-
-
-def variant_words(name: str) -> set[str]:
-    return set(re.findall(r"[a-z]+", name.lower())) & VARIANT_WORDS
 
 
 def architecture_family(info: dict) -> str | None:
