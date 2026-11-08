@@ -62,6 +62,19 @@
       "license": "Apache-2.0"
     },
     {
+      "id": "face_mesh_landmarks",
+      "kind": "face_mesh",
+      "platforms": [
+        "windows"
+      ],
+      "repo": "naklitechie/face-landmarks-onnx",
+      "revision": "575c33816c840c5b156398adb485e4f8d138adc2",
+      "path": "face_landmarks.onnx",
+      "sha256": "f38c3321ceffbc9e95103480ad38cc3f52e7e1bde2bcee7cd9355d0b9138ac0c",
+      "approxBytes": 4920995,
+      "license": "Apache-2.0"
+    },
+    {
       "id": "clip_vitb32_image",
       "kind": "mobileclip_s2",
       "platforms": [
