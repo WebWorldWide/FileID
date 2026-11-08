@@ -7,6 +7,8 @@ import FileIDShared
 @Suite struct ChatSelectionTests {
     struct Fixtures: Decodable {
         struct Criteria: Decodable { let text: String; let criteria: String; let words: [String] }
+        struct Checks: Decodable { let criteria: String; let checks: [String] }
+        struct Combine: Decodable { let first: [String]; let confirmations: [String]; let answer: String; let reason: String }
         struct VerdictCase: Decodable { let raw: String; let answer: String; let reason: String }
         struct Candidate: Decodable { let id: Int64; let kind: String; let evidence: String; let clip: Double?; let people: [Int64] }
         struct Known: Decodable {
@@ -22,6 +24,8 @@ import FileIDShared
         }
         struct Message: Decodable { let kind: String; let args: [Int]; let kinds: [String]; let why: String?; let message: String }
         let criteria: [Criteria]
+        let checks: [Checks]
+        let combine: [Combine]
         let verdicts: [VerdictCase]
         let ranking: [Ranking]
         let messages: [Message]
@@ -39,6 +43,46 @@ import FileIDShared
             #expect(criteria == item.criteria, "\(item.text)")
             #expect(ChatSelection.contentWords(criteria) == item.words, "\(item.text)")
         }
+    }
+
+    @Test func sharedChecksCases() throws {
+        for item in try fixtures().checks {
+            #expect(ChatSelection.checks(item.criteria) == item.checks, "\(item.criteria)")
+        }
+    }
+
+    @Test func sharedCombineCases() throws {
+        for item in try fixtures().combine {
+            let first = (ChatSelection.Verdict(rawValue: item.first[0]) ?? .unsure, item.first[1])
+            let confirmations = item.confirmations.map { ChatSelection.Verdict(rawValue: $0) ?? .unsure }
+            let (verdict, reason) = ChatSelection.combine(first, confirmations: confirmations)
+            #expect(verdict.rawValue == item.answer && reason == item.reason, "\(item.first) \(item.confirmations)")
+        }
+    }
+
+    @Test func confirmationsAskAboutTheWholeRequestThenEachPart() {
+        let prompts = ChatSelection.confirmPrompts("woman in a pink shirt drinking from a water bottle", small: false)
+        #expect(prompts.count == 3)
+        #expect(prompts.first?.contains("\"woman in a pink shirt drinking from a water bottle\"") == true)
+        #expect(prompts.dropFirst().first?.contains("\"woman in a pink shirt\"") == true)
+        #expect(prompts.last?.contains("\"woman drinking from a water bottle\"") == true)
+        #expect(prompts.allSatisfy { $0.contains("count") && !$0.contains("main subject") })
+        let small = ChatSelection.confirmPrompts("close-up portrait", small: true)
+        #expect(small.count == 1 && small[0].contains("main subject"))
+        #expect(AIModelKind.qwen3VL2B.ramBudgetGB < ChatSelection.smallModelGB && AIModelKind.qwen3VL4B.ramBudgetGB >= ChatSelection.smallModelGB)
+    }
+
+    @Test func checkModelPrefersAnInstalledSmallModelThenTheBestThatFits() {
+        let both: Set<AIModelKind> = [.qwen3VL2B, .qwen3VL4B]
+        #expect(ChatSelection.checkModel(loaded: .qwen3VL2B, ramGB: 16, availableGB: 4, installed: both.contains) == .qwen3VL2B)
+        #expect(ChatSelection.checkModel(loaded: nil, ramGB: 16, availableGB: 8, installed: both.contains) == .qwen3VL2B)
+        #expect(ChatSelection.checkModel(loaded: .qwen3VL4B, ramGB: 16, availableGB: 0.5, installed: both.contains) == .qwen3VL2B)
+        #expect(ChatSelection.checkModel(loaded: nil, ramGB: 16, availableGB: 8, installed: { $0 == .qwen3VL4B }) == .qwen3VL4B)
+        #expect(ChatSelection.checkModel(loaded: .qwen3VL4B, ramGB: 16, availableGB: 0.5, installed: { $0 == .qwen3VL4B }) == .qwen3VL4B)
+        #expect(ChatSelection.checkModel(loaded: nil, ramGB: 16, availableGB: 4, installed: { $0 == .qwen3VL4B }) == nil)
+        #expect(ChatSelection.checkModel(loaded: nil, ramGB: 16, availableGB: 1, installed: both.contains) == nil)
+        #expect(ChatSelection.checkModel(loaded: .qwen3VL2B, ramGB: 16, availableGB: 1, installed: { $0 == .qwen3VL2B }) == .qwen3VL2B)
+        #expect(ChatSelection.checkModel(loaded: nil, ramGB: 16, availableGB: 8, installed: { _ in false }) == nil)
     }
 
     @Test func sharedVerdictCases() throws {
