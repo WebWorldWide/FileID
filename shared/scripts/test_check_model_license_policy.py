@@ -230,6 +230,17 @@ class ExtendedCatalogPolicyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("Mac catalog mlx-community/Josiefied", result.stdout)
 
+    def test_mac_catalog_lineage(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from check_model_license_policy import lineage_problem
+
+        self.assertIsNone(lineage_problem("mlx-community/Qwen2.5-7B-Instruct-4bit", "Qwen/Qwen2.5-7B-Instruct"))
+        self.assertIsNone(lineage_problem("mlx-community/Qwen3-VL-4B-Instruct-8bit", "Qwen/Qwen3-VL-4B-Instruct"))
+        self.assertIsNone(lineage_problem("mlx-community/Qwen3-30B-A3B-OptiQ-4bit", "Qwen/Qwen3-30B-A3B"))
+        self.assertIn("first base", lineage_problem("mlx-community/Qwen2.5-7B-Instruct-4bit", "Qwen/Qwen2.5-7B") or "")
+        self.assertIn("first base", lineage_problem("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit", "Qwen/Qwen2.5-7B-Instruct") or "")
+        self.assertIn("resized", lineage_problem("mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit-REAP-19B", "mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit") or "")
+
     def test_unknown_license_fails(self) -> None:
         self.assert_fails("is not allowed", catalog_entry(license="Qwen-Research"))
 

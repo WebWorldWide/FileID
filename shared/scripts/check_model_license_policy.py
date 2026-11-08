@@ -63,6 +63,29 @@ def _sizes(text: str) -> set[str]:
     return set(_SIZE.findall(_normalized(text)))
 
 
+# Words that make a different model of the same family and size; a
+# conversion and its declared base must agree on them.
+VARIANT_WORDS = {"instruct", "it", "chat", "thinking", "reasoning", "vl", "coder", "math", "embedding", "reranker", "ocr"}
+CONVERSION_SUFFIX = re.compile(
+    r"([-_](gguf|mlx|q\d[\w]*|iq\d\w*|[2-8]-?bit|bf16|fp16|f16|mxfp4\w*|dwq|optiq|awq|gptq|int[48]|lm))+$", re.I
+)
+
+
+def variant_words(name: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", name.lower())) & VARIANT_WORDS
+
+
+def lineage_problem(repo: str, base: str) -> str | None:
+    """Why a conversion's first declared base is not the model it holds."""
+    held = CONVERSION_SUFFIX.sub("", repo.split("/", 1)[-1]) or repo
+    declared = CONVERSION_SUFFIX.sub("", base.split("/", 1)[-1]) or base
+    if _sizes(held) - _sizes(declared):
+        return f"holds {held}, a resized derivative of {base}"
+    if variant_words(held) != variant_words(declared):
+        return f"is {sorted(variant_words(held))}, first base {base} is {sorted(variant_words(declared))}"
+    return None
+
+
 def restricted_reason(*names: str) -> str | None:
     for name in names:
         for pattern, reason in RESTRICTED_MODELS:
@@ -116,6 +139,10 @@ def mac_catalog_errors(catalog_path: Path) -> list[str]:
             errors.append(f"Mac catalog {entry.get('repo')}: denylisted model ({reason})")
         if non_llm(lineage[0], lineage[0], lineage[-1], [f.get("path", "") for f in entry.get("files", [])]):
             errors.append(f"Mac catalog {entry.get('repo')}: image-generation or text-to-speech model is not offered")
+        if len(lineage) < 2:
+            errors.append(f"Mac catalog {entry.get('repo')}: no declared base")
+        elif problem := lineage_problem(lineage[0], lineage[1]):
+            errors.append(f"Mac catalog {entry.get('repo')}: {problem}")
     return errors
 
 

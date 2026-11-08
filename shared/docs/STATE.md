@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-07 — Mac model catalog checks each entry's first base; REAP prunes removed
+
+- `check_model_license_policy.py --mac-catalog` now also requires each Mac entry's first `bases` hop to hold the same model (no extra size, same variant words), using the generator's identity rule, which moved into the policy script so both catalogs share one definition. It flagged exactly three expert-pruned REAP builds, which were removed (218 → 215), matching the extended catalog's rejection of REAP prunes.
+- Policy (14) and generator (21) tests, both catalog gates, Swift catalog tests and the egress/docs gates pass.
+
 ## 2026-11-07 — Ask Chat about selected photos (IPC 1.24)
 
 - **All three apps and both engines** (agent; no locked files): select photos or videos in Library, Best Takes or Search & Moments (⌘/⇧-click on Mac, Ctrl/Shift on WinUI and GTK, plus Select all/Clear) and choose "Ask about N". Chat opens with a removable "12 selected photos" chip and answers only from those files (`ChatRequest.scopeFileIDs`, 1–2,000). Files are ranked by stored evidence (CLIP, tags/description/name words, named people), then the vision model checks each one (all of them up to 60, else the 60 best) with a strict yes/no/unsure question. Matches come first, then "Not sure", each with a reason (`CatalogHit.match`); the answer says honestly when none match. Answer tiles can be picked again to narrow the next question, opened, or saved as a Best Takes group. Without a model the ranked files are all "unsure" and the answer says nothing was checked.

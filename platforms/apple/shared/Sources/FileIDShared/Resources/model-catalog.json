@@ -7548,68 +7548,6 @@
       }
     },
     {
-      "repo": "mlx-community/Qwen3.5-122B-A10B-OptiQ-2bit-REAP-63B",
-      "revision": "dd7f845088e7c73e1f1d7492f0a5f142b177b535",
-      "license": "apache-2.0",
-      "architecture": "qwen3_5_moe",
-      "role": "text",
-      "weightBytes": 25593158704,
-      "bases": [
-        {
-          "repo": "mlx-community/Qwen3.5-122B-A10B-OptiQ-2bit",
-          "revision": "8284ab1029a2b0114824175aa7f04740ff318934",
-          "license": "apache-2.0"
-        },
-        {
-          "repo": "Qwen/Qwen3.5-122B-A10B",
-          "revision": "dc4d348443bc740c68e2d77492492c11606384d5",
-          "license": "apache-2.0"
-        }
-      ],
-      "files": [
-        {
-          "path": "model-00001-of-00006.safetensors",
-          "sha256": "5d9805aa7678ab59ac4982cb09478e6b8edaa41085dbd157b94be11131287959",
-          "size": 4291750441
-        },
-        {
-          "path": "model-00002-of-00006.safetensors",
-          "sha256": "4e55a8909b81ad5b3b28c3fd9d619372370a7919bf9bce7a8298f5e986a7352d",
-          "size": 4286979479
-        },
-        {
-          "path": "model-00003-of-00006.safetensors",
-          "sha256": "29d0c39ca1b355c2c2d37d2fae23f1fbd311d04280a57f2f27d319d98ef9fa03",
-          "size": 4229681105
-        },
-        {
-          "path": "model-00004-of-00006.safetensors",
-          "sha256": "32a1459fb01d610edce5f864bfdb22b455330f231dde13fec7dbe063f4132ec8",
-          "size": 4267899885
-        },
-        {
-          "path": "model-00005-of-00006.safetensors",
-          "sha256": "761468edd85b9824d77be12796ddd30b6c5c84a8046245263a991f72daf7efbc",
-          "size": 4288475546
-        },
-        {
-          "path": "model-00006-of-00006.safetensors",
-          "sha256": "caee4b7ac45e47d3e9f416ee8c5bb8c34b754d373e60fa45254a74833abaf03c",
-          "size": 3325753426
-        },
-        {
-          "path": "optiq/optiq_vision.safetensors",
-          "sha256": "2e15c90735e85e8f812b2d29fafaa2021a5ce689c58bbc541be80608f596846d",
-          "size": 902618822
-        }
-      ],
-      "quantization": {
-        "bits": 4,
-        "groupSize": 64,
-        "mode": "affine"
-      }
-    },
-    {
       "repo": "mlx-community/Qwen3.5-27B-OptiQ-4bit",
       "revision": "ad95bea472d94755964790a969f277ae0a339998",
       "license": "apache-2.0",
@@ -7757,63 +7695,6 @@
           "path": "optiq/optiq_vision.safetensors",
           "sha256": "aeef0d473cdd5f1e19f72cca61ca6e94b1d1af805d41387c098f484988d0fe79",
           "size": 893179469
-        }
-      ],
-      "quantization": {
-        "bits": 4,
-        "groupSize": 64,
-        "mode": "affine"
-      }
-    },
-    {
-      "repo": "mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit-REAP-19B",
-      "revision": "212e00f5c653fcf4753a1513272ff598cf5a1f4e",
-      "license": "apache-2.0",
-      "architecture": "qwen3_5_moe",
-      "role": "text",
-      "weightBytes": 13736540899,
-      "bases": [
-        {
-          "repo": "mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit",
-          "revision": "d2418dfeb55b7d3c76988a87e860693dee5cde99",
-          "license": "apache-2.0"
-        },
-        {
-          "repo": "Qwen/Qwen3.5-35B-A3B",
-          "revision": "59d61f3ce65a6d9863b86d2e96597125219dc754",
-          "license": "apache-2.0"
-        },
-        {
-          "repo": "Qwen/Qwen3.5-35B-A3B-Base",
-          "revision": "0f0813072d2358973511097385626f21fcb6d422",
-          "license": "apache-2.0"
-        }
-      ],
-      "files": [
-        {
-          "path": "model-00001-of-00003.safetensors",
-          "sha256": "6a3fa2a4dd0ee3159374c95c78c2e18f83c1e63601c1680e19011757f419d038",
-          "size": 4292916337
-        },
-        {
-          "path": "model-00002-of-00003.safetensors",
-          "sha256": "3db5e4a6ba180e1358489d24c573ef3f4fffd1d803ba41700608c69482f50f75",
-          "size": 4231572471
-        },
-        {
-          "path": "model-00003-of-00003.safetensors",
-          "sha256": "59fe0ef1198f1b77ff0337b2ae21a7d5baa800a739bd50af331ce9ae5356493d",
-          "size": 3831413574
-        },
-        {
-          "path": "optiq/mtp.safetensors",
-          "sha256": "e096105031f4a818bab9a8420f74ccad54d1b22f29d21b6fe8a5a66d5a85db50",
-          "size": 487458933
-        },
-        {
-          "path": "optiq/optiq_vision.safetensors",
-          "sha256": "7d2a9cc2dfe470aef2e0ecd287d29c0900497fe999c4a05f6a688319230ec1ce",
-          "size": 893179584
         }
       ],
       "quantization": {
@@ -8012,58 +7893,6 @@
           "path": "optiq/optiq_vision.safetensors",
           "sha256": "0125eeb6c29b935d0b1c6a6eb1a3c9ba13f9671680439c4e0aff16b95c7b8ab5",
           "size": 893179469
-        }
-      ],
-      "quantization": {
-        "bits": 4,
-        "groupSize": 64,
-        "mode": "affine"
-      }
-    },
-    {
-      "repo": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit-REAP-19B",
-      "revision": "95193a560399d81cd6272c393db8e96d59f54f50",
-      "license": "apache-2.0",
-      "architecture": "qwen3_5_moe",
-      "role": "text",
-      "weightBytes": 14864536516,
-      "bases": [
-        {
-          "repo": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
-          "revision": "70a3aa32c7feef511182bf16aa332f37e8d82014",
-          "license": "apache-2.0"
-        },
-        {
-          "repo": "Qwen/Qwen3.6-35B-A3B",
-          "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
-          "license": "apache-2.0"
-        }
-      ],
-      "files": [
-        {
-          "path": "model-00001-of-00003.safetensors",
-          "sha256": "0bf793e01f4bda00a4a7607d339b730c9ddbb5c5d11b3c58bbb83ef9236325fe",
-          "size": 4276137625
-        },
-        {
-          "path": "model-00002-of-00003.safetensors",
-          "sha256": "b084180ea16baeec657f6e833e0d5a095a2dc5412cab47b9fdfa5757f5169bc4",
-          "size": 4238607125
-        },
-        {
-          "path": "model-00003-of-00003.safetensors",
-          "sha256": "80f582f41a418f3a742a0b10dc747683bb032e79dc6c5d5f95e9b8c3ba843acf",
-          "size": 3811795684
-        },
-        {
-          "path": "optiq/mtp.safetensors",
-          "sha256": "ab850c643a37cd0c0b88530a5d6251f72a26c3b1dbf56707b307f5454942b49f",
-          "size": 1644816498
-        },
-        {
-          "path": "optiq/optiq_vision.safetensors",
-          "sha256": "84808486f85e5e1ea73d6ac7f1155a1d7e808d4be780d455609f7146ff1ee76f",
-          "size": 893179584
         }
       ],
       "quantization": {
