@@ -31,6 +31,19 @@ enum VideoFrameWorker {
         }
     }
 
+    final class SweepGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+        func claim() -> Bool { lock.withLock { defer { claimed = true }; return !claimed } }
+    }
+
+    static let frameSweep = SweepGate()
+
+    static func sweepAbandonedFramesOnce(gate: SweepGate = frameSweep, directory: URL = FileManager.default.temporaryDirectory) {
+        guard gate.claim() else { return }
+        sweepAbandonedFrames(directory: directory)
+    }
+
     static func run(arguments: [String]) async -> Int32 {
         let parentPID = getppid()
         let parentMonitor = Task.detached {
@@ -198,7 +211,7 @@ enum VideoFrameWorker {
 
     static func sampleSequence(source: URL, times: [Double]) async throws -> [Sample] {
         guard (2...8).contains(times.count) else { throw WorkerFailure() }
-        sweepAbandonedFrames()
+        sweepAbandonedFramesOnce()
         let destinations = times.map { _ in FileManager.default.temporaryDirectory.appendingPathComponent("FileIDTimeline-" + UUID().uuidString + ".png") }
         for destination in destinations { try ReadOnlyLocations.requireWritable(destination) }
         let output = Pipe()
@@ -227,7 +240,7 @@ enum VideoFrameWorker {
     }
 
     static func sample(source: URL, seconds: Double) async throws -> Sample {
-        sweepAbandonedFrames()
+        sweepAbandonedFramesOnce()
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDTimeline-" + UUID().uuidString + ".png")
         try ReadOnlyLocations.requireWritable(destination)
         let output = Pipe()
