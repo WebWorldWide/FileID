@@ -251,7 +251,37 @@ public sealed record FaceClusteringResult(
     ulong FaceCount,
     ulong UnmatchedFaces,
     double DurationSeconds,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? DeferredFaces = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? DeferredFaces = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ReviewQueued = null);
+
+/// <summary>One pending face review suggestion (schema 1.23.0).</summary>
+public sealed record FaceReviewItem(
+    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("fileID")] long FileId,
+    string Path,
+    string Bbox,
+    [property: JsonPropertyName("personID")] long PersonId,
+    string? PersonName,
+    [property: JsonPropertyName("representativeFaceID")] long? RepresentativeFaceId,
+    double Score,
+    string Reason,
+    [property: JsonPropertyName("runnerUpPersonID")] long? RunnerUpPersonId,
+    string? RunnerUpName,
+    double? RunnerUpScore,
+    double CreatedAt);
+
+/// <summary>Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).</summary>
+public sealed record FaceReviewPage(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string Action,
+    string Status,
+    string? Message,
+    [property: JsonPropertyName("operationID")] string? OperationId,
+    [property: JsonPropertyName("faceID")] long? FaceId,
+    [property: JsonPropertyName("personID")] long? PersonId,
+    long Total,
+    long Offset,
+    IReadOnlyList<FaceReviewItem> Items);
 
 public sealed record DeepAnalyzeStarting(
     string ModelKind,

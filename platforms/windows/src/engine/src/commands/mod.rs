@@ -7,6 +7,7 @@ pub(crate) mod deep_analyze;
 pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;
+pub(crate) mod face_review;
 pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;

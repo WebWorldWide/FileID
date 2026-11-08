@@ -1014,6 +1014,13 @@ struct FileIDEngineMain {
                 database: database, faceID: faceID,
                 destinationPersonID: destinationPersonID, createNewPerson: createNewPerson
             )))
+        case .listFaceReview(let requestID, let personID, let offset, let limit):
+            await emitFaceReview(.list(requestID: requestID, personID: personID, offset: offset, limit: limit), database: database, sink: sink)
+        case .resolveFaceReview(let requestID, let faceID, let personID, let resolution):
+            await emitFaceReview(.resolve(requestID: requestID, faceID: faceID, personID: personID, resolution: resolution),
+                                 database: database, sink: sink)
+        case .undoFaceReview(let requestID, let operationID):
+            await emitFaceReview(.undo(requestID: requestID, operationID: operationID), database: database, sink: sink)
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
             await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
@@ -1072,6 +1079,17 @@ struct FileIDEngineMain {
                 message: "CUDA isn't available on Apple Silicon — the AppleProvider EP selects ANE/Metal automatically."
             )))
         }
+    }
+
+    static func emitFaceReview(_ command: FaceReview.Command, database: Database?, sink: IPCSink) async {
+        guard HealthCheckResult.isValidRequestID(command.requestID) else {
+            await sink.emit(.error(EngineError(
+                kind: "invalid_face_review_request",
+                message: "Face review requests need a 1–128 character ASCII request ID."
+            )))
+            return
+        }
+        await sink.emit(.faceReview(await FaceReview.reply(command, database: database)))
     }
 
     static func emitDbUnavailable(_ sink: IPCSink, action: String) async {
@@ -1660,6 +1678,7 @@ struct FileIDEngineMain {
                         WHERE id = ?1
                         """, arguments: [personID])
                 }
+                try FaceReview.recordReassignment(db, faceID: faceID, previous: previous, destination: destination)
                 if let previous {
                     try db.execute(sql: """
                         DELETE FROM persons

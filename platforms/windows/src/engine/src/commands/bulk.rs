@@ -1950,6 +1950,7 @@ pub(crate) async fn handle_reassign_face(
                 rusqlite::params![person_id],
             )?;
         }
+        crate::commands::face_review::record_reassignment(&tx, payload.face_id, previous_person_id, destination)?;
         if let Some(source_person_id) = previous_person_id {
             let deleted = tx.execute(
                 "DELETE FROM persons
@@ -3798,11 +3799,25 @@ mod tests {
                  );
                  CREATE TABLE face_prints (
                     id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, person_id INTEGER,
-                    arcface_embedding BLOB, face_quality REAL
+                    arcface_embedding BLOB, face_quality REAL, bbox TEXT NOT NULL DEFAULT '',
+                    embedding_model TEXT, processing_version TEXT
                  );
                  CREATE TABLE face_verifications (
                     person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,
                     face_a INTEGER, face_b INTEGER
+                 );
+                 CREATE TABLE face_identity_constraints (
+                    id INTEGER PRIMARY KEY, file_id INTEGER, bbox TEXT, anchor_file_id INTEGER,
+                    anchor_bbox TEXT, source TEXT, created_at REAL,
+                    UNIQUE(file_id, bbox, anchor_file_id, anchor_bbox)
+                 );
+                 CREATE TABLE catalog_corrections (
+                    id TEXT PRIMARY KEY, file_id INTEGER, kind TEXT, before_json TEXT,
+                    after_json TEXT, created_at REAL
+                 );
+                 CREATE TABLE face_review_candidates (face_id INTEGER PRIMARY KEY);
+                 CREATE TABLE face_assignment_assessed (
+                    face_id INTEGER PRIMARY KEY, namespace TEXT, outcome TEXT, assessed_at REAL
                  );",
             )
             .unwrap();

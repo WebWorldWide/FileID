@@ -31,8 +31,7 @@ pub struct Window {
     pub times: Vec<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Moment {
     pub title: String,
     pub summary: String,
@@ -41,8 +40,19 @@ pub struct Moment {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMoment {
+    title: String,
+    summary: String,
+    start: Option<serde_json::Value>,
+    end: Option<serde_json::Value>,
+    first_frame: Option<i64>,
+    last_frame: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct MomentResponse {
-    moments: Vec<Moment>,
+    moments: Vec<RawMoment>,
 }
 
 /// Mean absolute luma difference between two equally sized grayscale
@@ -165,8 +175,8 @@ fn invalid_response() -> anyhow::Error {
     anyhow::anyhow!("The visual model did not return valid moment evidence. This interval remains incomplete.")
 }
 
-pub fn parse_moments(raw: &str, frame_count: usize) -> Result<Vec<Moment>> {
-    if !(2..=8).contains(&frame_count) || raw.len() > 16_384 {
+pub fn parse_moments(raw: &str, times: &[f64]) -> Result<Vec<Moment>> {
+    if !(2..=8).contains(&times.len()) || raw.len() > 16_384 {
         return Err(invalid_response());
     }
     let (Some(begin), Some(finish)) = (raw.find('{'), raw.rfind('}')) else { return Err(invalid_response()) };
@@ -174,18 +184,73 @@ pub fn parse_moments(raw: &str, frame_count: usize) -> Result<Vec<Moment>> {
         return Err(invalid_response());
     }
     let response: MomentResponse = serde_json::from_str(&raw[begin..=finish]).map_err(|_| invalid_response())?;
-    let valid = response.moments.len() <= 3
-        && response.moments.iter().all(|m| {
-            !m.title.trim().is_empty()
-                && m.title.chars().count() <= 120
-                && m.summary.chars().count() <= 1_000
-                && m.last_frame >= m.first_frame
-                && m.last_frame < frame_count
-        });
+    if response.moments.len() > 3 {
+        return Err(invalid_response());
+    }
+    let moments = response
+        .moments
+        .into_iter()
+        .map(|m| resolve_moment(m, times))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(invalid_response)?;
+    let valid = moments
+        .iter()
+        .all(|m| !m.title.trim().is_empty() && m.title.chars().count() <= 120 && m.summary.chars().count() <= 1_000);
     if !valid {
         return Err(invalid_response());
     }
-    Ok(response.moments)
+    Ok(moments)
+}
+
+fn resolve_moment(raw: RawMoment, times: &[f64]) -> Option<Moment> {
+    let start = raw.start.as_ref().and_then(seconds_value);
+    let end = raw.end.as_ref().and_then(seconds_value);
+    let (first, last) = if let Some(begin) = start.or(end) {
+        frame_range(begin, end.unwrap_or(begin), times)?
+    } else if let Some(first) = raw.first_frame.or(raw.last_frame) {
+        (first, raw.last_frame.unwrap_or(first))
+    } else {
+        (0, times.len() as i64 - 1)
+    };
+    let (first, last) = (usize::try_from(first).ok()?, usize::try_from(last).ok()?);
+    (last >= first && last < times.len()).then_some(Moment { title: raw.title, summary: raw.summary, first_frame: first, last_frame: last })
+}
+
+fn seconds_value(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => leading_number(text),
+        _ => None,
+    }
+}
+
+fn leading_number(text: &str) -> Option<f64> {
+    let rest = &text[text.find(|c: char| c.is_ascii_digit())?..];
+    let mut end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if let Some(fraction) = rest[end..].strip_prefix('.') {
+        let digits = fraction.find(|c: char| !c.is_ascii_digit()).unwrap_or(fraction.len());
+        if digits > 0 {
+            end += 1 + digits;
+        }
+    }
+    rest[..end].parse().ok()
+}
+
+fn frame_range(start: f64, end: f64, times: &[f64]) -> Option<(i64, i64)> {
+    if let (Some(first), Some(last)) = (frame_index(start, times), frame_index(end, times)) {
+        return Some((first as i64, last as i64));
+    }
+    let indices = start.fract() == 0.0 && end.fract() == 0.0 && start >= 0.0 && end < times.len() as f64;
+    indices.then_some((start as i64, end as i64))
+}
+
+/// Nearest frame to a timestamp the model quoted, within half a second of the sampled range.
+pub fn frame_index(seconds: f64, times: &[f64]) -> Option<usize> {
+    let (first, last) = (*times.first()?, *times.last()?);
+    if !seconds.is_finite() || seconds < first - 0.5 || seconds > last + 0.5 {
+        return None;
+    }
+    (0..times.len()).min_by(|&a, &b| (times[a] - seconds).abs().total_cmp(&(times[b] - seconds).abs()))
 }
 
 /// Indices of frames with strictly increasing timestamps. Low-fps sources

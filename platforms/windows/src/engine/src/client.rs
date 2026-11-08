@@ -276,6 +276,7 @@ mod tests {
             unmatched_faces: 2,
             duration_seconds: 0.4,
             deferred_faces: None,
+            review_queued: None,
         }))
     }
 

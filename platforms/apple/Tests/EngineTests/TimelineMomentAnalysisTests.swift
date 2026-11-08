@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 import GRDB
+import CoreImage
+import MLXLMCommon
+import MLXVLM
 import FileIDShared
 @testable import FileIDEngine
 
@@ -34,8 +37,8 @@ struct TimelineMomentAnalysisTests {
 
     @Test func parsesEvidenceAndAbstentionWithoutInventingConfidence() throws {
         let raw = "```json\n{\"moments\":[{\"title\":\"Gift opening\",\"summary\":\"Wrapping is removed\",\"firstFrame\":2,\"lastFrame\":5}]}\n```"
-        let moments = try TimelineMomentAnalysis.parse(raw, frameCount: 8)
         let window = try #require(TimelineMomentAnalysis.windows(duration: 4, signals: []).first)
+        let moments = try TimelineMomentAnalysis.parse(raw, times: window.times)
         let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: window.times, window: window,
                                                        fileID: 1, sourceRevision: "fixture", modelVersion: "sequence-test")
         #expect(chapters.count == 1)
@@ -43,16 +46,17 @@ struct TimelineMomentAnalysisTests {
         #expect(chapters[0].endSeconds == 3)
         #expect(chapters[0].confidence == 0.2)
         #expect(!chapters[0].userEdited)
-        #expect(try TimelineMomentAnalysis.parse("{\"moments\":[]}", frameCount: 8).isEmpty)
+        #expect(try TimelineMomentAnalysis.parse("{\"moments\":[]}", times: window.times).isEmpty)
     }
 
     @Test func rejectsUnboundedOrMalformedModelEvidence() {
+        let times = (0..<8).map { Double($0) * 0.5 }
         for raw in ["No events happened.", "{\"moments\":[{\"title\":\"Catch\",\"summary\":\"\",\"firstFrame\":0,\"lastFrame\":8}]}",
                     "{\"moments\":[{\"title\":\"Catch\",\"summary\":\"\",\"firstFrame\":5,\"lastFrame\":2}]}",
                     "{\"moments\":[{\"title\":\" \",\"summary\":\"\",\"firstFrame\":0,\"lastFrame\":1}]}",
                     String(repeating: "x", count: 16_385)] {
             #expect(throws: TimelineMomentAnalysis.InvalidResponse.self) {
-                try TimelineMomentAnalysis.parse(raw, frameCount: 8)
+                try TimelineMomentAnalysis.parse(raw, times: times)
             }
         }
     }
@@ -65,6 +69,66 @@ struct TimelineMomentAnalysisTests {
         #expect(prompt.contains("untrusted content"))
         #expect(!prompt.contains("short observable action"))
         #expect(!prompt.contains(#""firstFrame":0"#))
+    }
+
+    @Test func labelledRequestInterleavesTimestampsWithFrames() throws {
+        let times = [10.0, 10.5, 11.25]
+        let request = TimelineMomentAnalysis.request(times: times, labelled: true)
+        #expect(request.labels == ["t=10.00s", "t=10.50s", "t=11.25s"])
+        #expect(request.prompt.contains("timestamp label: t=10.00s, t=10.50s, t=11.25s"))
+        #expect(request.prompt.contains(#"{"moments":[{"title":string,"summary":string,"start":number,"end":number}]}"#))
+        #expect(request.prompt.contains("untrusted content"))
+        #expect(!request.prompt.contains("firstFrame"))
+        let images = times.map { _ in CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 8, height: 8)) }
+        let message = Chat.Message.user(request.prompt, images: TimelineMomentAnalysis.chatImages(images, labels: request.labels), videos: [])
+        let content = try #require(Qwen3VLMessageGenerator().generate(message: message)["content"] as? [[String: String]])
+        let shape = content.map { $0["type"] == "image" ? "image" : $0["text"] ?? "" }
+        #expect(shape == ["[t=10.00s]", "image", "[t=10.50s]", "image", "[t=11.25s]", "image", request.prompt])
+    }
+
+    @Test func unlabelledRequestKeepsTheFrameIndexPrompt() throws {
+        let request = TimelineMomentAnalysis.request(times: [0, 0.5], labelled: false)
+        #expect(request.labels == nil)
+        #expect(request.prompt == TimelineMomentAnalysis.prompt(times: [0, 0.5]))
+        let images = [CIImage(color: .gray), CIImage(color: .gray)].map { $0.cropped(to: CGRect(x: 0, y: 0, width: 8, height: 8)) }
+        #expect(TimelineMomentAnalysis.chatImages(images, labels: nil).allSatisfy { $0.label == nil })
+        #expect(TimelineMomentAnalysis.chatImages(images, labels: ["t=0.00s"]).allSatisfy { $0.label == nil })
+    }
+
+    @Test func parsesSecondsAndSnapsThemToFrames() throws {
+        let window = TimelineMomentAnalysis.Window(start: 10, end: 12.5, times: [10, 10.5, 11, 11.5, 12])
+        let raw = #"{"moments":[{"title":"Ball is thrown","summary":"A throw","start":11.0,"end":11.0},{"title":"Batter swings","summary":"","start":"t=10.45s","end":"11.6 seconds"}]}"#
+        let moments = try TimelineMomentAnalysis.parse(raw, times: window.times)
+        #expect(moments.map(\.firstFrame) == [2, 1])
+        #expect(moments.map(\.lastFrame) == [2, 3])
+        let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: window.times, window: window,
+                                                       fileID: 1, sourceRevision: "r", modelVersion: "m")
+        #expect(chapters.map(\.startSeconds) == [11, 10.5])
+        #expect(chapters.map(\.endSeconds) == [11.5, 12])
+        let tail = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Catch","summary":"","start":12.3}]}"#, times: window.times)
+        #expect(tail.map(\.firstFrame) == [4] && tail.map(\.lastFrame) == [4])
+    }
+
+    @Test func fallsBackToFrameIndicesOrTheWholeSequence() throws {
+        let times = [10.0, 10.5, 11, 11.5, 12]
+        let indexed = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Jump","summary":"","firstFrame":1,"lastFrame":3}]}"#, times: times)
+        #expect(indexed == [.init(title: "Jump", summary: "", firstFrame: 1, lastFrame: 3)])
+        let indicesAsTimes = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Wave","summary":"","start":2,"end":4}]}"#, times: times)
+        #expect(indicesAsTimes == [.init(title: "Wave", summary: "", firstFrame: 2, lastFrame: 4)])
+        let untimed = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Kids play","summary":"Running around"}]}"#, times: times)
+        #expect(untimed == [.init(title: "Kids play", summary: "Running around", firstFrame: 0, lastFrame: 4)])
+        let unreadable = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Hit","summary":"","start":"soon","end":null}]}"#, times: times)
+        #expect(unreadable.map(\.firstFrame) == [0] && unreadable.map(\.lastFrame) == [4])
+        let early = [0.0, 0.5, 1, 1.5, 2]
+        let seconds = try TimelineMomentAnalysis.parse(#"{"moments":[{"title":"Hit","summary":"","start":1,"end":2}]}"#, times: early)
+        #expect(seconds.map(\.firstFrame) == [2] && seconds.map(\.lastFrame) == [4])
+        for raw in [#"{"moments":[{"title":"Hit","summary":"","start":11.5,"end":10.5}]}"#,
+                    #"{"moments":[{"title":"Hit","summary":"","start":30,"end":31}]}"#,
+                    #"{"moments":[{"title":"Hit","summary":"","start":1.5,"end":2.5}]}"#] {
+            #expect(throws: TimelineMomentAnalysis.InvalidResponse.self) {
+                try TimelineMomentAnalysis.parse(raw, times: times)
+            }
+        }
     }
 
     @Test func ignoresInvalidDecodedTimestamps() throws {

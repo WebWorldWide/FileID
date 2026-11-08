@@ -92,6 +92,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 try { await ViewModel.RefreshAsync(CancellationToken.None); }
                 catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
                 if (!_unloaded) OnPropertyChanged(nameof(StatusText));
+                await RefreshReviewCountAsync();
             });
         });
 
@@ -102,7 +103,49 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
         UpdateHiddenUnknownsFooter();
         RefreshContinueToDeepAnalyzeBanner();
+        await RefreshReviewCountAsync();
     }
+
+    private async Task RefreshReviewCountAsync()
+    {
+        if (_unloaded) return;
+        try
+        {
+            var page = await FileID.ViewModels.EngineClient.Instance.ListFaceReviewAsync(null, 0, 1);
+            if (!_unloaded && FaceReviewPolicy.IsOk(page)) RenderReviewCount(page.Total);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("PeopleView review count refresh failed: " + ex.Message);
+        }
+    }
+
+    private void RenderReviewCount(long total)
+    {
+        ReviewSuggestionsButton.Visibility = total > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ReviewSuggestionsText.Text = FaceReviewPolicy.ButtonText(total);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ReviewSuggestionsButton, FaceReviewPolicy.Header(total));
+    }
+
+    private async void OnReviewSuggestionsClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync("PeopleView.OnReviewSuggestionsClicked", async () =>
+        {
+            var panel = new FaceReviewPanel { MinWidth = 640, MinHeight = 440 };
+            panel.SetPerson(null);
+            panel.TotalChanged += (_, total) => RenderReviewCount(total);
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Review suggestions",
+                Content = panel,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            _ = panel.ReloadAsync();
+            try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+            await ViewModel.RefreshAsync(CancellationToken.None);
+            await RefreshReviewCountAsync();
+        });
 
     // ───── Hidden-unknowns footer ─────────────────────────────────────
     // Tracks how many is_unknown=1 clusters are currently filtered out
@@ -421,6 +464,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         catch { /* dialog already open */ }
         finally { PersonSelectionRegistry.Instance.ClosePerson(pc.ClusterId); }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
+        await RefreshReviewCountAsync();
     }
 
     private async void OnSuggestedMergesClicked(object sender, RoutedEventArgs e)
@@ -612,6 +656,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         catch { /* dialog already open */ }
         finally { PersonSelectionRegistry.Instance.ClosePerson(pc.ClusterId); }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
+        await RefreshReviewCountAsync();
     }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)

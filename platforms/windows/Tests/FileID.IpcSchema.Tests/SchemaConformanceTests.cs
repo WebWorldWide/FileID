@@ -217,6 +217,9 @@ public class SchemaConformanceTests
         new CancelRestructureCommand(),
         new PurgeExcludedCommand([@"C:\Users\adam\Pictures\.cache"]),
         new ReassignFaceCommand(10, DestinationPersonId: 2),
+        new ListFaceReviewCommand("review-1", PersonId: 2, Offset: 0, Limit: 50),
+        new ResolveFaceReviewCommand("review-2", 10, 2, "accept"),
+        new UndoFaceReviewCommand("review-3", "6f1d3a52-8c4e-4b7a-9e21-3d5c0b8a7f10"),
         new RequestStatusCommand(),
         new HealthCheckCommand("probe-1"),
         new ListRootsCommand("roots-1"),
@@ -307,6 +310,10 @@ public class SchemaConformanceTests
         new HardwareReprobedEvent(new HardwareReprobed(ExampleHardware(), "cuDNN missing from PATH")),
         new LibraryWipedEvent(new LibraryWiped(true, "ok")),
         new ThumbnailGeneratedEvent(new ThumbnailGenerated(@"C:\Users\adam\Videos\clip.mp4", 1_700_000_000.0, "AAECAw==")),
+        new FaceReviewEvent(new FaceReviewPage("review-1", "list", "ok", null, null, null, null, 1, 0, new[]
+        {
+            new FaceReviewItem(10, 42, @"C:\Users\adam\Pictures\IMG_0001.jpg", "{\"x\":1}", 2, "Alex", 20, 0.62, "ambiguous", 3, null, 0.6, 1_700_000_000.0),
+        })),
     };
 
     private static RestructureMove ExampleMove() => new(

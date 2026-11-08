@@ -392,7 +392,7 @@ actor TimelineAnalysis {
                       activeModel.rawValue == model else { throw ModelChanged() }
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
                 guard (try? VideoFrameWorker.currentRevision(sourceURL)) == sourceRevision else { throw SourceChanged() }
-                let moments = try TimelineMomentAnalysis.parse(result.description, frameCount: distinct.count)
+                let moments = try TimelineMomentAnalysis.parse(result.description, times: times)
                 let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: times, window: window,
                                                                fileID: fileID, sourceRevision: sourceRevision, modelVersion: version)
                 try await Self.persistMomentWindow(chapters: chapters, coverageID: coverageID, window: window,
@@ -591,7 +591,7 @@ actor TimelineAnalysis {
                 try await requireRunning(jobID, database: database)
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
                 // One malformed reply leaves only its window marked incomplete.
-                guard let moments = try? TimelineMomentAnalysis.parse(result.description, frameCount: times.count) else {
+                guard let moments = try? TimelineMomentAnalysis.parse(result.description, times: times) else {
                     try await database.pool.write { db in
                         try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,'incomplete',?,?)",
                                        arguments: [coverageID, fileID, window.start, window.end, sourceRevision, version])
