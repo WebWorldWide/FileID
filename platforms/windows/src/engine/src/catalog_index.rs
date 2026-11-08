@@ -1,7 +1,7 @@
 use crate::{
     db,
     ipc::{CatalogHit, CatalogRequest, CatalogResponse},
-    models::clip_space,
+    models::{clip_space, search_strength},
     resource_scheduler::{Demand, Priority, ResourceScheduler},
     util::hnsw_index::{self, Embedding, Searcher},
 };
@@ -51,6 +51,23 @@ struct State {
     cache: Option<Arc<Cache>>,
     worker: Option<Arc<AtomicBool>>,
     closed: bool,
+}
+/// A search reply plus the files judged weaker look-alikes; `weak` is None
+/// when the search was not judged (keyword-only, similar-to-a-file, indexing).
+pub(crate) struct Judged {
+    pub(crate) response: CatalogResponse,
+    pub(crate) weak: Option<std::collections::HashSet<i64>>,
+}
+impl Judged {
+    /// Good matches first, then weaker look-alikes, and a count that says so.
+    pub(crate) fn labelled(mut self) -> Self {
+        if let Some(weak) = &self.weak {
+            let (good, weaker): (Vec<_>, Vec<_>) = std::mem::take(&mut self.response.hits).into_iter().partition(|hit| !weak.contains(&hit.file_id));
+            self.response.message = Some(search_strength::summary(good.len(), weaker.len()));
+            self.response.hits = good.into_iter().chain(weaker).collect();
+        }
+        self
+    }
 }
 pub struct CatalogIndex {
     writer: Arc<Mutex<Connection>>,
@@ -160,12 +177,16 @@ impl CatalogIndex {
         Ok(())
     }
     pub fn search(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
+        Ok(self.judged(request, &search_strength::live_encoder)?.response)
+    }
+    /// The reply plus the files judged weaker look-alikes (Swift `CatalogSearch.judged`).
+    pub(crate) fn judged(self: &Arc<Self>, request: &CatalogRequest, encode: &dyn Fn(&str) -> Option<Vec<f32>>) -> Result<Judged> {
         let root = match request.root_id {
             Some(id) => crate::commands::roots::RootScope::load(&db::open_read(&self.database)?, Some(id))?,
             None => None,
         };
         if request.captured_from.is_none() && request.captured_to.is_none() {
-            return self.search_unfiltered(request, root.as_ref());
+            return Ok(self.search_unfiltered(request, root.as_ref(), encode)?.labelled());
         }
         let from = request.captured_from.unwrap_or(0.0);
         let to = request.captured_to.unwrap_or(f64::MAX);
@@ -178,7 +199,8 @@ impl CatalogIndex {
         }
         let mut wide = request.clone();
         wide.limit = Some(100);
-        let mut response = self.search_unfiltered(&wide, root.as_ref())?;
+        let mut judged = self.search_unfiltered(&wide, root.as_ref(), encode)?;
+        let response = &mut judged.response;
         let conn = db::open_read(&self.database)?;
         let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
         let mut inside = std::collections::HashSet::new();
@@ -225,10 +247,15 @@ impl CatalogIndex {
                 }
             }
         }
-        Ok(response)
+        Ok(judged.labelled())
     }
 
-    fn search_unfiltered(self: &Arc<Self>, request: &CatalogRequest, root: Option<&crate::commands::roots::RootScope>) -> Result<CatalogResponse> {
+    fn search_unfiltered(
+        self: &Arc<Self>,
+        request: &CatalogRequest,
+        root: Option<&crate::commands::roots::RootScope>,
+        encode: &dyn Fn(&str) -> Option<Vec<f32>>,
+    ) -> Result<Judged> {
         let (mode, query, limit, files_only) = crate::commands::catalog_search::validate(request)?;
         let retrieval_lease = if mode == "semantic" {
             None
@@ -267,10 +294,14 @@ impl CatalogIndex {
         };
         if mode == "keyword" {
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-            return Ok(response);
+            return Ok(Judged { response, weak: None });
         }
         let mut query_vector = crate::commands::catalog_search::vector(&tx, request)?;
         normalize(&mut query_vector);
+        let judging = request.query_vector.is_some() && search_strength::applies();
+        if judging {
+            query_vector = search_strength::scoring_vector(query, &query_vector, encode);
+        }
         let latest = revision(&tx)?;
         let cached = self.state.lock().cache.clone().filter(|cache| cache.revision == latest);
         let Some(cache) = cached else {
@@ -288,7 +319,7 @@ impl CatalogIndex {
             );
             response.jobs = crate::commands::catalog::jobs(&conn)?;
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-            return Ok(response);
+            return Ok(Judged { response, weak: None });
         };
         let _visual_lease = if mode == "semantic" {
             Some(self.scheduler.reserve(
@@ -306,7 +337,7 @@ impl CatalogIndex {
         let wanted = if root.is_some() { 1000 } else { (limit * 4 + 1).min(1000) };
         let mut candidates = Searcher::default().top_k(&cache.graph, &query_vector, wanted);
         candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
-        let mut visual = Vec::new();
+        let mut visual: Vec<(CatalogHit, f32)> = Vec::new();
         let mut stmt = tx.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.id=?1 AND f.failed=0 AND e.model=?2")?;
         for (entry, _) in candidates {
             if Some(entry.file_id) == request.file_id {
@@ -331,15 +362,18 @@ impl CatalogIndex {
                 .optional()?;
             if let Some((hit, blob)) = found
                 && root.is_none_or(|root| root.contains(&hit.path))
-                && clip_space::digest(&blob) == entry.fingerprint && clip_space::decode(&blob).is_some() {
-                    visual.push(hit);
+                && clip_space::digest(&blob) == entry.fingerprint
+                && let Some(embedding) = clip_space::decode(&blob) {
+                    let margin = if judging { search_strength::score(&query_vector, &embedding).1 } else { 0.0 };
+                    visual.push((hit, margin));
                 }
         }
-        response.hits = if mode == "semantic" {
-            crate::commands::catalog_search::select(visual, limit, files_only)
-        } else {
-            crate::commands::catalog_search::merge(keyword, visual, limit, files_only)
-        };
+        if judging {
+            visual.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.file_id.cmp(&b.0.file_id)));
+        }
+        let weak_visual: Option<std::collections::HashSet<i64>> =
+            judging.then(|| visual.iter().filter(|(_, margin)| !search_strength::is_strong(*margin)).map(|(hit, _)| hit.file_id).collect());
+        let visual: Vec<CatalogHit> = visual.into_iter().map(|(hit, _)| hit).collect();
         response.message = Some(
             if mode == "semantic" {
                 "Visual similarity results."
@@ -348,7 +382,22 @@ impl CatalogIndex {
             }
             .into(),
         );
-        Ok(response)
+        if mode == "semantic" {
+            response.hits = crate::commands::catalog_search::select(visual, limit, files_only);
+            return Ok(Judged { response, weak: weak_visual });
+        }
+        let Some(mut weak) = weak_visual else {
+            response.hits = crate::commands::catalog_search::merge(keyword, visual, limit, files_only);
+            return Ok(Judged { response, weak: None });
+        };
+        for hit in &keyword {
+            weak.remove(&hit.file_id);
+        }
+        let everything = keyword.len() + visual.len();
+        let merged = crate::commands::catalog_search::merge(keyword, visual, everything, files_only);
+        let (good, weaker): (Vec<_>, Vec<_>) = merged.into_iter().partition(|hit| !weak.contains(&hit.file_id));
+        response.hits = crate::commands::catalog_search::select(good.into_iter().chain(weaker).collect(), limit, files_only);
+        Ok(Judged { response, weak: Some(weak) })
     }
     fn prepare(self: &Arc<Self>) -> Result<()> {
         let mut state = self.state.lock();

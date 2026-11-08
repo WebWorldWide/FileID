@@ -137,8 +137,31 @@ fn normalize(s: &str) -> String {
     lower.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn split_words(s: &str) -> impl Iterator<Item = &str> {
-    s.split(' ').filter(|w| !w.is_empty())
+/// OpenAI CLIP's pre-tokenization (Swift `CLIPTokenizer`'s regex):
+/// `<|startoftext|>|<|endoftext|>|'s|'t|'re|'ve|'m|'ll|'d|\p{L}+|\p{N}|[^\s\p{L}\p{N}]+`,
+/// so "dog." is "dog" then "." as in the reference tokenizer.
+fn split_words(s: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut rest = s;
+    while let Some(first) = rest.chars().next() {
+        if first.is_whitespace() {
+            rest = &rest[first.len_utf8()..];
+            continue;
+        }
+        let special = ["<|startoftext|>", "<|endoftext|>", "'re", "'ve", "'ll", "'s", "'t", "'m", "'d"];
+        let end = if let Some(token) = special.iter().find(|token| rest.starts_with(**token)) {
+            token.len()
+        } else if first.is_alphabetic() {
+            rest.find(|c: char| !c.is_alphabetic()).unwrap_or(rest.len())
+        } else if first.is_numeric() {
+            first.len_utf8()
+        } else {
+            rest.find(|c: char| c.is_whitespace() || c.is_alphabetic() || c.is_numeric()).unwrap_or(rest.len())
+        };
+        words.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    words
 }
 
 fn build_byte_encoder() -> [char; 256] {
@@ -189,6 +212,13 @@ mod tests {
         assert_eq!(out.len(), CLIP_CONTEXT_LEN);
         assert_eq!(out[0], SOT);
         assert_eq!(out.iter().rposition(|&t| t == EOT), Some(CLIP_CONTEXT_LEN - 1));
+    }
+
+    #[test]
+    fn punctuation_and_contractions_split_like_openai() {
+        assert_eq!(split_words("a photo of dog."), ["a", "photo", "of", "dog", "."]);
+        assert_eq!(split_words("kid's 2nd b-day?!"), ["kid", "'s", "2", "nd", "b", "-", "day", "?!"]);
+        assert_eq!(split_words("<|startoftext|>we're  café 12"), ["<|startoftext|>", "we", "'re", "café", "1", "2"]);
     }
 
     #[test]

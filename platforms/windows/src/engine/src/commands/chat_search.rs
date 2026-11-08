@@ -178,6 +178,7 @@ impl SearchPlan {
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
             "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
             "regarding", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
+            "similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling",
         ];
         // "how many of them show Alex?" and "what is he wearing?" point back at the last search.
         let refinement = follow_up
