@@ -5,7 +5,7 @@ import Foundation
 /// 8-bit luma so the Rust engine (pipeline/take_scoring.rs) computes the same
 /// signals, scores and reasons from the same pixels; change both together.
 enum TakeScoring {
-    static let version = "take-signals-v2"
+    static let version = "take-signals-v3"
     static let analysisLongSide = 1024
     static let videoLongSide = 384
     static let motionLongSide = 96
@@ -75,6 +75,9 @@ enum TakeScoring {
         var video: VideoSignals?
         /// Whole-person boxes, when the platform has a person detector.
         var people: [Box]?
+        /// Long side of the image the faces were found on, when tiles of a
+        /// larger decode found them; face sizes are judged at that scale.
+        var faceLongSide: Int?
     }
 
     // MARK: - Per-image signals
@@ -93,7 +96,7 @@ enum TakeScoring {
         max(8, Int((Double(max(width, height)) / 32).rounded()))
     }
 
-    static func signals(_ image: Luma, faces: [Face], people: [Box]? = nil) -> Signals {
+    static func signals(_ image: Luma, faces: [Face], people: [Box]? = nil, faceLongSide: Int? = nil) -> Signals {
         let w = image.width, h = image.height
         let cell = cellSize(width: w, height: h)
         let columns = (w + cell - 1) / cell, rows = (h + cell - 1) / cell
@@ -164,12 +167,12 @@ enum TakeScoring {
             }
         }
         let n = Double(max(1, image.pixels.count))
-        let primary = primaryFaces(faces, width: w, height: h)
+        let primary = primaryFaces(faces, width: w, height: h, scale: faceScale(width: w, height: h, faceLongSide: faceLongSide))
         let faceSharpness = primary.first.flatMap { regionSharpness(image, $0) }
         return Signals(width: w, height: h, sharpness: round4(sharpness), anisotropy: round4(anisotropy), subject: subject,
                        meanLuma: round4(Double(lumaSum) / n / 255), highlights: round4(Double(bright) / n),
                        shadows: round4(Double(dark) / n), faces: faces, faceSharpness: faceSharpness.map(round4), video: nil,
-                       people: people)
+                       people: people, faceLongSide: faceLongSide)
     }
 
     static func regionSharpness(_ image: Luma, _ face: Face) -> Double? {
@@ -198,11 +201,90 @@ enum TakeScoring {
 
     /// Faces big enough to judge, largest first: at least `minFacePixels` on the
     /// short side and a quarter of the largest face's area.
-    static func primaryFaces(_ faces: [Face], width: Int, height: Int) -> [Face] {
-        let sized = faces.filter { min($0.width * Double(width), $0.height * Double(height)) >= minFacePixels }
+    static func primaryFaces(_ faces: [Face], width: Int, height: Int, scale: Double = 1) -> [Face] {
+        let sized = faces.filter { facePixels($0, width: width, height: height, scale: scale) >= minFacePixels }
             .sorted { $0.width * $0.height == $1.width * $1.height ? $0.x < $1.x : $0.width * $0.height > $1.width * $1.height }
         guard let largest = sized.first else { return [] }
         return sized.filter { $0.width * $0.height >= 0.25 * largest.width * largest.height }
+    }
+
+    static func facePixels(_ face: Face, width: Int, height: Int, scale: Double) -> Double {
+        min(face.width * Double(width), face.height * Double(height)) * scale
+    }
+
+    static func faceScale(width: Int, height: Int, faceLongSide: Int?) -> Double {
+        let long = max(width, height)
+        guard let faceLongSide, long > 0 else { return 1 }
+        return Double(faceLongSide) / Double(long)
+    }
+
+    static func faceScale(_ s: Signals) -> Double { faceScale(width: s.width, height: s.height, faceLongSide: s.faceLongSide) }
+
+    // MARK: - Small faces in wide frames
+
+    static let tileLongSide = 2048
+    static let tileGrid = 2
+    static let tileOverlap = 0.1
+
+    struct Tile: Codable, Sendable, Equatable {
+        var x: Int
+        var y: Int
+        var width: Int
+        var height: Int
+    }
+
+    /// Wide group shots: faces 15–30 px across at the analysis size go unseen.
+    /// Look again in tiles only when the frame is large and the first pass
+    /// found no faces, a face too small for an eyes check, or more people than faces.
+    static func wantsTiles(sourceLongSide: Int, width: Int, height: Int, faces: [Face], people: [Box]?) -> Bool {
+        guard sourceLongSide >= tileLongSide else { return false }
+        let small = faces.contains { facePixels($0, width: width, height: height, scale: 1) < minEyePixels }
+        return faces.isEmpty || small || (people?.count ?? 0) > faces.count
+    }
+
+    /// Overlapping grid cells of a `width`×`height` image, top-left origin.
+    static func tiles(width: Int, height: Int) -> [Tile] {
+        let tw = Double(width) / Double(tileGrid), th = Double(height) / Double(tileGrid)
+        var out: [Tile] = []
+        for row in 0..<tileGrid {
+            for column in 0..<tileGrid {
+                let x0 = max(0, Int((Double(column) * tw - tileOverlap * tw).rounded(.down)))
+                let y0 = max(0, Int((Double(row) * th - tileOverlap * th).rounded(.down)))
+                let x1 = min(width, Int((Double(column + 1) * tw + tileOverlap * tw).rounded(.up)))
+                let y1 = min(height, Int((Double(row + 1) * th + tileOverlap * th).rounded(.up)))
+                out.append(Tile(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+            }
+        }
+        return out
+    }
+
+    /// A face found inside `tile`, normalized to the whole `width`×`height` image.
+    static func placing(_ face: Face, in tile: Tile, width: Int, height: Int) -> Face {
+        let w = Double(width), h = Double(height)
+        return Face(x: round4((Double(tile.x) + face.x * Double(tile.width)) / w), y: round4((Double(tile.y) + face.y * Double(tile.height)) / h),
+                    width: round4(face.width * Double(tile.width) / w), height: round4(face.height * Double(tile.height) / h),
+                    quality: face.quality, eyesOpen: face.eyesOpen)
+    }
+
+    static func sameFace(_ a: Face, _ b: Face) -> Bool {
+        let ix = max(0, min(a.x + a.width, b.x + b.width) - max(a.x, b.x))
+        let iy = max(0, min(a.y + a.height, b.y + b.height) - max(a.y, b.y))
+        let inter = ix * iy, areaA = a.width * a.height, areaB = b.width * b.height
+        let union = areaA + areaB - inter
+        return (union > 0 && inter / union >= 0.3) || inter >= 0.5 * min(areaA, areaB)
+    }
+
+    /// Tile faces first (sharper landmarks), largest first, without the copies
+    /// the overlaps produce; then first-pass faces the tiles missed. At most 16.
+    static func mergeFaces(base: [Face], tiled: [Face]) -> [Face] {
+        let largest: (Face, Face) -> Bool = { a, b in
+            let (areaA, areaB) = (a.width * a.height, b.width * b.height)
+            return areaA != areaB ? areaA > areaB : a.x != b.x ? a.x < b.x : a.y < b.y
+        }
+        var kept: [Face] = []
+        for face in tiled.sorted(by: largest) where !kept.contains(where: { sameFace(face, $0) }) { kept.append(face) }
+        let missed = base.filter { face in !kept.contains { sameFace(face, $0) } }
+        return Array((kept + missed).sorted(by: largest).prefix(16))
     }
 
     // MARK: - Video signals
@@ -362,9 +444,9 @@ enum TakeScoring {
         let maxSharp = readable.map(\.sharpness).max() ?? 0
         let everyFace = !readable.isEmpty && readable.allSatisfy { $0.faceSharpness != nil }
         let maxFaceSharp = everyFace ? readable.compactMap(\.faceSharpness).max() ?? 0 : 0
-        let visible = { (s: Signals) in s.faces.filter { min($0.width * Double(s.width), $0.height * Double(s.height)) >= 16 }.count }
+        let visible = { (s: Signals) in s.faces.filter { facePixels($0, width: s.width, height: s.height, scale: faceScale(s)) >= 16 }.count }
         let maxVisible = readable.map(visible).max() ?? 0
-        let groupHasFaces = readable.contains { !primaryFaces($0.faces, width: $0.width, height: $0.height).isEmpty }
+        let groupHasFaces = readable.contains { !primaryFaces($0.faces, width: $0.width, height: $0.height, scale: faceScale($0)).isEmpty }
         let anisotropies = readable.map(\.anisotropy).sorted()
         let medianAnisotropy = anisotropies.isEmpty ? 0 : anisotropies[anisotropies.count / 2]
         let maxAction = readable.compactMap { $0.video?.action }.max() ?? 0
@@ -386,8 +468,9 @@ enum TakeScoring {
             let faceRel = everyFace && maxFaceSharp > 0 ? (s.faceSharpness ?? 0) / maxFaceSharp : nil
             let sharpRel = round4(faceRel.map { 0.6 * $0 + 0.4 * peakRel } ?? peakRel)
             let exposure = round4(exposureScore(s))
-            let primary = primaryFaces(s.faces, width: s.width, height: s.height)
-            let judged = primary.filter { min($0.width * Double(s.width), $0.height * Double(s.height)) >= minEyePixels }
+            let scale = faceScale(s)
+            let primary = primaryFaces(s.faces, width: s.width, height: s.height, scale: scale)
+            let judged = primary.filter { facePixels($0, width: s.width, height: s.height, scale: scale) >= minEyePixels }
             let eyesClosed = judged.contains { ($0.eyesOpen ?? 1) < eyesClosedBelow }
             let faceCut = primary.contains { $0.x <= edgeMargin || $0.y <= edgeMargin || $0.x + $0.width >= 1 - edgeMargin || $0.y + $0.height >= 1 - edgeMargin }
             let motionBlur = !isVideo && sharpRel < motionBlurBelow && s.anisotropy >= max(motionAnisotropy, medianAnisotropy + motionAnisotropyMargin)

@@ -15,12 +15,47 @@ protocol TakeFaceAnalyzing: Sendable {
     /// used once but not cached. `people` is empty when the platform has no
     /// person detector.
     func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
+    /// Faces only, for the tiles of a wide frame.
+    func faces(in image: CGImage) -> [TakeScoring.Face]?
+}
+
+extension TakeFaceAnalyzing {
+    func faces(in image: CGImage) -> [TakeScoring.Face]? { analyze(image)?.faces }
 }
 
 /// Apple Vision faces with capture quality and an eye-openness estimate from
 /// the eye-contour landmarks (height over width of each eye outline).
 struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
     let id = "vision-landmarks-humans-v1"
+
+    func faces(in image: CGImage) -> [TakeScoring.Face]? {
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let landmarks = VNDetectFaceLandmarksRequest()
+        let quality = VNDetectFaceCaptureQualityRequest()
+        let box = _VisionUncheckedBox((handler, landmarks, quality))
+        let finished = runVisionWithTimeout {
+            let (handler, landmarks, quality) = box.value
+            do {
+                try handler.perform([landmarks])
+                if let found = landmarks.results, !found.isEmpty {
+                    quality.inputFaceObservations = found
+                    try handler.perform([quality])
+                }
+            } catch {}
+        }
+        guard finished else { return nil }
+        return Self.faces(landmarks.results ?? [], qualities: quality.results ?? [])
+    }
+
+    static func faces(_ found: [VNFaceObservation], qualities: [VNFaceObservation]) -> [TakeScoring.Face] {
+        found.prefix(16).enumerated().map { index, face in
+            let r = face.boundingBox
+            let q = index < qualities.count ? qualities[index].faceCaptureQuality.map(Double.init) : nil
+            return TakeScoring.Face(x: TakeScoring.round4(r.minX), y: TakeScoring.round4(1 - r.maxY),
+                                    width: TakeScoring.round4(r.width), height: TakeScoring.round4(r.height),
+                                    quality: q.map(TakeScoring.round4), eyesOpen: Self.eyesOpen(face).map(TakeScoring.round4))
+        }
+    }
     static let closedRatio = 0.12
     static let openRatio = 0.26
 
@@ -47,15 +82,7 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
                             width: TakeScoring.round4(h.boundingBox.width), height: TakeScoring.round4(h.boundingBox.height))
         }
         guard let found = landmarks.results else { return ([], people) }
-        let qualities = quality.results ?? []
-        let faces = found.prefix(16).enumerated().map { index, face in
-            let r = face.boundingBox
-            let q = index < qualities.count ? qualities[index].faceCaptureQuality.map(Double.init) : nil
-            return TakeScoring.Face(x: TakeScoring.round4(r.minX), y: TakeScoring.round4(1 - r.maxY),
-                                    width: TakeScoring.round4(r.width), height: TakeScoring.round4(r.height),
-                                    quality: q.map(TakeScoring.round4), eyesOpen: Self.eyesOpen(face).map(TakeScoring.round4))
-        }
-        return (faces, people)
+        return (Self.faces(found, qualities: quality.results ?? []), people)
     }
 
     static func eyesOpen(_ face: VNFaceObservation) -> Double? {
@@ -81,8 +108,25 @@ enum TakeMediaAnalysis {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let decoded = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.analysisLongSide),
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
-        let found = analyzer.analyze(fitted.image)
-        return (TakeScoring.signals(fitted.luma, faces: found?.faces ?? [], people: found?.people), found != nil)
+        guard let found = analyzer.analyze(fitted.image) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
+        let size = fitted.luma
+        guard TakeScoring.wantsTiles(sourceLongSide: sourceLongSide(source), width: size.width, height: size.height, faces: found.faces, people: found.people),
+              let wide = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide),
+              max(wide.width, wide.height) * 2 >= TakeScoring.analysisLongSide * 3
+        else { return (TakeScoring.signals(fitted.luma, faces: found.faces, people: found.people), true) }
+        var tiled: [TakeScoring.Face] = []
+        for tile in TakeScoring.tiles(width: wide.width, height: wide.height) {
+            guard let crop = wide.cropping(to: CGRect(x: tile.x, y: tile.y, width: tile.width, height: tile.height)),
+                  let faces = analyzer.faces(in: crop) else { return (TakeScoring.signals(fitted.luma, faces: found.faces, people: found.people), false) }
+            tiled += faces.map { TakeScoring.placing($0, in: tile, width: wide.width, height: wide.height) }
+        }
+        let faces = TakeScoring.mergeFaces(base: found.faces, tiled: tiled)
+        return (TakeScoring.signals(fitted.luma, faces: faces, people: found.people, faceLongSide: max(wide.width, wide.height)), true)
+    }
+
+    static func sourceLongSide(_ source: CGImageSource) -> Int {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return 0 }
+        return max(properties[kCGImagePropertyPixelWidth] as? Int ?? 0, properties[kCGImagePropertyPixelHeight] as? Int ?? 0)
     }
 
     /// Draws `image` into an 8-bit RGBA buffer no larger than `longSide`.

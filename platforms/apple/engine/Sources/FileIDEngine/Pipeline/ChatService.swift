@@ -221,12 +221,20 @@ actor ChatService {
         if let done = stage.0 { return done }
         let (_, plan, question, lexical) = stage
         var hits = lexical
+        var weaker: [CatalogHit] = []
+        let similar = SearchStrength.wantsSimilar(text)
         if !plan.query.isEmpty {
-            let extra = await semantic(request, query: plan.query, database: database)
-            if !extra.isEmpty {
+            let found = await semantic(request, query: plan.query, database: database)
+            if !found.lists.isEmpty {
                 let scope = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, root: root)
+                let lexicalIDs = Set(lexical.map(\.fileID))
                 var lists = [lexical]
-                for list in extra { lists.append(try await database.pool.read { db in try ChatFacts.restrict(db, list, scope) }) }
+                for list in found.lists {
+                    let restricted = try await database.pool.read { db in try ChatFacts.restrict(db, list, scope) }
+                    let isWeak = { (hit: CatalogHit) in found.weak.contains(hit.fileID) && !lexicalIDs.contains(hit.fileID) }
+                    weaker += restricted.filter(isWeak)
+                    lists.append(similar ? restricted : restricted.filter { !isWeak($0) })
+                }
                 hits = fuse(lists)
             }
         }
@@ -238,7 +246,9 @@ actor ChatService {
                                            minBytes: question.minBytes, maxBytes: question.maxBytes, root: root)
             let filter = extraFilter!
             let current = hits
+            let looser = weaker
             hits = try await database.pool.read { db in try ChatFacts.restrict(db, current, filter) }
+            weaker = try await database.pool.read { db in try ChatFacts.restrict(db, looser, filter) }
         }
         // Search keeps its best hundred and matches words as written; fill a short
         // list from every file the subject describes (singulars too) that passes
@@ -271,24 +281,46 @@ actor ChatService {
         let time = plan.timeSeconds.map { " (near \(DurationText.clock($0)))" } ?? ""
         let structure = extraFilter.map { filter -> String in var shown = filter; shown.personNames = []; return shown.qualifiers }.flatMap { $0.isEmpty ? nil : " (\($0.trimmingCharacters(in: .whitespaces)))" } ?? ""
         let qualifiers = filter + people + events + time + structure
+        let weakIDs = Set(weaker.map(\.fileID))
+        let shownWeak = similar ? hits.filter { weakIDs.contains($0.fileID) }.count : weakIDs.subtracting(hits.map(\.fileID)).count
+        let sampled = hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : ""
         let message = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.timeSeconds == nil
             ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
-            : hits.isEmpty
-                ? "No matches \(scope)\(qualifiers). Try names or a few descriptive words; files that haven't been analyzed may still contain it."
-                : "Found \(hits.count) \(hits.count == 1 ? "match" : "matches") \(scope)\(qualifiers)." + (hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : "")
+            : shownWeak > 0
+                ? weakSummary(found: hits.count, weak: shownWeak, similar: similar, subject: plan.query, qualifiers: qualifiers) + sampled
+                : hits.isEmpty
+                    ? "No matches \(scope)\(qualifiers). Try names or a few descriptive words; files that haven't been analyzed may still contain it."
+                    : "Found \(hits.count) \(hits.count == 1 ? "match" : "matches") \(scope)\(qualifiers)." + sampled
         return Prepared(message: message, hits: hits, summarize: true)
+    }
+
+    /// Mirrors Rust `chat::weak_summary`: weaker look-alikes are counted, and
+    /// shown only when the question asks for the closest or similar ones.
+    static func weakSummary(found: Int, weak: Int, similar: Bool, subject: String, qualifiers: String) -> String {
+        let looks = weak == 1 ? "look-alike" : "look-alikes"
+        if similar {
+            let good = found - weak
+            return good == 0
+                ? "No photos clearly show “\(subject)”\(qualifiers); showing the \(weak) closest."
+                : "Found \(found) matches for “\(subject)”\(qualifiers): \(good) good, \(weak) weaker."
+        }
+        return found == 0
+            ? "No photos clearly show “\(subject)”\(qualifiers). \(weak) weaker \(looks) left out; ask for the closest to see them."
+            : "Found \(found) good \(found == 1 ? "match" : "matches") for “\(subject)”\(qualifiers); \(weak) weaker \(looks) left out."
     }
 
     /// CLIP text→image through the persisted HNSW graph (the client supplies
     /// the query vector) and BGE over stored document embeddings when its
     /// model is installed. Never downloads.
-    private static func semantic(_ request: ChatRequest, query: String, database: Database) async -> [[CatalogHit]] {
+    private static func semantic(_ request: ChatRequest, query: String, database: Database) async -> (lists: [[CatalogHit]], weak: Set<Int64>) {
         var lists: [[CatalogHit]] = []
+        var weak = Set<Int64>()
         if let vector = request.queryVector, request.embeddingModel == CLIPEmbeddingSpace.modelID {
-            let search = CatalogRequest(requestID: request.requestID + "-visual", action: "search", searchMode: "semantic",
+            let search = CatalogRequest(requestID: request.requestID + "-visual", action: "search", query: query, searchMode: "semantic",
                                         queryVector: vector, embeddingModel: CLIPEmbeddingSpace.modelID, limit: 100, rootID: request.context?.rootID, resultScope: "files")
-            if let response = try? await CatalogSearch.handle(search, database: database), response.status == "ok" {
-                lists.append(response.hits)
+            if let found = try? await CatalogSearch.judged(search, database: database), found.response.status == "ok" {
+                lists.append(found.response.hits)
+                weak = found.weak ?? []
             }
         }
         if BGETextService.isInstalledOnDisk, BGETextService.shared.load(modelDir: BGETextService.defaultModelDir),
@@ -296,7 +328,7 @@ actor ChatService {
             let hits = (try? await database.pool.read { db in try bgeHits(db, wanted) }) ?? []
             if !hits.isEmpty { lists.append(hits) }
         }
-        return lists
+        return (lists, weak)
     }
 
     static func bgeHits(_ db: GRDB.Database, _ wanted: [Float]) throws -> [CatalogHit] {

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const VERSION: &str = "take-signals-v2";
+pub const VERSION: &str = "take-signals-v3";
 pub const ANALYSIS_LONG_SIDE: u32 = 1024;
 pub const VIDEO_LONG_SIDE: u32 = 384;
 pub const MOTION_LONG_SIDE: usize = 96;
@@ -121,6 +121,10 @@ pub struct Signals {
     pub video: Option<VideoSignals>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub people: Option<Vec<Box2>>,
+    /// Long side of the image the faces were found on, when tiles of a larger
+    /// decode found them; face sizes are judged at that scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_long_side: Option<usize>,
 }
 
 pub fn round4(value: f64) -> f64 {
@@ -147,6 +151,10 @@ struct CellStats {
 }
 
 pub fn signals(image: &Luma, faces: Vec<Face>, people: Option<Vec<Box2>>) -> Signals {
+    signals_at(image, faces, people, None)
+}
+
+pub fn signals_at(image: &Luma, faces: Vec<Face>, people: Option<Vec<Box2>>, face_long_side: Option<usize>) -> Signals {
     let (w, h) = (image.width, image.height);
     let p = &image.pixels;
     let cell = cell_size(w, h);
@@ -243,7 +251,7 @@ pub fn signals(image: &Luma, faces: Vec<Face>, people: Option<Vec<Box2>>) -> Sig
         }
     }
     let n = p.len().max(1) as f64;
-    let face_sharpness = primary_faces(&faces, w, h).first().and_then(|f| region_sharpness(image, f));
+    let face_sharpness = primary_faces(&faces, w, h, face_scale(w, h, face_long_side)).first().and_then(|f| region_sharpness(image, f));
     Signals {
         width: w,
         height: h,
@@ -257,6 +265,7 @@ pub fn signals(image: &Luma, faces: Vec<Face>, people: Option<Vec<Box2>>) -> Sig
         face_sharpness: face_sharpness.map(round4),
         video: None,
         people,
+        face_long_side,
     }
 }
 
@@ -287,10 +296,109 @@ fn short_side(face: &Face, width: usize, height: usize) -> f64 {
     (face.width * width as f64).min(face.height * height as f64)
 }
 
+pub fn face_pixels(face: &Face, width: usize, height: usize, scale: f64) -> f64 {
+    short_side(face, width, height) * scale
+}
+
+pub fn face_scale(width: usize, height: usize, face_long_side: Option<usize>) -> f64 {
+    let long = width.max(height);
+    match face_long_side {
+        Some(side) if long > 0 => side as f64 / long as f64,
+        _ => 1.0,
+    }
+}
+
+fn signals_scale(s: &Signals) -> f64 {
+    face_scale(s.width, s.height, s.face_long_side)
+}
+
+pub const TILE_LONG_SIDE: u32 = 2048;
+pub const TILE_GRID: usize = 2;
+pub const TILE_OVERLAP: f64 = 0.1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tile {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Wide group shots: faces 15–30 px across at the analysis size go unseen.
+/// Look again in tiles only when the frame is large and the first pass found
+/// no faces, a face too small for an eyes check, or more people than faces
+/// (Swift `TakeScoring.wantsTiles`).
+pub fn wants_tiles(source_long_side: u32, width: usize, height: usize, faces: &[Face], people: Option<&[Box2]>) -> bool {
+    if source_long_side < TILE_LONG_SIDE {
+        return false;
+    }
+    let small = faces.iter().any(|f| face_pixels(f, width, height, 1.0) < MIN_EYE_PIXELS);
+    faces.is_empty() || small || people.map_or(0, <[Box2]>::len) > faces.len()
+}
+
+/// Overlapping grid cells of a `width`×`height` image, top-left origin.
+pub fn tiles(width: usize, height: usize) -> Vec<Tile> {
+    let (tw, th) = (width as f64 / TILE_GRID as f64, height as f64 / TILE_GRID as f64);
+    let mut out = Vec::with_capacity(TILE_GRID * TILE_GRID);
+    for row in 0..TILE_GRID {
+        for column in 0..TILE_GRID {
+            let x0 = ((column as f64 * tw - TILE_OVERLAP * tw).floor().max(0.0)) as usize;
+            let y0 = ((row as f64 * th - TILE_OVERLAP * th).floor().max(0.0)) as usize;
+            let x1 = (((column + 1) as f64 * tw + TILE_OVERLAP * tw).ceil() as usize).min(width);
+            let y1 = (((row + 1) as f64 * th + TILE_OVERLAP * th).ceil() as usize).min(height);
+            out.push(Tile { x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+        }
+    }
+    out
+}
+
+/// A face found inside `tile`, normalized to the whole `width`×`height` image.
+pub fn placing(face: &Face, tile: &Tile, width: usize, height: usize) -> Face {
+    let (w, h) = (width as f64, height as f64);
+    Face {
+        x: round4((tile.x as f64 + face.x * tile.width as f64) / w),
+        y: round4((tile.y as f64 + face.y * tile.height as f64) / h),
+        width: round4(face.width * tile.width as f64 / w),
+        height: round4(face.height * tile.height as f64 / h),
+        quality: face.quality,
+        eyes_open: face.eyes_open,
+    }
+}
+
+fn same_face(a: &Face, b: &Face) -> bool {
+    let ix = ((a.x + a.width).min(b.x + b.width) - a.x.max(b.x)).max(0.0);
+    let iy = ((a.y + a.height).min(b.y + b.height) - a.y.max(b.y)).max(0.0);
+    let (inter, area_a, area_b) = (ix * iy, a.width * a.height, b.width * b.height);
+    let union = area_a + area_b - inter;
+    (union > 0.0 && inter / union >= 0.3) || inter >= 0.5 * area_a.min(area_b)
+}
+
+fn largest_first(a: &Face, b: &Face) -> std::cmp::Ordering {
+    (b.width * b.height).total_cmp(&(a.width * a.height)).then(a.x.total_cmp(&b.x)).then(a.y.total_cmp(&b.y))
+}
+
+/// Tile faces first (sharper landmarks), largest first, without the copies the
+/// overlaps produce; then first-pass faces the tiles missed. At most 16.
+pub fn merge_faces(base: &[Face], tiled: &[Face]) -> Vec<Face> {
+    let mut sorted = tiled.to_vec();
+    sorted.sort_by(largest_first);
+    let mut kept: Vec<Face> = Vec::new();
+    for face in sorted {
+        if !kept.iter().any(|k| same_face(&face, k)) {
+            kept.push(face);
+        }
+    }
+    let missed: Vec<Face> = base.iter().filter(|f| !kept.iter().any(|k| same_face(f, k))).cloned().collect();
+    kept.extend(missed);
+    kept.sort_by(largest_first);
+    kept.truncate(16);
+    kept
+}
+
 /// Faces big enough to judge, largest first: at least `MIN_FACE_PIXELS` on the
 /// short side and a quarter of the largest face's area.
-pub fn primary_faces(faces: &[Face], width: usize, height: usize) -> Vec<Face> {
-    let mut sized: Vec<Face> = faces.iter().filter(|f| short_side(f, width, height) >= MIN_FACE_PIXELS).cloned().collect();
+pub fn primary_faces(faces: &[Face], width: usize, height: usize, scale: f64) -> Vec<Face> {
+    let mut sized: Vec<Face> = faces.iter().filter(|f| face_pixels(f, width, height, scale) >= MIN_FACE_PIXELS).cloned().collect();
     sized.sort_by(|a, b| {
         let (aa, ba) = (a.width * a.height, b.width * b.height);
         ba.total_cmp(&aa).then(a.x.total_cmp(&b.x))
@@ -445,7 +553,7 @@ fn person_count(s: &Signals) -> usize {
 }
 
 fn visible(s: &Signals) -> usize {
-    s.faces.iter().filter(|f| short_side(f, s.width, s.height) >= 16.0).count()
+    s.faces.iter().filter(|f| face_pixels(f, s.width, s.height, signals_scale(s)) >= 16.0).count()
 }
 
 fn touches_edge(x: f64, y: f64, w: f64, h: f64) -> bool {
@@ -459,7 +567,7 @@ pub fn score(shots: &[Shot]) -> Vec<Quality> {
     let every_face = !readable.is_empty() && readable.iter().all(|s| s.face_sharpness.is_some());
     let max_face_sharp = if every_face { readable.iter().filter_map(|s| s.face_sharpness).fold(0.0, f64::max) } else { 0.0 };
     let max_visible = readable.iter().map(|s| visible(s)).max().unwrap_or(0);
-    let group_has_faces = readable.iter().any(|s| !primary_faces(&s.faces, s.width, s.height).is_empty());
+    let group_has_faces = readable.iter().any(|s| !primary_faces(&s.faces, s.width, s.height, signals_scale(s)).is_empty());
     let mut anisotropies: Vec<f64> = readable.iter().map(|s| s.anisotropy).collect();
     anisotropies.sort_by(f64::total_cmp);
     let median_anisotropy = if anisotropies.is_empty() { 0.0 } else { anisotropies[anisotropies.len() / 2] };
@@ -509,10 +617,11 @@ pub fn score(shots: &[Shot]) -> Vec<Quality> {
         let face_rel = (every_face && max_face_sharp > 0.0).then(|| s.face_sharpness.unwrap_or(0.0) / max_face_sharp);
         let sharp_rel = round4(face_rel.map_or(peak_rel, |f| 0.6 * f + 0.4 * peak_rel));
         let exposure = round4(exposure_score(s));
-        let primary = primary_faces(&s.faces, s.width, s.height);
+        let scale = signals_scale(s);
+        let primary = primary_faces(&s.faces, s.width, s.height, scale);
         let eyes_closed = primary
             .iter()
-            .filter(|f| short_side(f, s.width, s.height) >= MIN_EYE_PIXELS)
+            .filter(|f| face_pixels(f, s.width, s.height, scale) >= MIN_EYE_PIXELS)
             .any(|f| f.eyes_open.unwrap_or(1.0) < EYES_CLOSED_BELOW);
         let face_cut = primary.iter().any(|f| touches_edge(f.x, f.y, f.width, f.height));
         let motion_blur = !is_video
@@ -746,6 +855,50 @@ pub fn clamp_box(b: Box2) -> Box2 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_small_face_tiles_match_swift() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/take-face-tiles.json")).unwrap();
+        let faces = |value: &serde_json::Value| -> Vec<Face> { serde_json::from_value(value.clone()).unwrap() };
+        let size = |value: &serde_json::Value| usize::try_from(value.as_u64().unwrap()).unwrap();
+        for case in fixture["tiles"].as_array().unwrap() {
+            let expect: Vec<Tile> = serde_json::from_value(case["expect"].clone()).unwrap();
+            assert_eq!(tiles(size(&case["width"]), size(&case["height"])), expect);
+        }
+        for case in fixture["wantsTiles"].as_array().unwrap() {
+            let people: Option<Vec<Box2>> = serde_json::from_value(case["people"].clone()).unwrap();
+            let source = u32::try_from(case["sourceLongSide"].as_u64().unwrap()).unwrap();
+            let wants = wants_tiles(source, size(&case["width"]), size(&case["height"]), &faces(&case["faces"]), people.as_deref());
+            assert_eq!(wants, case["expect"].as_bool().unwrap(), "{}", case["name"]);
+        }
+        for case in fixture["placing"].as_array().unwrap() {
+            let face: Face = serde_json::from_value(case["face"].clone()).unwrap();
+            let tile: Tile = serde_json::from_value(case["tile"].clone()).unwrap();
+            let expect: Face = serde_json::from_value(case["expect"].clone()).unwrap();
+            assert_eq!(placing(&face, &tile, size(&case["width"]), size(&case["height"])), expect);
+        }
+        for case in fixture["merge"].as_array().unwrap() {
+            assert_eq!(merge_faces(&faces(&case["base"]), &faces(&case["tiled"])), faces(&case["expect"]), "{}", case["name"]);
+        }
+        let scoring = &fixture["scoring"];
+        let shots: Vec<Shot> = scoring["shots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|shot| Shot {
+                primary_file_id: shot["primaryFileID"].as_i64().unwrap(),
+                file_ids: vec![shot["primaryFileID"].as_i64().unwrap()],
+                path: shot["path"].as_str().unwrap().into(),
+                signals: Some(serde_json::from_value(shot["signals"].clone()).unwrap()),
+            })
+            .collect();
+        let qualities = score(&shots);
+        for expect in scoring["expect"].as_array().unwrap() {
+            let quality = qualities.iter().find(|q| q.primary_file_id == expect["primaryFileID"].as_i64().unwrap()).unwrap();
+            assert_eq!(quality.eyes_closed, expect["eyesClosed"].as_bool().unwrap());
+            assert_eq!(quality.face_count, size(&expect["faceCount"]));
+        }
+    }
+
     use super::*;
 
     fn pattern(width: usize, height: usize, blur: usize, offset: u8) -> Luma {

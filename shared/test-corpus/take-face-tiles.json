@@ -1,0 +1,343 @@
+{
+ "description": "Take scoring looks for small faces in wide frames (both engines, TakeScoring / take_scoring.rs): when the source is at least 2048 px on its long side and the 1024 px pass found no faces, a face under 40 px, or more people than faces, it runs the face detector on 2x2 tiles (10% overlap) of a 2048 px decode, keeps tile faces first (largest first, dropping overlap copies: IoU >= 0.3 or half the smaller box covered), adds first-pass faces the tiles missed, keeps 16, and judges face sizes at the tile decode's scale (faceLongSide).",
+ "tiles": [
+  {
+   "width": 2048,
+   "height": 1365,
+   "expect": [
+    {
+     "x": 0,
+     "y": 0,
+     "width": 1127,
+     "height": 751
+    },
+    {
+     "x": 921,
+     "y": 0,
+     "width": 1127,
+     "height": 751
+    },
+    {
+     "x": 0,
+     "y": 614,
+     "width": 1127,
+     "height": 751
+    },
+    {
+     "x": 921,
+     "y": 614,
+     "width": 1127,
+     "height": 751
+    }
+   ]
+  },
+  {
+   "width": 1365,
+   "height": 2048,
+   "expect": [
+    {
+     "x": 0,
+     "y": 0,
+     "width": 751,
+     "height": 1127
+    },
+    {
+     "x": 614,
+     "y": 0,
+     "width": 751,
+     "height": 1127
+    },
+    {
+     "x": 0,
+     "y": 921,
+     "width": 751,
+     "height": 1127
+    },
+    {
+     "x": 614,
+     "y": 921,
+     "width": 751,
+     "height": 1127
+    }
+   ]
+  },
+  {
+   "width": 2048,
+   "height": 2048,
+   "expect": [
+    {
+     "x": 0,
+     "y": 0,
+     "width": 1127,
+     "height": 1127
+    },
+    {
+     "x": 921,
+     "y": 0,
+     "width": 1127,
+     "height": 1127
+    },
+    {
+     "x": 0,
+     "y": 921,
+     "width": 1127,
+     "height": 1127
+    },
+    {
+     "x": 921,
+     "y": 921,
+     "width": 1127,
+     "height": 1127
+    }
+   ]
+  }
+ ],
+ "wantsTiles": [
+  {
+   "name": "small source",
+   "sourceLongSide": 1600,
+   "width": 1024,
+   "height": 683,
+   "faces": [],
+   "people": null,
+   "expect": false
+  },
+  {
+   "name": "no faces in a large frame",
+   "sourceLongSide": 7008,
+   "width": 1024,
+   "height": 683,
+   "faces": [],
+   "people": null,
+   "expect": true
+  },
+  {
+   "name": "one big face",
+   "sourceLongSide": 7008,
+   "width": 1024,
+   "height": 683,
+   "faces": [
+    {
+     "x": 0.4,
+     "y": 0.2,
+     "width": 0.2,
+     "height": 0.3
+    }
+   ],
+   "people": null,
+   "expect": false
+  },
+  {
+   "name": "a face too small for an eyes check",
+   "sourceLongSide": 7008,
+   "width": 1024,
+   "height": 683,
+   "faces": [
+    {
+     "x": 0.4,
+     "y": 0.2,
+     "width": 0.2,
+     "height": 0.3
+    },
+    {
+     "x": 0.1,
+     "y": 0.1,
+     "width": 0.03,
+     "height": 0.05
+    }
+   ],
+   "people": null,
+   "expect": true
+  },
+  {
+   "name": "more people than faces",
+   "sourceLongSide": 4320,
+   "width": 1024,
+   "height": 768,
+   "faces": [
+    {
+     "x": 0.4,
+     "y": 0.2,
+     "width": 0.2,
+     "height": 0.3
+    }
+   ],
+   "people": [
+    {
+     "x": 0.3,
+     "y": 0.1,
+     "width": 0.3,
+     "height": 0.8
+    },
+    {
+     "x": 0.7,
+     "y": 0.1,
+     "width": 0.2,
+     "height": 0.8
+    }
+   ],
+   "expect": true
+  }
+ ],
+ "placing": [
+  {
+   "face": {
+    "x": 0.5,
+    "y": 0.25,
+    "width": 0.04,
+    "height": 0.06,
+    "quality": 0.6,
+    "eyesOpen": 0.2
+   },
+   "tile": {
+    "x": 921,
+    "y": 614,
+    "width": 1127,
+    "height": 751
+   },
+   "width": 2048,
+   "height": 1365,
+   "expect": {
+    "x": 0.7249,
+    "y": 0.5874,
+    "width": 0.022,
+    "height": 0.033,
+    "quality": 0.6,
+    "eyesOpen": 0.2
+   }
+  }
+ ],
+ "merge": [
+  {
+   "name": "tile copies collapse; the first pass keeps a face the tiles missed",
+   "base": [
+    {
+     "x": 0.1,
+     "y": 0.1,
+     "width": 0.05,
+     "height": 0.07,
+     "eyesOpen": 0.9
+    },
+    {
+     "x": 0.8,
+     "y": 0.6,
+     "width": 0.04,
+     "height": 0.06
+    }
+   ],
+   "tiled": [
+    {
+     "x": 0.101,
+     "y": 0.099,
+     "width": 0.051,
+     "height": 0.072,
+     "eyesOpen": 0.2
+    },
+    {
+     "x": 0.1,
+     "y": 0.1,
+     "width": 0.05,
+     "height": 0.07,
+     "eyesOpen": 0.25
+    },
+    {
+     "x": 0.5,
+     "y": 0.5,
+     "width": 0.02,
+     "height": 0.03
+    }
+   ],
+   "expect": [
+    {
+     "x": 0.101,
+     "y": 0.099,
+     "width": 0.051,
+     "height": 0.072,
+     "eyesOpen": 0.2
+    },
+    {
+     "x": 0.8,
+     "y": 0.6,
+     "width": 0.04,
+     "height": 0.06
+    },
+    {
+     "x": 0.5,
+     "y": 0.5,
+     "width": 0.02,
+     "height": 0.03
+    }
+   ]
+  }
+ ],
+ "scoring": {
+  "name": "a face 20 px across at 1024 px but 40 px in the tile decode gets an eyes check",
+  "shots": [
+   {
+    "primaryFileID": 1,
+    "fileIDs": [
+     1
+    ],
+    "path": "/a.jpg",
+    "signals": {
+     "width": 1024,
+     "height": 683,
+     "sharpness": 10,
+     "anisotropy": 0.2,
+     "meanLuma": 0.5,
+     "highlights": 0,
+     "shadows": 0,
+     "faces": [
+      {
+       "x": 0.5,
+       "y": 0.3,
+       "width": 0.0196,
+       "height": 0.03,
+       "quality": 0.6,
+       "eyesOpen": 0.1
+      }
+     ],
+     "faceLongSide": 2048
+    }
+   },
+   {
+    "primaryFileID": 2,
+    "fileIDs": [
+     2
+    ],
+    "path": "/b.jpg",
+    "signals": {
+     "width": 1024,
+     "height": 683,
+     "sharpness": 10,
+     "anisotropy": 0.2,
+     "meanLuma": 0.5,
+     "highlights": 0,
+     "shadows": 0,
+     "faces": [
+      {
+       "x": 0.5,
+       "y": 0.3,
+       "width": 0.0196,
+       "height": 0.03,
+       "quality": 0.6,
+       "eyesOpen": 0.1
+      }
+     ]
+    }
+   }
+  ],
+  "expect": [
+   {
+    "primaryFileID": 1,
+    "eyesClosed": true,
+    "faceCount": 1
+   },
+   {
+    "primaryFileID": 2,
+    "eyesClosed": false,
+    "faceCount": 1
+   }
+  ]
+ }
+}
