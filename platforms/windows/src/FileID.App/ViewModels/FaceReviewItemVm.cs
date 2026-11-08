@@ -19,6 +19,9 @@ internal sealed class FaceReviewItemVm : INotifyPropertyChanged
     public string AcceptLabel => FaceReviewPolicy.AcceptLabel(Model);
     public string RejectLabel => FaceReviewPolicy.RejectLabel(Model);
     public string IgnoreLabel => FaceReviewPolicy.IgnoreLabel;
+    public string LowQualityNote => FaceQueuePolicy.LowQualityNote(Model);
+    public Microsoft.UI.Xaml.Visibility LowQualityVisibility =>
+        FaceQueuePolicy.IsLowQuality(Model) ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 
     private BitmapImage? _faceImage;
     private bool _faceResolved;
@@ -28,7 +31,7 @@ internal sealed class FaceReviewItemVm : INotifyPropertyChanged
     private bool _personResolved;
     public BitmapImage? PersonImage => LoadCrop(Model.RepresentativeFaceId ?? 0, ref _personImage, ref _personResolved);
 
-    private static BitmapImage? LoadCrop(long faceId, ref BitmapImage? cache, ref bool resolved)
+    internal static BitmapImage? LoadCrop(long faceId, ref BitmapImage? cache, ref bool resolved)
     {
         if (resolved) return cache;
         resolved = true;

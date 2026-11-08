@@ -31,6 +31,62 @@
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
+                <Grid x:Name="FaceRefreshBar"
+                      Visibility="Collapsed"
+                      Margin="0,6,0,0"
+                      Padding="12,8"
+                      CornerRadius="10"
+                      ColumnSpacing="8"
+                      BorderBrush="{ThemeResource GoldBrush}"
+                      BorderThickness="1"
+                      Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0" FontSize="13" Glyph="&#xE895;" Foreground="{ThemeResource GoldBrush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock x:Name="FaceRefreshText"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   TextWrapping="Wrap"
+                                   AutomationProperties.LiveSetting="Polite" />
+                        <ProgressBar x:Name="FaceRefreshProgress"
+                                     Visibility="Collapsed"
+                                     Maximum="100"
+                                     Foreground="{ThemeResource GoldBrush}"
+                                     AutomationProperties.Name="Face update progress" />
+                        <TextBlock x:Name="FaceRefreshNote"
+                                   Visibility="Collapsed"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <Button x:Name="FaceRefreshUpdateButton"
+                                Content="Update faces"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Visibility="Collapsed"
+                                ToolTipService.ToolTip="Re-read faces with the current face model. People and names don't change."
+                                AutomationProperties.Name="Update faces"
+                                Click="OnUpdateFacesClicked" />
+                        <Button x:Name="FaceRefreshPauseButton"
+                                Content="Pause"
+                                Visibility="Collapsed"
+                                AutomationProperties.Name="Pause updating faces"
+                                Click="OnFaceRefreshPauseClicked" />
+                        <Button x:Name="FaceRefreshResumeButton"
+                                Content="Resume"
+                                Visibility="Collapsed"
+                                AutomationProperties.Name="Resume updating faces"
+                                Click="OnFaceRefreshResumeClicked" />
+                        <Button x:Name="FaceRefreshCancelButton"
+                                Content="Cancel"
+                                Visibility="Collapsed"
+                                AutomationProperties.Name="Stop updating faces"
+                                Click="OnFaceRefreshCancelClicked" />
+                    </StackPanel>
+                </Grid>
             </StackPanel>
             <!-- header action buttons in a horizontal-scroll
                  wrapper so on narrow windows they scroll instead of
