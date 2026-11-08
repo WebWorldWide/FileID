@@ -21,10 +21,36 @@
                        Style="{StaticResource BodyStrongTextBlockStyle}"
                        AutomationProperties.HeadingLevel="Level2"
                        Text="Review suggestions" />
-            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+            <TextBlock x:Name="QueueHelpText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        TextWrapping="Wrap"
                        Text="New faces that look like someone you already have. Nothing is added to a person until you accept it." />
+            <StackPanel x:Name="QueueSwitcher"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        Visibility="Collapsed"
+                        AutomationProperties.Name="Review queue">
+                <ToggleButton x:Name="FacesQueueButton"
+                              Content="Faces (0)"
+                              IsChecked="True"
+                              AutomationProperties.Name="Faces: 0 faces to review"
+                              Click="OnQueueClicked" />
+                <ToggleButton x:Name="MergesQueueButton"
+                              Content="Merges (0)"
+                              AutomationProperties.Name="Merges: 0 pairs of people who may be the same person"
+                              Click="OnQueueClicked" />
+                <ToggleButton x:Name="SplitsQueueButton"
+                              Content="Splits (0)"
+                              AutomationProperties.Name="Splits: 0 people who may be two people"
+                              Click="OnQueueClicked" />
+            </StackPanel>
+            <Button x:Name="AcceptAllButton"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Visibility="Collapsed"
+                    Content="Accept all suggested"
+                    ToolTipService.ToolTip="Accept every face listed as a likely match. Faces already in one of their photos are skipped."
+                    Click="OnAcceptAllClicked" />
             <StackPanel x:Name="BusyPanel" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
                 <ProgressRing x:Name="BusyRing" Width="16" Height="16" IsActive="False" />
                 <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Loading suggestions…" />
@@ -78,6 +104,10 @@
                                     <TextBlock Text="{x:Bind ReasonText}"
                                                Style="{StaticResource CaptionTextBlockStyle}"
                                                TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind LowQualityNote}"
+                                               Visibility="{x:Bind LowQualityVisibility}"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                     <TextBlock Text="{x:Bind FileName}"
                                                Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -99,6 +129,161 @@
                                             AutomationProperties.Name="{x:Bind AcceptLabel}"
                                             Click="OnAcceptClicked" />
                                 </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+                <ItemsRepeater x:Name="MergeRepeater" ElementPrepared="OnMergeElementPrepared" Visibility="Collapsed">
+                    <ItemsRepeater.Layout>
+                        <StackLayout Orientation="Vertical" Spacing="8" />
+                    </ItemsRepeater.Layout>
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:FaceMergeRowVm">
+                            <Grid Padding="12,10,12,10"
+                                  CornerRadius="12"
+                                  ColumnSpacing="12"
+                                  Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                  BorderThickness="1"
+                                  AutomationProperties.Name="{x:Bind RowLabel}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Border Width="56" Height="56" CornerRadius="28"
+                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                            BorderBrush="{ThemeResource GoldBrush}" BorderThickness="1"
+                                            AutomationProperties.Name="{x:Bind OtherFaceLabel}">
+                                        <Image Source="{x:Bind OtherImage, Mode=OneTime}" Stretch="UniformToFill" Width="56" Height="56" />
+                                    </Border>
+                                    <FontIcon Glyph="&#xE72A;" FontSize="12" Foreground="{ThemeResource AiBrush}" VerticalAlignment="Center" />
+                                    <Border Width="56" Height="56" CornerRadius="28"
+                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                            AutomationProperties.Name="{x:Bind PersonFaceLabel}">
+                                        <Image Source="{x:Bind PersonImage, Mode=OneTime}" Stretch="UniformToFill" Width="56" Height="56" />
+                                    </Border>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis">
+                                        <Run Text="{x:Bind OtherName}" /><Run Text=" and " /><Run Text="{x:Bind PersonName}" />
+                                    </TextBlock>
+                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap">
+                                        <Run Text="{x:Bind OtherFaces}" /><Run Text=" · " /><Run Text="{x:Bind PersonFaces}" />
+                                    </TextBlock>
+                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                               TextWrapping="Wrap"
+                                               Text="These look like the same person." />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Button Content="Dismiss"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind DismissLabel}"
+                                            ToolTipService.ToolTip="Hide this suggestion without changing anyone"
+                                            Click="OnMergeDismissClicked" />
+                                    <Button Content="Not the same person"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind NotSameLabel}"
+                                            ToolTipService.ToolTip="Keep these two apart from now on"
+                                            Click="OnMergeNotSameClicked" />
+                                    <Button Content="Merge"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind MergeLabel}"
+                                            Click="OnMergeClicked" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+                <ItemsRepeater x:Name="SplitRepeater" ElementPrepared="OnSplitElementPrepared" Visibility="Collapsed">
+                    <ItemsRepeater.Layout>
+                        <StackLayout Orientation="Vertical" Spacing="8" />
+                    </ItemsRepeater.Layout>
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:FaceSplitRowVm">
+                            <Grid Padding="12,10,12,10"
+                                  CornerRadius="12"
+                                  RowSpacing="8"
+                                  ColumnSpacing="12"
+                                  Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                  BorderThickness="1"
+                                  AutomationProperties.Name="{x:Bind RowLabel}">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock Text="{x:Bind PersonName}"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                               TextWrapping="Wrap"
+                                               Text="These faces look like two different people." />
+                                </StackPanel>
+                                <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Button Content="Dismiss"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind DismissLabel}"
+                                            ToolTipService.ToolTip="Hide this suggestion without changing anyone"
+                                            Click="OnSplitDismissClicked" />
+                                    <Button Content="Split into two"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind SplitLabel}"
+                                            Click="OnSplitClicked" />
+                                </StackPanel>
+                                <Grid Grid.Row="1" Grid.ColumnSpan="2" ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="4">
+                                        <TextBlock Text="{x:Bind KeepCaption}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                        <ItemsRepeater ItemsSource="{x:Bind KeepFaces}">
+                                            <ItemsRepeater.Layout>
+                                                <StackLayout Orientation="Horizontal" Spacing="4" />
+                                            </ItemsRepeater.Layout>
+                                            <ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:FaceCropVm">
+                                                    <Border Width="40" Height="40" CornerRadius="20"
+                                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                                            AutomationProperties.Name="{x:Bind Label}">
+                                                        <Image Source="{x:Bind Image, Mode=OneTime}" Stretch="UniformToFill" Width="40" Height="40" />
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsRepeater.ItemTemplate>
+                                        </ItemsRepeater>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="{x:Bind MoveCaption}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                        <ItemsRepeater ItemsSource="{x:Bind MoveFaces}">
+                                            <ItemsRepeater.Layout>
+                                                <StackLayout Orientation="Horizontal" Spacing="4" />
+                                            </ItemsRepeater.Layout>
+                                            <ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:FaceCropVm">
+                                                    <Border Width="40" Height="40" CornerRadius="20"
+                                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                                            BorderBrush="{ThemeResource GoldBrush}" BorderThickness="1"
+                                                            AutomationProperties.Name="{x:Bind Label}">
+                                                        <Image Source="{x:Bind Image, Mode=OneTime}" Stretch="UniformToFill" Width="40" Height="40" />
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsRepeater.ItemTemplate>
+                                        </ItemsRepeater>
+                                    </StackPanel>
+                                </Grid>
                             </Grid>
                         </DataTemplate>
                     </ItemsRepeater.ItemTemplate>

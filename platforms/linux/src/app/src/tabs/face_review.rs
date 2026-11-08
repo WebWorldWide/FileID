@@ -80,8 +80,65 @@ pub(super) fn reject_label(item: &FaceReviewItem) -> String {
 pub(super) const IGNORE_LABEL: &str = "Ignore this face";
 pub(super) const EMPTY_TEXT: &str = "No suggestions to review.";
 
+pub(super) const LOW_QUALITY_NOTE: &str = "Small or blurry face";
+
+pub(super) fn is_low_quality(item: &FaceReviewItem) -> bool {
+    item.low_quality == Some(true)
+}
+
 pub(super) fn row_label(item: &FaceReviewItem) -> String {
-    format!("{} In {}.", reason_sentence(item), file_label(&item.path))
+    let note = if is_low_quality(item) {
+        format!(" {LOW_QUALITY_NOTE}.")
+    } else {
+        String::new()
+    };
+    format!(
+        "{} In {}.{note}",
+        reason_sentence(item),
+        file_label(&item.path)
+    )
+}
+
+pub(super) fn faces_word(count: usize) -> &'static str {
+    if count == 1 { "face" } else { "faces" }
+}
+
+pub(super) fn suggested_count(items: &[FaceReviewItem]) -> usize {
+    items
+        .iter()
+        .filter(|item| item.reason == "suggested")
+        .count()
+}
+
+pub(super) fn accept_all_text(count: usize) -> String {
+    format!("Accept all suggested ({count})")
+}
+
+pub(super) fn accept_all_label(count: usize, name: Option<&str>) -> String {
+    let name = person_name(name);
+    if count == 1 {
+        format!("Accept the 1 suggested face for {name}")
+    } else {
+        format!("Accept all {count} suggested faces for {name}")
+    }
+}
+
+pub(super) fn accepted_all_text(accepted: usize, skipped: usize) -> String {
+    let mut text = format!("Accepted {accepted} {}", faces_word(accepted));
+    if skipped > 0 {
+        text.push_str(&format!(" · {skipped} skipped, already in their photo"));
+    }
+    text
+}
+
+pub(super) fn accept_all_payload(id: &str, person: i64) -> ResolveFaceReviewPayload {
+    ResolveFaceReviewPayload {
+        request_id: id.to_string(),
+        face_id: None,
+        person_id: person,
+        other_person_id: None,
+        resolution: "acceptAll".to_string(),
+    }
 }
 
 pub(super) fn header_text(waiting: i64) -> String {
@@ -151,6 +208,7 @@ enum Pending {
         item: Box<FaceReviewItem>,
         resolution: &'static str,
     },
+    AcceptAll,
     Undo,
 }
 
@@ -160,9 +218,10 @@ pub(super) struct ReviewPanel {
     paging: RefCell<ReviewPaging>,
     pending: RefCell<HashMap<String, Pending>>,
     busy: Cell<bool>,
-    on_total: RefCell<Option<Box<dyn Fn(i64)>>>,
+    on_total: RefCell<Vec<Box<dyn Fn(i64)>>>,
     pub root: adw::ToastOverlay,
     header: gtk::Label,
+    accept_all: gtk::Button,
     message: gtk::Label,
     list: gtk::Box,
     empty: gtk::Label,
@@ -174,7 +233,19 @@ impl ReviewPanel {
         let header = gtk::Label::builder()
             .xalign(0.0)
             .css_classes(["heading"])
+            .hexpand(true)
             .build();
+        let accept_all = gtk::Button::builder()
+            .visible(false)
+            .valign(gtk::Align::Center)
+            .css_classes(["gold-button"])
+            .build();
+        let header_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        header_row.append(&header);
+        header_row.append(&accept_all);
         let message = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -200,7 +271,7 @@ impl ReviewPanel {
             .orientation(gtk::Orientation::Vertical)
             .spacing(10)
             .build();
-        body.append(&header);
+        body.append(&header_row);
         body.append(&message);
         body.append(&list);
         body.append(&empty);
@@ -213,9 +284,10 @@ impl ReviewPanel {
             paging: RefCell::new(ReviewPaging::default()),
             pending: RefCell::new(HashMap::new()),
             busy: Cell::new(false),
-            on_total: RefCell::new(None),
+            on_total: RefCell::new(Vec::new()),
             root,
             header,
+            accept_all,
             message,
             list,
             empty,
@@ -227,13 +299,19 @@ impl ReviewPanel {
                 panel.load_more();
             }
         });
+        let weak = Rc::downgrade(&panel);
+        panel.accept_all.connect_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.accept_all();
+            }
+        });
         panel.listen();
         panel.render();
         panel
     }
 
-    pub fn set_on_total(&self, callback: impl Fn(i64) + 'static) {
-        *self.on_total.borrow_mut() = Some(Box::new(callback));
+    pub fn connect_total(&self, callback: impl Fn(i64) + 'static) {
+        self.on_total.borrow_mut().push(Box::new(callback));
     }
 
     fn listen(self: &Rc<Self>) {
@@ -272,6 +350,7 @@ impl ReviewPanel {
         CommandPayload::ListFaceReview(ListFaceReviewPayload {
             request_id: id.to_string(),
             person_id: self.person,
+            queue: None,
             offset: Some(offset),
             limit: Some(PAGE_SIZE),
         })
@@ -295,8 +374,9 @@ impl ReviewPanel {
         let id = request_id();
         let payload = CommandPayload::ResolveFaceReview(ResolveFaceReviewPayload {
             request_id: id.clone(),
-            face_id: item.face_id,
+            face_id: Some(item.face_id),
             person_id: item.person_id,
+            other_person_id: None,
             resolution: resolution.to_string(),
         });
         if self.send(
@@ -307,6 +387,18 @@ impl ReviewPanel {
                 resolution,
             },
         ) {
+            self.set_busy(true);
+        }
+    }
+
+    fn accept_all(&self) {
+        let Some(person) = self.person else { return };
+        if self.busy.get() {
+            return;
+        }
+        let id = request_id();
+        let payload = CommandPayload::ResolveFaceReview(accept_all_payload(&id, person));
+        if self.send(payload, id, Pending::AcceptAll) {
             self.set_busy(true);
         }
     }
@@ -341,6 +433,19 @@ impl ReviewPanel {
                     self.paging.borrow_mut().remove(item.face_id);
                     self.paging.borrow_mut().total = page.total;
                     self.toast(&resolved_text(resolution, &item), page.operation_id.clone());
+                }
+            }
+            Pending::AcceptAll => {
+                self.set_busy(false);
+                if ok {
+                    self.message.set_visible(false);
+                    let accepted = page.accepted_face_ids.as_ref().map_or(0, Vec::len);
+                    let skipped = page.skipped_face_ids.as_ref().map_or(0, Vec::len);
+                    self.toast(
+                        &accepted_all_text(accepted, skipped),
+                        page.operation_id.clone(),
+                    );
+                    self.reload();
                 }
             }
             Pending::Undo if ok => {
@@ -378,6 +483,7 @@ impl ReviewPanel {
     fn set_busy(&self, busy: bool) {
         self.busy.set(busy);
         self.list.set_sensitive(!busy);
+        self.accept_all.set_sensitive(!busy);
     }
 
     fn render(self: &Rc<Self>) {
@@ -386,6 +492,17 @@ impl ReviewPanel {
             (paging.items.clone(), paging.total, paging.has_more())
         };
         self.header.set_text(&header_text(total));
+        let suggested = suggested_count(&items);
+        self.accept_all
+            .set_visible(self.person.is_some() && suggested > 0);
+        if suggested > 0 {
+            let name = items.first().and_then(|item| item.person_name.clone());
+            let label = accept_all_label(suggested, name.as_deref());
+            self.accept_all.set_label(&accept_all_text(suggested));
+            self.accept_all
+                .update_property(&[gtk::accessible::Property::Label(&label)]);
+            self.accept_all.set_tooltip_text(Some(&label));
+        }
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -394,7 +511,7 @@ impl ReviewPanel {
         }
         self.empty.set_visible(items.is_empty());
         self.more.set_visible(more);
-        if let Some(callback) = self.on_total.borrow().as_ref() {
+        for callback in self.on_total.borrow().iter() {
             callback(total);
         }
     }
@@ -435,6 +552,15 @@ impl ReviewPanel {
             .build();
         text.append(&name);
         text.append(&reason);
+        if is_low_quality(item) {
+            text.append(
+                &gtk::Label::builder()
+                    .label(LOW_QUALITY_NOTE)
+                    .xalign(0.0)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
         text.append(&file);
         let buttons = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -477,7 +603,7 @@ impl ReviewPanel {
     }
 }
 
-fn crop_picture(label: &str) -> gtk::Picture {
+pub(super) fn crop_picture(label: &str) -> gtk::Picture {
     let picture = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .width_request(64)
@@ -488,7 +614,7 @@ fn crop_picture(label: &str) -> gtk::Picture {
     picture
 }
 
-fn load_face(
+pub(super) fn load_face(
     engine: &Rc<RefCell<EngineClient>>,
     picture: &gtk::Picture,
     face: Option<i64>,
@@ -527,7 +653,7 @@ fn load_face(
     });
 }
 
-fn reveal(row: &gtk::Box) {
+pub(super) fn reveal(row: &impl IsA<gtk::Widget>) {
     row.set_opacity(0.0);
     let weak = row.downgrade();
     crate::spring::animate_with(
@@ -543,13 +669,18 @@ fn reveal(row: &gtk::Box) {
     );
 }
 
-/// Asks for the number of waiting suggestions (every person's) and hands it to `done`.
-pub(super) fn count_waiting(engine: &Rc<RefCell<EngineClient>>, done: impl Fn(i64) + 'static) {
+/// Asks for the number of waiting suggestions in one queue (every person's) and hands it to `done`.
+pub(super) fn count_waiting(
+    engine: &Rc<RefCell<EngineClient>>,
+    queue: Option<&str>,
+    done: impl Fn(i64) + 'static,
+) {
     let id = request_id();
     let events = engine.borrow_mut().subscribe();
     let payload = CommandPayload::ListFaceReview(ListFaceReviewPayload {
         request_id: id.clone(),
         person_id: None,
+        queue: queue.map(str::to_string),
         offset: Some(0),
         limit: Some(1),
     });
@@ -596,6 +727,7 @@ mod tests {
             runner_up_name: runner.map(str::to_string),
             runner_up_score: None,
             created_at: 0.0,
+            low_quality: None,
         }
     }
 
@@ -611,6 +743,13 @@ mod tests {
             total,
             offset: 0,
             items,
+            queue: None,
+            merges: None,
+            splits: None,
+            refresh: None,
+            other_person_id: None,
+            accepted_face_ids: None,
+            skipped_face_ids: None,
         }
     }
 
@@ -670,6 +809,53 @@ mod tests {
         assert_eq!(paging.remove(1).map(|item| item.face_id), Some(1));
         assert_eq!(paging.total, 1);
         assert!(paging.remove(9).is_none());
+    }
+
+    #[test]
+    fn accept_all_counts_only_suggested_rows_and_names_the_person() {
+        let items = vec![
+            item("suggested", Some("Alex"), None, None),
+            item("uncertain", Some("Alex"), None, None),
+            item("suggested", Some("Alex"), None, None),
+        ];
+        assert_eq!(suggested_count(&items), 2);
+        assert_eq!(suggested_count(&items[1..2]), 0);
+        assert_eq!(accept_all_text(5), "Accept all suggested (5)");
+        assert_eq!(
+            accept_all_label(5, Some("Alex")),
+            "Accept all 5 suggested faces for Alex"
+        );
+        assert_eq!(
+            accept_all_label(1, None),
+            "Accept the 1 suggested face for an unnamed person"
+        );
+        assert_eq!(accepted_all_text(4, 0), "Accepted 4 faces");
+        assert_eq!(
+            accepted_all_text(1, 2),
+            "Accepted 1 face · 2 skipped, already in their photo"
+        );
+        let payload = accept_all_payload("r", 9);
+        assert_eq!(
+            (payload.face_id, payload.person_id, payload.other_person_id),
+            (None, 9, None)
+        );
+        assert_eq!(payload.resolution, "acceptAll");
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("faceID").is_none());
+    }
+
+    #[test]
+    fn low_quality_faces_get_a_short_note() {
+        let mut face = item("uncertain", Some("Alex"), None, None);
+        assert!(!is_low_quality(&face));
+        face.low_quality = Some(false);
+        assert!(!is_low_quality(&face));
+        face.low_quality = Some(true);
+        assert!(is_low_quality(&face));
+        assert_eq!(
+            row_label(&face),
+            "Might be Alex, but the match is weak (62%). In Beach Day.jpg. Small or blurry face."
+        );
     }
 
     #[test]

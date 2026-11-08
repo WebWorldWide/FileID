@@ -240,7 +240,7 @@ fn a_rejected_face_without_another_match_stays_rejected_and_held() {
 }
 
 fn list_page(conn: &Connection, person: Option<i64>, offset: i64, limit: i64) -> FaceReviewPage {
-    let payload = ListFaceReviewPayload { request_id: "r".into(), person_id: person, offset: Some(offset), limit: Some(limit) };
+    let payload = ListFaceReviewPayload { request_id: "r".into(), person_id: person, offset: Some(offset), limit: Some(limit), queue: None };
     list(conn, &payload).unwrap()
 }
 
@@ -266,7 +266,7 @@ fn list_pages_best_first_and_filters_by_person() {
 }
 
 fn resolve_face(conn: &Connection, face: i64, person: i64, resolution: &str) -> FaceReviewPage {
-    let payload = ResolveFaceReviewPayload { request_id: "r".into(), face_id: face, person_id: person, resolution: resolution.into() };
+    let payload = ResolveFaceReviewPayload { request_id: "r".into(), face_id: Some(face), person_id: person, resolution: resolution.into(), other_person_id: None };
     resolve(conn, &payload).unwrap()
 }
 
@@ -404,4 +404,80 @@ fn request_ids_follow_the_nonce_pattern() {
     assert!(!valid_request_id(""));
     assert!(!valid_request_id("a/b"));
     assert!(!valid_request_id(&"x".repeat(129)));
+}
+
+fn accept_all(conn: &Connection, person: i64) -> FaceReviewPage {
+    let payload = ResolveFaceReviewPayload {
+        request_id: "r".into(),
+        face_id: None,
+        person_id: person,
+        resolution: "acceptAll".into(),
+        other_person_id: None,
+    };
+    resolve(conn, &payload).unwrap()
+}
+
+#[test]
+fn accept_all_accepts_suggested_faces_in_one_operation_and_skips_photos_with_the_person() {
+    let conn = library();
+    face(&conn, 3, 3, None, (1.0, 0.0));
+    face(&conn, 4, 4, None, (0.95, 0.05));
+    face(&conn, 5, 5, None, (0.5, 0.5));
+    run(&conn, &Settings::default());
+    assert_eq!(candidates(&conn).iter().filter(|row| row.3 == "suggested" && row.1 == 1).count(), 2);
+    face(&conn, 6, 4, Some(1), (1.0, 0.0));
+    let reply = accept_all(&conn, 1);
+    assert_eq!(reply.status, "ok");
+    assert_eq!(reply.accepted_face_ids.as_deref(), Some(&[3][..]));
+    assert_eq!(reply.skipped_face_ids.as_deref(), Some(&[4][..]));
+    assert_eq!((owner(&conn, 3), owner(&conn, 4), owner(&conn, 5)), (Some(1), None, None));
+    assert_eq!(outcome(&conn, 3).as_deref(), Some("accepted"));
+    let operation = reply.operation_id.unwrap();
+    let kind: String = conn.query_row("SELECT kind FROM catalog_corrections WHERE id=?1", [&operation], |r| r.get(0)).unwrap();
+    assert_eq!(kind, "face_review_bulk");
+    let undone = undo_op(&conn, &operation);
+    assert_eq!((undone.status.as_str(), undone.accepted_face_ids.as_deref()), ("ok", Some(&[3][..])));
+    assert_eq!(owner(&conn, 3), None);
+    assert_eq!(outcome(&conn, 3).as_deref(), Some("suggested"));
+    assert!(candidates(&conn).iter().any(|row| row.0 == 3 && row.1 == 1));
+    assert_eq!(undo_op(&conn, &operation).status, "refused");
+}
+
+#[test]
+fn accept_all_refuses_when_nothing_can_be_accepted() {
+    let conn = library();
+    assert_eq!(accept_all(&conn, 1).message.as_deref(), Some(NOTHING_TO_ACCEPT));
+    face(&conn, 3, 3, None, (1.0, 0.0));
+    run(&conn, &Settings::default());
+    face(&conn, 6, 3, Some(1), (1.0, 0.0));
+    let reply = accept_all(&conn, 1);
+    assert_eq!((reply.status.as_str(), reply.message.as_deref()), ("refused", Some(ALL_IN_PHOTO)));
+    assert_eq!(reply.skipped_face_ids.as_deref(), Some(&[3][..]));
+    assert_eq!(owner(&conn, 3), None);
+}
+
+#[test]
+fn accept_all_undo_is_refused_once_a_face_moved() {
+    let conn = library();
+    face(&conn, 3, 3, None, (1.0, 0.0));
+    face(&conn, 4, 4, None, (0.95, 0.05));
+    run(&conn, &Settings::default());
+    let operation = accept_all(&conn, 1).operation_id.unwrap();
+    conn.execute("UPDATE face_prints SET person_id=2 WHERE id=4", []).unwrap();
+    let reply = undo_op(&conn, &operation);
+    assert_eq!((reply.status.as_str(), reply.message.as_deref()), ("refused", Some(MOVED_MANY)));
+    assert_eq!((owner(&conn, 3), owner(&conn, 4)), (Some(1), Some(2)));
+}
+
+#[test]
+fn list_marks_low_quality_faces_and_rejects_unknown_queues() {
+    let conn = library();
+    face(&conn, 3, 3, None, (1.0, 0.0));
+    run(&conn, &Settings::default());
+    conn.execute("UPDATE face_prints SET excluded=1 WHERE id=3", []).unwrap();
+    assert_eq!(list_page(&conn, None, 0, 10).items[0].low_quality, Some(true));
+    let payload = ListFaceReviewPayload { request_id: "r".into(), person_id: None, offset: None, limit: None, queue: Some("other".into()) };
+    assert_eq!(list(&conn, &payload).unwrap().status, "refused");
+    let missing_face = ResolveFaceReviewPayload { request_id: "r".into(), face_id: None, person_id: 1, resolution: "accept".into(), other_person_id: None };
+    assert_eq!(resolve(&conn, &missing_face).unwrap().status, "refused");
 }

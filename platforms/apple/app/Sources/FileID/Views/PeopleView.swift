@@ -47,6 +47,9 @@ struct PeopleView: View {
     }
     @State private var activeSheet: ActiveSheet?
     @State private var review: FaceReviewModel?
+    @State private var mergeQueue: FaceQueueModel?
+    @State private var splitQueue: FaceQueueModel?
+    @State private var faceRefresh: FaceRefreshModel?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,6 +76,7 @@ struct PeopleView: View {
             if sheet == nil { refreshReview() }
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
+        .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: reload))
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -152,8 +156,9 @@ struct PeopleView: View {
                     onDismiss: { activeSheet = nil }
                 )
             case .faceReview:
-                if let review {
-                    FaceReviewSheet(model: review, personByID: personByID) { activeSheet = nil }
+                if let review, let mergeQueue, let splitQueue {
+                    FaceReviewSheet(model: review, merges: mergeQueue, splits: splitQueue, personByID: personByID,
+                                    store: store) { activeSheet = nil }
                 }
             case .mergeTargetPicker:
                 MergeTargetPickerSheet(
@@ -186,20 +191,31 @@ struct PeopleView: View {
 
     @ViewBuilder
     private var reviewButton: some View {
-        if let review, review.total > 0, !mergeMode, !unknownMode {
+        let waiting = (review?.total ?? 0) + (mergeQueue?.total ?? 0) + (splitQueue?.total ?? 0)
+        if waiting > 0, !mergeMode, !unknownMode {
             Button { activeSheet = .faceReview } label: {
-                Label("\(FaceReviewText.title) (\(review.total))", systemImage: "person.crop.circle.badge.checkmark")
+                Label("\(FaceReviewText.title) (\(waiting))", systemImage: "person.crop.circle.badge.checkmark")
             }
             .buttonStyle(.dsAccentOutline)
-            .accessibilityLabel(FaceReviewText.header(review.total))
+            .accessibilityLabel(FaceReviewText.header(waiting))
             .help("New faces that look like people you already have. Nothing is assigned until you accept.")
         }
     }
 
+    private var queueChanges: Int { (mergeQueue?.changes ?? 0) + (splitQueue?.changes ?? 0) }
+
     private func refreshReview() {
         let model = review ?? FaceReviewModel(engine: engine)
-        review = model
-        Task { await model.reload() }
+        let merges = mergeQueue ?? FaceQueueModel(engine: engine, kind: .merges)
+        let splits = splitQueue ?? FaceQueueModel(engine: engine, kind: .splits)
+        let refresh = faceRefresh ?? FaceRefreshModel(engine: engine)
+        review = model; mergeQueue = merges; splitQueue = splits; faceRefresh = refresh
+        Task {
+            await model.reload()
+            await merges.reload()
+            await splits.reload()
+            await refresh.reload()
+        }
     }
 
     private var header: some View {
@@ -210,6 +226,7 @@ struct PeopleView: View {
                 reviewButton
                 headerActions
             }
+            if let faceRefresh { FaceRefreshRow(model: faceRefresh) }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
                 Text("\(count) more face\(count == 1 ? " is" : "s are") waiting to be grouped. People you marked as unknown are left out.")
                     .font(Theme.Font.body(13.5))
@@ -1596,4 +1613,19 @@ private struct FaceModelInstallPanel: View {
 struct UncheckedImage: @unchecked Sendable {
     let image: NSImage
     init(_ image: NSImage) { self.image = image }
+}
+
+private struct FaceQueueObservers: ViewModifier {
+    let jobs: [CatalogJob]
+    let changes: Int
+    let refresh: FaceRefreshModel?
+    let onChange: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: jobs) { _, jobs in
+                if jobs.contains(where: { $0.kind == "faceRefresh" }) { Task { await refresh?.reload() } }
+            }
+            .onChange(of: changes) { _, _ in onChange() }
+    }
 }

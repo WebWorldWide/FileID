@@ -37,7 +37,7 @@ enum FaceReview {
             SELECT fp.id, a.outcome FROM face_prints fp
             LEFT JOIN face_assignment_assessed a ON a.face_id=fp.id
             JOIN catalog_revisions r ON r.file_id=fp.file_id
-            WHERE fp.person_id IS NULL AND COALESCE(fp.excluded,0)=0 AND length(fp.arcface_embedding)=512
+            WHERE fp.person_id IS NULL AND length(fp.arcface_embedding)=512
               AND fp.embedding_model=? AND fp.processing_version=? AND fp.source_revision=r.revision
               AND (a.face_id IS NULL OR a.outcome IN \(pendingSQL))
               AND (? <= 0 OR COALESCE(fp.face_quality,-1) >= ?)
@@ -53,12 +53,14 @@ enum FaceReview {
     // MARK: - After a clustering pass
 
     static func finish(database: Database, pool: [Int64], holdout: Set<Int64>, model: String, processing: String,
-                       settings: Settings = .fromEnvironment()) async -> Int? {
+                       settings: Settings = .fromEnvironment(), queues: FaceQueues.Settings = .fromEnvironment()) async -> Int? {
         do {
             return try await database.pool.write { db in
                 let now = Date().timeIntervalSince1970
                 try markPool(db, faceIDs: pool, now: now)
                 try assess(db, faceIDs: holdout, model: model, processing: processing, settings: settings, now: now)
+                let stored = try FaceQueues.refresh(db, model: model, processing: processing, settings: queues, now: now)
+                JSONLog.shared.info(ev: "face_queues_stored", extra: ["merges": AnyCodable(stored.merges), "splits": AnyCodable(stored.splits)])
                 return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face_review_candidates") ?? 0
             }
         } catch {
@@ -90,6 +92,7 @@ enum FaceReview {
         let fileID: Int64
         let bbox: String
         let vector: [Float]
+        var held = false
     }
 
     struct Scored: Sendable {
@@ -152,13 +155,13 @@ enum FaceReview {
     static func loadFaces(_ db: GRDB.Database, ids: Set<Int64>, model: String, processing: String) throws -> [Face] {
         guard !ids.isEmpty else { return [] }
         return try Row.fetchAll(db, sql: """
-            SELECT id, file_id, bbox, arcface_embedding FROM face_prints
-            WHERE id IN (SELECT value FROM json_each(?)) AND person_id IS NULL AND COALESCE(excluded,0)=0
+            SELECT id, file_id, bbox, arcface_embedding, COALESCE(excluded,0) AS held FROM face_prints
+            WHERE id IN (SELECT value FROM json_each(?)) AND person_id IS NULL
               AND length(arcface_embedding)=512 AND embedding_model=? AND processing_version=?
             ORDER BY id
             """, arguments: [json(Array(ids)), model, processing]).compactMap { row in
             normalized(FloatBlob.decode(row["arcface_embedding"])).map {
-                Face(id: row["id"], fileID: row["file_id"], bbox: row["bbox"], vector: $0)
+                Face(id: row["id"], fileID: row["file_id"], bbox: row["bbox"], vector: $0, held: (row["held"] as Int64) != 0)
             }
         }
     }
@@ -223,6 +226,15 @@ enum FaceReview {
                         runnerUp: runner?.person, runnerUpScore: runner?.score)
     }
 
+    /// A face that failed the per-face quality gate is only ever an uncertain
+    /// suggestion: never suggested, never auto-assigned.
+    static func capped(_ decision: Decision, held: Bool) -> Decision {
+        guard held, decision.outcome == "suggested" || decision.outcome == "assigned" else { return decision }
+        var capped = decision
+        capped.outcome = "uncertain"
+        return capped
+    }
+
     static func assess(_ db: GRDB.Database, faceIDs: Set<Int64>, model: String, processing: String,
                        settings: Settings, now: Double) throws {
         let faces = try loadFaces(db, ids: faceIDs, model: model, processing: processing)
@@ -246,7 +258,8 @@ enum FaceReview {
         var claimed: [Int64: Set<Int64>] = [:]
         var received = Set<Int64>()
         for item in prepared {
-            let decision = decide(item.scored, barred: item.barred.union(claimed[item.face.fileID] ?? []), settings: settings)
+            let decision = capped(decide(item.scored, barred: item.barred.union(claimed[item.face.fileID] ?? []), settings: settings),
+                                  held: item.face.held)
             if let person = decision.person, decision.outcome == "suggested" || decision.outcome == "assigned" {
                 claimed[item.face.fileID, default: []].insert(person)
             }
@@ -291,7 +304,7 @@ enum FaceReview {
 
     // MARK: - List
 
-    private static func display(_ alias: String) -> String {
+    static func display(_ alias: String) -> String {
         "COALESCE(NULLIF(TRIM(\(alias).name),''), NULLIF(TRIM(COALESCE(\(alias).first_name,'') || ' ' || COALESCE(\(alias).last_name,'')),''))"
     }
 
@@ -307,18 +320,36 @@ enum FaceReview {
     }
 
     static let pageRefusal = "Ask for 1 to 200 suggestions from offset 0 or later."
+    static let queueRefusal = "Choose the faces, merges, splits or refresh queue."
 
-    static func list(_ db: GRDB.Database, requestID: String, personID: Int64?, offset: Int?, limit: Int?) throws -> FaceReviewPage {
+    static func pageBounds(offset: Int?, limit: Int?) -> (offset: Int, limit: Int, valid: Bool) {
         let offset = offset ?? 0
         let limit = limit ?? 50
-        guard offset >= 0, (1...200).contains(limit) else {
+        return (offset, limit, offset >= 0 && (1...200).contains(limit))
+    }
+
+    static func list(_ db: GRDB.Database, requestID: String, personID: Int64?, offset: Int?, limit: Int?,
+                     queue: String? = nil) throws -> FaceReviewPage {
+        switch queue {
+        case nil, "faces": return try listFaces(db, requestID: requestID, personID: personID, offset: offset, limit: limit)
+        case "merges": return try FaceQueues.listMerges(db, requestID: requestID, personID: personID, offset: offset, limit: limit)
+        case "splits": return try FaceQueues.listSplits(db, requestID: requestID, personID: personID, offset: offset, limit: limit)
+        case "refresh": return try FaceRefreshJob.statusPage(db, requestID: requestID)
+        default:
+            return FaceReviewPage(requestID: requestID, action: "list", status: "refused", message: queueRefusal, total: 0, offset: 0)
+        }
+    }
+
+    static func listFaces(_ db: GRDB.Database, requestID: String, personID: Int64?, offset: Int?, limit: Int?) throws -> FaceReviewPage {
+        let (offset, limit, valid) = pageBounds(offset: offset, limit: limit)
+        guard valid else {
             return FaceReviewPage(requestID: requestID, action: "list", status: "refused", message: pageRefusal,
                                   total: 0, offset: offset)
         }
         let rows = try Row.fetchAll(db, sql: """
             SELECT c.face_id, fp.file_id, f.path_text, fp.bbox, c.person_id, \(display("p")) AS person_name,
                    p.representative_face_id, c.score, c.reason, c.runner_up_person_id, \(display("rp")) AS runner_name,
-                   c.runner_up_score, c.created_at
+                   c.runner_up_score, c.created_at, COALESCE(fp.excluded,0) AS held
             """ + " " + pendingFrom + " ORDER BY c.score DESC, c.face_id ASC LIMIT ?2 OFFSET ?3",
             arguments: [personID, limit, offset])
         let items = rows.map { row in
@@ -326,7 +357,8 @@ enum FaceReview {
                            personID: row["person_id"], personName: row["person_name"],
                            representativeFaceID: row["representative_face_id"], score: row["score"], reason: row["reason"],
                            runnerUpPersonID: row["runner_up_person_id"], runnerUpName: row["runner_name"],
-                           runnerUpScore: row["runner_up_score"], createdAt: row["created_at"])
+                           runnerUpScore: row["runner_up_score"], createdAt: row["created_at"],
+                           lowQuality: (row["held"] as Int64) != 0 ? true : nil)
         }
         return FaceReviewPage(requestID: requestID, action: "list", status: "ok",
                               total: try pendingTotal(db, personID: personID), offset: offset, items: items)
@@ -335,7 +367,11 @@ enum FaceReview {
     // MARK: - Resolve
 
     static let staleMessage = "This suggestion changed. Refresh the review list."
-    static let resolutionMessage = "Choose accept, reject or ignore."
+    static let resolutionMessage = "Choose accept, reject, ignore, acceptAll, merge, notSamePerson, dismiss or split."
+    static let faceRequiredMessage = "Choose a face to resolve."
+    static let nothingToAcceptMessage = "Nothing to accept for this person."
+    static let allInPhotoMessage = "Every suggested face is in a photo that already has this person, so nothing changed."
+    static let movedManyMessage = "Some of these faces were moved since, so nothing changed."
     static let samePhotoMessage = "That person is already in this photo."
     static let noAnchorMessage = "This person has no face to compare with."
     static let nothingToUndoMessage = "There is nothing to undo for this suggestion."
@@ -347,11 +383,24 @@ enum FaceReview {
                        total: try pendingTotal(db), offset: 0)
     }
 
-    static func resolve(_ db: GRDB.Database, requestID: String, faceID: Int64, personID: Int64, resolution: String,
-                        now: Double = Date().timeIntervalSince1970) throws -> FaceReviewPage {
-        guard ["accept", "reject", "ignore"].contains(resolution) else {
+    static func resolve(_ db: GRDB.Database, requestID: String, faceID: Int64?, personID: Int64, resolution: String,
+                        otherPersonID: Int64? = nil, now: Double = Date().timeIntervalSince1970) throws -> FaceReviewPage {
+        switch resolution {
+        case "accept", "reject", "ignore":
+            guard let faceID else { return try refused(requestID, "resolve", faceRequiredMessage, db: db) }
+            return try resolveFace(db, requestID: requestID, faceID: faceID, personID: personID, resolution: resolution, now: now)
+        case "acceptAll":
+            return try acceptAll(db, requestID: requestID, personID: personID, now: now)
+        case "merge", "notSamePerson", "dismiss", "split":
+            return try FaceQueues.resolve(db, requestID: requestID, personID: personID, otherPersonID: otherPersonID,
+                                          resolution: resolution, now: now)
+        default:
             return try refused(requestID, "resolve", resolutionMessage, db: db)
         }
+    }
+
+    static func resolveFace(_ db: GRDB.Database, requestID: String, faceID: Int64, personID: Int64, resolution: String,
+                            now: Double) throws -> FaceReviewPage {
         guard let candidate = try Row.fetchOne(db, sql: """
                 SELECT c.person_id, c.score, c.reason, c.runner_up_person_id, c.runner_up_score, c.namespace, c.created_at,
                        fp.file_id, fp.bbox
@@ -450,11 +499,29 @@ enum FaceReview {
     static func undo(_ db: GRDB.Database, requestID: String, operationID: String,
                      now: Double = Date().timeIntervalSince1970) throws -> FaceReviewPage {
         guard let row = try Row.fetchOne(db, sql: """
-                SELECT c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id
-                WHERE o.id=? AND o.state='completed' AND c.kind='face_review'
+                SELECT c.kind, c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id
+                WHERE o.id=? AND o.state='completed'
+                  AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review')
                 """, arguments: [operationID]),
-              let before = parse(row["before_json"]), let after = parse(row["after_json"]),
-              let faceID = int(before["faceID"]), let candidate = before["candidate"] as? [String: Any],
+              let before = parse(row["before_json"]), let after = parse(row["after_json"]) else {
+            return try refused(requestID, "undo", nothingToUndoMessage, db: db)
+        }
+        let kind: String = row["kind"]
+        let reply: FaceReviewPage
+        switch kind {
+        case "face_review_bulk": reply = try undoAcceptAll(db, requestID: requestID, before: before, after: after, now: now)
+        case "face_merge_review", "face_split_review":
+            reply = try FaceQueues.undo(db, requestID: requestID, before: before, after: after, now: now)
+        default: reply = try undoFace(db, requestID: requestID, before: before, after: after, now: now)
+        }
+        guard reply.status == "ok" else { return reply }
+        try db.execute(sql: "UPDATE catalog_operations SET state='undone' WHERE id=?", arguments: [operationID])
+        return reply.withOperation(operationID)
+    }
+
+    private static func undoFace(_ db: GRDB.Database, requestID: String, before: [String: Any], after: [String: Any],
+                                 now: Double) throws -> FaceReviewPage {
+        guard let faceID = int(before["faceID"]), let candidate = before["candidate"] as? [String: Any],
               let resolution = after["resolution"] as? String else {
             return try refused(requestID, "undo", nothingToUndoMessage, db: db)
         }
@@ -482,9 +549,110 @@ enum FaceReview {
             }
         }
         try restore(db, faceID: faceID, candidate: candidate, now: now)
-        try db.execute(sql: "UPDATE catalog_operations SET state='undone' WHERE id=?", arguments: [operationID])
-        return FaceReviewPage(requestID: requestID, action: "undo", status: "ok", operationID: operationID,
-                              faceID: faceID, total: try pendingTotal(db), offset: 0)
+        return FaceReviewPage(requestID: requestID, action: "undo", status: "ok", faceID: faceID, total: try pendingTotal(db), offset: 0)
+    }
+
+    // MARK: - Accept all
+
+    static func candidateEntry(_ db: GRDB.Database, faceID: Int64) throws -> (fileID: Int64, entry: [String: Any])? {
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT fp.file_id, c.person_id, c.score, c.reason, c.runner_up_person_id, c.runner_up_score, c.namespace, c.created_at, a.outcome
+            FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id
+            LEFT JOIN face_assignment_assessed a ON a.face_id=c.face_id WHERE c.face_id=?
+            """, arguments: [faceID]) else { return nil }
+        let candidate: [String: Any] = [
+            "personID": row["person_id"] as Int64,
+            "score": row["score"] as Double,
+            "reason": row["reason"] as String,
+            "runnerUpPersonID": (row["runner_up_person_id"] as Int64?) as Any? ?? NSNull(),
+            "runnerUpScore": (row["runner_up_score"] as Double?) as Any? ?? NSNull(),
+            "namespace": row["namespace"] as String,
+            "createdAt": row["created_at"] as Double,
+        ]
+        return (row["file_id"], ["faceID": faceID, "outcome": (row["outcome"] as String?) as Any? ?? NSNull(), "candidate": candidate])
+    }
+
+    static func acceptAll(_ db: GRDB.Database, requestID: String, personID: Int64, now: Double) throws -> FaceReviewPage {
+        let rows = try Row.fetchAll(db, sql: "SELECT c.face_id, fp.file_id " + pendingFrom
+            + " AND c.reason='suggested' ORDER BY c.score DESC, c.face_id ASC", arguments: [personID])
+        guard !rows.isEmpty else {
+            return try refused(requestID, "resolve", nothingToAcceptMessage, db: db).withPerson(personID)
+        }
+        var accepted: [Int64] = [], skipped: [Int64] = [], entries: [[String: Any]] = []
+        var files = Set<Int64>()
+        var firstFile: Int64?
+        for row in rows {
+            let faceID: Int64 = row["face_id"]
+            let fileID: Int64 = row["file_id"]
+            let present = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM face_prints WHERE file_id=? AND person_id=? AND id<>?)",
+                                            arguments: [fileID, personID, faceID]) ?? false
+            if present || files.contains(fileID) { skipped.append(faceID); continue }
+            guard let (_, entry) = try candidateEntry(db, faceID: faceID) else { continue }
+            let namespace = (entry["candidate"] as? [String: Any])?["namespace"] as? String ?? ""
+            try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE id=? AND person_id IS NULL", arguments: [personID, faceID])
+            try db.execute(sql: "DELETE FROM face_review_candidates WHERE face_id=?", arguments: [faceID])
+            try upsertOutcome(db, faceID: faceID, namespace: namespace, outcome: "accepted", now: now)
+            files.insert(fileID)
+            if firstFile == nil { firstFile = fileID }
+            accepted.append(faceID)
+            entries.append(entry)
+        }
+        guard let first = accepted.first else {
+            return FaceReviewPage(requestID: requestID, action: "resolve", status: "refused", message: allInPhotoMessage,
+                                  personID: personID, total: try pendingTotal(db), offset: 0,
+                                  acceptedFaceIDs: [], skippedFaceIDs: skipped)
+        }
+        try db.execute(sql: """
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+                representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1
+            """, arguments: [personID, first])
+        let operationID = UUID().uuidString.lowercased()
+        let beforeJSON = try jsonText(["personID": personID, "faces": entries])
+        let after: [String: Any] = ["personID": personID, "resolution": "acceptAll", "acceptedFaceIDs": accepted, "skippedFaceIDs": skipped]
+        try db.execute(sql: "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?,?,'face_review_bulk',?,?,?)",
+                       arguments: [operationID, firstFile, beforeJSON, try jsonText(after), now])
+        try db.execute(sql: "INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?,?,?,'completed',?)",
+                       arguments: [operationID, try jsonText(["type": "faceReviewBulk", "personID": personID, "resolution": "acceptAll",
+                                                              "count": accepted.count]), beforeJSON, now])
+        return FaceReviewPage(requestID: requestID, action: "resolve", status: "ok", operationID: operationID, personID: personID,
+                              total: try pendingTotal(db), offset: 0, acceptedFaceIDs: accepted, skippedFaceIDs: skipped)
+    }
+
+    private static func undoAcceptAll(_ db: GRDB.Database, requestID: String, before: [String: Any], after: [String: Any],
+                                      now: Double) throws -> FaceReviewPage {
+        guard let personID = int(after["personID"]), let list = after["acceptedFaceIDs"] as? [Any] else {
+            return try refused(requestID, "undo", nothingToUndoMessage, db: db)
+        }
+        let faces = list.compactMap { int($0) }
+        for face in faces where try Int64.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id=?", arguments: [face]) != personID {
+            return try refused(requestID, "undo", movedManyMessage, db: db)
+        }
+        for face in faces {
+            try db.execute(sql: "UPDATE face_prints SET person_id=NULL WHERE id=?", arguments: [face])
+        }
+        try recount(db, personID: personID)
+        for entry in before["faces"] as? [[String: Any]] ?? [] {
+            if let face = int(entry["faceID"]), let candidate = entry["candidate"] as? [String: Any] {
+                try restore(db, faceID: face, candidate: candidate, now: now)
+            }
+        }
+        return FaceReviewPage(requestID: requestID, action: "undo", status: "ok", personID: personID,
+                              total: try pendingTotal(db), offset: 0, acceptedFaceIDs: faces)
+    }
+
+    /// Recomputes a person's file count, keeping its representative face when it
+    /// still belongs to the person (else the best embedded face).
+    static func recount(_ db: GRDB.Database, personID: Int64) throws {
+        try db.execute(sql: """
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+                representative_face_id=CASE WHEN representative_face_id IS NOT NULL
+                    AND EXISTS(SELECT 1 FROM face_prints WHERE id=persons.representative_face_id AND person_id=?1)
+                  THEN representative_face_id ELSE COALESCE(
+                    (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL
+                     ORDER BY COALESCE(fp.face_quality,0) DESC LIMIT 1),
+                    (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 ORDER BY COALESCE(fp.face_quality,0) DESC LIMIT 1)) END
+            WHERE id=?1
+            """, arguments: [personID])
     }
 
     private static func recomputeAfterRemoval(_ db: GRDB.Database, personID: Int64, faceID: Int64) throws {
@@ -500,7 +668,7 @@ enum FaceReview {
             """, arguments: [personID, faceID])
     }
 
-    private static func restore(_ db: GRDB.Database, faceID: Int64, candidate: [String: Any], now: Double) throws {
+    static func restore(_ db: GRDB.Database, faceID: Int64, candidate: [String: Any], now: Double) throws {
         guard let reason = candidate["reason"] as? String, reviewReasons.contains(reason) else { return }
         let space = candidate["namespace"] as? String ?? ""
         if let person = int(candidate["personID"]),
@@ -548,13 +716,13 @@ enum FaceReview {
     // MARK: - IPC
 
     enum Command: Sendable {
-        case list(requestID: String, personID: Int64?, offset: Int?, limit: Int?)
-        case resolve(requestID: String, faceID: Int64, personID: Int64, resolution: String)
+        case list(requestID: String, personID: Int64?, offset: Int?, limit: Int?, queue: String? = nil)
+        case resolve(requestID: String, faceID: Int64?, personID: Int64, resolution: String, otherPersonID: Int64? = nil)
         case undo(requestID: String, operationID: String)
 
         var requestID: String {
             switch self {
-            case .list(let id, _, _, _), .resolve(let id, _, _, _), .undo(let id, _): return id
+            case .list(let id, _, _, _, _), .resolve(let id, _, _, _, _), .undo(let id, _): return id
             }
         }
 
@@ -575,10 +743,15 @@ enum FaceReview {
         }
         do {
             switch command {
-            case .list(_, let personID, let offset, let limit):
-                return try await database.pool.read { try list($0, requestID: requestID, personID: personID, offset: offset, limit: limit) }
-            case .resolve(_, let faceID, let personID, let resolution):
-                return try await database.pool.write { try resolve($0, requestID: requestID, faceID: faceID, personID: personID, resolution: resolution) }
+            case .list(_, let personID, let offset, let limit, let queue):
+                return try await database.pool.read {
+                    try list($0, requestID: requestID, personID: personID, offset: offset, limit: limit, queue: queue)
+                }
+            case .resolve(_, let faceID, let personID, let resolution, let otherPersonID):
+                return try await database.pool.write {
+                    try resolve($0, requestID: requestID, faceID: faceID, personID: personID, resolution: resolution,
+                                otherPersonID: otherPersonID)
+                }
             case .undo(_, let operationID):
                 return try await database.pool.write { try undo($0, requestID: requestID, operationID: operationID) }
             }
@@ -596,25 +769,41 @@ enum FaceReview {
         "[" + ids.sorted().map(String.init).joined(separator: ",") + "]"
     }
 
-    private static func jsonText(_ object: [String: Any]) throws -> String {
+    static func jsonText(_ object: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
     }
 
-    private static func parse(_ text: String?) -> [String: Any]? {
+    static func parse(_ text: String?) -> [String: Any]? {
         guard let text else { return nil }
         return (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
     }
 
-    private static func int(_ value: Any?) -> Int64? {
+    static func int(_ value: Any?) -> Int64? {
         guard let number = value as? NSNumber, !(value is NSNull) else { return nil }
         return number.int64Value
     }
 
-    private static func double(_ value: Any?) -> Double? {
+    static func double(_ value: Any?) -> Double? {
         (value as? NSNumber)?.doubleValue
     }
 
-    private static func bool(_ value: Any?) -> Bool {
+    static func bool(_ value: Any?) -> Bool {
         (value as? NSNumber)?.boolValue ?? false
+    }
+}
+
+extension FaceReviewPage {
+    func withOperation(_ operationID: String) -> FaceReviewPage {
+        FaceReviewPage(requestID: requestID, action: action, status: status, message: message, operationID: operationID,
+                       faceID: faceID, personID: personID, total: total, offset: offset, items: items, queue: queue,
+                       merges: merges, splits: splits, refresh: refresh, otherPersonID: otherPersonID,
+                       acceptedFaceIDs: acceptedFaceIDs, skippedFaceIDs: skippedFaceIDs)
+    }
+
+    func withPerson(_ personID: Int64) -> FaceReviewPage {
+        FaceReviewPage(requestID: requestID, action: action, status: status, message: message, operationID: operationID,
+                       faceID: faceID, personID: personID, total: total, offset: offset, items: items, queue: queue,
+                       merges: merges, splits: splits, refresh: refresh, otherPersonID: otherPersonID,
+                       acceptedFaceIDs: acceptedFaceIDs, skippedFaceIDs: skippedFaceIDs)
     }
 }

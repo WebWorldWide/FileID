@@ -101,9 +101,9 @@ public struct IPCCommand: Codable, Sendable {
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         /// Move one face to another person (or a new one when `createNewPerson`).
         case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
-        /// Face review queue (schema 1.23.0). Each replies with `faceReview`.
-        case listFaceReview(requestID: String, personID: Int64?, offset: Int?, limit: Int?)
-        case resolveFaceReview(requestID: String, faceID: Int64, personID: Int64, resolution: String)
+        /// Face review queue (schema 1.23.0; queues, acceptAll, merge and split 1.25.0). Each replies with `faceReview`.
+        case listFaceReview(requestID: String, personID: Int64?, offset: Int?, limit: Int?, queue: String? = nil)
+        case resolveFaceReview(requestID: String, faceID: Int64?, personID: Int64, resolution: String, otherPersonID: Int64? = nil)
         case undoFaceReview(requestID: String, operationID: String)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
@@ -893,16 +893,89 @@ public struct FaceReviewItem: Codable, Sendable, Equatable, Identifiable {
     public let runnerUpName: String?
     public let runnerUpScore: Double?
     public let createdAt: Double
+    /// Schema 1.25.0: failed the per-face quality gate; only ever an uncertain suggestion.
+    public let lowQuality: Bool?
 
     public var id: Int64 { faceID }
 
     public init(faceID: Int64, fileID: Int64, path: String, bbox: String, personID: Int64, personName: String?,
                 representativeFaceID: Int64?, score: Double, reason: String, runnerUpPersonID: Int64?,
-                runnerUpName: String?, runnerUpScore: Double?, createdAt: Double) {
+                runnerUpName: String?, runnerUpScore: Double?, createdAt: Double, lowQuality: Bool? = nil) {
         self.faceID = faceID; self.fileID = fileID; self.path = path; self.bbox = bbox
         self.personID = personID; self.personName = personName; self.representativeFaceID = representativeFaceID
         self.score = score; self.reason = reason; self.runnerUpPersonID = runnerUpPersonID
         self.runnerUpName = runnerUpName; self.runnerUpScore = runnerUpScore; self.createdAt = createdAt
+        self.lowQuality = lowQuality
+    }
+}
+
+/// Two existing people who may be one (schema 1.25.0). `personID` is kept; `otherPersonID` merges in.
+public struct FaceMergeSuggestion: Codable, Sendable, Equatable, Identifiable {
+    public let personID: Int64
+    public let personName: String?
+    public let representativeFaceID: Int64?
+    public let faceCount: Int
+    public let otherPersonID: Int64
+    public let otherName: String?
+    public let otherRepresentativeFaceID: Int64?
+    public let otherFaceCount: Int
+    public let score: Double
+    public let createdAt: Double
+
+    public var id: String { "\(personID):\(otherPersonID)" }
+
+    public init(personID: Int64, personName: String?, representativeFaceID: Int64?, faceCount: Int,
+                otherPersonID: Int64, otherName: String?, otherRepresentativeFaceID: Int64?, otherFaceCount: Int,
+                score: Double, createdAt: Double) {
+        self.personID = personID; self.personName = personName; self.representativeFaceID = representativeFaceID
+        self.faceCount = faceCount; self.otherPersonID = otherPersonID; self.otherName = otherName
+        self.otherRepresentativeFaceID = otherRepresentativeFaceID; self.otherFaceCount = otherFaceCount
+        self.score = score; self.createdAt = createdAt
+    }
+}
+
+/// A person whose faces form two well-separated groups (schema 1.25.0).
+public struct FaceSplitSuggestion: Codable, Sendable, Equatable, Identifiable {
+    public let personID: Int64
+    public let personName: String?
+    public let representativeFaceID: Int64?
+    public let score: Double
+    public let keepCount: Int
+    public let splitCount: Int
+    public let keepFaceIDs: [Int64]
+    public let splitFaceIDs: [Int64]
+    public let createdAt: Double
+
+    public var id: Int64 { personID }
+
+    public init(personID: Int64, personName: String?, representativeFaceID: Int64?, score: Double, keepCount: Int,
+                splitCount: Int, keepFaceIDs: [Int64], splitFaceIDs: [Int64], createdAt: Double) {
+        self.personID = personID; self.personName = personName; self.representativeFaceID = representativeFaceID
+        self.score = score; self.keepCount = keepCount; self.splitCount = splitCount
+        self.keepFaceIDs = keepFaceIDs; self.splitFaceIDs = splitFaceIDs; self.createdAt = createdAt
+    }
+}
+
+/// The durable face refresh backlog for one model and processing version (schema 1.25.0).
+public struct FaceRefreshStatus: Codable, Sendable, Equatable {
+    public let model: String
+    public let processing: String
+    public let outdated: Int
+    public let total: Int
+    public let done: Int
+    public let pending: Int
+    public let missing: Int
+    public let offline: Int
+    public let failed: Int
+    public let jobID: String?
+    public let state: String?
+    public let progress: Double?
+
+    public init(model: String, processing: String, outdated: Int, total: Int, done: Int, pending: Int,
+                missing: Int, offline: Int, failed: Int, jobID: String? = nil, state: String? = nil, progress: Double? = nil) {
+        self.model = model; self.processing = processing; self.outdated = outdated; self.total = total
+        self.done = done; self.pending = pending; self.missing = missing; self.offline = offline; self.failed = failed
+        self.jobID = jobID; self.state = state; self.progress = progress
     }
 }
 
@@ -918,12 +991,24 @@ public struct FaceReviewPage: Codable, Sendable, Equatable {
     public let total: Int
     public let offset: Int
     public let items: [FaceReviewItem]
+    public let queue: String?
+    public let merges: [FaceMergeSuggestion]?
+    public let splits: [FaceSplitSuggestion]?
+    public let refresh: FaceRefreshStatus?
+    public let otherPersonID: Int64?
+    public let acceptedFaceIDs: [Int64]?
+    public let skippedFaceIDs: [Int64]?
 
     public init(requestID: String, action: String, status: String, message: String? = nil, operationID: String? = nil,
-                faceID: Int64? = nil, personID: Int64? = nil, total: Int, offset: Int, items: [FaceReviewItem] = []) {
+                faceID: Int64? = nil, personID: Int64? = nil, total: Int, offset: Int, items: [FaceReviewItem] = [],
+                queue: String? = nil, merges: [FaceMergeSuggestion]? = nil, splits: [FaceSplitSuggestion]? = nil,
+                refresh: FaceRefreshStatus? = nil, otherPersonID: Int64? = nil, acceptedFaceIDs: [Int64]? = nil,
+                skippedFaceIDs: [Int64]? = nil) {
         self.requestID = requestID; self.action = action; self.status = status; self.message = message
         self.operationID = operationID; self.faceID = faceID; self.personID = personID
         self.total = total; self.offset = offset; self.items = items
+        self.queue = queue; self.merges = merges; self.splits = splits; self.refresh = refresh
+        self.otherPersonID = otherPersonID; self.acceptedFaceIDs = acceptedFaceIDs; self.skippedFaceIDs = skippedFaceIDs
     }
 }
 

@@ -13,6 +13,7 @@ struct FaceReviewList: View {
         VStack(alignment: .leading, spacing: 10) {
             if let message = model.message { FaceReviewMessage(text: message) }
             if model.undoOperationID != nil { FaceReviewUndoBar(model: model) }
+            if model.personID != nil, model.suggestedCount > 0 { acceptAll }
             ForEach(model.items) { item in
                 FaceReviewRow(item: item, candidate: personByID[item.personID], model: model)
                     .transition(.opacity.combined(with: .move(edge: .leading)))
@@ -24,6 +25,18 @@ struct FaceReviewList: View {
         }
         .animation(reduceMotion ? nil : reviewSpring, value: model.items.map(\.faceID))
         .animation(reduceMotion ? nil : reviewSpring, value: model.undoOperationID)
+    }
+
+    private var acceptAll: some View {
+        let count = model.suggestedCount
+        let person = model.items.first { $0.reason == "suggested" }?.personName
+        return Button { Task { await model.acceptAll() } } label: {
+            Label(FaceReviewText.acceptAllTitle(count), systemImage: "checkmark.circle")
+        }
+        .buttonStyle(.dsAccentOutline)
+        .disabled(model.busy)
+        .accessibilityLabel(FaceReviewText.acceptAllLabel(count, person))
+        .help("Accept every strong suggestion for this person at once. Faces in photos that already have this person stay for review.")
     }
 
     private var showMore: some View {
@@ -45,7 +58,7 @@ private struct FaceReviewUndoBar: View {
     let model: FaceReviewModel
     var body: some View {
         HStack(spacing: 10) {
-            MetaText("Review saved.", color: Theme.text2)
+            MetaText(model.notice ?? FaceReviewText.saved, color: Theme.text2)
             Spacer()
             Button(FaceReviewText.undo) { Task { await model.undo() } }
                 .buttonStyle(.dsSecondary)
@@ -89,7 +102,7 @@ private struct FaceReviewRow: View {
                 .font(Theme.Font.body(12.5))
                 .foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
-            MetaText(FaceReviewText.fileName(item), size: 11)
+            MetaText(item.lowQuality == true ? "\(FaceReviewText.fileName(item)) · \(FaceReviewText.lowQuality)" : FaceReviewText.fileName(item), size: 11)
         }
     }
 
@@ -181,26 +194,64 @@ enum FaceReviewCropLoader {
 
 struct FaceReviewSheet: View {
     let model: FaceReviewModel
+    let merges: FaceQueueModel
+    let splits: FaceQueueModel
     let personByID: [Int64: ReadStore.PersonRow]
+    let store: ReadStore
     let onDone: () -> Void
+    @State private var queue: FaceQueueKind = .faces
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 Text(FaceReviewText.title).font(Theme.Font.body(20, .semibold))
-                    .accessibilityLabel(FaceReviewText.header(model.total))
-                MetaText("\(model.total) waiting")
+                    .accessibilityLabel(FaceReviewText.header(waiting))
+                MetaText("\(waiting) waiting")
                 Spacer()
                 Button("Done", action: onDone).buttonStyle(.dsPrimary).keyboardShortcut(.defaultAction)
             }
             .padding(16)
+            picker.padding(.horizontal, 16).padding(.bottom, 12)
             Divider()
-            ScrollView {
-                FaceReviewList(model: model, personByID: personByID).padding(16)
-            }
+            ScrollView { content.padding(16) }
         }
         .frame(minWidth: 760, minHeight: 520)
-        .task { await model.reload() }
+        .task { await loadAll() }
+    }
+
+    private var waiting: Int { model.total + merges.total + splits.total }
+
+    private var picker: some View {
+        Picker("Queue", selection: $queue) {
+            ForEach(FaceQueueKind.allCases) { kind in Text("\(kind.title) (\(count(kind)))").tag(kind) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityLabel("Which suggestions to review")
+    }
+
+    private func count(_ kind: FaceQueueKind) -> Int {
+        switch kind {
+        case .faces: return model.total
+        case .merges: return merges.total
+        case .splits: return splits.total
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch queue {
+        case .faces: FaceReviewList(model: model, personByID: personByID)
+        case .merges: FaceQueueList(model: merges, personByID: personByID, store: store)
+        case .splits: FaceQueueList(model: splits, personByID: personByID, store: store)
+        }
+    }
+
+    private func loadAll() async {
+        await model.reload()
+        await merges.reload()
+        await splits.reload()
+        if model.total == 0 { queue = merges.total > 0 ? .merges : (splits.total > 0 ? .splits : .faces) }
     }
 }
 

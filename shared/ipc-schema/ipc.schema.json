@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.24.0",
+  "version": "1.25.0",
 
   "$defs": {
     "IPCCommand": {
@@ -469,7 +469,8 @@
               "required": ["requestID"],
               "properties": {
                 "requestID": { "$ref": "#/$defs/HealthRequestID" },
-                "personID": { "type": ["integer", "null"], "description": "Only suggestions for this person. Omitted or null lists every person's." },
+                "personID": { "type": ["integer", "null"], "description": "Only suggestions for this person. Omitted or null lists every person's. merges: suggestions that involve this person; splits: this person's suggestion." },
+                "queue": { "type": "string", "enum": ["faces", "merges", "splits", "refresh"], "description": "Schema 1.25.0. Which queue to read; omitted means faces. merges: suggested merges between existing people, in merges, best score first; splits: people whose faces form two well-separated groups, in splits, most separated first; refresh: the face refresh backlog for the engine's current face model and processing, in refresh (items, merges and splits empty). Every queue is read-only and stored by runFaceClustering." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
               }
@@ -484,13 +485,14 @@
             "resolveFaceReview": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Schema 1.23.0. Resolve one pending suggestion. accept assigns the face to personID and is refused when that person is already in the same photo; reject records that the face is not this person (against the person's representative face, by file and box, so it survives reclustering); ignore files the face under a new Unknown person. personID must match the pending suggestion, otherwise the reply is refused. Each resolution is one catalog operation (catalog_corrections kind face_review). Replies faceReview with action resolve and the operationID to undo.",
-              "required": ["requestID", "faceID", "personID", "resolution"],
+              "description": "Schema 1.23.0. Resolve one pending suggestion. accept assigns the face to personID and is refused when that person is already in the same photo; reject records that the face is not this person (against the person's representative face, by file and box, so it survives reclustering); ignore files the face under a new Unknown person. personID must match the pending suggestion, otherwise the reply is refused. Each resolution is one catalog operation (catalog_corrections kind face_review). Replies faceReview with action resolve and the operationID to undo. Schema 1.25.0 adds: acceptAll accepts every pending suggested item of personID best score first in one operation (kind face_review_bulk), skipping faces whose photo already has that person (skippedFaceIDs) and listing the rest in acceptedFaceIDs; refused when none can be accepted. merge, notSamePerson and dismiss with otherPersonID resolve the pending merge suggestion of personID (the person kept) and otherPersonID (the person merged in): merge moves otherPersonID's faces to personID like mergeClusters (a named person keeps its name, an unnamed one takes the other's, a user-merged verdict links the two) and deletes otherPersonID; notSamePerson records a different-people verdict between their representative faces like markPersonsDifferent; dismiss hides the suggestion (by both representative faces, so it survives reclustering). split moves the second group of personID's pending split suggestion to a new unnamed person and records a different-people verdict between the groups; dismiss without otherPersonID hides that split suggestion. Each is one catalog operation (kind face_merge_review or face_split_review) that undoFaceReview reverses; any of them is refused when the suggestion changed since it was listed.",
+              "required": ["requestID", "personID", "resolution"],
               "properties": {
                 "requestID": { "$ref": "#/$defs/HealthRequestID" },
-                "faceID": { "type": "integer" },
+                "faceID": { "type": "integer", "description": "accept, reject and ignore: the face. Required for those, ignored otherwise." },
                 "personID": { "type": "integer" },
-                "resolution": { "type": "string", "enum": ["accept", "reject", "ignore"] }
+                "otherPersonID": { "type": ["integer", "null"], "description": "Schema 1.25.0. merge, notSamePerson and dismiss of a merge suggestion: the person merged into personID." },
+                "resolution": { "type": "string", "enum": ["accept", "reject", "ignore", "acceptAll", "merge", "notSamePerson", "dismiss", "split"] }
               }
             }
           }
@@ -503,7 +505,7 @@
             "undoFaceReview": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the suggestion is pending again. Refused when the face changed since. Replies faceReview with action undo.",
+              "description": "Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the suggestion is pending again. Refused when the face changed since. Replies faceReview with action undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any of them moved since), merge (the merged person comes back under its id with its name and faces), notSamePerson, dismiss and split (the faces return and the new person is removed); the suggestion is pending again.",
               "required": ["requestID", "operationID"],
               "properties": {
                 "requestID": { "$ref": "#/$defs/HealthRequestID" },
@@ -696,7 +698,63 @@
         "runnerUpPersonID": { "type": ["integer", "null"], "description": "The next closest person, when there is one." },
         "runnerUpName": { "type": ["string", "null"] },
         "runnerUpScore": { "type": ["number", "null"] },
-        "createdAt": { "type": "number", "description": "Unix seconds when the suggestion was made." }
+        "createdAt": { "type": "number", "description": "Unix seconds when the suggestion was made." },
+        "lowQuality": { "type": ["boolean", "null"], "description": "Schema 1.25.0. The face failed the per-face quality gate (small, blurred or turned away); such faces are only ever uncertain suggestions. Omitted means false." }
+      }
+    },
+    "FaceMergeSuggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Schema 1.25.0. Two existing people whose face centroids in the same model and processing space are close, who never share a photo, are not Unknown and have no different-people verdict.",
+      "required": ["personID", "otherPersonID", "score", "faceCount", "otherFaceCount", "createdAt"],
+      "properties": {
+        "personID": { "type": "integer", "description": "The person kept: named before unnamed, then more faces." },
+        "personName": { "type": ["string", "null"] },
+        "representativeFaceID": { "type": ["integer", "null"] },
+        "faceCount": { "type": "integer", "minimum": 0 },
+        "otherPersonID": { "type": "integer", "description": "The person merged in." },
+        "otherName": { "type": ["string", "null"] },
+        "otherRepresentativeFaceID": { "type": ["integer", "null"] },
+        "otherFaceCount": { "type": "integer", "minimum": 0 },
+        "score": { "type": "number", "description": "Cosine similarity of the two centroids." },
+        "createdAt": { "type": "number" }
+      }
+    },
+    "FaceSplitSuggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Schema 1.25.0. A person whose faces form two well-separated groups. keep stays with the person (the group with the representative face); split would move to a new unnamed person.",
+      "required": ["personID", "score", "keepCount", "splitCount", "keepFaceIDs", "splitFaceIDs", "createdAt"],
+      "properties": {
+        "personID": { "type": "integer" },
+        "personName": { "type": ["string", "null"] },
+        "representativeFaceID": { "type": ["integer", "null"] },
+        "score": { "type": "number", "description": "Cosine similarity of the two group centroids; lower is more separated." },
+        "keepCount": { "type": "integer", "minimum": 0 },
+        "splitCount": { "type": "integer", "minimum": 0 },
+        "keepFaceIDs": { "type": "array", "items": { "type": "integer" }, "maxItems": 8, "description": "Preview faces of the group that stays, best first." },
+        "splitFaceIDs": { "type": "array", "items": { "type": "integer" }, "maxItems": 8, "description": "Preview faces of the group that would move, best first." },
+        "createdAt": { "type": "number" }
+      }
+    },
+    "FaceRefreshStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Schema 1.25.0. The durable face refresh backlog for one face model and processing version (enqueueFaceRefresh). States: pending (not done yet), done, missing (the photo is gone from its library location), offline (the whole library location is unreachable, for example an unplugged drive), failed (decoding or embedding failed).",
+      "required": ["model", "processing", "outdated", "total", "done", "pending", "missing", "offline", "failed"],
+      "properties": {
+        "model": { "type": "string", "description": "The face model the backlog refreshes to; empty when no face model is installed." },
+        "processing": { "type": "string" },
+        "outdated": { "type": "integer", "minimum": 0, "description": "Faces whose stored vector is missing or from another model, processing or file version right now." },
+        "total": { "type": "integer", "minimum": 0 },
+        "done": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "offline": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "jobID": { "type": ["string", "null"], "description": "The faceRefresh catalog job, for pauseJob, resumeJob and cancelJob." },
+        "state": { "type": ["string", "null"], "description": "The job's state." },
+        "progress": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
       }
     },
     "FaceReviewPage": {
@@ -714,7 +772,14 @@
         "personID": { "type": ["integer", "null"], "description": "resolve: the person the face now belongs to (accept: the suggested person; ignore: the new Unknown person; reject: null)." },
         "total": { "type": "integer", "minimum": 0, "description": "Pending suggestions matching the list filter (for resolve and undo: all pending suggestions)." },
         "offset": { "type": "integer", "minimum": 0 },
-        "items": { "type": "array", "items": { "$ref": "#/$defs/FaceReviewItem" }, "description": "list: the page, best score first. Empty for resolve and undo." }
+        "items": { "type": "array", "items": { "$ref": "#/$defs/FaceReviewItem" }, "description": "list: the page, best score first. Empty for resolve and undo." },
+        "queue": { "type": ["string", "null"], "enum": ["faces", "merges", "splits", "refresh", null], "description": "Schema 1.25.0. list: the queue read. Omitted means faces." },
+        "merges": { "type": ["array", "null"], "items": { "$ref": "#/$defs/FaceMergeSuggestion" }, "maxItems": 200, "description": "Schema 1.25.0. list of merges: the page; total counts them." },
+        "splits": { "type": ["array", "null"], "items": { "$ref": "#/$defs/FaceSplitSuggestion" }, "maxItems": 200, "description": "Schema 1.25.0. list of splits: the page; total counts them." },
+        "refresh": { "anyOf": [{ "$ref": "#/$defs/FaceRefreshStatus" }, { "type": "null" }], "description": "Schema 1.25.0. list of refresh: the backlog." },
+        "otherPersonID": { "type": ["integer", "null"], "description": "Schema 1.25.0. resolve merge: the person merged in (now gone); resolve split: the new person." },
+        "acceptedFaceIDs": { "type": ["array", "null"], "items": { "type": "integer" }, "description": "Schema 1.25.0. resolve acceptAll: the faces assigned." },
+        "skippedFaceIDs": { "type": ["array", "null"], "items": { "type": "integer" }, "description": "Schema 1.25.0. resolve acceptAll: suggested faces left pending because their photo already has the person." }
       }
     },
     "RootsList": {
@@ -1422,7 +1487,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "Worker kind, including timelineSample, catalogIndex and takeGrouping. Resume requires a supported worker; catalogIndex permits explicit retry after failure or cancellation."
+          "description": "Worker kind, including timelineSample, catalogIndex, takeGrouping and faceRefresh (schema 1.25.0). Resume requires a supported worker; catalogIndex permits explicit retry after failure or cancellation."
         },
         "fileIDs": {
           "type": "array",
@@ -1653,9 +1718,10 @@
             "learnNames",
             "namePreferences",
             "resetNamePreferences",
-            "unlearnNames"
+            "unlearnNames",
+            "enqueueFaceRefresh"
           ],
-          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed. enqueueTakeGrouping (schema 1.21.0) queues the library-wide related-take job (kind takeGrouping, one job per library): it proposes groups of related tries from capture sessions, CLIP similarity and user-named people, never touches files, saved events or Keep all / Skip choices, and on a rerun reprocesses only capture sessions whose files were added, changed or removed. It replies with the job in jobs; a queued or running job is left as is, and a completed, cancelled, failed or paused one is queued again. pauseJob, resumeJob and cancelJob control it; an interrupted run comes back paused and resumes without redoing finished sessions. takeGroupProposals (schema 1.21.0) reads the stored proposals as takeGroups with relation and evidence, ranked like autoTakeGroups and limited by limit (default 100), and returns the job in jobs. Proposals overlapping a saved event are left out and Keep all / Skip choices apply as for autoTakeGroups. Schema 1.21.0 adds local learning of style corrections: learnNames records, for each nameEdits entry, the name the user applied after a proposeNames preview (naming is the style the preview used); the engine stores it with the unlearned name it would propose for that file, keeps the newest 200 and never sends them anywhere. namePreferences lists what the newest 50 show and resetNamePreferences forgets them all; both learnNames and these reply with hits of kind namePreference (fileID 0, path empty, evidenceID the preference: separator, case, leadingDate, trailingDate, dateFormat, people, words or dropWords, text its value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the number of stored samples. proposeNames applies them only when naming.learn is true; evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'), naming the preferences that changed that file's name. Schema 1.22.0 adds unlearnNames: after the user undoes renames that learnNames recorded, it deletes, for each nameEdits entry, the newest stored sample for that fileID whose applied name equals applied (proposed is not compared; an entry with no match is ignored), so a reversed rename stops teaching a style, then replies like namePreferences."
+          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Companions keep one stem: a RAW with its JPEG/HEIC, a Live Photo HEIC/JPEG with its MOV, and .xmp/.aae sidecars in the same folder come back together, catalogued members added even when not requested, leader first (the member with the best evidence, preferring the image), each with its own extension and evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that stem in the folder is in the batch, and when one member of a group fails it puts the others back and reports the whole group failed. enqueueTakeGrouping (schema 1.21.0) queues the library-wide related-take job (kind takeGrouping, one job per library): it proposes groups of related tries from capture sessions, CLIP similarity and user-named people, never touches files, saved events or Keep all / Skip choices, and on a rerun reprocesses only capture sessions whose files were added, changed or removed. It replies with the job in jobs; a queued or running job is left as is, and a completed, cancelled, failed or paused one is queued again. pauseJob, resumeJob and cancelJob control it; an interrupted run comes back paused and resumes without redoing finished sessions. takeGroupProposals (schema 1.21.0) reads the stored proposals as takeGroups with relation and evidence, ranked like autoTakeGroups and limited by limit (default 100), and returns the job in jobs. Proposals overlapping a saved event are left out and Keep all / Skip choices apply as for autoTakeGroups. Schema 1.21.0 adds local learning of style corrections: learnNames records, for each nameEdits entry, the name the user applied after a proposeNames preview (naming is the style the preview used); the engine stores it with the unlearned name it would propose for that file, keeps the newest 200 and never sends them anywhere. namePreferences lists what the newest 50 show and resetNamePreferences forgets them all; both learnNames and these reply with hits of kind namePreference (fileID 0, path empty, evidenceID the preference: separator, case, leadingDate, trailingDate, dateFormat, people, words or dropWords, text its value, one hit per dropped word) followed by one hit of kind nameSamples whose text is the number of stored samples. proposeNames applies them only when naming.learn is true; evidenceID then carries '|learned:<preferences>' after the reason (before any '|group:'), naming the preferences that changed that file's name. Schema 1.22.0 adds unlearnNames: after the user undoes renames that learnNames recorded, it deletes, for each nameEdits entry, the newest stored sample for that fileID whose applied name equals applied (proposed is not compared; an entry with no match is ignored), so a reversed rename stops teaching a style, then replies like namePreferences. enqueueFaceRefresh (schema 1.25.0) queues the durable face refresh job (kind faceRefresh, id face-refresh, one per library) for the engine's current face model and processing version: faces whose stored vector is missing or from another model, processing or file version join that version's backlog, and missing, offline and failed items are tried again. The job re-embeds faces in face order, never changes People, records each face as done, missing (the photo is gone), offline (its library location is unreachable) or failed, and reports progress in jobs; listFaceReview with queue refresh reads the counts. pauseJob, resumeJob and cancelJob control it, and an interrupted run comes back paused and resumes where it stopped. It replies with the job in jobs, or status error when no face model is installed."
         },
         "query": {
           "type": "string",

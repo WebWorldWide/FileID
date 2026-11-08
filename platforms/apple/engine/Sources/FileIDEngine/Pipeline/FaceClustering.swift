@@ -54,8 +54,9 @@ public enum FaceClustering {
         let arcFace: Data
         let quality: Double
         /// Failed the per-face quality gate (pose, size, capture quality).
-        /// Held faces never form or bridge a person; they may only join an
-        /// established one through `attachHeldFaces`.
+        /// Held faces never form or bridge a person; in a pass they may only join
+        /// an established one through `attachHeldFaces`. Once the space has
+        /// people, new held faces skip the pass and go to review instead.
         var held: Bool = false
     }
 
@@ -1118,7 +1119,7 @@ public enum FaceClustering {
         // fragmentation (1-photo clusters whose embeddings happen to land
         // just below the kNN threshold). Cheap insurance.
         let autoMergedSources = await tightPairAutoMerge(database: database, expectedSpace: selectedSpace)
-        let reviewQueued = await FaceReview.finish(database: database, pool: rows.filter { !$0.held }.map(\.id), holdout: reviewHoldout,
+        let reviewQueued = await FaceReview.finish(database: database, pool: rows.map(\.id), holdout: reviewHoldout,
                                                    model: selectedSpace.model, processing: selectedSpace.processing)
 
         let finalPersonCount = await currentPersonCount(database: database)
@@ -1776,7 +1777,7 @@ public enum FaceClustering {
     private static let extractionConcurrency = 4
 
     /// One face_prints row that's missing its ArcFace embedding.
-    fileprivate typealias PendingRow = FaceAnalysisCache.Input
+    typealias PendingRow = FaceAnalysisCache.Input
 
     static func extractPendingPrints(
         database: Database, sink: IPCSink,
@@ -1923,7 +1924,7 @@ public enum FaceClustering {
     /// Open one image, crop each requested face, run ArcFace on each crop.
     /// Always saves a face crop JPEG for downstream VLM use (idempotent
     /// on disk).
-    private static func extractOneFile(
+    static func extractOneFile(
         path: String, rows: [PendingRow]
     ) async -> [PendingExtract] {
         return await withCheckedContinuation { (cont: CheckedContinuation<[PendingExtract], Never>) in
@@ -1970,7 +1971,7 @@ public enum FaceClustering {
         }
     }
 
-    fileprivate struct PendingExtract: Sendable {
+    struct PendingExtract: Sendable {
         let input: PendingRow
         let arcFace: Data
         let jpeg: Data?
@@ -2071,7 +2072,7 @@ public enum FaceClustering {
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
-    private static func saveFaceCrop(faceID: Int64, jpeg: Data) {
+    static func saveFaceCrop(faceID: Int64, jpeg: Data) {
         let url = faceCropURL(faceID: faceID)
         guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

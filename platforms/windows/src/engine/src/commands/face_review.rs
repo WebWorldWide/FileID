@@ -10,9 +10,13 @@ use crate::ipc::{
 type Writer = std::sync::Arc<parking_lot::Mutex<Connection>>;
 
 const PENDING: &str = "'suggested','uncertain','ambiguous','rejected'";
-const STALE: &str = "This suggestion changed. Refresh the review list.";
+pub(crate) const STALE: &str = "This suggestion changed. Refresh the review list.";
 const MOVED: &str = "This face was moved since, so nothing changed.";
-const DISPLAY_P: &str = "COALESCE(NULLIF(TRIM(p.name),''), NULLIF(TRIM(COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'')),''))";
+pub(crate) const MOVED_MANY: &str = "Some of these faces were moved since, so nothing changed.";
+pub(crate) const NOTHING_TO_UNDO: &str = "There is nothing to undo for this suggestion.";
+pub(crate) const NO_ANCHOR: &str = "This person has no face to compare with.";
+const RESOLUTIONS: &str = "Choose accept, reject, ignore, acceptAll, merge, notSamePerson, dismiss or split.";
+pub(crate) const DISPLAY_P: &str = "COALESCE(NULLIF(TRIM(p.name),''), NULLIF(TRIM(COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'')),''))";
 const DISPLAY_RP: &str = "COALESCE(NULLIF(TRIM(rp.name),''), NULLIF(TRIM(COALESCE(rp.first_name,'') || ' ' || COALESCE(rp.last_name,'')),''))";
 const PENDING_WHERE: &str = "fp.person_id IS NULL AND c.namespace = fp.embedding_model || '|' || fp.processing_version";
 
@@ -50,18 +54,18 @@ fn env_cos(key: &str, default: f64) -> f64 {
         .map_or(default, |value| value.clamp(0.0, 1.0))
 }
 
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
-fn round4(value: f64) -> f64 {
+pub(crate) fn round4(value: f64) -> f64 {
     (value * 10000.0).round() / 10000.0
 }
 
-fn json_ids<'a>(ids: impl IntoIterator<Item = &'a i64>) -> String {
+pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a i64>) -> String {
     let mut sorted: Vec<i64> = ids.into_iter().copied().collect();
     sorted.sort_unstable();
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".into())
@@ -85,7 +89,7 @@ pub(crate) fn unit_vector(blob: &[u8]) -> Option<Vec<f32>> {
     Some(vector)
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f64 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f64 {
     f64::from(a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>())
 }
 
@@ -234,7 +238,7 @@ fn constraint_owners(conn: &Connection, file: i64, bbox: &str) -> rusqlite::Resu
     statement.query_map(params![file, bbox], |row| row.get(0))?.collect()
 }
 
-fn owner_of(conn: &Connection, legacy: Option<i64>, file: Option<i64>, bbox: Option<&str>) -> rusqlite::Result<Option<i64>> {
+pub(crate) fn owner_of(conn: &Connection, legacy: Option<i64>, file: Option<i64>, bbox: Option<&str>) -> rusqlite::Result<Option<i64>> {
     if let (Some(file), Some(bbox)) = (file, bbox) {
         let found: Option<Option<i64>> = conn
             .query_row(
@@ -408,7 +412,7 @@ pub(crate) fn assess(
     Ok(stats)
 }
 
-fn upsert_outcome(conn: &Connection, face: i64, namespace: &str, outcome: &str, at: f64) -> rusqlite::Result<()> {
+pub(crate) fn upsert_outcome(conn: &Connection, face: i64, namespace: &str, outcome: &str, at: f64) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(?1,?2,?3,?4) \
          ON CONFLICT(face_id) DO UPDATE SET namespace=excluded.namespace,outcome=excluded.outcome,assessed_at=excluded.assessed_at",
@@ -417,7 +421,7 @@ fn upsert_outcome(conn: &Connection, face: i64, namespace: &str, outcome: &str, 
     Ok(())
 }
 
-fn face_namespace(conn: &Connection, face: i64) -> rusqlite::Result<String> {
+pub(crate) fn face_namespace(conn: &Connection, face: i64) -> rusqlite::Result<String> {
     conn.query_row(
         "SELECT COALESCE(embedding_model,'') || '|' || COALESCE(processing_version,'') FROM face_prints WHERE id=?1",
         [face],
@@ -455,7 +459,7 @@ pub(crate) fn record_reassignment(conn: &Connection, face: i64, previous: Option
     upsert_outcome(conn, face, &face_namespace(conn, face)?, "manual", at)
 }
 
-fn page(request_id: &str, action: &str, status: &str) -> FaceReviewPage {
+pub(crate) fn page(request_id: &str, action: &str, status: &str) -> FaceReviewPage {
     FaceReviewPage {
         request_id: request_id.to_string(),
         action: action.to_string(),
@@ -467,10 +471,17 @@ fn page(request_id: &str, action: &str, status: &str) -> FaceReviewPage {
         total: 0,
         offset: 0,
         items: Vec::new(),
+        queue: None,
+        merges: None,
+        splits: None,
+        refresh: None,
+        other_person_id: None,
+        accepted_face_ids: None,
+        skipped_face_ids: None,
     }
 }
 
-fn refused(request_id: &str, action: &str, message: &str) -> FaceReviewPage {
+pub(crate) fn refused(request_id: &str, action: &str, message: &str) -> FaceReviewPage {
     FaceReviewPage { message: Some(message.to_string()), ..page(request_id, action, "refused") }
 }
 
@@ -482,13 +493,31 @@ pub(crate) fn valid_request_id(id: &str) -> bool {
     (1..=128).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
+pub(crate) fn page_bounds(payload: &ListFaceReviewPayload) -> Result<(i64, i64), FaceReviewPage> {
     let offset = payload.offset.unwrap_or(0);
     let limit = payload.limit.unwrap_or(50);
     if offset < 0 || !(1..=200).contains(&limit) {
         let reply = refused(&payload.request_id, "list", "Ask for 1 to 200 suggestions from offset 0 or later.");
-        return Ok(FaceReviewPage { offset, ..reply });
+        return Err(FaceReviewPage { offset, ..reply });
     }
+    Ok((offset, limit))
+}
+
+pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
+    match payload.queue.as_deref() {
+        None | Some("faces") => list_faces(conn, payload),
+        Some("merges") => super::face_queues::list_merges(conn, payload),
+        Some("splits") => super::face_queues::list_splits(conn, payload),
+        Some("refresh") => super::face_refresh::status_page(conn, &payload.request_id),
+        Some(_) => Ok(refused(&payload.request_id, "list", "Choose the faces, merges, splits or refresh queue.")),
+    }
+}
+
+fn list_faces(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
+    let (offset, limit) = match page_bounds(payload) {
+        Ok(bounds) => bounds,
+        Err(reply) => return Ok(reply),
+    };
     let filter = format!("{PENDING_WHERE} AND (?1 IS NULL OR c.person_id=?1)");
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id JOIN files f ON f.id=fp.file_id JOIN persons p ON p.id=c.person_id WHERE {filter}"),
@@ -497,7 +526,7 @@ pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqli
     )?;
     let sql = format!(
         "SELECT c.face_id, fp.file_id, f.path_text, fp.bbox, c.person_id, {DISPLAY_P}, p.representative_face_id, c.score, c.reason, \
-                c.runner_up_person_id, {DISPLAY_RP}, c.runner_up_score, c.created_at \
+                c.runner_up_person_id, {DISPLAY_RP}, c.runner_up_score, c.created_at, COALESCE(fp.excluded,0) \
          FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id JOIN files f ON f.id=fp.file_id \
          JOIN persons p ON p.id=c.person_id LEFT JOIN persons rp ON rp.id=c.runner_up_person_id \
          WHERE {filter} ORDER BY c.score DESC, c.face_id ASC LIMIT ?2 OFFSET ?3"
@@ -519,6 +548,7 @@ pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqli
                 runner_up_name: row.get(10)?,
                 runner_up_score: row.get(11)?,
                 created_at: row.get(12)?,
+                low_quality: (row.get::<_, i64>(13)? != 0).then_some(true),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -535,7 +565,7 @@ struct Pending {
     created: f64,
 }
 
-fn recount(conn: &Connection, person: i64) -> rusqlite::Result<()> {
+pub(crate) fn recount(conn: &Connection, person: i64) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
          representative_face_id=CASE WHEN representative_face_id IS NOT NULL AND EXISTS(SELECT 1 FROM face_prints WHERE id=persons.representative_face_id AND person_id=?1) \
@@ -550,17 +580,25 @@ fn recount(conn: &Connection, person: i64) -> rusqlite::Result<()> {
 
 fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
     let request = payload.request_id.as_str();
-    let resolution = payload.resolution.as_str();
-    if !matches!(resolution, "accept" | "reject" | "ignore") {
-        return Ok(refused(request, "resolve", "Choose accept, reject or ignore."));
+    match payload.resolution.as_str() {
+        "accept" | "reject" | "ignore" => match payload.face_id {
+            Some(face) => resolve_face_in(conn, request, face, payload.person_id, payload.resolution.as_str()),
+            None => Ok(refused(request, "resolve", "Choose a face to resolve.")),
+        },
+        "acceptAll" => accept_all_in(conn, request, payload.person_id),
+        "merge" | "notSamePerson" | "dismiss" | "split" => super::face_queues::resolve_in(conn, payload),
+        _ => Ok(refused(request, "resolve", RESOLUTIONS)),
     }
+}
+
+fn resolve_face_in(conn: &Connection, request: &str, face_id: i64, person_id: i64, resolution: &str) -> rusqlite::Result<FaceReviewPage> {
     let row: Option<(Pending, i64, String, Option<i64>, Option<String>)> = conn
         .query_row(
             "SELECT c.person_id, c.score, c.reason, c.runner_up_person_id, c.runner_up_score, c.namespace, c.created_at, \
                     fp.file_id, fp.bbox, fp.person_id, a.outcome \
              FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id \
              LEFT JOIN face_assignment_assessed a ON a.face_id=c.face_id WHERE c.face_id=?1",
-            [payload.face_id],
+            [face_id],
             |row| {
                 Ok((
                     Pending {
@@ -583,7 +621,7 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
     let Some((pending, file, bbox, owner, outcome)) = row else {
         return Ok(refused(request, "resolve", STALE));
     };
-    if pending.person != payload.person_id || owner.is_some() {
+    if pending.person != person_id || owner.is_some() {
         return Ok(refused(request, "resolve", STALE));
     }
     let person = pending.person;
@@ -594,17 +632,17 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
         "accept" => {
             let present: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM face_prints WHERE file_id=?1 AND person_id=?2 AND id<>?3)",
-                params![file, person, payload.face_id],
+                params![file, person, face_id],
                 |row| row.get(0),
             )?;
             if present {
                 return Ok(refused(request, "resolve", "That person is already in this photo."));
             }
-            conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2", params![person, payload.face_id])?;
+            conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2", params![person, face_id])?;
             conn.execute(
                 "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
                  representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1",
-                params![person, payload.face_id],
+                params![person, face_id],
             )?;
             new_owner = Some(person);
         }
@@ -635,23 +673,23 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
         _ => {
             conn.execute(
                 "INSERT INTO persons(name,is_unknown,created_at,representative_face_id,file_count) VALUES(NULL,1,?1,?2,1)",
-                params![at, payload.face_id],
+                params![at, face_id],
             )?;
             let unknown = conn.last_insert_rowid();
-            conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2", params![unknown, payload.face_id])?;
+            conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2", params![unknown, face_id])?;
             new_owner = Some(unknown);
         }
     }
-    conn.execute("DELETE FROM face_review_candidates WHERE face_id=?1", [payload.face_id])?;
+    conn.execute("DELETE FROM face_review_candidates WHERE face_id=?1", [face_id])?;
     let final_outcome = match resolution {
         "accept" => "accepted",
         "reject" => "rejected",
         _ => "ignored",
     };
-    upsert_outcome(conn, payload.face_id, &face_namespace(conn, payload.face_id)?, final_outcome, at)?;
+    upsert_outcome(conn, face_id, &face_namespace(conn, face_id)?, final_outcome, at)?;
     let id = uuid::Uuid::new_v4().to_string();
     let before = serde_json::json!({
-        "faceID": payload.face_id,
+        "faceID": face_id,
         "outcome": outcome,
         "candidate": {
             "personID": pending.person,
@@ -665,14 +703,14 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
     })
     .to_string();
     let after = serde_json::json!({
-        "faceID": payload.face_id,
+        "faceID": face_id,
         "resolution": resolution,
         "personID": new_owner,
         "constraintID": constraint.0,
         "constraintCreated": constraint.1,
     })
     .to_string();
-    let plan = serde_json::json!({"type": "faceReview", "faceID": payload.face_id, "resolution": resolution}).to_string();
+    let plan = serde_json::json!({"type": "faceReview", "faceID": face_id, "resolution": resolution}).to_string();
     conn.execute(
         "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?1,?2,'face_review',?3,?4,?5)",
         params![id, file, before, after, at],
@@ -683,7 +721,7 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
     )?;
     Ok(FaceReviewPage {
         operation_id: Some(id),
-        face_id: Some(payload.face_id),
+        face_id: Some(face_id),
         person_id: new_owner,
         total: pending_count(conn)?,
         ..page(request, "resolve", "ok")
@@ -692,22 +730,37 @@ fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite
 
 fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
     let request = payload.request_id.as_str();
-    let found: Option<(String, String)> = conn
+    let found: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id \
-             WHERE o.id=?1 AND o.state='completed' AND c.kind='face_review'",
+            "SELECT c.kind, c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id \
+             WHERE o.id=?1 AND o.state='completed' \
+               AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review')",
             [&payload.operation_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let nothing = "There is nothing to undo for this suggestion.";
-    let Some((before, after)) = found else { return Ok(refused(request, "undo", nothing)) };
+    let nothing = NOTHING_TO_UNDO;
+    let Some((kind, before, after)) = found else { return Ok(refused(request, "undo", nothing)) };
     let (Ok(before), Ok(after)) = (
         serde_json::from_str::<serde_json::Value>(&before),
         serde_json::from_str::<serde_json::Value>(&after),
     ) else {
         return Ok(refused(request, "undo", nothing));
     };
+    let reply = match kind.as_str() {
+        "face_review_bulk" => undo_accept_all_in(conn, request, &before, &after)?,
+        "face_merge_review" | "face_split_review" => super::face_queues::undo_in(conn, request, &before, &after)?,
+        _ => undo_face_in(conn, request, &before, &after)?,
+    };
+    if reply.status == "ok" {
+        conn.execute("UPDATE catalog_operations SET state='undone' WHERE id=?1", [&payload.operation_id])?;
+        return Ok(FaceReviewPage { operation_id: Some(payload.operation_id.clone()), ..reply });
+    }
+    Ok(reply)
+}
+
+fn undo_face_in(conn: &Connection, request: &str, before: &serde_json::Value, after: &serde_json::Value) -> rusqlite::Result<FaceReviewPage> {
+    let nothing = NOTHING_TO_UNDO;
     let Some(face) = after["faceID"].as_i64() else { return Ok(refused(request, "undo", nothing)) };
     let owner: Option<Option<i64>> = conn
         .query_row("SELECT person_id FROM face_prints WHERE id=?1", [face], |row| row.get(0))
@@ -747,7 +800,11 @@ fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Resu
         }
         _ => return Ok(refused(request, "undo", nothing)),
     }
-    let candidate = &before["candidate"];
+    restore_candidate(conn, face, &before["candidate"])?;
+    Ok(FaceReviewPage { face_id: Some(face), total: pending_count(conn)?, ..page(request, "undo", "ok") })
+}
+
+fn restore_candidate(conn: &Connection, face: i64, candidate: &serde_json::Value) -> rusqlite::Result<()> {
     let reason = candidate["reason"].as_str().unwrap_or("suggested");
     let namespace = candidate["namespace"].as_str().unwrap_or_default();
     if let Some(person) = candidate["personID"].as_i64() {
@@ -772,11 +829,142 @@ fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Resu
             )?;
         }
     }
-    upsert_outcome(conn, face, namespace, reason, now())?;
-    conn.execute("UPDATE catalog_operations SET state='undone' WHERE id=?1", [&payload.operation_id])?;
+    upsert_outcome(conn, face, namespace, reason, now())
+}
+
+fn candidate_json(conn: &Connection, face: i64) -> rusqlite::Result<Option<(i64, serde_json::Value)>> {
+    conn.query_row(
+        "SELECT fp.file_id, c.person_id, c.score, c.reason, c.runner_up_person_id, c.runner_up_score, c.namespace, c.created_at, a.outcome \
+         FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id \
+         LEFT JOIN face_assignment_assessed a ON a.face_id=c.face_id WHERE c.face_id=?1",
+        [face],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                serde_json::json!({
+                    "faceID": face,
+                    "outcome": row.get::<_, Option<String>>(8)?,
+                    "candidate": {
+                        "personID": row.get::<_, i64>(1)?,
+                        "score": row.get::<_, f64>(2)?,
+                        "reason": row.get::<_, String>(3)?,
+                        "runnerUpPersonID": row.get::<_, Option<i64>>(4)?,
+                        "runnerUpScore": row.get::<_, Option<f64>>(5)?,
+                        "namespace": row.get::<_, String>(6)?,
+                        "createdAt": row.get::<_, f64>(7)?,
+                    },
+                }),
+            ))
+        },
+    )
+    .optional()
+}
+
+const NOTHING_TO_ACCEPT: &str = "Nothing to accept for this person.";
+const ALL_IN_PHOTO: &str = "Every suggested face is in a photo that already has this person, so nothing changed.";
+
+fn accept_all_in(conn: &Connection, request: &str, person: i64) -> rusqlite::Result<FaceReviewPage> {
+    let faces: Vec<(i64, i64)> = {
+        let mut statement = conn.prepare(&format!(
+            "SELECT c.face_id, fp.file_id FROM face_review_candidates c JOIN face_prints fp ON fp.id=c.face_id \
+             JOIN persons p ON p.id=c.person_id WHERE {PENDING_WHERE} AND c.person_id=?1 AND c.reason='suggested' \
+             ORDER BY c.score DESC, c.face_id ASC"
+        ))?;
+        statement.query_map([person], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+    };
+    if faces.is_empty() {
+        return Ok(FaceReviewPage { person_id: Some(person), ..refused(request, "resolve", NOTHING_TO_ACCEPT) });
+    }
+    let at = now();
+    let mut accepted = Vec::new();
+    let mut skipped = Vec::new();
+    let mut entries = Vec::new();
+    let mut files: HashSet<i64> = HashSet::new();
+    let mut first_file = None;
+    for (face, file) in faces {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM face_prints WHERE file_id=?1 AND person_id=?2 AND id<>?3)",
+            params![file, person, face],
+            |row| row.get(0),
+        )?;
+        if present || files.contains(&file) {
+            skipped.push(face);
+            continue;
+        }
+        let Some((_, entry)) = candidate_json(conn, face)? else { continue };
+        conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2 AND person_id IS NULL", params![person, face])?;
+        conn.execute("DELETE FROM face_review_candidates WHERE face_id=?1", [face])?;
+        upsert_outcome(conn, face, &face_namespace(conn, face)?, "accepted", at)?;
+        files.insert(file);
+        first_file.get_or_insert(file);
+        accepted.push(face);
+        entries.push(entry);
+    }
+    if accepted.is_empty() {
+        return Ok(FaceReviewPage {
+            person_id: Some(person),
+            skipped_face_ids: Some(skipped),
+            accepted_face_ids: Some(Vec::new()),
+            ..refused(request, "resolve", ALL_IN_PHOTO)
+        });
+    }
+    conn.execute(
+        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
+         representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1",
+        params![person, accepted[0]],
+    )?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let before = serde_json::json!({"personID": person, "faces": entries}).to_string();
+    let after = serde_json::json!({
+        "personID": person,
+        "resolution": "acceptAll",
+        "acceptedFaceIDs": accepted,
+        "skippedFaceIDs": skipped,
+    })
+    .to_string();
+    let plan = serde_json::json!({"type": "faceReviewBulk", "personID": person, "resolution": "acceptAll", "count": accepted.len()}).to_string();
+    conn.execute(
+        "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?1,?2,'face_review_bulk',?3,?4,?5)",
+        params![id, first_file, before, after, at],
+    )?;
+    conn.execute(
+        "INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,?3,'completed',?4)",
+        params![id, plan, before, at],
+    )?;
     Ok(FaceReviewPage {
-        operation_id: Some(payload.operation_id.clone()),
-        face_id: Some(face),
+        operation_id: Some(id),
+        person_id: Some(person),
+        accepted_face_ids: Some(accepted),
+        skipped_face_ids: Some(skipped),
+        total: pending_count(conn)?,
+        ..page(request, "resolve", "ok")
+    })
+}
+
+fn undo_accept_all_in(conn: &Connection, request: &str, before: &serde_json::Value, after: &serde_json::Value) -> rusqlite::Result<FaceReviewPage> {
+    let (Some(person), Some(accepted)) = (after["personID"].as_i64(), after["acceptedFaceIDs"].as_array()) else {
+        return Ok(refused(request, "undo", NOTHING_TO_UNDO));
+    };
+    let faces: Vec<i64> = accepted.iter().filter_map(serde_json::Value::as_i64).collect();
+    for face in &faces {
+        let owner: Option<Option<i64>> =
+            conn.query_row("SELECT person_id FROM face_prints WHERE id=?1", [face], |row| row.get(0)).optional()?;
+        if owner.flatten() != Some(person) {
+            return Ok(refused(request, "undo", MOVED_MANY));
+        }
+    }
+    for face in &faces {
+        conn.execute("UPDATE face_prints SET person_id=NULL WHERE id=?1", [face])?;
+    }
+    recount(conn, person)?;
+    for entry in before["faces"].as_array().into_iter().flatten() {
+        if let Some(face) = entry["faceID"].as_i64() {
+            restore_candidate(conn, face, &entry["candidate"])?;
+        }
+    }
+    Ok(FaceReviewPage {
+        person_id: Some(person),
+        accepted_face_ids: Some(faces),
         total: pending_count(conn)?,
         ..page(request, "undo", "ok")
     })
@@ -809,7 +997,12 @@ fn with_pending_total(conn: &Connection, reply: FaceReviewPage) -> rusqlite::Res
     if reply.status == "ok" {
         return Ok(reply);
     }
-    Ok(FaceReviewPage { total: pending_count(conn)?, ..reply })
+    let total = match reply.queue.as_deref() {
+        Some("merges") => super::face_queues::merge_count(conn)?,
+        Some("splits") => super::face_queues::split_count(conn)?,
+        _ => pending_count(conn)?,
+    };
+    Ok(FaceReviewPage { total, ..reply })
 }
 
 pub(crate) fn rejection(request_id: &str, action: &str) -> IpcEvent {

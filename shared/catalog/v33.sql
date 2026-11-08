@@ -1,0 +1,7 @@
+CREATE TABLE face_merge_suggestions (person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,other_person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,score REAL NOT NULL,namespace TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(person_id,other_person_id));
+CREATE INDEX face_merge_suggestions_other ON face_merge_suggestions(other_person_id);
+CREATE TABLE face_split_suggestions (person_id INTEGER PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,score REAL NOT NULL,keep_json TEXT NOT NULL,split_json TEXT NOT NULL,namespace TEXT NOT NULL,created_at REAL NOT NULL);
+CREATE TABLE face_queue_dismissals (id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL CHECK(kind IN ('merge','split')),file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,bbox TEXT NOT NULL,other_file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,other_bbox TEXT,created_at REAL NOT NULL);
+CREATE UNIQUE INDEX face_queue_dismissals_key ON face_queue_dismissals(kind,file_id,bbox,COALESCE(other_file_id,0),COALESCE(other_bbox,''));
+CREATE TABLE face_refresh_backlog (face_id INTEGER NOT NULL REFERENCES face_prints(id) ON DELETE CASCADE,embedding_model TEXT NOT NULL,processing_version TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','done','missing','offline','failed')),attempts INTEGER NOT NULL DEFAULT 0,reason TEXT,updated_at REAL NOT NULL,PRIMARY KEY(face_id,embedding_model,processing_version));
+CREATE INDEX face_refresh_backlog_state ON face_refresh_backlog(embedding_model,processing_version,state,face_id);

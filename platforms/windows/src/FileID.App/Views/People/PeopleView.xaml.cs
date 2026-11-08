@@ -84,6 +84,11 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun("PeopleView.OnEngineClientChanged", () =>
         {
             if (_unloaded) return;
+            if (e.PropertyName == nameof(FileID.ViewModels.EngineClient.LastCatalogResponse))
+            {
+                OnFaceRefreshEngineChanged(e);
+                return;
+            }
             if (e.PropertyName != nameof(FileID.ViewModels.EngineClient.LastFaceClustering)) return;
             DebugLog.Debug($"[ENGINE-SUB:PeopleView] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(async () =>
@@ -93,6 +98,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
                 if (!_unloaded) OnPropertyChanged(nameof(StatusText));
                 await RefreshReviewCountAsync();
+                await RefreshFaceRefreshStatusAsync();
             });
         });
 
@@ -104,15 +110,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         UpdateHiddenUnknownsFooter();
         RefreshContinueToDeepAnalyzeBanner();
         await RefreshReviewCountAsync();
+        await RefreshFaceRefreshStatusAsync();
     }
+
+    private static readonly string[] ReviewQueues = { FaceQueuePolicy.Merges, FaceQueuePolicy.Splits };
 
     private async Task RefreshReviewCountAsync()
     {
         if (_unloaded) return;
         try
         {
+            var totals = new FaceQueueTotals();
             var page = await FileID.ViewModels.EngineClient.Instance.ListFaceReviewAsync(null, 0, 1);
-            if (!_unloaded && FaceReviewPolicy.IsOk(page)) RenderReviewCount(page.Total);
+            if (_unloaded || !FaceReviewPolicy.IsOk(page)) return;
+            totals.Set(FaceQueuePolicy.Faces, page.Total);
+            foreach (var queue in ReviewQueues)
+            {
+                var counted = await FileID.ViewModels.EngineClient.Instance.ListFaceReviewAsync(null, 0, 1, queue);
+                if (_unloaded) return;
+                if (FaceReviewPolicy.IsOk(counted)) totals.Set(queue, counted.Total);
+            }
+            RenderReviewCount(totals.Sum);
         }
         catch (Exception ex)
         {
