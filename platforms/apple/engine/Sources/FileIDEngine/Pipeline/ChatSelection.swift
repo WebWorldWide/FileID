@@ -486,7 +486,7 @@ enum ChatSelection {
 
     static func ask(_ image: CIImage, prompt: String) async -> (Verdict, String)? {
         do {
-            return parseVerdict(try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: checkTokens).output)
+            return parseVerdict(try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: checkTokens, imageSide: checkSide).output)
         } catch {
             JSONLog.shared.warn(ev: "chat_selection_check_failed", error: "\(error)")
             return nil
