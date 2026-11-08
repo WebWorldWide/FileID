@@ -176,6 +176,8 @@ Baseline lines: shared Rust engine 84k (30k tests), WinUI app 38k, Swift engine 
 
 - [ ] Make selection questions exact: precision is 0.27–0.42 with Qwen3-VL 2B. Rerun with 4B/8B (isolated model env), split compound criteria into separate checks, and calibrate per-criterion verdicts on labelled questions. Rust video frames for selection checks (currently unsure); Windows GPU PC run with a Qwen3-VL GGUF through the resident server; on-screen checks of selection, chip and results strip in all three apps.
 
+- [ ] Owner decision: `volumeFreeBytes` in the digest-locked `StreamingDownload.swift` uses `volumeAvailableCapacityForImportantUsage`, which macOS sometimes reports as 0 with space free (a hosted CI runner failed `preflightDiskSpace` on PR #303 with available 0; it passed on the previous commit). Fall back to `volumeAvailableCapacity` when it reports 0, so a real model download isn't refused for "insufficient disk space".
+
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 
 1. **Linux inference runtime** (2026-11-07): packages build and ship a pinned CPU llama-server (b9254, outbound HTTP patched out). Left: confirm the Flatpak and `llama-runtime` CI jobs pass; a native AppImage build (RPATHs, start-up); Deep Analyze on 10 images from the Flatpak on native Linux hardware; aarch64 in CI; add the runtime to the AUR/Nix packages at the next release cut; decide on Vulkan after a real-GPU check, with a CPU fallback if the Vulkan backend fails.
