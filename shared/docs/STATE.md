@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-08 — People review queues: gated faces to review, accept all, merges and splits, durable face refresh (catalog v33, IPC 1.25)
+
+- **Both engines** (agent; no locked files): new faces that fail the quality gate go to review as uncertain suggestions once a face space has people, instead of Swift's attach stage (labelled set: 0 new faces assigned without review, was 11; recall 0.831 / 0.797 tune / held-out, was 0.775 / 0.719; precision unchanged). "Accept all" accepts a person's suggested faces in one undoable operation and skips photos that already have the person. Durable merge and split suggestion queues are rebuilt by each clustering run, with Merge / Not the same person / Dismiss and Split into two / Dismiss, all journaled and undoable. A model-separated face refresh backlog (pending / done / missing / offline / failed) runs as the `face-refresh` catalog job with pause/resume/cancel and comes back paused after a restart; the Rust engine has a refresh worker again.
+- **All three apps:** Accept all suggested in the per-person list; Faces / Merges / Splits in the review sheet; a face-update row in the People header.
+- **Measured:** merge suggestions are weak, 1 right of 8 at cosine 0.55 (lookalike children); each "Not the same person" stores a verdict that protects later clustering. No split suggestions at the defaults.
+- **Checks:** Rust 1,232, GTK 221, CLI 62, TUI 99, C# IPC 70, WinUI logic 63 (scratch build), WinUI source contracts 37, Swift 929 serial; conformance Rust 58 / Swift 66, including the cross-engine queue round trip. Not checked on screen; WinUI not built (Mac host).
+
 ## 2026-11-08 — Exact selection answers: confirmed yeses; 2B checks when installed
 
 - **Both engines** (agent; no locked files, no IPC change): every yes from the selection check is confirmed by a second question about the whole request and each part. Requests are split into parts by deterministic shared rules (`shared/test-corpus/chat-selection.json`). Small models are asked whether it is the photo's main subject; 4B and up whether it is clearly shown, counting numbers. A no rules the photo out; an unclear reply makes it "Not sure". Checks prefer an installed Qwen3-VL 2B (it measured better than 4B on held-out questions, in half the time), else the best installed vision model that fits free memory. Rust uses the same order with the catalog 2B GGUF, then 8B, then 4B (not yet run against a real GGUF).

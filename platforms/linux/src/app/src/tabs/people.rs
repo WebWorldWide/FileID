@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
+use super::face_queues::{self, Queue};
 use super::face_review;
 use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
 use fileid_engine::ipc::{
@@ -395,6 +396,8 @@ struct Ui {
     footer_label: gtk::Label,
     footer_button: gtk::Button,
     review_button: gtk::Button,
+    review_counts: Cell<[i64; 3]>,
+    refresh_bar: Rc<face_queues::RefreshBar>,
     anchor: gtk::Box,
 }
 
@@ -454,7 +457,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .build();
+    let refresh_bar = face_queues::RefreshBar::new(engine.clone());
     header.append(&title_row);
+    header.append(&refresh_bar.root);
     header.append(&status_label);
     header.append(&bulk_strip);
 
@@ -575,6 +580,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         footer_label: footer_label.clone(),
         footer_button: footer_button.clone(),
         review_button: review_button.clone(),
+        review_counts: Cell::new([0; 3]),
+        refresh_bar,
         anchor: root.clone(),
     });
     {
@@ -719,6 +726,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         root.connect_map(move |_| {
             reload(&ui);
             refresh_review_count(&ui);
+            ui.refresh_bar.request();
         });
     }
     root.upcast()
@@ -1267,7 +1275,11 @@ fn set_status(ui: &Rc<Ui>, msg: String) {
 
 // ── Face review ───────────────────────────────────────────────────────────────
 
-fn show_review_count(ui: &Ui, waiting: i64) {
+fn show_review_count(ui: &Ui, slot: usize, count: i64) {
+    let mut counts = ui.review_counts.get();
+    counts[slot] = count;
+    ui.review_counts.set(counts);
+    let waiting = counts.iter().sum::<i64>();
     ui.review_button.set_label(&face_review::button_text(waiting));
     ui.review_button.update_property(&[gtk::accessible::Property::Label(&face_review::header_text(waiting))]);
     ui.review_button.set_visible(waiting > 0);
@@ -1277,12 +1289,17 @@ fn refresh_review_count(ui: &Rc<Ui>) {
     if !ui.engine.borrow().is_ready() {
         return;
     }
-    let weak = Rc::downgrade(ui);
-    face_review::count_waiting(&ui.engine, move |waiting| {
-        if let Some(ui) = weak.upgrade() {
-            show_review_count(&ui, waiting);
-        }
-    });
+    for (slot, queue) in [None, Some(Queue::Merges), Some(Queue::Splits)]
+        .into_iter()
+        .enumerate()
+    {
+        let weak = Rc::downgrade(ui);
+        face_review::count_waiting(&ui.engine, queue.map(Queue::wire), move |waiting| {
+            if let Some(ui) = weak.upgrade() {
+                show_review_count(&ui, slot, waiting);
+            }
+        });
+    }
 }
 
 fn review_panel(ui: &Rc<Ui>, person: Option<i64>) -> Rc<face_review::ReviewPanel> {
@@ -1290,7 +1307,7 @@ fn review_panel(ui: &Rc<Ui>, person: Option<i64>) -> Rc<face_review::ReviewPanel
     let weak = Rc::downgrade(ui);
     let panel_weak = Rc::downgrade(&panel);
     let last = Cell::new(None::<i64>);
-    panel.set_on_total(move |total| {
+    panel.connect_total(move |total| {
         let changed = last.replace(Some(total)).is_some_and(|previous| previous != total);
         if let Some(panel) = panel_weak.upgrade()
             && person.is_some()
@@ -1306,6 +1323,23 @@ fn review_panel(ui: &Rc<Ui>, person: Option<i64>) -> Rc<face_review::ReviewPanel
     panel
 }
 
+fn queue_panel(ui: &Rc<Ui>, queue: Queue) -> Rc<face_queues::QueuePanel> {
+    let panel = face_queues::QueuePanel::new(ui.engine.clone(), queue);
+    let weak = Rc::downgrade(ui);
+    panel.connect_changed(move || {
+        if let Some(ui) = weak.upgrade() {
+            refresh_review_count(&ui);
+            schedule_reload_burst(&ui);
+        }
+    });
+    panel.reload();
+    panel
+}
+
+fn first_waiting(counts: [i64; 3]) -> usize {
+    counts.iter().position(|count| *count > 0).unwrap_or(0)
+}
+
 fn open_face_review(ui: &Rc<Ui>) {
     let dialog = adw::Dialog::new();
     dialog.set_title("Review suggestions");
@@ -1313,19 +1347,90 @@ fn open_face_review(ui: &Rc<Ui>) {
     dialog.set_content_height(620);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
-    let panel = review_panel(ui, None);
+    let faces = review_panel(ui, None);
+    let merges = queue_panel(ui, Queue::Merges);
+    let splits = queue_panel(ui, Queue::Splits);
+    let counts = ui.review_counts.get();
+    let titles: Vec<String> = face_queues::QUEUE_TITLES
+        .iter()
+        .zip(counts)
+        .map(|(title, count)| face_queues::tab_text(title, count))
+        .collect();
+    let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let selected = first_waiting(counts);
+    let switcher = crate::v3::Segmented::new(&titles, selected);
+    switcher.root.set_halign(gtk::Align::Start);
+    switcher
+        .root
+        .update_property(&[gtk::accessible::Property::Label(
+            "Which suggestions to review",
+        )]);
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::None)
+        .vhomogeneous(false)
+        .build();
+    let pages: [gtk::Widget; 3] = [
+        faces.root.clone().upcast(),
+        merges.root.clone().upcast(),
+        splits.root.clone().upcast(),
+    ];
+    for page in &pages {
+        stack.add_child(page);
+    }
+    stack.set_visible_child(&pages[selected]);
+    let tab_updater = |index: usize| {
+        let switcher = Rc::downgrade(&switcher);
+        move |total: i64| {
+            if let Some(switcher) = switcher.upgrade() {
+                let title = face_queues::QUEUE_TITLES[index];
+                switcher.set_label(index, &face_queues::tab_text(title, total));
+            }
+        }
+    };
+    faces.connect_total(tab_updater(0));
+    merges.connect_total(tab_updater(1));
+    splits.connect_total(tab_updater(2));
+    {
+        let (faces, splits) = (Rc::downgrade(&faces), Rc::downgrade(&splits));
+        merges.connect_changed(move || {
+            faces.upgrade().inspect(|panel| panel.reload());
+            splits.upgrade().inspect(|panel| panel.reload());
+        });
+    }
+    {
+        let (faces, merges) = (Rc::downgrade(&faces), Rc::downgrade(&merges));
+        splits.connect_changed(move || {
+            faces.upgrade().inspect(|panel| panel.reload());
+            merges.upgrade().inspect(|panel| panel.reload());
+        });
+    }
+    {
+        let stack = stack.clone();
+        switcher.connect_changed(move |index| {
+            if let Some(page) = pages.get(index) {
+                stack.set_visible_child(page);
+                face_review::reveal(page);
+            }
+        });
+    }
     let scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
-        .child(&panel.root)
+        .child(&stack)
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
         .margin_top(16)
         .margin_bottom(16)
         .margin_start(16)
         .margin_end(16)
         .build();
-    toolbar.set_content(Some(&scroll));
+    content.append(&switcher.root);
+    content.append(&scroll);
+    toolbar.set_content(Some(&content));
     dialog.set_child(Some(&toolbar));
-    let keep = RefCell::new(Some(panel));
+    let keep = RefCell::new(Some((faces, merges, splits, switcher)));
     let weak = Rc::downgrade(ui);
     dialog.connect_closed(move |_| {
         keep.borrow_mut().take();
@@ -2717,9 +2822,17 @@ mod tests {
     use super::{
         BoundedLru, FaceClusteringLifecycle, PersonActionGate, PersonDialogLifecycle,
         PersonDialogOperation, PersonFace, RenameTerminal, classify_rename_terminal,
-        face_thumbnail_source_in, person_photos_changed,
+        face_thumbnail_source_in, first_waiting, person_photos_changed,
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
+
+    #[test]
+    fn review_dialog_opens_on_the_first_queue_with_suggestions() {
+        assert_eq!(first_waiting([0, 0, 0]), 0);
+        assert_eq!(first_waiting([3, 2, 0]), 0);
+        assert_eq!(first_waiting([0, 0, 4]), 2);
+        assert_eq!(first_waiting([0, 1, 4]), 1);
+    }
 
     fn oriented_jpeg_fixture(orientation: u8) -> Vec<u8> {
         let (width, height) = (84, 64);

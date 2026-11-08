@@ -38,6 +38,16 @@ enum FaceReviewText {
     static let ignoreLabel = "Ignore this face"
     static func rowLabel(_ item: FaceReviewItem) -> String { "\(reason(item)) In \(fileName(item))." }
     static func header(_ count: Int) -> String { "\(title), \(count) waiting" }
+    static let lowQuality = "Small or blurry face"
+    static let saved = "Review saved."
+    static func acceptAllTitle(_ count: Int) -> String { "Accept all suggested (\(count))" }
+    static func acceptAllLabel(_ count: Int, _ person: String?) -> String {
+        "Accept all \(count) suggested face\(count == 1 ? "" : "s") for \(name(person))"
+    }
+    static func accepted(_ accepted: Int, skipped: Int) -> String {
+        let base = "Accepted \(accepted) face\(accepted == 1 ? "" : "s")"
+        return skipped > 0 ? base + " · \(skipped) skipped, already in their photo" : base
+    }
 }
 
 enum FaceReviewResolution: String, CaseIterable, Sendable {
@@ -59,6 +69,7 @@ final class FaceReviewModel {
     private(set) var busy = false
     private(set) var message: String?
     private(set) var undoOperationID: String?
+    private(set) var notice: String?
     private(set) var changes = 0
 
     init(personID: Int64? = nil, request: @escaping Requester) {
@@ -71,6 +82,7 @@ final class FaceReviewModel {
     }
 
     var hasMore: Bool { items.count < total }
+    var suggestedCount: Int { items.filter { $0.reason == "suggested" }.count }
     var isVisible: Bool { total > 0 || undoOperationID != nil || message != nil }
 
     func reload() async {
@@ -113,6 +125,28 @@ final class FaceReviewModel {
         items.removeAll { $0.faceID == face }
         total = max(0, total - 1)
         message = nil
+        notice = nil
+        undoOperationID = page.operationID
+        changes += 1
+    }
+
+    func acceptAll() async {
+        guard !busy, let person = personID else { return }
+        busy = true
+        defer { busy = false }
+        guard let page = await request({ .resolveFaceReview(requestID: $0, faceID: nil, personID: person, resolution: "acceptAll") }) else {
+            message = FaceReviewText.unreachable
+            return
+        }
+        guard page.status == "ok" else {
+            message = page.message ?? FaceReviewText.unreachable
+            return
+        }
+        let accepted = Set(page.acceptedFaceIDs ?? [])
+        items.removeAll { accepted.contains($0.faceID) }
+        total = max(0, total - accepted.count)
+        message = nil
+        notice = FaceReviewText.accepted(accepted.count, skipped: page.skippedFaceIDs?.count ?? 0)
         undoOperationID = page.operationID
         changes += 1
     }
@@ -124,6 +158,7 @@ final class FaceReviewModel {
         busy = false
         guard let page else { message = FaceReviewText.unreachable; return }
         undoOperationID = nil
+        notice = nil
         message = page.status == "ok" ? nil : page.message
         changes += 1
         await reload()

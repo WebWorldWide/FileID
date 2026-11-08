@@ -87,7 +87,7 @@ public sealed partial class PersonDetailSheet : UserControl
         _personId = personId;
         HeaderText.Text = string.IsNullOrEmpty(displayName) ? $"Person #{personId}" : displayName;
         Load();
-        ReviewPanel.SetPerson(personId);
+        ReviewPanel.SetPerson(personId, displayName);
         _ = ReviewPanel.ReloadAsync();
     }
 

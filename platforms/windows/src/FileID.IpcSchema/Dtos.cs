@@ -268,9 +268,50 @@ public sealed record FaceReviewItem(
     [property: JsonPropertyName("runnerUpPersonID")] long? RunnerUpPersonId,
     string? RunnerUpName,
     double? RunnerUpScore,
+    double CreatedAt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? LowQuality = null);
+
+/// <summary>Two existing people who may be one (schema 1.25.0). PersonId is kept; OtherPersonId merges in.</summary>
+public sealed record FaceMergeSuggestion(
+    [property: JsonPropertyName("personID")] long PersonId,
+    string? PersonName,
+    [property: JsonPropertyName("representativeFaceID")] long? RepresentativeFaceId,
+    long FaceCount,
+    [property: JsonPropertyName("otherPersonID")] long OtherPersonId,
+    string? OtherName,
+    [property: JsonPropertyName("otherRepresentativeFaceID")] long? OtherRepresentativeFaceId,
+    long OtherFaceCount,
+    double Score,
     double CreatedAt);
 
-/// <summary>Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).</summary>
+/// <summary>A person whose faces form two well-separated groups (schema 1.25.0).</summary>
+public sealed record FaceSplitSuggestion(
+    [property: JsonPropertyName("personID")] long PersonId,
+    string? PersonName,
+    [property: JsonPropertyName("representativeFaceID")] long? RepresentativeFaceId,
+    double Score,
+    long KeepCount,
+    long SplitCount,
+    [property: JsonPropertyName("keepFaceIDs")] IReadOnlyList<long> KeepFaceIds,
+    [property: JsonPropertyName("splitFaceIDs")] IReadOnlyList<long> SplitFaceIds,
+    double CreatedAt);
+
+/// <summary>The durable face refresh backlog for one model and processing version (schema 1.25.0).</summary>
+public sealed record FaceRefreshStatus(
+    string Model,
+    string Processing,
+    long Outdated,
+    long Total,
+    long Done,
+    long Pending,
+    long Missing,
+    long Offline,
+    long Failed,
+    [property: JsonPropertyName("jobID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? JobId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? State = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Progress = null);
+
+/// <summary>Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0; queues 1.25.0).</summary>
 public sealed record FaceReviewPage(
     [property: JsonPropertyName("requestID")] string RequestId,
     string Action,
@@ -281,7 +322,14 @@ public sealed record FaceReviewPage(
     [property: JsonPropertyName("personID")] long? PersonId,
     long Total,
     long Offset,
-    IReadOnlyList<FaceReviewItem> Items);
+    IReadOnlyList<FaceReviewItem> Items,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Queue = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FaceMergeSuggestion>? Merges = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<FaceSplitSuggestion>? Splits = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FaceRefreshStatus? Refresh = null,
+    [property: JsonPropertyName("otherPersonID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? OtherPersonId = null,
+    [property: JsonPropertyName("acceptedFaceIDs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? AcceptedFaceIds = null,
+    [property: JsonPropertyName("skippedFaceIDs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? SkippedFaceIds = null);
 
 public sealed record DeepAnalyzeStarting(
     string ModelKind,

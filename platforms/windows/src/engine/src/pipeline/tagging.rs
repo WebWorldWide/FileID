@@ -3170,7 +3170,7 @@ fn read_gps_coord<'a>(
 /// Crop a face region from the source RGB image with `FACE_CROP_PAD`
 /// slack, then nearest-resize to 112×112. Returns None if the bbox is
 /// degenerate or outside the image.
-fn crop_and_resize_face(
+pub(crate) fn crop_and_resize_face(
     rgb: &[u8],
     img_w: u32,
     img_h: u32,

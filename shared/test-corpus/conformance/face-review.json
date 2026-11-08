@@ -227,7 +227,7 @@
     },
     "expect": {
      "status": "refused",
-     "message": "Choose accept, reject or ignore."
+     "message": "Choose accept, reject, ignore, acceptAll, merge, notSamePerson, dismiss or split."
     }
    },
    {
