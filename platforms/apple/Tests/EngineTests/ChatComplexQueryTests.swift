@@ -130,6 +130,10 @@ struct ChatComplexQueryTests {
                 every(p, { $0.hasSuffix(".ARW") }, "wrong") ?? (p.message.contains("them") ? "kept a pronoun: \(p.message)" : nil)
             },
             Case(text: "pictures of the sea") { every($0, { $0.contains("IMG_") }, "wrong") },
+            Case(text: "how many summer photos of Kyle?") { says($0, "20 photos") },
+            Case(text: "dog photos from the winter") { p in
+                every(p, { $0.contains("dog_") }, "not a dog") ?? (p.message.contains("winter (any year)") ? nil : "no season filter: \(p.message)")
+            },
         ]
         var failures: [String] = []
         let followUps: [(String, String, (ChatService.Prepared) -> String?)] = [

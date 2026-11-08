@@ -32,11 +32,11 @@ impl ClipText {
         if !path.exists() {
             anyhow::bail!("CLIP text weights missing at {}", path.display());
         }
-        super::clip_space::verify(path, "clip_text", 0)?;
         let directory = path.parent().ok_or_else(|| anyhow::anyhow!("CLIP weights have no directory"))?;
-        super::clip_space::verify(&directory.join("vocab.json"), "clip_text", 1)?;
-        super::clip_space::verify(&directory.join("merges.txt"), "clip_text", 2)?;
-        let (session, input_name) = commit_chain_session("CLIP text", path)?;
+        let (vocab, merges) = (directory.join("vocab.json"), directory.join("merges.txt"));
+        let checks = [(path, "clip_text", 0), (vocab.as_path(), "clip_text", 1), (merges.as_path(), "clip_text", 2)];
+        let (session, input_name) =
+            super::clip_space::load_verified(&checks, || commit_chain_session("CLIP text", path))?;
         Ok(Self { session, input_name, tokenizer })
     }
 

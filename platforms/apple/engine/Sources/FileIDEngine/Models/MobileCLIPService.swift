@@ -41,6 +41,8 @@ public final class MobileCLIPService: @unchecked Sendable {
 
     private init() {}
 
+    private static let manifestDigest = ModelManifest.artifacts.first { $0.id == "clip_vitb32_image" }?.sha256
+
     // MARK: - Loading
 
     /// ViT-B/32 vision encoder ONNX path. Kept under the existing
@@ -70,7 +72,8 @@ public final class MobileCLIPService: @unchecked Sendable {
 
         let modelURL = url ?? Self.defaultImageModelURL
         let safe = redactPathForLog(modelURL.path)
-        guard CLIPEmbeddingSpace.verifyArtifact(at: modelURL, id: "clip_vitb32_image") else {
+        let started = CFAbsoluteTimeGetCurrent()
+        guard CLIPEmbeddingSpace.verifyArtifact(at: modelURL, id: "clip_vitb32_image"), let digest = Self.manifestDigest else {
             if missingWarnedPaths.insert(modelURL.path).inserted {
                 JSONLog.shared.warn(ev: "clip_model_missing", path: safe,
                                     error: "CLIP image weights are missing or fail artifact verification; embeddings disabled")
@@ -84,14 +87,16 @@ public final class MobileCLIPService: @unchecked Sendable {
             // CLIP ViT-B/32 it fails to build the CoreML plan on-hardware
             // ("ios17.conv: output size is too small"), which throws at session
             // creation and would disable CLIP embeddings entirely.
-            let session = try ORTSessions.make(modelPath: modelURL.path).session
+            let cache = ORTSessions.CoreMLCache(modelDigest: digest, mlProgram: false, subgraphs: false)
+            let session = try ORTSessions.make(modelPath: modelURL.path, cache: cache).session
             let name = try session.inputNames().first
             lock.lock()
             self.session = session
             self.inputName = name
             self.isImageLoaded = true
             lock.unlock()
-            JSONLog.shared.info(ev: "clip_model_loaded", path: safe)
+            JSONLog.shared.info(ev: "clip_model_loaded", path: safe,
+                                extra: ["ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000), "backend": AnyCodable("onnx")])
             return true
         } catch {
             JSONLog.shared.error(ev: "clip_model_load_failed", path: safe, error: "\(error)")
@@ -186,10 +191,18 @@ public final class MobileCLIPService: @unchecked Sendable {
         if let gpuEncoder { lock.unlock(); return gpuEncoder }
         if gpuEncoderFailed { lock.unlock(); return nil }
         lock.unlock()
-        let built = try? CLIPVisionMLX(onnxURL: url)
+        let started = CFAbsoluteTimeGetCurrent()
+        let built = (try? ModelArtifactVerification.load(verifiedBy: {
+            CLIPEmbeddingSpace.verifyArtifact(at: url, id: "clip_vitb32_image")
+        }) { try CLIPVisionMLX(onnxURL: url) }) ?? nil
         lock.lock(); defer { lock.unlock() }
         if gpuEncoder == nil { gpuEncoder = built; gpuEncoderFailed = built == nil }
-        if built == nil { JSONLog.shared.warn(ev: "clip_gpu_encoder_unavailable") }
+        if built == nil {
+            JSONLog.shared.warn(ev: "clip_gpu_encoder_unavailable")
+        } else {
+            JSONLog.shared.info(ev: "clip_model_loaded", path: redactPathForLog(url.path),
+                                extra: ["ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000), "backend": AnyCodable("mlx")])
+        }
         return gpuEncoder
     }
 

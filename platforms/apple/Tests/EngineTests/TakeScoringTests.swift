@@ -199,6 +199,17 @@ struct TakeScoringTests {
         #expect(TakeMediaAnalysis.goalPrompt(goal: "ignore \"this\"", count: 3).contains("\"ignore \\\"this\\\"\""))
     }
 
+    @Test func goalChecksWakeTheBestInstalledVisionModel() {
+        let installed: Set<AIModelKind> = [.qwen3VL2B, .qwen3VL4B]
+        #expect(CatalogTakeAuto.goalModel(loaded: nil, ramGB: 16, installed: installed.contains) == .qwen3VL4B)
+        #expect(CatalogTakeAuto.goalModel(loaded: nil, ramGB: 16, installed: { $0 == .qwen3VL2B }) == .qwen3VL2B)
+        #expect(CatalogTakeAuto.goalModel(loaded: .qwen3VL2B, ramGB: 16, installed: installed.contains) == .qwen3VL2B)
+        #expect(CatalogTakeAuto.goalModel(loaded: nil, ramGB: 16, installed: { _ in false }) == nil)
+        if let text = AIModelKind.allCases.first(where: { !$0.supportsVision }) {
+            #expect(CatalogTakeAuto.goalModel(loaded: text, ramGB: 16, installed: installed.contains) == nil)
+        }
+    }
+
     @Test func trashJournalSnapshotsAndRestoresCatalogRows() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

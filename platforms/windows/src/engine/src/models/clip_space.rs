@@ -59,6 +59,19 @@ pub fn verify(path: &Path, kind: &str, index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Runs `load` while `checks` hash the weights on another thread; the loaded
+/// value is returned only when every check passed.
+pub fn load_verified<T>(checks: &[(&Path, &str, usize)], load: impl FnOnce() -> Result<T>) -> Result<T> {
+    let (verified, loaded) = std::thread::scope(|scope| {
+        let verifier = scope.spawn(|| checks.iter().try_for_each(|(path, kind, index)| verify(path, kind, *index)));
+        let loaded = load();
+        let verified = verifier.join().unwrap_or_else(|_| Err(anyhow::anyhow!("CLIP artifact check stopped")));
+        (verified, loaded)
+    });
+    verified?;
+    loaded
+}
+
 pub fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -103,6 +116,22 @@ mod tests {
         assert!(verify(&path, "mobileclip_s2", 0).is_err());
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn verified_load_keeps_the_model_only_when_the_weights_check_out() {
+        let path = std::env::temp_dir().join(format!("fileid-clip-load-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"unverified local fixture").unwrap();
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let refused = load_verified(&[(path.as_path(), "mobileclip_s2", 0)], || {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(7)
+        });
+        assert!(refused.unwrap_err().to_string().contains("checksum"));
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(load_verified(&[], || Ok(7)).unwrap(), 7);
+        assert!(load_verified::<u8>(&[], || anyhow::bail!("load failed")).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn exact_space_rejects_legacy_dimensions_and_nonfinite_values() {
         let mut vector = vec![0.0f32; DIMENSION];

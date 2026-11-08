@@ -77,6 +77,7 @@ public final class ArcFaceService: @unchecked Sendable {
         lock.unlock()
 
         let url = Self.modelURL(for: kind)
+        let started = CFAbsoluteTimeGetCurrent()
         guard FileManager.default.fileExists(atPath: url.path) else {
             JSONLog.shared.warn(ev: "arcface_model_missing",
                                 path: redactPathForLog(url.path),
@@ -88,7 +89,8 @@ public final class ArcFaceService: @unchecked Sendable {
             let values = try url.resourceValues(forKeys: [.fileSizeKey])
             guard let size = values.fileSize, size > 0, size <= 128 * 1024 * 1024,
                   let fingerprint = ExactFileDigest.computeWithIdentity(url: url, expectedSize: Int64(size)) else { return false }
-            let modelVersion = "sface128-sha256:" + fingerprint.digest.map { String(format: "%02x", $0) }.joined()
+            let digest = fingerprint.digest.map { String(format: "%02x", $0) }.joined()
+            let modelVersion = "sface128-sha256:" + digest
             // CoreML EP — ANE/GPU acceleration on Apple Silicon. SFace is small
             // enough that MLProgram + MLComputeUnits=All roughly HALVES inference
             // on-hardware (~23 ms → ~11 ms) vs the legacy NeuralNetwork format,
@@ -98,7 +100,8 @@ public final class ArcFaceService: @unchecked Sendable {
             // default (ANE + GPU + CPU); useCPUAndGPU would EXCLUDE the ANE.
             // A CoreML bind failure (or an explicit FILEID_FACE_EP=cpu) drops to
             // ORT's implicit CPU EP so session creation and embedding still succeed.
-            let built = try ORTSessions.make(modelPath: url.path, coreML: epPref == "cpu" ? .disabled : .optional) {
+            let cache = ORTSessions.CoreMLCache(modelDigest: digest, mlProgram: true, subgraphs: true)
+            let built = try ORTSessions.make(modelPath: url.path, coreML: epPref == "cpu" ? .disabled : .optional, cache: cache) {
                 $0.createMLProgram = true
                 $0.enableOnSubgraphs = true
             }
@@ -130,7 +133,8 @@ public final class ArcFaceService: @unchecked Sendable {
                                 extra: ["kind": AnyCodable(kind.rawValue),
                                         "path": AnyCodable(redactPathForLog(url.path)),
                                         "input": AnyCodable(firstInput),
-                                        "ep": AnyCodable(ep)])
+                                        "ep": AnyCodable(ep),
+                                        "ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000)])
             return true
         } catch {
             JSONLog.shared.error(ev: "arcface_model_load_failed",

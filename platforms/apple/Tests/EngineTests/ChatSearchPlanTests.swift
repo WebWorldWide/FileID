@@ -37,6 +37,20 @@ import FileIDShared
         #expect(alex.personIDs == [8, 9])
     }
 
+    @Test func pronounsNarrowTheLastSearch() {
+        let people = [ChatSearchPlan.KnownPerson(id: 1, names: ["Alex"]), ChatSearchPlan.KnownPerson(id: 2, names: ["Blake"])]
+        let orchard = ChatSearchPlan.resolve("orchard photos", knownPeople: people)
+        let them = ChatSearchPlan.resolve("which of them show Alex", previous: orchard, knownPeople: people)
+        #expect(them.query == "orchard")
+        #expect(them.kinds == ["image"])
+        #expect(them.personIDs == [1])
+        let blake = ChatSearchPlan.resolve("photos of Blake", knownPeople: people)
+        let wearing = ChatSearchPlan.resolve("what is he wearing", previous: blake, knownPeople: people)
+        #expect(wearing.query == "wearing")
+        #expect(wearing.personIDs == [2])
+        #expect(ChatSearchPlan.resolve("what is he wearing", knownPeople: people).personIDs.isEmpty)
+    }
+
     @Test func sharedPlansPreserveSubjectsAndExplicitFilters() throws {
         struct Fixture: Decodable { let messages: [String]; let query: String; let kinds: [String] }
         var root = URL(fileURLWithPath: #filePath)
