@@ -1,3 +1,4 @@
+import FileIDShared
 import Foundation
 import OnnxRuntimeBindings
 
@@ -10,7 +11,7 @@ enum ORTSessions {
     static func env() throws -> ORTEnv {
         try lock.withLock {
             if let sharedEnv { return sharedEnv }
-            let env = try ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            let env = try ORTPrivacy.makeEnv(loggingLevel: ORTLoggingLevel.warning)
             sharedEnv = env
             return env
         }

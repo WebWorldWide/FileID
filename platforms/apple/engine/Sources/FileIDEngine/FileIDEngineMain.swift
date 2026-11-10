@@ -20,6 +20,7 @@ struct FileIDEngineMain {
     static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
 
     static func main() async {
+        ORTPrivacy.disableTelemetryBeforeLoad()
         if Array(CommandLine.arguments.dropFirst()) == ["--model-catalog-status"] {
             let entries = MLXModelCatalog.entries
             let vision = entries.filter { $0.role == .vision }.count
