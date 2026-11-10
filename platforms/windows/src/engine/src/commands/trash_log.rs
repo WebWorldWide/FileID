@@ -143,7 +143,7 @@ pub(crate) fn snapshot_rows(
             continue;
         }
         let mut stmt = conn.prepare_cached(&format!("SELECT * FROM \"{table}\" WHERE \"{key}\" = ?1"))?;
-        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+        let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
         let mut rows = stmt.query([file_id])?;
         while let Some(row) = rows.next()? {
             let mut columns = BTreeMap::new();
@@ -426,7 +426,7 @@ pub(crate) fn reconcile_trashed_rows(
     let mut dropped = 0;
     for mut entry in entries.into_iter().rev().take(RECONCILE_BATCHES) {
         let mut found_new = false;
-        for item in entry.items.iter_mut() {
+        for item in &mut entry.items {
             let ghost = db
                 .lock()
                 .query_row(

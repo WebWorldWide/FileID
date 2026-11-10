@@ -317,7 +317,8 @@ mod tests {
             serde_json::json!({"intent": {"id": "B", "fileID": 2, "from": stale.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
             serde_json::json!({"done": "B"}),
         ];
-        let text: String = lines.iter().map(|line| format!("{line}\n")).collect::<String>() + "{\"intent\":";
+        let mut text: String = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        text.push_str("\n{\"intent\":");
         std::fs::write(&journal, text).unwrap();
 
         assert_eq!(repair_swift_path_moves(&journal, &conn), 1);

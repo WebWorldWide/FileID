@@ -1224,7 +1224,7 @@ pub(crate) async fn handle_trash_files(
                                         indexed_content_hash,
                                         source_identity,
                                         expected_exact: exact_by_id.remove(fid),
-                                    })
+                                    });
                                     }
                                     None => {
                                         failed += 1;
@@ -1343,6 +1343,15 @@ pub(crate) async fn handle_trash_files(
                             });
                         }
                     }
+                }
+                #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+                CheckedTrashOutcome::TrashedAt(_) => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(candidate.file_id),
+                        ok: false,
+                        message: Some("moved to Trash, but its location was not journaled; use Undo to restore".into()),
+                    });
                 }
                 CheckedTrashOutcome::Rejected(reason) => {
                     tracing::warn!(

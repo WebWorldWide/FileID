@@ -253,8 +253,8 @@ pub mod trash {
             assert_eq!(landed_second, root.join("photo 2.jpg"));
 
             let inode = crate::platform::file_ref(&landed_second).unwrap();
-            assert_eq!(locate_inode(&[root.clone()], &second, inode), Some(landed_second.clone()));
-            assert_eq!(locate_inode(&[root.clone()], &dir.join("other.jpg"), inode), None);
+            assert_eq!(locate_inode(std::slice::from_ref(&root), &second, inode), Some(landed_second.clone()));
+            assert_eq!(locate_inode(std::slice::from_ref(&root), &dir.join("other.jpg"), inode), None);
             std::fs::remove_dir_all(dir).ok();
         }
 
@@ -312,7 +312,7 @@ pub mod tags {
         #[test]
         fn merge_keeps_existing_spelling_and_order() {
             let existing = vec!["Mom".to_string(), "Important".to_string()];
-            let merged = merge_tags(&existing, &["mom".into(), " Beach ".into(), "".into(), "beach".into()]);
+            let merged = merge_tags(&existing, &["mom".into(), " Beach ".into(), String::new(), "beach".into()]);
             assert_eq!(merged, vec!["Mom", "Important", "Beach"]);
         }
 
