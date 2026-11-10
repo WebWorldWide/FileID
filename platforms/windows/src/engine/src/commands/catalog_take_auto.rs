@@ -282,9 +282,10 @@ pub trait TakeFaceAnalyzer {
 }
 
 /// YuNet when its weights are installed: boxes and detector score as quality.
-/// Eye openness is not judged until a landmark-quality model is available.
+/// Eye openness comes from the face mesh when that model is installed too.
 pub struct YuNetFaces {
     model: Option<crate::models::yunet::YuNet>,
+    mesh: Option<crate::models::face_mesh::FaceMesh>,
 }
 
 impl YuNetFaces {
@@ -293,16 +294,21 @@ impl YuNetFaces {
             .ok()
             .filter(|path| path.exists())
             .and_then(|path| crate::models::yunet::YuNet::load(path).ok());
-        Self { model }
+        let mesh = model
+            .as_ref()
+            .and_then(|_| crate::models::face_mesh::default_weights_path().ok())
+            .filter(|path| path.exists())
+            .and_then(|path| crate::models::face_mesh::FaceMesh::load(path).ok());
+        Self { model, mesh }
     }
 }
 
 impl TakeFaceAnalyzer for YuNetFaces {
     fn id(&self) -> &str {
-        if self.model.is_some() {
-            "yunet-v1"
-        } else {
-            "no-faces-v1"
+        match (&self.model, &self.mesh) {
+            (Some(_), Some(_)) => "yunet-mesh-v1",
+            (Some(_), None) => "yunet-v1",
+            _ => "no-faces-v1",
         }
     }
 
@@ -314,25 +320,27 @@ impl TakeFaceAnalyzer for YuNetFaces {
         let Some(model) = self.model.as_mut() else { return Some(vec![]) };
         let found = model.detect(rgb, width, height).ok()?;
         let (w, h) = (width as f64, height as f64);
-        Some(
-            found
-                .into_iter()
-                .take(16)
-                .map(|d| {
-                    let [x1, y1, x2, y2] = d.bbox;
-                    let x = (x1 as f64 / w).clamp(0.0, 1.0);
-                    let y = (y1 as f64 / h).clamp(0.0, 1.0);
-                    Face {
-                        x: take_scoring::round4(x),
-                        y: take_scoring::round4(y),
-                        width: take_scoring::round4(((x2 - x1) as f64 / w).clamp(0.0, 1.0 - x)),
-                        height: take_scoring::round4(((y2 - y1) as f64 / h).clamp(0.0, 1.0 - y)),
-                        quality: Some(take_scoring::round4(d.score as f64)),
-                        eyes_open: None,
-                    }
-                })
-                .collect(),
-        )
+        let mut faces = Vec::new();
+        for d in found.into_iter().take(16) {
+            let [x1, y1, x2, y2] = d.bbox;
+            let eyes_open = match self.mesh.as_mut() {
+                Some(mesh) if f64::from((x2 - x1).min(y2 - y1)) >= take_scoring::MIN_FACE_PIXELS => {
+                    mesh.eyes_open(rgb, width, height, &d).ok()?.map(take_scoring::round4)
+                }
+                _ => None,
+            };
+            let x = (x1 as f64 / w).clamp(0.0, 1.0);
+            let y = (y1 as f64 / h).clamp(0.0, 1.0);
+            faces.push(Face {
+                x: take_scoring::round4(x),
+                y: take_scoring::round4(y),
+                width: take_scoring::round4(((x2 - x1) as f64 / w).clamp(0.0, 1.0 - x)),
+                height: take_scoring::round4(((y2 - y1) as f64 / h).clamp(0.0, 1.0 - y)),
+                quality: Some(take_scoring::round4(d.score as f64)),
+                eyes_open,
+            });
+        }
+        Some(faces)
     }
 }
 
@@ -668,7 +676,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut faces = YuNetFaces { model: None };
+        let mut faces = YuNetFaces { model: None, mesh: None };
         let job = prepare(&conn, &[1, 2], faces.id()).unwrap();
         let scored = compute(job, &mut faces);
         assert_eq!(scored.qualities.len(), 2);

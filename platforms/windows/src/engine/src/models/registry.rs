@@ -129,6 +129,7 @@ fn bundle(model_kind: &str) -> Option<Bundle> {
             "Gemma 3 4B",
             &[("gemma3_gguf", "vlm/gemma-3-4b/model.gguf"), ("gemma3_mmproj", "vlm/gemma-3-4b/mmproj.gguf")],
         ),
+        "face_mesh" => ("face_mesh", "Face landmarks for eye openness", &[("face_mesh_landmarks", "face_mesh/face_landmarks.onnx")]),
         "bge_text" | "bge_small_en_v1_5" | "bge_small" => (
             "bge_text",
             "BGE-small text embeddings",
@@ -415,7 +416,7 @@ mod tests {
         // on NVIDIA's CDN, llama + ort_cuda are on github (all CI-allowlisted).
         // ort_openvino IS on HF, so it belongs here for real coverage.
         let kinds = [
-            "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
+            "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface", "face_mesh",
             "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
             "gemma_3_4b", "mistral_small_3_2", "ort_openvino_x64",
         ];
