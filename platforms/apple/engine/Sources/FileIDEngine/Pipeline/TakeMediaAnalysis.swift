@@ -26,9 +26,11 @@ extension TakeFaceAnalyzing {
     func faces(in image: CGImage) -> [TakeScoring.Face]? { analyze(image)?.faces }
 }
 
-/// The photo decoded at the tile size, made at most once and only when asked for:
-/// Face Mesh reads eyelids from it (at 1024 px its closed-eye precision falls from
-/// about 0.7 to 0.5), and wide frames are tiled from it.
+/// The photo decoded at up to the tile size, made at most once and only when asked
+/// for: Face Mesh reads eyelids from it (at 1024 px its closed-eye precision falls
+/// from about 0.7 to 0.5). Camera JPEGs give their stored preview (1616 px on Sony),
+/// which decodes about 20× faster than the full image; a full-size decode is reused
+/// for tiles.
 final class TakeDetailImage: @unchecked Sendable {
     private let lock = NSLock()
     private let make: () -> CGImage?
@@ -199,11 +201,12 @@ enum TakeMediaAnalysis {
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
         let longSide = sourceLongSide(source)
         let detail = longSide > TakeScoring.analysisLongSide
-            ? TakeDetailImage { decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide) } : nil
+            ? TakeDetailImage { decodeScanImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide) } : nil
         guard let found = analyzer.analyze(fitted.image, detail: detail) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
         let size = fitted.luma
         guard TakeScoring.wantsTiles(sourceLongSide: longSide, width: size.width, height: size.height, faces: found.faces, people: found.people),
-              let wide = detail?.image,
+              let wide = detail?.image.flatMap({ max($0.width, $0.height) >= min(longSide, TakeScoring.tileLongSide) ? $0 : nil })
+                ?? decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide),
               max(wide.width, wide.height) * 2 >= TakeScoring.analysisLongSide * 3
         else { return (TakeScoring.signals(fitted.luma, faces: found.faces, people: found.people), true) }
         var tiled: [TakeScoring.Face] = []

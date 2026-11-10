@@ -138,7 +138,9 @@ struct FaceMeshTests {
     /// the box-only mesh ratio (as the Rust eye_state_eval example), the mesh ratio and the
     /// Vision openness for the Vision face that best overlaps the box, and timings.
     /// FILEID_FACE_MESH_LONG_SIDE first fits each image as take scoring does (1024); with
-    /// FILEID_FACE_MESH_DETAIL=1 faces are still found there but the mesh reads the file's own size.
+    /// FILEID_FACE_MESH_DETAIL=1 faces are still found there but the mesh reads the file's own size,
+    /// or, with FILEID_FACE_MESH_ORIGINALS (a folder of the source files under the jobs' names), what the
+    /// engine reads: a camera JPEG's preview, else a 2048 px decode.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_FACE_MESH_JOBS"] != nil))
     func evalHarness() throws {
         let env = ProcessInfo.processInfo.environment
@@ -149,6 +151,7 @@ struct FaceMeshTests {
         var cache: (path: String, image: CGImage, pixels: FaceMesh.Pixels, faces: [VNFaceObservation])?
         let detail = env["FILEID_FACE_MESH_DETAIL"] == "1"
         var scale: Float = 1
+        var decodedWidth = 1
         for line in try String(contentsOfFile: try #require(env["FILEID_FACE_MESH_JOBS"]), encoding: .utf8).split(separator: "\n") {
             let job = try JSONDecoder().decode(Job.self, from: Data(line.utf8))
             if cache?.path != job.image {
@@ -159,14 +162,21 @@ struct FaceMeshTests {
                     image = try #require(TakeMediaAnalysis.fit(decoded, longSide: side)).image
                 }
                 scale = Float(image.width) / Float(decoded.width)
+                decodedWidth = decoded.width
                 let request = VNDetectFaceLandmarksRequest()
                 try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-                cache = (job.image, image, try #require(FaceMesh.Pixels(detail ? decoded : image)), request.results ?? [])
+                var meshImage = decoded
+                if let original = env["FILEID_FACE_MESH_ORIGINALS"], let name = job.image.split(separator: "/").last {
+                    let url = URL(fileURLWithPath: original).appendingPathComponent(String(name))
+                    let full = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+                    meshImage = try #require(decodeScanImage(full, path: url.path, maxPixelSize: TakeScoring.tileLongSide))
+                }
+                cache = (job.image, image, try #require(FaceMesh.Pixels(detail ? meshImage : image)), request.results ?? [])
             }
             guard let (_, image, pixels, faces) = cache else { continue }
             let (W, H) = (Float(image.width), Float(image.height))
             let b = job.bbox.map { $0 * scale }
-            let m = detail ? job.bbox : b
+            let m = detail ? job.bbox.map { $0 * Float(pixels.width) / Float(decodedWidth) } : b
             var started = CFAbsoluteTimeGetCurrent()
             let boxRatio = try mesh.eyeRatio(pixels, .boxOnly(x1: m[0], y1: m[1], x2: m[2], y2: m[3]))
             let boxMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
