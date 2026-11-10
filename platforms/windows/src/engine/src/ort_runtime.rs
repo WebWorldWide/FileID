@@ -138,6 +138,17 @@ pub fn resolve_dylib() -> Option<std::path::PathBuf> {
 /// the first ORT session. Returns the path pinned, if any.
 #[cfg(target_os = "macos")]
 pub fn pin_dylib_path() -> Option<PathBuf> {
+    // The engine the app hosts ignores an inherited ORT_DYLIB_PATH: it loads
+    // only the runtime it ships (or none).
+    if crate::paths::APP_HOSTED {
+        let bundled = search_locations().into_iter().find(|p| p.is_file());
+        // SAFETY note: single-threaded at this point in startup.
+        match &bundled {
+            Some(path) => unsafe { std::env::set_var("ORT_DYLIB_PATH", path) },
+            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
+        }
+        return bundled;
+    }
     if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty() && PathBuf::from(&v).is_file())
     {
         return None;
@@ -213,7 +224,29 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    /// The engine the app hosts never loads an inherited ORT_DYLIB_PATH.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn app_hosted_engine_ignores_an_inherited_dylib_path() {
+        let dir = std::env::temp_dir().join(format!("fileid-ort-hosted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = dir.join(DYLIB_FILE_NAME);
+        std::fs::write(&foreign, b"not-a-real-dylib").unwrap();
+        let prev = std::env::var_os("ORT_DYLIB_PATH");
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", &foreign) };
+
+        let pinned = pin_dylib_path();
+        assert_ne!(pinned.as_deref(), Some(foreign.as_path()));
+        assert_eq!(std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from), pinned);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ORT_DYLIB_PATH", v) },
+            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
     #[test]
     fn explicit_dylib_path_is_honored_first() {
         // A non-existent ORT_DYLIB_PATH must NOT resolve (we only return real
