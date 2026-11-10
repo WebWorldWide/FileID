@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-10 — Face Mesh reads higher-resolution faces in both engines
+
+- **Both engines** (agent, coordinator decision): faces are still found on the 1024 px analysis image, but the eyelid mesh now reads finer pixels, only for photos where a face of 24 px or more was found. Rust already holds the full decode, so it resizes only a square of 3× the face around each face to the 2048 px scale (4.9 ms median per face; resizing the whole 33 MP frame to 2048 costs 226–275 ms). The Mac can't decode a region, so it decodes once more: a camera JPEG's stored preview (Sony 1616 px), else 2048 px; the same decode is reused for small-face tiles. Threshold stays 0.175. Rust cache id `yunet-mesh-v1` → `yunet-mesh-v2`.
+- **Measured** (private eye set, 1,211 faces, faces found at 1024 px). Closed-eye precision / recall, held-out (tune): mesh at 1024 px 0.45 / 0.84 (0.48 / 0.76); Rust face regions 0.62 / 0.77 (0.73 / 0.71), the same as on 2048 px images; Mac preview-or-2048 0.57 / 0.79 (0.72 / 0.68); Mac full 2048 decode 0.64 / 0.79 (0.73 / 0.71), not shipped. Vision eye contours at 1024 px: 0.48 / 0.47.
+- **Cost** (Mac release engine, 80 copied original Sony photos all with faces, scoreTakes from an empty cache, 5 reps back to back, load 2.6–5.4): mesh at 1024 px 41.7 ms per photo (median), preview detail 49.4 ms (+18%), full 2048 detail 59.3 ms (+42%). Photos flagged eyes-closed: 31 → 30 of the 40 with a closed eye, 16 → 7 of the 40 with only open eyes.
+- Checks: see the branch report.
+
 ## 2026-11-10 — Mac Best Takes judges eyes with Face Mesh when installed
 
 - **Swift engine + app** (agent; one owner-approved download from huggingface.co): the Mac now runs MediaPipe Face Mesh V2 for eye openness, as the shared engine does. It is opt-in: a "Closed eyes in Best Takes" card in Settings installs the same pinned file (`face_mesh_landmarks`, `naklitechie/face-landmarks-onnx` @ `575c3381`, SHA-256 checked at download and at load) into `Models/face_mesh/`. `FaceMeshService` runs it through the linked onnxruntime (CPU by default; CoreML EP with `FILEID_FACE_EP=coreml`). Vision still finds the faces; its box and eye/nose centres stand in for YuNet's, and crop, two passes, eye ratio and the 0.175 threshold are the Rust steps. Without the model, Vision's eye contours stay in charge. Take-signal cache id `vision-landmarks-humans-v1` becomes `vision-mesh-humans-v1` once installed, so stored scores refresh once. No IPC or catalog schema change.

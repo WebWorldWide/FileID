@@ -4554,3 +4554,22 @@ Owner decision: the Mac uses MediaPipe Face Mesh V2 too, opt-in, with the shared
   Mac and Rust ratios on the same boxes differ by 0.0013 median (p99 0.016, from JPEG decoding and colour handling) and agree on 1,157 of 1,170 closed calls. The best-F1 threshold on tune is 0.165–0.17, so 0.175 stays.
 - **Not solved: the 1024 px analysis size.** Take scoring finds faces on a 1024 px image, and both engines feed the mesh that image. There, on the same faces, precision falls for both checks: held-out Vision 0.48 / 0.47, mesh 0.45 / 0.84 (tune 0.40 / 0.45 and 0.48 / 0.76). Faces 40 px and larger at 1024 drop from 0.77 to 0.50 precision on tune between 2048 and 1024 px input. The mesh still finds far more closed eyes at about Vision's precision, so it ships as is. Feeding it a 2048 px decode or lowering the threshold to 0.13 at 1024 (held-out 0.60 / 0.67) are open options for both engines (NEXT).
 - **End to end** (debug engine, isolated catalog and home, 80 copied photos: 40 with a labelled closed eye, 40 with only open eyes): eyes-closed flags on the first group 24 → 31, on the second 12 → 15; all 80 cache rows moved to the new id after one re-score (4 were left uncached on the first pass by Vision timeouts at load 37, then refreshed).
+
+## 2026-11-10 — Face Mesh reads faces above the 1024 px analysis size
+
+Coordinator decision (owner-delegated): fix the 1024 px precision drop with higher-resolution face input in both engines rather than a lower threshold, keep 0.175, and fall back to threshold 0.13 at 1024 only if the extra cost passed 25% of Best Takes time.
+
+- **Rust: face regions, not a second frame.** `image_signals` already decodes the full image. `Detail::face` copies a square of three face-widths around each face from it and resizes only that square to the scale of a 2048 px frame. The mesh then runs there with the face's coordinates mapped across. On 1,170 faces its ratios differ from a mesh run on whole 2048 px images by 0.0035 median (p99 0.037), with the same call on 1,140, and precision/recall match: held-out 0.62 / 0.77 both ways. It costs 4.9 ms median per face (p90 25, load 25–40). Resizing the whole 33 MP frame to 2048 px instead costs 226–275 ms per photo, about half again the photo's decode-and-resize time. Tiles still resize the whole frame as before. Cache id `yunet-mesh-v2`.
+- **Mac: camera preview, else 2048 px.** ImageIO has no cheap region decode, so the Mac decodes once more, lazily (`TakeDetailImage`) and only when a judged face exists. It uses `decodeScanImage` at 2048 px: the camera's stored MPF preview when a JPEG has one (Sony 1616 px, about 20× cheaper than a full decode), else a bounded 2048 px decode. Small-face tiling reuses the decode when it is full size. Best Takes on 80 Sony photos with faces (release, 5 reps, load 2.6–5.4): 41.7 → 49.4 ms per photo (+18%). The full 2048 px decode measured 59.3 ms (+42%), over budget, so it is not used.
+- **Accuracy at the shipped inputs** (faces found at 1024 px; closed-eye precision / recall, held-out then tune):
+
+| Mesh input | Held-out | Tune |
+|---|---|---|
+| 1024 px image (before) | 0.45 / 0.84 | 0.48 / 0.76 |
+| Mac: preview or 2048 px (shipped) | 0.57 / 0.79 | 0.72 / 0.68 |
+| Mac: full 2048 px decode (not shipped, +42%) | 0.64 / 0.79 | 0.73 / 0.71 |
+| Rust: face regions at 2048 px scale (shipped) | 0.62 / 0.77 | 0.73 / 0.71 |
+| Threshold 0.13 at 1024 px (fallback, not shipped) | 0.60 / 0.67 | 0.67 / 0.68 |
+
+  The Mac's preview path gives up some held-out precision against a full 2048 decode (the Sony preview is 1616 px). It still beats the 0.13 fallback on F1 in both splits (0.66 vs 0.63 held-out, 0.70 vs 0.67 tune). End to end on the 80 photos, false eyes-closed flags on photos with only open eyes fell from 16 to 7, and flags on photos with a closed eye went from 31 to 30. Rust per-photo cost was measured with the eval example only, because YuNet isn't installed on this Mac. The Windows hardware check (NEXT) should confirm it with real YuNet boxes.
+
