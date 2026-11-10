@@ -35,6 +35,7 @@ internal static class ModelDisplaySize
             // RAM++ ONNX (Swin-L @384, fp16) ~882 MB + tiny tag/threshold sidecars.
             ["ram_plus"] = 926,
             ["arcface"] = 37,                     // YuNet (~0.2 MB) + SFace (~37 MB)
+            ["face_mesh"] = 5,                    // Face Mesh landmarks ONNX (~4.9 MB, Apache-2.0)
             ["mobileclip_s2"] = 352,        // CLIP ViT-B/32 vision ONNX (~335 MB, MIT)
             ["clip_text"] = (254 + 1 + 1),          // ≈ 256 with vocab + merges
             ["cudnn_runtime_x64"] = 430,

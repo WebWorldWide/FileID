@@ -109,6 +109,7 @@ internal static class SentinelProbe
                 // truncated/stub file without rejecting the real one.
                 && TreeContains("llama.cpp-cuda", 100_000, "cudart64_12.dll")
                 && TreeContains("llama.cpp-cuda", 1_000_000, "cublas64_12.dll"),
+            "face_mesh" => FilePresent(Path.Combine("face_mesh", "face_landmarks.onnx"), 1_000_000),
             "bge_text" => FilePresent(Path.Combine("bge_text", "bge_small.onnx"), 1_000_000)
                 && FilePresent(Path.Combine("bge_text", "vocab.txt"), 1_000),
             _ => false,
