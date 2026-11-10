@@ -127,9 +127,9 @@ Retire when Rust has been the default for a release (or several weeks of the own
 
 Then delete the Swift engine code not moved into `FileIDAppleKit`, its GRDB writer and migrations (Rust migrations and `shared/catalog/*.sql` become the only source; `check_catalog_schema.py` keeps checking it), the Swift conformance CI step, and the Swift journal writers once dual-write ends. What stays Swift: the SwiftUI app, `FileIDShared` DTOs, the read-only `ReadStore`, QuickLook thumbnails, the Spotlight indexer, and `FileIDAppleKit` (Vision, ImageIO/VideoToolbox/HEIF, AVFoundation, Speech, PDFKit/textutil, MLX sessions, Trash, Finder tags, bookmarks, FSEvents, IOPM).
 
-## 5. Risks and open owner decisions
+## 5. Risks and owner decisions
 
-Decisions:
+Decided 2026-11-10 (see DECISIONS.md): 1 approved with no new network code per stage; 2 bundle ORT with the `coreml` feature; 3 test-only Trash root in test builds only; 4 ±10% time/memory, evals within 0.02, on the M1 Pro 16 GB; 5 Rust NDJSON canonical, Swift dual-writes for one release; 6 Swift ships beside Rust for one release; 7 stays rejected. The original questions:
 1. Approve the reviewed FFI surface (`src/apple/ffi.rs`, `FileIDAppleKit` in the egress inventory) and the locked-file refreshes per stage listed in section 0.
 2. ORT on macOS: bundle the official MIT `libonnxruntime.dylib` and enable `ort`'s `coreml` feature, or keep ORT inference in the Swift adapter.
 3. A test-only Trash root for conformance, or keep that case `run:false`.
