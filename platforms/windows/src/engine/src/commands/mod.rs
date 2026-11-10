@@ -7,6 +7,7 @@ pub(crate) mod deep_analyze;
 pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;
+pub(crate) mod face_clustering_mac;
 pub(crate) mod face_queues;
 pub(crate) mod face_refresh;
 pub(crate) mod face_review;
