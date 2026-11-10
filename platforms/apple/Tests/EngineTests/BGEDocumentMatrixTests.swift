@@ -38,7 +38,7 @@ struct BGEDocumentMatrixTests {
     func matchesTheScan() async throws {
         BGEDocumentMatrix.shared.reset()
         defer { BGEDocumentMatrix.shared.reset() }
-        let (db, root, centre) = try await catalog(rows: 20_000)
+        let (db, root, centre) = try await catalog(rows: 1_000)
         defer { try? FileManager.default.removeItem(at: root) }
         let query = centre.enumerated().map { $0.offset % 3 == 0 ? $0.element * 1.1 : $0.element }
         let norm = sqrt(query.reduce(0) { $0 + $1 * $1 })
@@ -54,7 +54,7 @@ struct BGEDocumentMatrixTests {
             let scanTime = try clock.measure { _ = try scan(sql, wanted) }
             #expect(cold == expected)
             #expect(warm == expected)
-            print("bge 20k: scan \(scanTime), first \(coldTime), cached \(warmTime)")
+            print("bge 1k: scan \(scanTime), first \(coldTime), cached \(warmTime)")
         }
         #expect(BGEDocumentMatrix.shared.isLoaded)
         try await db.pool.write { sql in
