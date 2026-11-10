@@ -20,6 +20,11 @@ cluster again with the given environment overrides.
   people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
   people_eval.py ... --incremental
 
+--split tune clusters only the photos of that half (the other half's faces are
+removed from the scratch copy before clustering), so thresholds and suggestion
+queues can be tuned on one half and checked on the other without people that
+span both halves mixing the two.
+
 --incremental replays a library that grows: the later half of each event's photos
 (by image path) is held back, the rest is clustered, then the held-back faces come
 back as new faces and clustering runs again. New faces are compared with the
@@ -144,8 +149,12 @@ def cluster_once(binary, state, env, timeout, home=None):
         engine.close()
 
 
-def recluster(binary, snapshot, state, env, timeout, home=None):
+def recluster(binary, snapshot, state, env, timeout, home=None, drop_hashes=frozenset(), hash_cache=None):
     _, connection = fresh_copy(snapshot, state)
+    if drop_hashes:
+        hashes = file_hashes(connection, {} if hash_cache is None else hash_cache)
+        dropped = [file_id for file_id, digest in hashes.items() if digest in drop_hashes]
+        connection.executemany("DELETE FROM face_prints WHERE file_id=?", [(file_id,) for file_id in dropped])
     connection.commit()
     connection.close()
     return cluster_once(binary, state, env, timeout, home)
@@ -470,6 +479,7 @@ def main():
     parser.add_argument("--rescan", action="store_true", help="scan again even if a snapshot exists")
     parser.add_argument("--timeout", type=float, default=3600)
     parser.add_argument("--incremental", action="store_true", help="hold back the later half of each event, then add it as new faces")
+    parser.add_argument("--split", help="cluster and score only this half of the labels (e.g. tune)")
     args = parser.parse_args()
 
     images = require_internal(args.images, "images")
@@ -477,6 +487,14 @@ def main():
     home = prepare_home(args.home)
     labels_doc = json.loads(args.labels.read_text())
     labels = labels_doc["faces"]
+    drop_hashes = frozenset()
+    if args.split:
+        events = set(labels_doc.get("split", {}).get(args.split) or [])
+        if not events:
+            raise SystemExit(f"no split named {args.split!r} in {args.labels}")
+        drop_hashes = frozenset(f["sha256"] for f in labels if f["event"] not in events)
+        labels = [f for f in labels if f["event"] in events]
+        labels_doc = {**labels_doc, "faces": labels, "split": {args.split: sorted(events)}}
     env = parse_env(args.env)
     scan_env = {k: v for k, v in env.items() if k in SCAN_ENV_KEYS}
     scan_key = hashlib.sha256(json.dumps(scan_env, sort_keys=True).encode()).hexdigest()[:8] if scan_env else "default"
@@ -484,7 +502,7 @@ def main():
     snapshot = scan_state / "snapshot.sqlite"
 
     before = live_state_snapshot()
-    meta = {"name": args.name, "flavor": args.flavor, "env": env}
+    meta = {"name": args.name, "flavor": args.flavor, "env": env, "split": args.split}
     if args.rescan or not snapshot.exists():
         meta["scanRun"] = run_scan(args.engine, images, scan_state, env, args.timeout, home)
         checkpoint(database_path(scan_state))
@@ -492,12 +510,14 @@ def main():
     state = work / f"{args.flavor}-{args.name}"
     hash_cache = {}
     incremental = None
+    if args.incremental and args.split:
+        raise SystemExit("--split and --incremental cannot be combined yet")
     if args.incremental:
         incremental = incremental_run(args.engine, snapshot, state, env, args.timeout, labels, hash_cache, home)
         meta["clusterRun"] = {key: incremental[key] for key in ("first", "second", "heldFiles", "heldFaces",
                                                                  "earlierFacesWhoseGroupChanged", "newFacesAssigned")}
     else:
-        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout, home)
+        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout, home, drop_hashes, hash_cache)
     changes = diff_snapshots(before, live_state_snapshot())
     if changes:
         print("WARNING: the live FileID state changed during the run:", *changes, sep="\n  ", file=sys.stderr)

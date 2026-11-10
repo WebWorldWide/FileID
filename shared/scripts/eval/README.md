@@ -71,6 +71,8 @@ python3 shared/scripts/eval/people_eval.py --engine <FileIDEngine> \
 python3 shared/scripts/eval/people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
 # replay a growing library: cluster the earlier half of each event, then add the rest as new faces
 python3 shared/scripts/eval/people_eval.py ... --name incremental --incremental
+# cluster one half on its own (tune merge/split queue thresholds without held-out people mixed in)
+python3 shared/scripts/eval/people_eval.py ... --name tune-merge60 --split tune --env FILEID_FACE_MERGE_SUGGEST_COS=0.60
 
 python3 shared/scripts/eval/timeline_eval.py candidates --engine <FileIDEngine> \
     --videos $E/timeline/videos --labels $E/timeline/labels.json --work $E/timeline \
