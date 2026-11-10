@@ -42,8 +42,9 @@ the manifest (`ModelManifest.swift`, `gen_model_manifest.py --check`) and `Strea
 hashes incrementally, deleting the
 artifact and failing with a distinct checksum error *before* the atomic move. Small embedders
 (CLIP/ArcFace) re-verify on load at preWarm; multi-GB VLMs are install-time-verified with a
-`.fileid-verified-<revision>` sentinel (re-hashing 5–7 GB on every load is unacceptable — the
-residual risk and rationale are in `DECISIONS.md`).
+`.fileid-verified-<revision>` sentinel; a load re-hashes the weights only when a file's recorded
+identity (size, device, inode, mtime and ctime, in the `-v2` record beside the sentinel) has
+changed (rationale in `DECISIONS.md`).
 
 ### TLS pinning — live on both platforms (2026-06-10)
 

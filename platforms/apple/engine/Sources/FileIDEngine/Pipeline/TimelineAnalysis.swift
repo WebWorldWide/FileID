@@ -55,7 +55,7 @@ actor TimelineAnalysis {
 
     func recover(database: Database) async {
         Task.detached(priority: .utility) {
-            VideoFrameWorker.sweepAbandonedFrames()
+            VideoFrameWorker.sweepAbandonedFramesOnce()
             TimelineSpeechTranscription.sweepAbandonedAudio()
         }
         try? await database.pool.write { db in

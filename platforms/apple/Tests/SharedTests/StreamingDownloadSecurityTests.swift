@@ -150,6 +150,37 @@ struct DiskPreflightTests {
         try preflightDiskSpace(dest: dest, approxBytes: approx, peakMultiplier: 1)
     }
 
+    @Test("free space of 0 or nil for important usage falls back to the raw capacity")
+    func importantUsageZeroFallsBack() throws {
+        let dest = tempDest()
+        defer { try? FileManager.default.removeItem(at: dest.deletingLastPathComponent()) }
+        let zero: (URL) -> VolumeCapacity = { _ in VolumeCapacity(important: 0, available: 10_000) }
+        let missing: (URL) -> VolumeCapacity = { _ in VolumeCapacity(important: nil, available: 10_000) }
+        #expect(volumeFreeBytes(forItemAt: dest, read: zero) == 10_000)
+        #expect(volumeFreeBytes(forItemAt: dest, read: missing) == 10_000)
+        try preflightDiskSpace(dest: dest, approxBytes: 4_000, read: zero)
+        try preflightDiskSpace(dest: dest, approxBytes: 4_000, read: missing)
+        #expect(throws: StreamingDownloadError.self) {
+            try preflightDiskSpace(dest: dest, approxBytes: 6_000, read: zero)
+        }
+    }
+
+    @Test("a positive important-usage reading is used as is, and no reading skips the check")
+    func importantUsagePreferred() throws {
+        let dest = tempDest()
+        defer { try? FileManager.default.removeItem(at: dest.deletingLastPathComponent()) }
+        let low: (URL) -> VolumeCapacity = { _ in VolumeCapacity(important: 1_000, available: 10_000) }
+        let unknown: (URL) -> VolumeCapacity = { _ in VolumeCapacity(important: nil, available: nil) }
+        let zeroOnly: (URL) -> VolumeCapacity = { _ in VolumeCapacity(important: 0, available: nil) }
+        #expect(volumeFreeBytes(forItemAt: dest, read: low) == 1_000)
+        #expect(throws: StreamingDownloadError.self) {
+            try preflightDiskSpace(dest: dest, approxBytes: 4_000, read: low)
+        }
+        #expect(volumeFreeBytes(forItemAt: dest, read: unknown) == nil)
+        try preflightDiskSpace(dest: dest, approxBytes: 4_000, read: unknown)
+        #expect(volumeFreeBytes(forItemAt: dest, read: zeroOnly) == 0)
+    }
+
     @Test("multiplier defaults to the 2x parallel-staging guard")
     func defaultMultiplierIsParallel() {
         let dest = tempDest()

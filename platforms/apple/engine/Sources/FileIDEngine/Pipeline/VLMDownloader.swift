@@ -16,7 +16,10 @@
 // installed file by path, size, and SHA-256; without it, on-disk files
 // are re-hashed against the LFS oid before being trusted. A valid
 // manifest skips the tree listing entirely, so installed models load
-// fully offline.
+// fully offline. Revalidating on load re-hashes every file unless the
+// `-v2` identity record beside the manifest (size, device, inode, mtime,
+// ctime per file) still matches exactly; any write, replace or touch
+// changes ctime, so the hash runs again.
 // Integrity: the tree listing + file URLs are pinned to the immutable
 // HF revision from ModelManifest, and each LFS file's sha256 (its LFS
 // oid) is enforced by the downloader before the atomic promote. Small
@@ -25,6 +28,7 @@
 // Progress: a single fraction across all files, weighted by byte
 // total reported by the HF tree API.
 import Foundation
+import CryptoKit
 import FileIDShared
 
 public struct VLMRepoFile: Sendable {
@@ -245,6 +249,78 @@ public actor VLMDownloader {
         let files: [File]
     }
 
+    struct FileIdentity: Codable, Equatable, Sendable {
+        let path: String
+        let size: Int64
+        let device: Int64
+        let inode: UInt64
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+        let changedSeconds: Int64
+        let changedNanoseconds: Int64
+    }
+
+    struct IdentitySentinel: Codable, Sendable {
+        let version: Int
+        let revision: String
+        let manifestSHA256: String
+        let files: [FileIdentity]
+    }
+
+    nonisolated static func identitySentinelURL(_ sentinel: URL) -> URL {
+        sentinel.deletingLastPathComponent().appendingPathComponent(sentinel.lastPathComponent + "-v2")
+    }
+
+    nonisolated static func fileIdentity(_ url: URL, path: String) -> FileIdentity? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return nil }
+        let modified = info.st_mtimespec
+        let changed = info.st_ctimespec
+        return FileIdentity(
+            path: path,
+            size: Int64(info.st_size),
+            device: Int64(info.st_dev),
+            inode: UInt64(info.st_ino),
+            modifiedSeconds: Int64(modified.tv_sec),
+            modifiedNanoseconds: Int64(modified.tv_nsec),
+            changedSeconds: Int64(changed.tv_sec),
+            changedNanoseconds: Int64(changed.tv_nsec)
+        )
+    }
+
+    nonisolated static func identities(_ paths: [String], modelDir: URL) -> [FileIdentity]? {
+        var result: [FileIdentity] = []
+        for path in paths {
+            guard let url = safeModelFileURL(path, modelDir: modelDir),
+                  let identity = fileIdentity(url, path: path) else { return nil }
+            result.append(identity)
+        }
+        return result
+    }
+
+    nonisolated static func manifestDigest(_ manifest: Data) -> String {
+        SHA256.hash(data: manifest).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated static func writeIdentitySentinel(_ sentinel: URL, revision: String, manifest: Data, files: [FileIdentity]) {
+        let record = IdentitySentinel(version: 2, revision: revision, manifestSHA256: manifestDigest(manifest), files: files)
+        let url = identitySentinelURL(sentinel)
+        guard let data = try? JSONEncoder().encode(record),
+              (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    nonisolated static func identityMatches(_ sentinel: URL, revision: String, manifest: Data, paths: [String], modelDir: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: identitySentinelURL(sentinel)) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.readToEnd(),
+              let record = try? JSONDecoder().decode(IdentitySentinel.self, from: data),
+              record.version == 2,
+              record.revision == revision,
+              record.manifestSHA256 == manifestDigest(manifest) else { return false }
+        return identities(paths, modelDir: modelDir) == record.files
+    }
+
     static func catalogSentinelIsValid(_ url: URL, repo: String) -> Bool {
         guard let entry = MLXModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) else { return true }
         guard url.isFileURL, let handle = try? FileHandle(forReadingFrom: url) else { return false }
@@ -262,8 +338,10 @@ public actor VLMDownloader {
         revision: String,
         files: [VLMRepoFile]
     ) async throws {
-        let payload = try await Task.detached(priority: .utility) {
-            let entries = try files.sorted { $0.path < $1.path }.map { file in
+        let (payload, recorded) = try await Task.detached(priority: .utility) { () throws -> (Data, [FileIdentity]?) in
+            let sorted = files.sorted { $0.path < $1.path }
+            let before = identities(sorted.map(\.path), modelDir: modelDir)
+            let entries = try sorted.map { file in
                 guard let url = safeModelFileURL(file.path, modelDir: modelDir),
                       let values = try? url.resourceValues(forKeys: [
                           .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey
@@ -285,16 +363,21 @@ public actor VLMDownloader {
             let manifest = VerifiedSentinel(version: 1, revision: revision, files: entries)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            return try encoder.encode(manifest)
+            let after = identities(sorted.map(\.path), modelDir: modelDir)
+            return (try encoder.encode(manifest), before == after ? before : nil)
         }.value
         try ReadOnlyLocations.requireWritable(sentinel)
         try payload.write(to: sentinel, options: .atomic)
+        if let recorded {
+            writeIdentitySentinel(sentinel, revision: revision, manifest: payload, files: recorded)
+        }
     }
 
     static func verifiedSentinelIsValid(
         _ sentinel: URL,
         modelDir: URL,
-        revision: String
+        revision: String,
+        hash: @escaping @Sendable (URL) throws -> String = { try sha256HexOfFile(at: $0) }
     ) async -> Bool {
         await Task.detached(priority: .utility) {
             guard let data = try? Data(contentsOf: sentinel),
@@ -302,16 +385,19 @@ public actor VLMDownloader {
                   manifest.version == 1,
                   manifest.revision == revision,
                   !manifest.files.isEmpty else { return false }
-            for file in manifest.files {
-                guard let url = safeModelFileURL(file.path, modelDir: modelDir),
-                      let values = try? url.resourceValues(forKeys: [
-                          .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey
-                      ]),
-                      values.isRegularFile == true,
-                      values.isSymbolicLink != true,
-                      Int64(values.fileSize ?? -1) == file.size,
-                      let actual = try? sha256HexOfFile(at: url),
+            let paths = manifest.files.map(\.path)
+            if identityMatches(sentinel, revision: revision, manifest: data, paths: paths, modelDir: modelDir) {
+                return true
+            }
+            guard let before = identities(paths, modelDir: modelDir) else { return false }
+            for (file, identity) in zip(manifest.files, before) {
+                guard identity.size == file.size,
+                      let url = safeModelFileURL(file.path, modelDir: modelDir),
+                      let actual = try? hash(url),
                       actual.lowercased() == file.sha256.lowercased() else { return false }
+            }
+            if identities(paths, modelDir: modelDir) == before {
+                writeIdentitySentinel(sentinel, revision: revision, manifest: data, files: before)
             }
             return true
         }.value

@@ -30,6 +30,37 @@ struct VideoFrameWorkerTests {
         #expect(FileManager.default.fileExists(atPath: unrelated.path))
     }
 
+    @Test func sweepsTheFrameFolderOncePerGate() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = Date().addingTimeInterval(-600)
+        func plant() throws -> URL {
+            let url = directory.appendingPathComponent("FileIDTimeline-\(UUID().uuidString).png")
+            try Data([1]).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
+            return url
+        }
+        let gate = VideoFrameWorker.SweepGate()
+        let first = try plant()
+        VideoFrameWorker.sweepAbandonedFramesOnce(gate: gate, directory: directory)
+        #expect(!FileManager.default.fileExists(atPath: first.path))
+        let second = try plant()
+        VideoFrameWorker.sweepAbandonedFramesOnce(gate: gate, directory: directory)
+        #expect(FileManager.default.fileExists(atPath: second.path))
+        VideoFrameWorker.sweepAbandonedFramesOnce(gate: VideoFrameWorker.SweepGate(), directory: directory)
+        #expect(!FileManager.default.fileExists(atPath: second.path))
+    }
+
+    @Test func sweepGateIsClaimedOnceAcrossThreads() async {
+        let gate = VideoFrameWorker.SweepGate()
+        let claims = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<64 { group.addTask { gate.claim() } }
+            return await group.reduce(0) { $0 + ($1 ? 1 : 0) }
+        }
+        #expect(claims == 1)
+    }
+
     @Test func timeoutTerminatesWorker() async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sleep")
