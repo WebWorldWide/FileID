@@ -99,6 +99,7 @@ struct FaceMeshTests {
     /// FILEID_FACE_MESH_MODEL the pinned ONNX. Writes FILEID_FACE_MESH_OUT as JSON lines with
     /// the box-only mesh ratio (as the Rust eye_state_eval example), the mesh ratio and the
     /// Vision openness for the Vision face that best overlaps the box, and timings.
+    /// FILEID_FACE_MESH_LONG_SIDE first fits each image as take scoring does (1024).
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_FACE_MESH_JOBS"] != nil))
     func evalHarness() throws {
         let env = ProcessInfo.processInfo.environment
@@ -107,18 +108,24 @@ struct FaceMeshTests {
         struct Job: Decodable { let id: String; let image: String; let bbox: [Float] }
         var out = ""
         var cache: (path: String, image: CGImage, pixels: FaceMesh.Pixels, faces: [VNFaceObservation])?
+        var scale: Float = 1
         for line in try String(contentsOfFile: try #require(env["FILEID_FACE_MESH_JOBS"]), encoding: .utf8).split(separator: "\n") {
             let job = try JSONDecoder().decode(Job.self, from: Data(line.utf8))
             if cache?.path != job.image {
                 let source = try #require(CGImageSourceCreateWithURL(URL(fileURLWithPath: job.image) as CFURL, nil))
-                let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+                let decoded = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+                var image = decoded
+                if let side = env["FILEID_FACE_MESH_LONG_SIDE"].flatMap(Int.init) {
+                    image = try #require(TakeMediaAnalysis.fit(decoded, longSide: side)).image
+                }
+                scale = Float(image.width) / Float(decoded.width)
                 let request = VNDetectFaceLandmarksRequest()
                 try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
                 cache = (job.image, image, try #require(FaceMesh.Pixels(image)), request.results ?? [])
             }
             guard let (_, image, pixels, faces) = cache else { continue }
             let (W, H) = (Float(image.width), Float(image.height))
-            let b = job.bbox
+            let b = job.bbox.map { $0 * scale }
             var started = CFAbsoluteTimeGetCurrent()
             let boxRatio = try mesh.eyeRatio(pixels, .boxOnly(x1: b[0], y1: b[1], x2: b[2], y2: b[3]))
             let boxMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
