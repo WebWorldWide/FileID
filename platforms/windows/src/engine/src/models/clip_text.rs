@@ -13,7 +13,7 @@ use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
 use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+    classify_inference_error, ensure_gpu_inference_alive,
 };
 
 const CONTEXT_LEN: usize = 77;
@@ -35,8 +35,7 @@ impl ClipText {
         let directory = path.parent().ok_or_else(|| anyhow::anyhow!("CLIP weights have no directory"))?;
         let (vocab, merges) = (directory.join("vocab.json"), directory.join("merges.txt"));
         let checks = [(path, "clip_text", 0), (vocab.as_path(), "clip_text", 1), (merges.as_path(), "clip_text", 2)];
-        let (session, input_name) =
-            super::clip_space::load_verified(&checks, || commit_chain_session("CLIP text", path))?;
+        let (session, input_name) = super::clip_space::load_verified(&checks, || session(path))?;
         Ok(Self { session, input_name, tokenizer })
     }
 
@@ -147,6 +146,29 @@ impl ClipText {
         }
         Ok(out)
     }
+}
+
+/// macOS: the CPU session with ONNX Runtime's default thread pool, as the Swift
+/// `CLIPTextEncoder` builds it. An explicit intra-op count (one per core) answered
+/// up to several times slower on a busy Mac, where other processes hold cores.
+#[cfg(target_os = "macos")]
+fn session(path: &Path) -> Result<(Session, String)> {
+    use ort::session::builder::GraphOptimizationLevel;
+    let session = Session::builder()
+        .context("ORT session builder")?
+        .with_log_level(ort::logging::LogLevel::Error)
+        .context("configure session (CLIP text)")?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .context("configure session (CLIP text)")?
+        .commit_from_file(path)
+        .context("ORT session commit (CLIP text)")?;
+    let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?.name.clone();
+    Ok((session, input_name))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn session(path: &Path) -> Result<(Session, String)> {
+    super::runtime::commit_chain_session("CLIP text", path)
 }
 
 fn l2_normalize(v: &mut [f32]) {
