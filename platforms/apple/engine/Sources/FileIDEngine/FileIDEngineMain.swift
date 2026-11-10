@@ -131,7 +131,8 @@ struct FileIDEngineMain {
             version: "0.1.3",
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
-            physicalMemoryGB: Hardware.physicalMemoryGB
+            physicalMemoryGB: Hardware.physicalMemoryGB,
+            engine: "swift"
         )))
         JSONLog.shared.info(ev: "engine_ready",
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),

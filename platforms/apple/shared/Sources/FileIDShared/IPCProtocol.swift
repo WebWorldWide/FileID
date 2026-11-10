@@ -459,16 +459,19 @@ public struct EngineInfo: Codable, Sendable {
     public let pid: Int32
     public let workerCap: Int
     public let physicalMemoryGB: Double
+    /// Schema 1.26.0: "swift" or "rust"; nil from older engines.
+    public let engine: String?
     /// CPU + GPU detection result the engine made on startup. Optional so
     /// older engines (that don't emit it) still decode — `nil` when absent.
     public let hardware: HardwareInfo?
 
     public init(version: String, pid: Int32, workerCap: Int, physicalMemoryGB: Double,
-                hardware: HardwareInfo? = nil) {
+                engine: String? = nil, hardware: HardwareInfo? = nil) {
         self.version = version
         self.pid = pid
         self.workerCap = workerCap
         self.physicalMemoryGB = physicalMemoryGB
+        self.engine = engine
         self.hardware = hardware
     }
 }

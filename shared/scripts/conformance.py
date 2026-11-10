@@ -127,10 +127,18 @@ class Engine:
             if isinstance(event, dict) and isinstance(event.get("payload"), dict):
                 if "ready" in event["payload"]:
                     self.stream["ready"] = name
+                    info = event["payload"]["ready"]
+                    info = info.get("_0", info) if isinstance(info, dict) else {}
+                    if isinstance(info, dict) and info.get("engine") in ("swift", "rust"):
+                        self.stream["engine"] = info["engine"]
                 self.events.put(event["payload"])
 
     @property
     def flavor(self):
+        """The engine named in ready (IPC 1.26), else the stream it used: the
+        Swift engine and the Rust engine the Mac app hosts both write stderr."""
+        if "engine" in self.stream:
+            return self.stream["engine"]
         return "swift" if self.stream.get("ready") == "stderr" else "rust"
 
     def next_event(self, deadline):

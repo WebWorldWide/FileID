@@ -87,6 +87,8 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 /// Ordered macOS search locations for an installed ONNX Runtime dylib (highest
 /// priority first), NOT counting an explicit `ORT_DYLIB_PATH` (resolved before
 /// this list):
+///   0. app-hosted engine only: `Contents/Frameworks` of the app bundle (it
+///      then searches only there and beside the executable);
 ///   1. beside the running executable — also what `ort` itself probes for a
 ///      bare name, surfaced here so `status`/error text can report it;
 ///   2. the engine runtime dir (`fileid runtime install` target);
@@ -94,11 +96,21 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 ///   4. `/usr/local/lib` (Intel-prefix Homebrew / manual installs).
 #[cfg(target_os = "macos")]
 pub fn search_locations() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(4);
+    let mut out = Vec::with_capacity(5);
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {
+            // The app bundle's copy (`Contents/Frameworks`) comes first for the
+            // engine the Mac app hosts.
+            if crate::paths::APP_HOSTED {
+                out.push(dir.join("../Frameworks").join(DYLIB_FILE_NAME));
+            }
             out.push(dir.join(DYLIB_FILE_NAME));
         }
+    // The app loads only code it ships: never a Homebrew or /usr/local runtime
+    // (Homebrew's build carries Microsoft's telemetry client).
+    if crate::paths::APP_HOSTED {
+        return out;
+    }
     if let Ok(rt) = crate::paths::runtime_dir() {
         out.push(rt.join(DYLIB_FILE_NAME));
     }
@@ -156,6 +168,17 @@ pub fn resolve_dylib() -> Option<std::path::PathBuf> {
 /// the first ORT session. Returns the path pinned, if any.
 #[cfg(target_os = "macos")]
 pub fn pin_dylib_path() -> Option<PathBuf> {
+    // The engine the app hosts ignores an inherited ORT_DYLIB_PATH: it loads
+    // only the runtime it ships (or none).
+    if crate::paths::APP_HOSTED {
+        let bundled = search_locations().into_iter().find(|p| p.is_file());
+        // SAFETY note: single-threaded at this point in startup.
+        match &bundled {
+            Some(path) => unsafe { std::env::set_var("ORT_DYLIB_PATH", path) },
+            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
+        }
+        return bundled;
+    }
     if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty() && PathBuf::from(&v).is_file())
     {
         return None;
@@ -282,11 +305,38 @@ mod tests {
         // runtime dir + the two system prefixes are always present; the
         // beside-exe entry is best-effort (current_exe may fail in a sandbox).
         assert!(locs.iter().all(|p| p.ends_with(DYLIB_FILE_NAME)));
-        assert!(locs.iter().any(|p| p.starts_with("/opt/homebrew/lib")));
-        assert!(locs.iter().any(|p| p.starts_with("/usr/local/lib")));
+        if crate::paths::APP_HOSTED {
+            assert!(locs.first().is_some_and(|p| p.to_string_lossy().contains("../Frameworks/")));
+            assert!(locs.iter().all(|p| !p.starts_with("/opt/homebrew") && !p.starts_with("/usr/local")));
+        } else {
+            assert!(locs.iter().any(|p| p.starts_with("/opt/homebrew/lib")));
+            assert!(locs.iter().any(|p| p.starts_with("/usr/local/lib")));
+        }
     }
 
-    #[cfg(target_os = "macos")]
+    /// The engine the app hosts never loads an inherited ORT_DYLIB_PATH.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn app_hosted_engine_ignores_an_inherited_dylib_path() {
+        let dir = std::env::temp_dir().join(format!("fileid-ort-hosted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = dir.join(DYLIB_FILE_NAME);
+        std::fs::write(&foreign, b"not-a-real-dylib").unwrap();
+        let prev = std::env::var_os("ORT_DYLIB_PATH");
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", &foreign) };
+
+        let pinned = pin_dylib_path();
+        assert_ne!(pinned.as_deref(), Some(foreign.as_path()));
+        assert_eq!(std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from), pinned);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ORT_DYLIB_PATH", v) },
+            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
     #[test]
     fn explicit_dylib_path_is_honored_first() {
         // A non-existent ORT_DYLIB_PATH must NOT resolve (we only return real
