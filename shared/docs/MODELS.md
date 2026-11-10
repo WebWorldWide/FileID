@@ -1,5 +1,61 @@
 # Models — canonical registry
 
+## 2026-11-08 — Qwen3.5 0.8B for tag/rename passes: measured, not adopted
+
+The owner approved downloading Qwen3.5 0.8B to see whether tag and rename passes could run on a smaller model to save memory. It lost a blinded comparison to the current default (Qwen3-VL 2B), so nothing was added to the manifest or the app. It stays in the Mac catalog as an opt-in candidate (`hf:mlx-community/Qwen3.5-0.8B-MLX-4bit`), as before.
+
+**Licence.** [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) at `2fc06364715b967f1860aea9cf38778875588b17`: the repository's `LICENSE` file is Apache-2.0 and the card says `license: apache-2.0` (base model `Qwen/Qwen3.5-0.8B-Base`, also Apache-2.0). The card describes "prototyping, task-specific fine-tuning, and other research or development purposes" as intended uses because of the model's size. That is a statement of what the model is suited for, not a licence term. Both conversions name it as their base and declare Apache-2.0.
+
+**Downloaded** (evaluation only, into `~/Library/Developer/FileIDModels-eval`):
+
+| Build | Repository @ revision | File, bytes, SHA-256 |
+|---|---|---|
+| MLX 4-bit | [mlx-community/Qwen3.5-0.8B-MLX-4bit](https://huggingface.co/mlx-community/Qwen3.5-0.8B-MLX-4bit) @ `5d894f8cc4ef3e6c88537bf3746ed262f549da6a` | `model.safetensors`, 625,229,487, `f5a0d9dd3efa73510542a8023d610ff26be2b4b020d181cfc4bedaa1fcc5dd9e` (folder total 634 MB) |
+| GGUF Q4_K_M | [lmstudio-community/Qwen3.5-0.8B-GGUF](https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF) @ `26bab2c9369648924251c0ebb3dae012f5147707` | `Qwen3.5-0.8B-Q4_K_M.gguf`, 527,502,816, `f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec`; `mmproj-Qwen3.5-0.8B-BF16.gguf`, 207,345,952, `6fdd1b4bdc3d2ae8bd15d783e23260dd07dcf83f45604a21dabfd6efad8f8bc5` |
+
+Both match the pins already in `catalog.json` and `model-catalog.json`. The GGUF build was not run, because there is no llama.cpp server on this Mac.
+
+**Blinded comparison.** 120 photos, spread evenly through copies of the private people set (family events from 2010–2015 and 2026: birthdays, Christmas, baseball, portraits). The Swift release engine ran on a scratch catalog: Describe Files (`deepAnalyzeAll`, full pass with renames) once with each model, M1 Pro 16 GB, nothing else running. Each photo's two results (description, tags, proposed name) were shuffled into A/B with a cryptographic RNG. I judged every pair against the photo (more accurate and useful, or a tie) and unblinded only after all 120 judgments. Position check: side A won 56 and side B won 53.
+
+| | Qwen3-VL 2B (default) | Qwen3.5 0.8B |
+|---|---|---|
+| Pairs won | **105** | 4 |
+| Ties | 11 | 11 |
+| 120 photos, Describe Files | 160 s (1.33 s per photo) | 62 s (0.51 s per photo) |
+| Engine peak physical footprint | 3.09 GB | 2.07 GB |
+| Mean description length | 47 words | 21 words |
+| Proposed names ending in "Jpg"/"Png"/"Txt" | 2 | 14 |
+| Results with snake-case or file-like tags (`man_glasses_brendan`, `baby_baby`) | 4 | 16 |
+
+The 0.8B model was 2.6× faster and used about 1 GB less, but it was less accurate. It misread objects (a sandwich as a banana, a bat as a hockey stick, a gift bag as a cake) and dropped people from group shots. It invented personal names in tags and file names ("Brendan", "Jason"), echoed file extensions into names, and added fewer useful details (signs, jersey text, places). The default stays. The Mac's existing memory controls (idle parking, a capped MLX cache, `clearCache()` between passes) remain the way FileID compresses AI memory.
+
+## 2026-11-08 — Face Mesh V2 for eye openness (shared engine, opt-in)
+
+The shared Rust engine judges eye openness in Best Takes with Google's MediaPipe Face Mesh V2 (the 478-point face landmark network inside the Face Landmarker bundle) when that model is installed. YuNet's five landmarks can't tell open from closed. It is pinned in `shared/models/manifest.json` as `face_mesh_landmarks` (kind `face_mesh`, platforms `windows`, which means the shared engine) and installs into `models/face_mesh/face_landmarks.onnx` through `downloadModel {modelKind: "face_mesh"}`. Nothing downloads it on its own, and no app shows it yet.
+
+| | |
+|---|---|
+| Repository | [naklitechie/face-landmarks-onnx](https://huggingface.co/naklitechie/face-landmarks-onnx) at commit `575c33816c840c5b156398adb485e4f8d138adc2` |
+| File | `face_landmarks.onnx`, 4,920,995 bytes, SHA-256 `f38c3321ceffbc9e95103480ad38cc3f52e7e1bde2bcee7cd9355d0b9138ac0c` |
+| License | Apache-2.0: the repository's own `LICENSE` file is the Apache-2.0 text (byte-identical to MediaPipe's), and its card says Apache-2.0 |
+| Upstream | Google's [Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), float16 bundle v1. The [Face Mesh V2 model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf) (2022-09-15, authors at Google) says "Licensed under Apache License, Version 2.0" |
+| Training data | The card says the images were captured on smartphone cameras in real-world conditions through an AR application and annotated by Google's own 11 annotators. No third-party or non-commercial dataset is named |
+| Card scope | Intended for AR effects. Out of scope: life-critical decisions, and face recognition or identification. Eye openness is neither |
+
+**Why this copy.** Google hosts the weights only on `storage.googleapis.com`, which FileID never downloads from. Byte-exact mirrors of the official `face_landmarker.task` bundle exist on Hugging Face (for example [Azng0/autoshade-mirror-mediapipe-face-landmarker](https://huggingface.co/Azng0/autoshade-mirror-mediapipe-face-landmarker), SHA-256 `64184e22…9ff`, the same digest in four unrelated repositories), but the bundle holds TFLite, which ONNX Runtime can't run. The pinned file is a format-only tf2onnx conversion. It was checked against the official weights: inside the mirrored bundle, `face_landmarks_detector.tflite` (SHA-256 `c7d54204…43d5`) holds 251 weight tensors with 1,199,316 values. Every one of its 219 tensors with more than 16 values appears in the ONNX file with exactly the same values (compared as sorted fp32 multisets, so layout changes don't matter), and the totals match. A second independent conversion ([senty-au/face_landmarks_detector-ONNX](https://huggingface.co/senty-au/face_landmarks_detector-ONNX)) passes the same check. The pinned copy was chosen because it carries its own `LICENSE` file.
+
+**How it runs.** Crop a square of 1.5× the YuNet box, rolled level using YuNet's eye points. Run the mesh, refit the crop to the mesh's own points, and run it again. The eye aspect ratio is (|160−144| + |158−153|) / 2|33−133| for one eye, the mirrored points for the other, averaged over both eyes. Openness = (ratio − 0.14) / (0.24 − 0.14), clamped to 0…1, so Best Takes' existing "eyes closed below 0.35" rule fires at a ratio under 0.175 (tuned on the tune split). Faces under 24 px are skipped, and a crop whose presence logit is below 0 gives no judgement. Release build on the M1 Pro: 9.6 ms median per face for both passes (p90 18 ms). The take-signals cache key becomes `yunet-mesh-v1`, so stored scores refresh once the model is installed.
+
+**Measured** on the private people set (`FileIDEval/people/eye-labels.json`, new): 825 faces at the sizes where Best Takes judges eyes (shorter side ≥ 40 px at 1024 px, or at 2048 px for large sources). One labeller marked each face open, closed or unsure from full-resolution eye crops: 253 open, 135 closed (blinks, squints and downcast eyes that read as closed) and 437 unsure (profiles, sunglasses, too dark). Both checks used the same upright downscaled images. The Mac check is the engine's `VisionTakeFaceAnalyzer.eyesOpen` formula run on Vision's landmarks. The mesh used the labelled box as its first crop, because YuNet isn't installed here and FileID doesn't download it; the second pass follows the mesh's own points. "Eyes closed" means openness < 0.35.
+
+| Eyes-closed flag | Tune (104 open / 73 closed): P / R | Held-out (149 / 62): P / R | Faces judged |
+|---|---|---|---|
+| Mac Vision eye-contour check | 0.78 / 0.25 | 0.76 / 0.31 | 85% |
+| Face mesh, chosen ratio 0.175 | 0.79 / 0.67 | **0.82 / 0.68** | 94% |
+| Both, only faces both judged (held-out n = 179) | Vision 0.76 / 0.43 | mesh 0.79 / 0.77 | — |
+
+The mesh flags more than twice as many of the closed eyes at the same precision. Most of its misses are downcast eyes and squints that still show a sliver of iris; most of its false flags are narrow smiling eyes. Not established: real YuNet boxes as the first crop (the Windows RTX 2060 run should confirm), and other families' photos.
+
 ## 2026-11-06 — Extended catalog license and identity audit
 
 Every `shared/models/catalog.json` entry was checked against its pinned repository's own files and its true upstream's LICENSE file or model card. Result: 342 → 334 entries (262 Apache-2.0, 46 MIT, 26 Gemma Terms with `termsRequired`). Removed:

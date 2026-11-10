@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-08 — Eye openness in the shared engine; Qwen3.5 0.8B measured and not adopted
+
+- **Shared engine** (agent, owner-approved download): Best Takes judges eye openness from MediaPipe Face Mesh V2 (Apache-2.0, 4.9 MB ONNX pinned at `naklitechie/face-landmarks-onnx` @ `575c3381`; all 219 weight tensors checked identical to Google's official `face_landmarker.task`, and to a second independent conversion), used only when installed (`downloadModel face_mesh`; take-score cache id `yunet-mesh-v1`). On 825 newly labelled faces (private eval), held-out eyes-closed precision/recall 0.82 / 0.68 versus 0.76 / 0.31 for the Mac's Vision check; 9.6 ms per face. First crops came from labelled boxes, not YuNet (not installed here).
+- **Qwen3.5 0.8B** (Apache-2.0) for tag/rename passes: blinded 120-photo comparison against Qwen3-VL 2B, 2B won 105, ties 11, 0.8B won 4; 0.8B was 2.6× faster and used 1 GB less but misread objects, dropped people and invented names. Not adopted; nothing added to the manifest or apps for it.
+- Rust 1,245 tests, clippy/fmt; conformance Rust 60, Swift 68, 0 fail; licence, egress and manifest gates pass. Downloaded models are kept in `~/Library/Developer/FileIDModels-eval` (never the live model folders).
 ## 2026-11-08 — Owner-approved fixes in four digest-locked Mac files: fast VLM loads, free-space fallback, one frame sweep, 672 px selection checks
 
 - **VLM loads** (`VLMDownloader.swift`): after one full hash, a `-v2` record beside the verified sentinel stores each weight file's size, device, inode, mtime and ctime; later loads skip the hash only on an exact match, anything else re-hashes and rewrites it. Old (v1) sentinels re-hash once, then upgrade (seen on the real model copies). `bench_model_load.py`, release builds, scratch model copies, load average 20–29, 4 rounds: Qwen3-VL 2B prewarm 1.65–1.71 s → 0.67–0.70 s warm (first round, with the one-time re-hash, 1.95 → 1.93 s); 4B 2.76–2.98 s → 0.64–0.67 s warm (2.92 → 2.74 s first round).

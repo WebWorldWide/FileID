@@ -39,6 +39,7 @@ pub mod scene_vocab;
 pub mod search_strength;
 pub mod face_align;
 pub mod face_geometry;
+pub mod face_mesh;
 pub mod sface;
 pub mod variants;
 pub mod yunet;
