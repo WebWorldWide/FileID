@@ -57,7 +57,8 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 /// Ordered macOS search locations for an installed ONNX Runtime dylib (highest
 /// priority first), NOT counting an explicit `ORT_DYLIB_PATH` (resolved before
 /// this list):
-///   0. app-hosted engine only: `Contents/Frameworks` of the app bundle;
+///   0. app-hosted engine only: `Contents/Frameworks` of the app bundle (it
+///      then searches only there and beside the executable);
 ///   1. beside the running executable — also what `ort` itself probes for a
 ///      bare name, surfaced here so `status`/error text can report it;
 ///   2. the engine runtime dir (`fileid runtime install` target);
@@ -75,6 +76,11 @@ pub fn search_locations() -> Vec<PathBuf> {
             }
             out.push(dir.join(DYLIB_FILE_NAME));
         }
+    // The app loads only code it ships: never a Homebrew or /usr/local runtime
+    // (Homebrew's build carries Microsoft's telemetry client).
+    if crate::paths::APP_HOSTED {
+        return out;
+    }
     if let Ok(rt) = crate::paths::runtime_dir() {
         out.push(rt.join(DYLIB_FILE_NAME));
     }
@@ -198,8 +204,13 @@ mod tests {
         // runtime dir + the two system prefixes are always present; the
         // beside-exe entry is best-effort (current_exe may fail in a sandbox).
         assert!(locs.iter().all(|p| p.ends_with(DYLIB_FILE_NAME)));
-        assert!(locs.iter().any(|p| p.starts_with("/opt/homebrew/lib")));
-        assert!(locs.iter().any(|p| p.starts_with("/usr/local/lib")));
+        if crate::paths::APP_HOSTED {
+            assert!(locs.first().is_some_and(|p| p.to_string_lossy().contains("../Frameworks/")));
+            assert!(locs.iter().all(|p| !p.starts_with("/opt/homebrew") && !p.starts_with("/usr/local")));
+        } else {
+            assert!(locs.iter().any(|p| p.starts_with("/opt/homebrew/lib")));
+            assert!(locs.iter().any(|p| p.starts_with("/usr/local/lib")));
+        }
     }
 
     #[cfg(target_os = "macos")]
