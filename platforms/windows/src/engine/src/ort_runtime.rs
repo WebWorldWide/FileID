@@ -57,6 +57,7 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 /// Ordered macOS search locations for an installed ONNX Runtime dylib (highest
 /// priority first), NOT counting an explicit `ORT_DYLIB_PATH` (resolved before
 /// this list):
+///   0. app-hosted engine only: `Contents/Frameworks` of the app bundle;
 ///   1. beside the running executable — also what `ort` itself probes for a
 ///      bare name, surfaced here so `status`/error text can report it;
 ///   2. the engine runtime dir (`fileid runtime install` target);
@@ -64,9 +65,14 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 ///   4. `/usr/local/lib` (Intel-prefix Homebrew / manual installs).
 #[cfg(target_os = "macos")]
 pub fn search_locations() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(4);
+    let mut out = Vec::with_capacity(5);
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {
+            // The app bundle's copy (`Contents/Frameworks`) comes first for the
+            // engine the Mac app hosts.
+            if crate::paths::APP_HOSTED {
+                out.push(dir.join("../Frameworks").join(DYLIB_FILE_NAME));
+            }
             out.push(dir.join(DYLIB_FILE_NAME));
         }
     if let Ok(rt) = crate::paths::runtime_dir() {

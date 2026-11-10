@@ -1118,6 +1118,10 @@ pub struct SleepGuard {
     child: Option<std::process::Child>,
     #[cfg(target_os = "linux")]
     inhibit_stdin: Option<std::process::ChildStdin>,
+    // macOS app-hosted engine: an IOPM PreventSystemSleep assertion held by
+    // FileIDAppleKit, released on drop. CLI/TUI builds stay a no-op.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    _assertion: Option<crate::apple::SleepAssertion>,
 }
 
 impl SleepGuard {
@@ -1192,7 +1196,12 @@ impl SleepGuard {
         Self { child, inhibit_stdin }
     }
 
-    #[cfg(all(not(windows), not(target_os = "linux")))]
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    pub fn acquire() -> Self {
+        Self { _assertion: crate::apple::SleepAssertion::begin("FileID is processing your library") }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux"), not(all(target_os = "macos", feature = "apple-adapters"))))]
     pub fn acquire() -> Self { Self {} }
 }
 

@@ -93,7 +93,8 @@ public sealed record EngineInfo(
     int Pid,
     uint WorkerCap,
     [property: JsonPropertyName("physicalMemoryGB")] double PhysicalMemoryGB,
-    HardwareInfo? Hardware = null);
+    HardwareInfo? Hardware = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Engine = null);
 
 public sealed record RestructureConfidenceCounts(ulong Auto, ulong Review, ulong Ask, ulong Unknown);
 
