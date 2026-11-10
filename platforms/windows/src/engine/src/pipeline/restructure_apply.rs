@@ -556,7 +556,7 @@ impl UndoJournal {
         self.file
             .write_all(line.as_bytes())
             .context("appending undo journal entry")?;
-        self.file.sync_data().context("syncing undo journal entry")?;
+        sync_ahead_of_move(&self.file).context("syncing undo journal entry")?;
         self.len = prev + line.len() as u64;
         Ok(prev)
     }
@@ -572,6 +572,23 @@ impl UndoJournal {
         let _ = self.file.sync_data();
         self.len = prev;
     }
+}
+
+/// Makes a write-ahead entry durable before the move it describes. On macOS
+/// `sync_data` is `F_FULLFSYNC`, a drive-cache flush per moved file that made an
+/// apply about 4x slower than the Swift engine (which uses `fsync`);
+/// `F_BARRIERFSYNC` still guarantees the entry reaches storage before the rename
+/// that follows, which is the ordering the journal relies on.
+fn sync_ahead_of_move(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: fcntl on a descriptor this File owns; F_BARRIERFSYNC takes no argument.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+    }
+    file.sync_data()
 }
 
 fn prior_undo_journal_backups(path: &Path) -> Result<Vec<PathBuf>> {

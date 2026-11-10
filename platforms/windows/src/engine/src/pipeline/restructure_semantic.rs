@@ -869,38 +869,56 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters) -> Vec<usize> {
         crate::util::hnsw_index::build(points)
     });
 
+    // Bounded top-k: O(n) partition instead of an O(n log n) full sort of all n-1
+    // neighbors when only k are used; sort just the k kept.
+    let top_k = |mut hits: Vec<Neighbor>| {
+        let cmp = |a: &Neighbor, b: &Neighbor| {
+            b.similarity
+                .total_cmp(&a.similarity)
+                .then_with(|| a.idx.cmp(&b.idx))
+        };
+        if hits.len() > k {
+            hits.select_nth_unstable_by(k, cmp);
+            hits.truncate(k);
+        }
+        hits.sort_by(cmp);
+        hits
+    };
+    // Below HNSW_MIN every list is computed once, in parallel, before clustering:
+    // the clusterer asks for each file's neighbours up to three times, and the
+    // per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400
+    // photos). The Swift engine does the same with one Accelerate matrix multiply.
+    let exact: Option<Vec<Vec<Neighbor>>> = hnsw.is_none().then(|| {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                top_k(
+                    (0..n)
+                        .filter(|&j| j != i)
+                        .map(|j| Neighbor { idx: j, similarity: dot_lanes(&fused[i], &fused[j]) })
+                        .collect(),
+                )
+            })
+            .collect()
+    });
+
     let mut knn_search = crate::util::hnsw_index::Searcher::default();
     let result = identity_clustering::cluster(
         fused,
-        |i| {
-            let mut hits: Vec<Neighbor> = if let Some(idx) = &hnsw {
-                // Reuse one Search scratch across the sweep (a fresh one re-zeros
-                // an n-byte visited set per query — an O(n²) term over the pass).
+        |i| match (&exact, &hnsw) {
+            (Some(lists), _) => lists[i].clone(),
+            // Reuse one Search scratch across the sweep (a fresh one re-zeros an
+            // n-byte visited set per query — an O(n²) term over the pass).
+            (None, Some(idx)) => top_k(
                 knn_search
                     .top_k(idx, &fused[i], k + 1)
                     .into_iter()
                     .filter(|(j, _)| *j != i)
                     .map(|(j, d)| Neighbor { idx: j, similarity: 1.0 - d / 2.0 })
-                    .collect()
-            } else {
-                (0..n)
-                    .filter(|&j| j != i)
-                    .map(|j| Neighbor { idx: j, similarity: dot(&fused[i], &fused[j]) })
-                    .collect()
-            };
-            // Bounded top-k: O(n) partition instead of an O(n log n) full sort of
-            // all n-1 neighbors when only k are used; sort just the k kept.
-            let cmp = |a: &Neighbor, b: &Neighbor| {
-                b.similarity
-                    .total_cmp(&a.similarity)
-                    .then_with(|| a.idx.cmp(&b.idx))
-            };
-            if hits.len() > k {
-                hits.select_nth_unstable_by(k, cmp);
-                hits.truncate(k);
-            }
-            hits.sort_by(cmp);
-            hits
+                    .collect(),
+            ),
+            (None, None) => Vec::new(),
         },
         params,
     );
@@ -1007,6 +1025,23 @@ fn group_name_from_terms(terms: &[&str]) -> String {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Dot product over eight independent lanes so the compiler vectorizes it (a
+/// single running sum cannot be reordered). Used for kNN scans only.
+fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    let (a, b) = (&a[..len], &b[..len]);
+    let mut lanes = [0.0f32; 8];
+    let (a_chunks, a_tail) = a.as_chunks::<8>();
+    let (b_chunks, b_tail) = b.as_chunks::<8>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for lane in 0..8 {
+            lanes[lane] += x[lane] * y[lane];
+        }
+    }
+    let tail: f32 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
+    lanes.iter().sum::<f32>() + tail
 }
 
 fn l2_normalized(v: &[f32]) -> Vec<f32> {

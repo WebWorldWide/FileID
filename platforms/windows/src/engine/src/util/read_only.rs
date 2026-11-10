@@ -1,7 +1,15 @@
 use std::path::{Path, PathBuf};
 
+const READ_ONLY_ROOT: &str = "/Volumes/Adlon";
+
 pub fn require_writable(path: &Path) -> std::io::Result<()> {
-    require_writable_under(path, &[PathBuf::from("/Volumes/Adlon")])
+    // Resolving the root costs a realpath (statfs on a mount point) and runs twice
+    // per restructure move; its resolution never changes while the engine runs.
+    static RESOLVED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    match RESOLVED.get_or_init(|| resolved(Path::new(READ_ONLY_ROOT)).ok()) {
+        Some(root) => check_under(path, &[PathBuf::from(READ_ONLY_ROOT)], &[root.clone()]),
+        None => require_writable_under(path, &[PathBuf::from(READ_ONLY_ROOT)]),
+    }
 }
 
 pub fn require_source_mutation(path: &Path) -> std::io::Result<()> {
@@ -38,6 +46,11 @@ fn resolved(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 pub fn require_writable_under(path: &Path, roots: &[PathBuf]) -> std::io::Result<()> {
+    let resolved_roots = roots.iter().map(|root| resolved(root)).collect::<std::io::Result<Vec<_>>>()?;
+    check_under(path, roots, &resolved_roots)
+}
+
+fn check_under(path: &Path, roots: &[PathBuf], resolved_roots: &[PathBuf]) -> std::io::Result<()> {
     let literal = path.to_string_lossy().replace('\\', "/").to_lowercase();
     for root in roots {
         let root = root.to_string_lossy().replace('\\', "/").to_lowercase();
@@ -46,8 +59,8 @@ pub fn require_writable_under(path: &Path, roots: &[PathBuf]) -> std::io::Result
         }
     }
     let candidate = resolved(path)?.to_string_lossy().replace('\\', "/").to_lowercase();
-    for root in roots {
-        let root = resolved(root)?.to_string_lossy().replace('\\', "/").to_lowercase();
+    for root in resolved_roots {
+        let root = root.to_string_lossy().replace('\\', "/").to_lowercase();
         if candidate == root || candidate.starts_with(&(root.trim_end_matches('/').to_owned() + "/")) {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "This location is read-only example data"));
         }
