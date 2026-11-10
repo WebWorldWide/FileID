@@ -52,6 +52,21 @@ func decodeBoundedImage(_ source: CGImageSource, path: String, maxPixelSize: Int
     return decodeBoundedImage(source, maxPixelSize: maxPixelSize)
 }
 
+/// The scan's working image. Camera JPEGs that carry a large preview get the
+/// same treatment as camera RAW files: the preview stands in for the full image
+/// (a 33 MP Sony JPEG decoded at 37 photos/s in the hardware decoder, its
+/// 1616 px preview at 182/s). Other callers keep decoding the full image.
+func decodeScanImage(_ source: CGImageSource, path: String, maxPixelSize: Int) -> CGImage? {
+    if isJPEG(source), let image = JPEGPreview.decode(source, path: path, maxPixelSize: maxPixelSize) { return image }
+    return decodeBoundedImage(source, path: path, maxPixelSize: maxPixelSize)
+}
+
+func isJPEG(_ source: CGImageSource) -> Bool {
+    guard let identifier = CGImageSourceGetType(source) as String?,
+          let type = UTType(identifier) else { return false }
+    return type.conforms(to: .jpeg)
+}
+
 // public.heic and public.heif are siblings, not parent and child.
 func isHEIF(_ source: CGImageSource) -> Bool {
     guard let identifier = CGImageSourceGetType(source) as String?,
