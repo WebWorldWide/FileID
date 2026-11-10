@@ -39,6 +39,36 @@ pub const DYLIB_FILE_NAME: &str = "libonnxruntime.so";
 /// missing. Distinct from the AI-model download (`fileid models download`).
 pub const INSTALL_COMMAND: &str = "fileid runtime install";
 
+/// Read by official ONNX Runtime builds from 1.29 on, whose macOS/Linux
+/// libraries carry Microsoft's 1DS uploader. The uploader starts with the first
+/// environment, writes a device id and an event queue under
+/// `~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime` and
+/// uploads from there; `DisableTelemetryEvents` comes too late to stop either.
+/// Only this variable, set before that first environment, keeps it from
+/// starting (measured with the pip 1.30.0 dylib; DECISIONS 2026-11-10).
+pub const DISABLE_TELEMETRY_ENV: &str = "ORT_DISABLE_TELEMETRY";
+
+/// Turn ONNX Runtime's own telemetry off for this process and the processes it
+/// starts. Call first thing in `main`, while the process is single-threaded.
+pub fn disable_telemetry_before_load() {
+    // SAFETY: callers run this before any other thread exists.
+    unsafe { std::env::set_var(DISABLE_TELEMETRY_ENV, "1") };
+}
+
+/// Create the process-wide ORT environment with telemetry events off and the
+/// native log severity clamped, or keep the one that already exists. Every
+/// session path calls this first: `ort`'s lazy default environment calls
+/// `EnableTelemetryEvents`, which Microsoft's Windows builds route to ETW.
+/// Warning severity matters with the `tracing` feature: ort otherwise creates
+/// the environment at VERBOSE and forwards every native log line through an
+/// `extern "system"` callback that aborts the process on a null pointer.
+pub fn commit_environment() -> ort::Result<()> {
+    if ort::init().with_telemetry(false).commit()? {
+        ort::environment::get_environment()?.set_log_level(ort::logging::LogLevel::Warning);
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // macOS resolution.
 // ─────────────────────────────────────────────────────────────────────────
@@ -166,6 +196,66 @@ pub fn missing_runtime_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_is_disabled_before_ort_loads() {
+        disable_telemetry_before_load();
+        assert_eq!(std::env::var(DISABLE_TELEMETRY_ENV).as_deref(), Ok("1"));
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let server = std::fs::read_to_string(src.join("server.rs")).unwrap();
+        let run = &server[server.find("pub fn run() -> Result<()> {").expect("server::run")..];
+        let disable = run
+            .find("ort_runtime::disable_telemetry_before_load();")
+            .expect("run() disables ORT telemetry");
+        for later in [
+            "tokio::runtime::Builder",
+            "logging::init()",
+            "ort_runtime::pin_dylib_path()",
+            "ort_runtime::commit_environment",
+        ] {
+            assert!(
+                disable < run.find(later).unwrap_or(usize::MAX),
+                "{later} runs before ORT telemetry is disabled"
+            );
+        }
+
+        let mut stack = vec![src];
+        let mut session_sites = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") || path.ends_with("ort_runtime.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    !text.contains("ort::init()"),
+                    "{} builds an ORT environment outside commit_environment",
+                    path.display()
+                );
+                for (at, _) in text.match_indices("Session::builder()") {
+                    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+                    if text[line_start..at].trim_start().starts_with("//") {
+                        continue;
+                    }
+                    session_sites += 1;
+                    let before = &text[..at];
+                    let function = &before[before.rfind("fn ").unwrap_or(0)..];
+                    assert!(
+                        function.contains("ort_runtime::commit_environment()"),
+                        "{} creates a session before committing the telemetry-off environment",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(session_sites >= 2, "session builder sites moved; update this test");
+    }
 
     #[test]
     fn dylib_file_name_matches_platform() {

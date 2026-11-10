@@ -52,6 +52,8 @@ fn oversized_frame_message(seen: usize) -> String {
 }
 
 pub fn run() -> Result<()> {
+    ort_runtime::disable_telemetry_before_load();
+
     // SEC-3: lock DLL search FIRST. Must run before tokio::runtime spins
     // worker threads, before logging::init() opens tracing-appender file
     // handles, and before anything else that might trigger an implicit
@@ -239,34 +241,17 @@ async fn async_main() -> Result<()> {
         };
 
     // Create the ORT environment eagerly (the ORT_DYLIB_PATH pin above must
-    // already be decided) so we control two things a lazy default would get
-    // wrong:
-    //   1. Telemetry: ort's builder defaults `telemetry: true` and relies on
-    //      the binary having none compiled in — but the CUDA pack pins
-    //      Microsoft's official build, which carries Windows ETW telemetry.
-    //      "No telemetry, ever" — disable it explicitly.
-    //   2. Log severity: with the `tracing` feature ort creates the
-    //      environment at VERBOSE and forwards EVERY native log line through
-    //      an `extern "system"` callback whose CStr asserts panic-abort the
-    //      whole process on a null pointer (0xC0000409 — a panic cannot
-    //      unwind across FFI), and the CUDA arena logs INFO lines
-    //      continuously under load. Warning keeps the EP-registration
-    //      failures the feature exists for while keeping the inference hot
-    //      path out of the callback entirely.
+    // already be decided) so telemetry is off and the native log severity is
+    // clamped before the first session; see `ort_runtime::commit_environment`.
     // ort PANICS (not Err) when the resolved dylib is missing or version-
     // mismatched. Under lazy init that panic surfaced at first model load,
     // inside a catch_unwind'd handler, and the engine kept serving — contain
     // the eager path the same way so a bad dylib degrades instead of killing
     // startup (the arm64 CI runner carries a stale system onnxruntime 1.17).
-    match std::panic::catch_unwind(|| ort::init().with_telemetry(false).commit().map(|_| ())) {
-        Ok(Ok(())) => match ort::environment::get_environment() {
-            Ok(env) => env.set_log_level(ort::logging::LogLevel::Warning),
-            Err(err) => {
-                tracing::warn!(%err, "[EP] could not clamp ORT native log severity");
-            }
-        },
+    match std::panic::catch_unwind(ort_runtime::commit_environment) {
+        Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::warn!(%err, "[EP] eager ORT environment init failed; continuing with lazy init");
+            tracing::warn!(%err, "[EP] eager ORT environment init failed; sessions retry it with telemetry off");
         }
         Err(_) => {
             tracing::warn!(
