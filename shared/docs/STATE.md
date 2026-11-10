@@ -8,6 +8,12 @@
 - **Time per face** (release, both passes, load 20–50 from other agents): Mac 12.7–15.1 ms median (p90 30–36), Rust 16.2–27.0 ms on the same faces back to back.
 - Checks: Swift serial suite, Rust face_mesh tests, licence/manifest/egress/docs gates (see the branch report).
 
+## 2026-11-10 — Face Mesh eye model can be installed from Settings and the CLI
+
+- **WinUI, GTK, CLI** (agent): the opt-in Face Mesh model (`face_mesh`, 4.9 MB, Apache-2.0) now has an install control. WinUI and GTK Settings show an "Eye check · optional" row ("Improves closed-eye detection in Best Takes") with the same download, progress, cancel and Ready states as the other models; the CLI lists it and installs it with `fileid models download face_mesh`. Downloads go through the engine's existing pinned prewarm path, so no IPC or engine change. It is not part of Install all and does not gate onboarding.
+- WinUI: new `FaceMesh` slot in `ModelInstallerService`, sentinel probe for `face_mesh/face_landmarks.onnx`, Settings card. Digest-locked `SettingsView.xaml.cs` and GTK `tabs/settings.rs` refreshed (no network code added).
+- Not checked on Windows hardware: the WinUI page only builds there.
+
 ## 2026-11-10 — Mac: camera JPEGs scan 2.8× faster from their built-in preview; the Neural Engine is now the limit
 
 - **Swift engine** (agent; quiet M1 Pro, load 3–7, release engine, isolated catalogs, default models: CLIP on GPU, Vision, fast and careful text reads; RAM++ not installed): JPEG scans were limited by ImageIO's full-image decode (37.5/s for 25 MB Sony files at any thread count). The scan now decodes the full-frame preview the camera stores in the JPEG (Sony MPF 1616×1080) at 182/s, under the rule RAW previews already follow, with EXIF orientation and fallbacks to the full decode (non-sRGB, shape off by > 1%, other MPF types, parse failure). Face clustering, Best Takes, Deep Analyze and chat checks still decode the full image.
