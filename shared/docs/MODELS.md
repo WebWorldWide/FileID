@@ -31,7 +31,7 @@ The 0.8B model was 2.6× faster and used about 1 GB less, but it was less accura
 
 ## 2026-11-08 — Face Mesh V2 for eye openness (shared engine, opt-in)
 
-The shared Rust engine judges eye openness in Best Takes with Google's MediaPipe Face Mesh V2 (the 478-point face landmark network inside the Face Landmarker bundle) when that model is installed. YuNet's five landmarks can't tell open from closed. It is pinned in `shared/models/manifest.json` as `face_mesh_landmarks` (kind `face_mesh`, platforms `windows`, which means the shared engine) and installs into `models/face_mesh/face_landmarks.onnx` through `downloadModel {modelKind: "face_mesh"}`. Nothing downloads it on its own, and no app shows it yet.
+The shared Rust engine judges eye openness in Best Takes with Google's MediaPipe Face Mesh V2 (the 478-point face landmark network inside the Face Landmarker bundle) when that model is installed. YuNet's five landmarks can't tell open from closed. It is pinned in `shared/models/manifest.json` as `face_mesh_landmarks` (kind `face_mesh`, platforms `macos` and `windows`) and installs into `models/face_mesh/face_landmarks.onnx` through `downloadModel {modelKind: "face_mesh"}`. Since 2026-11-10 the Mac offers it too (Settings → "Closed eyes in Best Takes", into `~/Library/Application Support/FileID/Models/face_mesh/`); the Swift engine runs the same steps on Vision's faces and keeps Vision's eye contours when it is missing. Nothing downloads it on its own.
 
 | | |
 |---|---|
@@ -53,6 +53,8 @@ The shared Rust engine judges eye openness in Best Takes with Google's MediaPipe
 | Mac Vision eye-contour check | 0.78 / 0.25 | 0.76 / 0.31 | 85% |
 | Face mesh, chosen ratio 0.175 | 0.79 / 0.67 | **0.82 / 0.68** | 94% |
 | Both, only faces both judged (held-out n = 179) | Vision 0.76 / 0.43 | mesh 0.79 / 0.77 | — |
+
+**Mac, 2026-11-10** (new private set, 1,211 faces, 81 closed; 2048 px images; threshold 0.175): held-out precision/recall Vision 0.68 / 0.44, Mac mesh 0.65 / 0.79, Rust mesh 0.62 / 0.77; 12.7–15.1 ms median per face (release, CPU). At the engines' 1024 px analysis size precision drops for both checks (held-out Vision 0.48 / 0.47, mesh 0.45 / 0.84); see DECISIONS 2026-11-10.
 
 The mesh flags more than twice as many of the closed eyes at the same precision. Most of its misses are downcast eyes and squints that still show a sliver of iris; most of its false flags are narrow smiling eyes. Not established: real YuNet boxes as the first crop (the Windows RTX 2060 run should confirm), and other families' photos.
 
