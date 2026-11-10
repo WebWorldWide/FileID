@@ -290,23 +290,20 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         }
         "jobs" => result.jobs = jobs(conn)?,
         "pauseJob" | "resumeJob" | "cancelJob" => {
-            let id = request
-                .job_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Job required"))?;
+            let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
+            // Only jobs with a worker in this engine can change state (Swift `FileIDEngineMain`).
+            if !super::timeline::is_timeline_job(&tx, id)?
+                && !super::take_grouping::is_job(&tx, id)?
+                && !super::face_refresh::is_job(&tx, id)?
+            {
+                bail!("This job has no supported worker in this engine.")
+            }
             let current: String = tx.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get(0))?;
             if !["queued", "running", "paused"].contains(&current.as_str())
                 || (request.action == "resumeJob" && current != "paused")
             {
                 bail!("This job cannot make that transition")
-            }
-            if request.action == "resumeJob"
-                && !super::timeline::is_timeline_job(&tx, id)?
-                && !super::take_grouping::is_job(&tx, id)?
-                && !super::face_refresh::is_job(&tx, id)?
-            {
-                bail!("This engine cannot resume that job")
             }
             let target = match request.action.as_str() {
                 "pauseJob" => "paused",

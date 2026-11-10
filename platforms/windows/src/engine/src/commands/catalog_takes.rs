@@ -435,7 +435,7 @@ fn correction(
     file_id: Option<i64>,
 ) -> Result<(String, String, String)> {
     let file_id = file_id.map(|id| id.to_string()).unwrap_or_default();
-    Ok(conn.query_row("SELECT o.id,c.before_json,c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id WHERE c.kind=?1 AND o.state='completed' AND json_extract(o.plan_json,'$.eventID')=?2 AND json_extract(o.plan_json,'$.fileID')=?3 ORDER BY o.rowid DESC LIMIT 1", params![kind,event_id,file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
+    Ok(conn.query_row("SELECT o.id,c.before_json,c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id WHERE c.kind=?1 AND o.state='completed' AND json_extract(o.plan_json,'$.eventID')=?2 AND json_extract(o.plan_json,'$.fileID')=?3 ORDER BY o.rowid DESC LIMIT 1", params![kind,event_id,file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(|| anyhow::anyhow!("Nothing to undo"))?)
 }
 
 #[cfg(test)]
