@@ -54,7 +54,10 @@ platforms/windows/
 .\platforms\windows\build\build-all.ps1 -Clean -Run      # clean rebuild then launch
 .\platforms\windows\build\build-all.ps1 -WipeDbOnly      # fresh scan, keep models
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign   # release MSIs + FileIDSetup.exe
+.\platforms\windows\build\build-ort-runtime.ps1 -Architecture x64   # once: telemetry-free ONNX Runtime (~1 h)
 ```
+
+Microsoft's ONNX Runtime packages are telemetry builds; FileID ships its own source build. `fetch-runtime-deps.ps1` stops with instructions until `build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/<arch>/` exists (or download the `ort-runtime` workflow artifact into it).
 
 Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. Current dev hardware: AMD Ryzen 9 9900X (12 cores / 24 threads), 64 GB RAM, GeForce RTX 5080 (16 GB VRAM, driver 617.14), Windows 11 Pro build 26300. The former `G:\TrueNAS` corpus is not mounted; pass an available representative copy explicitly with `build\iterate.ps1 -Corpus <path>`. Earlier RTX 2060 / DirectML results are historical, not a baseline for this machine. CUDA and DirectML still need current-hardware verification.
 
