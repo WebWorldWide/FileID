@@ -38,7 +38,7 @@ struct SettingsTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Scanning").font(Theme.Font.body(14, .semibold))
                         SettingToggleRow("Faster text reading (Latin scripts only)",
-                                         subtitle: "Reads text in photos and screenshots in English and other Latin-alphabet languages first, which makes scans of text-heavy folders faster. Chinese, Japanese, Korean, Arabic and other scripts are read only where FileID notices text it couldn't read, so some may be missed. Takes effect after you quit and reopen FileID.",
+                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after you quit and reopen FileID.",
                                          isOn: $fastTextReading)
                     }
                 }
