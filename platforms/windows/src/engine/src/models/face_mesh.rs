@@ -227,4 +227,53 @@ mod tests {
         assert!((tensor[[0, 128, 128, 0]] * 255.0 - 128.0).abs() < 2.5);
         assert!((tensor[[0, 0, 0, 2]] * 255.0 - 7.0).abs() < 1e-3);
     }
+
+    #[test]
+    fn shared_geometry_fixture_matches() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/face-mesh-geometry.json")).unwrap();
+        let num = |v: &serde_json::Value| v.as_f64().unwrap() as f32;
+        let pair = |v: &serde_json::Value| [num(&v[0]), num(&v[1])];
+        let close = |a: f32, b: &serde_json::Value| (f64::from(a) - b.as_f64().unwrap()).abs() < 1e-3;
+        let check_crop = |c: &Crop, e: &serde_json::Value| {
+            assert!(close(c.cx, &e["cx"]) && close(c.cy, &e["cy"]) && close(c.side, &e["side"]), "{c:?} vs {e}");
+            assert!(close(c.cos, &e["cos"]) && close(c.sin, &e["sin"]), "{c:?} vs {e}");
+        };
+        let (w, h) = (fixture["image"]["width"].as_u64().unwrap() as usize, fixture["image"]["height"].as_u64().unwrap() as usize);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [((7 * x + 3 * y) % 256) as u8, ((x * x + 5 * y) % 256) as u8, ((x * y) % 256) as u8]
+            })
+            .collect();
+        for case in fixture["detections"].as_array().unwrap() {
+            let b = &case["bbox"];
+            let face = Detection {
+                bbox: [num(&b[0]), num(&b[1]), num(&b[2]), num(&b[3])],
+                landmarks: [pair(&case["eyeA"]), pair(&case["eyeB"]), pair(&case["nose"]), [0.0, 0.0], [0.0, 0.0]],
+                score: 1.0,
+            };
+            let crop = crop_from_detection(&face);
+            check_crop(&crop, &case["crop"]);
+            let p = &case["project"];
+            let [x, y] = crop.project(num(&p["u"]), num(&p["v"]));
+            assert!(close(x, &p["expect"][0]) && close(y, &p["expect"][1]));
+            let tensor = sample(&rgb, w, h, &crop);
+            for s in case["samples"].as_array().unwrap() {
+                let (u, v) = (s["u"].as_u64().unwrap() as usize, s["v"].as_u64().unwrap() as usize);
+                for c in 0..3 {
+                    assert!(close(tensor[[0, v, u, c]], &s["rgb"][c]), "sample {s} channel {c}: {}", tensor[[0, v, u, c]]);
+                }
+            }
+        }
+        for mesh in fixture["meshes"].as_array().unwrap() {
+            let points: Vec<[f32; 2]> = mesh["points"].as_array().unwrap().iter().map(pair).collect();
+            check_crop(&crop_from_points(&points).unwrap(), &mesh["crop"]);
+            let ratio = eye_aspect_ratio(&points).unwrap();
+            assert!((ratio - mesh["ratio"].as_f64().unwrap()).abs() < 1e-4, "{ratio}");
+            assert!((openness(ratio) - mesh["openness"].as_f64().unwrap()).abs() < 1e-3);
+        }
+        for case in fixture["openness"].as_array().unwrap() {
+            assert!((openness(case["ratio"].as_f64().unwrap()) - case["expect"].as_f64().unwrap()).abs() < 1e-9);
+        }
+    }
 }

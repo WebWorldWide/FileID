@@ -65,6 +65,7 @@
       "id": "face_mesh_landmarks",
       "kind": "face_mesh",
       "platforms": [
+        "macos",
         "windows"
       ],
       "repo": "naklitechie/face-landmarks-onnx",

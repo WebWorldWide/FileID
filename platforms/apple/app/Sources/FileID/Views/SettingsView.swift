@@ -55,6 +55,7 @@ struct SettingsTab: View {
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 ModelInstallCard.face
+                ModelInstallCard.faceMesh
 
                 // ─── Advanced (collapsed by default) ─────────────────────
                 // Engine PIDs, DB paths, log files. Power-user info that
@@ -531,6 +532,18 @@ extension ModelInstallCard {
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove face model?",
             fallback: "Grouping faces stops until you download it again.")
+    }
+
+    static var faceMesh: ModelInstallCard {
+        let installer = ModelInstaller.faceMesh
+        return ModelInstallCard(
+            installer: installer,
+            title: "Closed eyes in Best Takes",
+            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Model: MediaPipe Face Mesh V2 (Apache-2.0), runs on this Mac. Without it, FileID uses Apple's built-in eye check.",
+            rows: [Row(name: "MediaPipe Face Mesh V2", detail: "478 face landmarks · eyelid gap over eye width", path: installer.spec.primaryFile)],
+            approxBytes: installer.spec.approxBytes,
+            removeTitle: "Remove the closed-eyes model?",
+            fallback: "Best Takes goes back to Apple's built-in eye check.")
     }
 }
 
