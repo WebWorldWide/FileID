@@ -115,6 +115,12 @@ const CATALOG: &[Catalog] = &[
         category: "Faces (detect + embed)",
     },
     Catalog {
+        name: "face_mesh",
+        kind: "face_mesh",
+        license: "Apache-2.0",
+        category: "Closed-eye check (Best Takes)",
+    },
+    Catalog {
         name: "mobileclip_s2",
         kind: "mobileclip_s2",
         license: "MIT",

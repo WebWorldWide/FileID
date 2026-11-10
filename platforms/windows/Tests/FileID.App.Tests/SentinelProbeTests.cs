@@ -99,6 +99,16 @@ public sealed class SentinelProbeTests : IDisposable
     }
 
     [Fact]
+    public void FaceMesh_UsesCanonicalRegistryPath()
+    {
+        CreateSized(Path.Combine("face_mesh", "face_landmarks.onnx"), 999_999);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "face_mesh"));
+        File.Delete(Path.Combine(_dir, "face_mesh", "face_landmarks.onnx"));
+        CreateSized(Path.Combine("face_mesh", "face_landmarks.onnx"), 4_920_995);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "face_mesh"));
+    }
+
+    [Fact]
     public void RamPlus_RequiresThresholdSidecar()
     {
         CreateSized(Path.Combine("ram_plus", "ram_plus.onnx"), 1_000_000);
