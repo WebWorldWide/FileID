@@ -8,6 +8,7 @@ enum CarefulTextRead {
     enum Languages: String, Sendable {
         case automatic
         case latinFirst
+        case latinOnly
     }
 
     static let configured = Languages(rawValue: ProcessInfo.processInfo.environment["FILEID_CAREFUL_READ"] ?? "") ?? .automatic
@@ -27,6 +28,8 @@ enum CarefulTextRead {
         switch languages {
         case .automatic:
             return await recognize(image, automatic: true).map(joined)
+        case .latinOnly:
+            return await recognize(image, automatic: false).map(joined)
         case .latinFirst:
             async let textBoxes = detectText(image)
             guard let latin = await recognize(image, automatic: false) else { return nil }
