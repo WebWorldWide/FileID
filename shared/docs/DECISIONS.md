@@ -4556,3 +4556,12 @@ The owner delegated every open decision on 2026-11-10. Each is recorded here so 
   6. The Swift engine ships beside Rust for one release after the flip, selectable through `engine.backend`.
   7. The Swift-host / Rust-static-library topology stays rejected.
 - **Contact sheets and collages:** decided by the rebuilt people eval (see that entry when it lands), not by guess.
+
+## 2026-11-10 — Convergence Stage 1: macOS face spaces cluster with a port of the Swift pipeline
+
+- **Port, don't retune.** On the Swift scan of the private People set, Rust's portable pipeline (mutual kNN, k 32, its own consolidation and suppression, new person rows each run) gave pairwise recall 0.222 and F1 0.503 against Swift's 0.422 / 0.643, renumbered every person and stored 30 merge suggestions instead of 8. Tuning it toward Swift would not have kept person ids or verdict behaviour, so the Rust engine runs a line-for-line port of `FaceClustering.runClustering` (minus extraction) for any `macos-*` face space and keeps its own pipeline for `rust-align112-v1`. Result: identical rows on 943 faces, and identical People tables after Swift-made corrections.
+- **Foundation file times.** Swift writes `modified_at` as `(seconds − 978307200) + nanoseconds·1e-9 + 978307200` (via `Date`); `Duration::as_secs_f64` differs in the last bit for 113 of 400 checked files, which would have deferred those faces as stale. The port reads file times the Foundation way (all 498 files match).
+- **The app-hosted engine names the Mac space; refresh is report-only.** `face_refresh::processing()` is `macos-landmark-overlap-v3-orientation` under `apple-adapters`, so a Swift catalog shows no refresh backlog. The Rust engine cannot compute vectors in that space before Stage 6 (Vision landmarks), so `enqueueFaceRefresh` and a resumed job fail with a plain message rather than writing portable vectors into the Mac namespace.
+- **No model needed to cluster stored vectors.** Swift refuses `runFaceClustering` without an installed SFace model because it extracts pending faces first; the Rust port clusters what is stored. Kept: Stage 1 is "no inference", and the Rust-only clustering conformance cases depend on it.
+- **Conformance can't pin Swift here.** Swift clustering needs the installed model and only clusters faces whose `embedding_model` equals that model's hash, so a fixture case cannot run on Swift; the new case is Rust-only and `people_parity.py` is the Swift comparison on real faces.
+
