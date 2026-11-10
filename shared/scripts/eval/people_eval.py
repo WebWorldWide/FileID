@@ -15,9 +15,15 @@ Re-clustering experiments reuse one scan: the first run stores a snapshot of the
 scanned catalog (face embeddings included); later runs copy it, clear People and
 cluster again with the given environment overrides.
 
+  people_eval.py --engine <FileIDEngine>      # data in ~/FileIDDev/Eval/people
   people_eval.py --engine <FileIDEngine> --images <dir> --labels <labels.json> --work <dir>
   people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
   people_eval.py ... --incremental
+
+--split tune clusters only the photos of that half (the other half's faces are
+removed from the scratch copy before clustering), so thresholds and suggestion
+queues can be tuned on one half and checked on the other without people that
+span both halves mixing the two.
 
 --incremental replays a library that grows: the later half of each event's photos
 (by image path) is held back, the rest is clustered, then the held-back faces come
@@ -46,8 +52,8 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_common import (Engine, database_path, diff_snapshots, iou, live_state_snapshot,  # noqa: E402
-                         require_internal, sha256_file)
+from eval_common import (EVAL_ROOT, Engine, database_path, diff_snapshots, iou,  # noqa: E402
+                         live_state_snapshot, prepare_home, require_internal, sha256_file)
 
 MATCH_IOU = 0.4
 # A face is "small" when its shorter side is under this many pixels on a
@@ -83,11 +89,11 @@ def engine_box(bbox: str, width: int, height: int):
     return [x, 1.0 - y - h, w, h]
 
 
-def run_scan(binary, images, state, env, timeout):
+def run_scan(binary, images, state, env, timeout, home=None):
     if state.exists():
         shutil.rmtree(state)
     state.mkdir(parents=True)
-    engine = Engine(binary, state, env=env, log=state / "engine.log")
+    engine = Engine(binary, state, env=env, log=state / "engine.log", home=home)
     try:
         engine.wait("ready", 180)
         started = time.monotonic()
@@ -131,8 +137,8 @@ def fresh_copy(snapshot, state):
     return database, connection
 
 
-def cluster_once(binary, state, env, timeout):
-    engine = Engine(binary, state, env=env, log=state / "engine.log")
+def cluster_once(binary, state, env, timeout, home=None):
+    engine = Engine(binary, state, env=env, log=state / "engine.log", home=home)
     try:
         engine.wait("ready", 180)
         started = time.monotonic()
@@ -143,11 +149,15 @@ def cluster_once(binary, state, env, timeout):
         engine.close()
 
 
-def recluster(binary, snapshot, state, env, timeout):
+def recluster(binary, snapshot, state, env, timeout, home=None, drop_hashes=frozenset(), hash_cache=None):
     _, connection = fresh_copy(snapshot, state)
+    if drop_hashes:
+        hashes = file_hashes(connection, {} if hash_cache is None else hash_cache)
+        dropped = [file_id for file_id, digest in hashes.items() if digest in drop_hashes]
+        connection.executemany("DELETE FROM face_prints WHERE file_id=?", [(file_id,) for file_id in dropped])
     connection.commit()
     connection.close()
-    return cluster_once(binary, state, env, timeout)
+    return cluster_once(binary, state, env, timeout, home)
 
 
 def later_half_hashes(labels):
@@ -186,7 +196,7 @@ def co_members(assigned, faces):
     return {face: frozenset(groups[assigned[face]]) if assigned.get(face) is not None else None for face in faces}
 
 
-def incremental_run(binary, snapshot, state, env, timeout, labels, hash_cache):
+def incremental_run(binary, snapshot, state, env, timeout, labels, hash_cache, home=None):
     """Cluster the earlier half of each event, then bring the later half back as new faces."""
     database, connection = fresh_copy(snapshot, state)
     held_hashes = later_half_hashes(labels)
@@ -199,7 +209,7 @@ def incremental_run(binary, snapshot, state, env, timeout, labels, hash_cache):
     connection.execute(f"DELETE FROM face_prints WHERE file_id IN ({marks})", held_files)
     connection.commit()
     connection.close()
-    first = cluster_once(binary, state, env, timeout)
+    first = cluster_once(binary, state, env, timeout, home)
     before = assignments(database)
     connection = sqlite3.connect(database)
     connection.execute("INSERT INTO face_prints SELECT * FROM eval_held_faces")
@@ -209,7 +219,7 @@ def incremental_run(binary, snapshot, state, env, timeout, labels, hash_cache):
     connection.execute("DROP TABLE eval_held_faces")
     connection.commit()
     connection.close()
-    second = cluster_once(binary, state, env, timeout)
+    second = cluster_once(binary, state, env, timeout, home)
     after = assignments(database)
     earlier = list(before)
     then, now_ = co_members(before, earlier), co_members(after, earlier)
@@ -458,20 +468,33 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", required=True, type=Path, help="FileIDEngine or fileid-engine binary")
     parser.add_argument("--flavor", choices=("swift", "rust"), default="swift")
-    parser.add_argument("--images", required=True, type=Path)
-    parser.add_argument("--labels", required=True, type=Path)
-    parser.add_argument("--work", required=True, type=Path, help="scratch folder for catalogs and reports")
+    parser.add_argument("--images", type=Path, default=EVAL_ROOT / "people/images")
+    parser.add_argument("--labels", type=Path, default=EVAL_ROOT / "people/labels.json")
+    parser.add_argument("--work", type=Path, default=EVAL_ROOT / "people/runs",
+                        help="scratch folder for catalogs and reports")
+    parser.add_argument("--home", type=Path, default=EVAL_ROOT / "home",
+                        help="isolated engine home holding copies of the installed models")
     parser.add_argument("--name", default="baseline")
     parser.add_argument("--env", action="append", help="KEY=VALUE engine override (repeatable)")
     parser.add_argument("--rescan", action="store_true", help="scan again even if a snapshot exists")
     parser.add_argument("--timeout", type=float, default=3600)
     parser.add_argument("--incremental", action="store_true", help="hold back the later half of each event, then add it as new faces")
+    parser.add_argument("--split", help="cluster and score only this half of the labels (e.g. tune)")
     args = parser.parse_args()
 
     images = require_internal(args.images, "images")
     work = require_internal(args.work, "work folder")
+    home = prepare_home(args.home)
     labels_doc = json.loads(args.labels.read_text())
     labels = labels_doc["faces"]
+    drop_hashes = frozenset()
+    if args.split:
+        events = set(labels_doc.get("split", {}).get(args.split) or [])
+        if not events:
+            raise SystemExit(f"no split named {args.split!r} in {args.labels}")
+        drop_hashes = frozenset(f["sha256"] for f in labels if f["event"] not in events)
+        labels = [f for f in labels if f["event"] in events]
+        labels_doc = {**labels_doc, "faces": labels, "split": {args.split: sorted(events)}}
     env = parse_env(args.env)
     scan_env = {k: v for k, v in env.items() if k in SCAN_ENV_KEYS}
     scan_key = hashlib.sha256(json.dumps(scan_env, sort_keys=True).encode()).hexdigest()[:8] if scan_env else "default"
@@ -479,20 +502,22 @@ def main():
     snapshot = scan_state / "snapshot.sqlite"
 
     before = live_state_snapshot()
-    meta = {"name": args.name, "flavor": args.flavor, "env": env}
+    meta = {"name": args.name, "flavor": args.flavor, "env": env, "split": args.split}
     if args.rescan or not snapshot.exists():
-        meta["scanRun"] = run_scan(args.engine, images, scan_state, env, args.timeout)
+        meta["scanRun"] = run_scan(args.engine, images, scan_state, env, args.timeout, home)
         checkpoint(database_path(scan_state))
         shutil.copy2(database_path(scan_state), snapshot)
     state = work / f"{args.flavor}-{args.name}"
     hash_cache = {}
     incremental = None
+    if args.incremental and args.split:
+        raise SystemExit("--split and --incremental cannot be combined yet")
     if args.incremental:
-        incremental = incremental_run(args.engine, snapshot, state, env, args.timeout, labels, hash_cache)
+        incremental = incremental_run(args.engine, snapshot, state, env, args.timeout, labels, hash_cache, home)
         meta["clusterRun"] = {key: incremental[key] for key in ("first", "second", "heldFiles", "heldFaces",
                                                                  "earlierFacesWhoseGroupChanged", "newFacesAssigned")}
     else:
-        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout)
+        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout, home, drop_hashes, hash_cache)
     changes = diff_snapshots(before, live_state_snapshot())
     if changes:
         print("WARNING: the live FileID state changed during the run:", *changes, sep="\n  ", file=sys.stderr)

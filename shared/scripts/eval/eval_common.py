@@ -5,6 +5,11 @@ fileid-engine) over newline-delimited JSON, always with its database, logs and
 state redirected into a scratch folder inside the evaluation directory. Never
 point an engine at the owner's live catalog: every Engine here refuses to start
 without an explicit state directory, and refuses protected source roots.
+
+Engines also run with HOME, CFFIXED_USER_HOME and the model folders pointed at an
+isolated home (`<eval root>/home` by default) that holds copies of the installed
+models, because the Swift engine finds its models under the home folder and marks
+a vision model folder each time it loads it.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -22,7 +28,11 @@ PROTECTED_ROOTS = ("/volumes/adlon",)
 LIVE_STATE = (
     Path.home() / "Library/Application Support/FileID",
     Path.home() / ".local/share/FileID",
+    Path.home() / "Documents/huggingface",
 )
+EVAL_ROOT = Path(os.environ.get("FILEID_EVAL_ROOT") or Path.home() / "FileIDDev/Eval").expanduser()
+LIVE_APP_MODELS = Path.home() / "Library/Application Support/FileID/Models"
+LIVE_HF_MODELS = Path.home() / "Documents/huggingface/models"
 
 
 def require_internal(path: Path, what: str) -> Path:
@@ -44,16 +54,42 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def engine_environment(state: Path, extra: dict | None = None) -> dict:
+def prepare_home(home: Path, hf_repos=()) -> Path:
+    """An isolated home with copies of the installed models (never the originals)."""
+    home = require_internal(home, "engine home")
+    if home == Path(os.path.realpath(Path.home())):
+        raise SystemExit("the engine home must not be the real home folder")
+    app_models = home / "Library/Application Support/FileID/Models"
+    if not app_models.exists() and LIVE_APP_MODELS.exists():
+        shutil.copytree(LIVE_APP_MODELS, app_models)
+    for repo in hf_repos:
+        target = home / "hf/models" / repo
+        if not target.exists():
+            source = LIVE_HF_MODELS / repo
+            if not source.exists():
+                raise SystemExit(f"model {repo} is not installed in {LIVE_HF_MODELS}")
+            shutil.copytree(source, target)
+    (home / "models").mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def engine_environment(state: Path, extra: dict | None = None, home: Path | None = None) -> dict:
     state = require_internal(state, "engine state directory")
+    home = require_internal(home or EVAL_ROOT / "home", "engine home")
     database = state / "FileID/fileid.sqlite"
     database.parent.mkdir(parents=True, exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update({
         "FILEID_DATABASE_PATH": str(database),
         "FILEID_DB": str(database),
         "XDG_DATA_HOME": str(state),
         "LOCALAPPDATA": str(state),
+        "HOME": str(home),
+        "CFFIXED_USER_HOME": str(home),
+        "FILEID_HF_CACHE_ROOT": str(home / "hf"),
+        "FILEID_MODELS_DIR": str(home / "models"),
+        "FILEID_OCR_WARMUP": "0",
     })
     env.update(extra or {})
     return env
@@ -67,10 +103,11 @@ class Engine:
     """One engine process; events are read from stdout and stderr because the
     macOS engine writes its event stream to stderr."""
 
-    def __init__(self, binary: Path, state: Path, env: dict | None = None, log: Path | None = None):
+    def __init__(self, binary: Path, state: Path, env: dict | None = None, log: Path | None = None,
+                 home: Path | None = None):
         self.process = subprocess.Popen(
             [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=engine_environment(state, env), text=True, encoding="utf-8", bufsize=1,
+            env=engine_environment(state, env, home), text=True, encoding="utf-8", bufsize=1,
         )
         self.events: queue.Queue = queue.Queue()
         self.log = open(log, "a", encoding="utf-8") if log else None
@@ -139,8 +176,8 @@ class Engine:
 
 
 def live_state_snapshot() -> dict:
-    """Name -> (size, mtime) for the owner's live state folders, minus the
-    thumbnail cache contents, so a run can prove it left them untouched."""
+    """Name -> (size, mtime) for the owner's live state and model folders, minus
+    the thumbnail cache contents, so a run can prove it left them untouched."""
     snapshot = {}
     for root in LIVE_STATE:
         if not root.exists():
