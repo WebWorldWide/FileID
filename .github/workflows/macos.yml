@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'platforms/apple/**'
+      - 'platforms/windows/src/engine/src/apple/**'
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - 'platforms/apple/**'
+      - 'platforms/windows/src/engine/src/apple/**'
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
@@ -141,6 +143,22 @@ jobs:
       - name: Engine conformance — Rust
         timeout-minutes: 15
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
+
+      # The Rust engine as the Mac app hosts it (Contents/MacOS/fileidd):
+      # Apple adapters linked, events on fd 2, Swift-engine state root.
+      - name: Build Rust engine with Apple adapters
+        run: |
+          set -euo pipefail
+          swift build -c release --product FileIDAppleKit
+          KIT_DIR="$PWD/.build/release"
+          (cd ../windows/src/engine && LIBRARY_PATH="$KIT_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo build --locked --jobs 4 --features apple-adapters --target-dir "$RUNNER_TEMP/fileid-conformance-engine-apple")
+          ENGINE="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine"
+          cp "$KIT_DIR/libFileIDAppleKit.dylib" "$(dirname "$ENGINE")/"
+          install_name_tool -add_rpath @executable_path "$ENGINE"
+
+      - name: Engine conformance — Rust (app-hosted adapters build)
+        timeout-minutes: 15
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" --flavor rust --peer-engine "$RUNNER_TEMP/FileIDEngine-swift"
 
       - name: Verify catalog index recovery
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"

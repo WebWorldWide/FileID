@@ -18,6 +18,7 @@ Reports interval recall at IoU >= 0.3, cut timestamp error in seconds, precision
 of proposed moments, the share of proposals inside labelled quiet spans, and the
 fast actions (<= 1.5 s) that were never examined or never proposed.
 
+  timeline_eval.py candidates --engine <FileIDEngine>   # data in ~/FileIDDev/Eval/timeline
   timeline_eval.py candidates --engine <FileIDEngine> --videos <dir> --labels <labels.json> --work <dir>
   timeline_eval.py full --engine <FileIDEngine> --videos <dir> --labels <labels.json> --work <dir> --model qwen3_vl_2b
 """
@@ -38,8 +39,12 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_common import (Engine, database_path, diff_snapshots, engine_environment,  # noqa: E402
-                         live_state_snapshot, require_internal, sha256_file)
+from eval_common import (EVAL_ROOT, Engine, database_path, diff_snapshots,  # noqa: E402
+                         engine_environment, live_state_snapshot, prepare_home, require_internal,
+                         sha256_file)
+
+MODEL_REPOS = {"qwen3_vl_2b": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+               "qwen3_vl_4b": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"}
 
 IOU = 0.3
 
@@ -253,7 +258,7 @@ def video_paths(videos_dir: Path, labels_doc):
     return out
 
 
-def pool_for(binary, source, directory: Path, state: Path):
+def pool_for(binary, source, directory: Path, state: Path, home: Path):
     manifest = directory / "manifest.json"
     if manifest.exists():
         return json.loads(manifest.read_text())
@@ -261,18 +266,18 @@ def pool_for(binary, source, directory: Path, state: Path):
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
     result = subprocess.run([str(binary), "--sample-video-pool", str(source), "0.5", "448", str(directory)],
-                            env=engine_environment(state), capture_output=True, timeout=1800)
+                            env=engine_environment(state, home=home), capture_output=True, timeout=1800)
     if result.returncode != 0:
         raise SystemExit(f"pool worker failed ({result.returncode}) for {source.name}")
     return json.loads(manifest.read_text())
 
 
-def embed_pool_frames(binary, pools: Path, state: Path, timeout):
+def embed_pool_frames(binary, pools: Path, state: Path, timeout, home: Path):
     """CLIP vectors for every pool frame, from one photo scan of the pool folders."""
     database = database_path(state)
     if not database.exists():
         state.mkdir(parents=True, exist_ok=True)
-        engine = Engine(binary, state, log=state / "engine.log")
+        engine = Engine(binary, state, log=state / "engine.log", home=home)
         try:
             engine.wait("ready", 180)
             engine.send({"startScan": {"rootPath": str(pools)}})
@@ -293,8 +298,9 @@ def run_candidates(args, labels_doc, rules: Rules):
     paths = video_paths(require_internal(args.videos, "videos"), labels_doc)
     pools = work / "pools"
     state = work / "pool-state"
-    manifests = {vid: pool_for(args.engine, path, pools / vid, state) for vid, path in paths.items()}
-    vectors = embed_pool_frames(args.engine, pools, work / "pool-clip", args.timeout)
+    home = prepare_home(args.home)
+    manifests = {vid: pool_for(args.engine, path, pools / vid, state, home) for vid, path in paths.items()}
+    vectors = embed_pool_frames(args.engine, pools, work / "pool-clip", args.timeout, home)
     scored = {}
     for video in labels_doc["videos"]:
         manifest = manifests[video["id"]]
@@ -326,7 +332,8 @@ def run_full(args, labels_doc):
     # A bare engine binary has no speech-recognition usage description, so macOS
     # TCC aborts it on the first speech request; speech is not labelled here.
     env = {"FILEID_TIMELINE_SPEECH": "0", **dict(e.split("=", 1) for e in args.env or [])}
-    engine = Engine(args.engine, state, env=env, log=state / "engine.log")
+    home = prepare_home(args.home, [MODEL_REPOS[args.model]] if args.model in MODEL_REPOS else [])
+    engine = Engine(args.engine, state, env=env, log=state / "engine.log", home=home)
     started = time.monotonic()
     try:
         engine.wait("ready", 180)
@@ -425,9 +432,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=("candidates", "full"))
     parser.add_argument("--engine", required=True, type=Path)
-    parser.add_argument("--videos", required=True, type=Path)
-    parser.add_argument("--labels", required=True, type=Path)
-    parser.add_argument("--work", required=True, type=Path)
+    parser.add_argument("--videos", type=Path, default=EVAL_ROOT / "timeline/videos")
+    parser.add_argument("--labels", type=Path, default=EVAL_ROOT / "timeline/labels.json")
+    parser.add_argument("--work", type=Path, default=EVAL_ROOT / "timeline")
+    parser.add_argument("--home", type=Path, default=EVAL_ROOT / "home",
+                        help="isolated engine home holding copies of the installed models")
     parser.add_argument("--name", default="baseline")
     parser.add_argument("--model", default="qwen3_vl_2b", help="installed visual model kind (full mode)")
     parser.add_argument("--rule", action="append", help="candidates mode: rule=value override, e.g. activity_change=0.03")
