@@ -37,7 +37,7 @@ pub async fn handle(
     let action = request.action.clone();
     let job_id = request.job_id.clone();
     let scheduler = database.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         if request.action == "scoreTakes" {
             let Some(database) = database else {
                 bail!("The catalog database is unavailable")
@@ -53,7 +53,7 @@ pub async fn handle(
             return Ok((response, Some(id)));
         }
         execute_with_index(database, index, request).map(|response| (response, None))
-    })
+    }))
     .await;
     let response = match result {
         Ok(Ok((response, queued))) => {
