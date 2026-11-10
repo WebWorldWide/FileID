@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Fail when a shipped binary contains a known telemetry endpoint marker.
 
+On Windows it also fails when ONNX Runtime's ETW provider joins Microsoft's
+telemetry provider group, which Windows' diagnostic-data service collects.
+Only ONNX Runtime builds made with `--use_telemetry` (Microsoft's NuGet
+packages and GitHub release zips) do that. Other providers in the group are
+listed as notes, not failures.
+
 `--ort-runtime LIB` also loads an ONNX Runtime shared library the way FileID's
 engines do (ORT_DISABLE_TELEMETRY=1, no CI variables, network blocked where the
 OS allows it) and fails if creating an environment leaves any file in a
@@ -52,6 +58,12 @@ FORBIDDEN = (
 )
 
 LIBRARY_SUFFIXES = {".exe", ".dll", ".dylib", ".so"}
+
+# A TraceLogging provider's metadata is: UINT16 total size, NUL-terminated
+# name, then traits. One group trait is UINT16 19, type 1, and the group GUID;
+# this is {4f50731a-89cf-4782-b3e0-dce8c90476ba}, Microsoft's telemetry group.
+TELEMETRY_GROUP_TRAIT = b"\x13\x00\x01" + bytes.fromhex("1a73504fcf898247b3e0dce8c90476ba")
+ORT_TELEMETRY_PROVIDER = "Microsoft.ML.ONNXRuntime"
 
 # Variables ONNX Runtime reads to suppress telemetry on CI machines. The
 # behaviour check drops them so only FileID's own setting is tested.
@@ -112,15 +124,41 @@ def resolve_binary_paths(paths: list[Path]) -> tuple[list[Path], list[str]]:
     return list(dict.fromkeys(binaries)), failures
 
 
-def scan_binary_paths(paths: list[Path]) -> list[str]:
+def telemetry_group_providers(data: bytes) -> list[str]:
+    """Names of the TraceLogging providers in `data` that join Microsoft's telemetry group."""
+    names: list[str] = []
+    start = data.find(TELEMETRY_GROUP_TRAIT)
+    while start != -1:
+        end = start - 1
+        begin = end
+        while begin > 0 and 0x20 <= data[begin - 1] < 0x7F:
+            begin -= 1
+        name = data[begin:end]
+        declared = int.from_bytes(data[begin - 2:begin], "little") if begin >= 2 else -1
+        if end > begin and data[end] == 0 and declared == 2 + len(name) + 1 + len(TELEMETRY_GROUP_TRAIT):
+            names.append(name.decode("ascii"))
+        start = data.find(TELEMETRY_GROUP_TRAIT, start + 1)
+    return list(dict.fromkeys(names))
+
+
+def scan_binary_paths(paths: list[Path], notes: list[str] | None = None) -> list[str]:
     failures: list[str] = []
     for path in paths:
-        data = path.read_bytes().lower()
+        raw = path.read_bytes()
+        data = raw.lower()
         for marker in FORBIDDEN:
             text = marker.decode("ascii")
             variants = (marker, text.encode("utf-16le"), text.encode("utf-16be"))
             if any(variant in data for variant in variants):
                 failures.append(f"{path}: {text}")
+        for provider in telemetry_group_providers(raw):
+            if provider == ORT_TELEMETRY_PROVIDER:
+                failures.append(
+                    f"{path}: ONNX Runtime ETW provider joins Microsoft's telemetry group "
+                    "(a --use_telemetry build)"
+                )
+            elif notes is not None:
+                notes.append(f"{path}: TraceLogging provider {provider} joins Microsoft's telemetry group")
     return failures
 
 
@@ -180,9 +218,12 @@ def main() -> int:
         parser.error("nothing to check")
 
     binaries, failures = resolve_binary_paths(args.binary + args.ort_runtime)
-    failures.extend(scan_binary_paths(binaries))
+    notes: list[str] = []
+    failures.extend(scan_binary_paths(binaries, notes))
     for library in args.ort_runtime:
         failures.extend(check_ort_runtime(library))
+    for note in notes:
+        print(f"Note: {note}")
     if failures:
         print("Telemetry markers found in shipped binaries:")
         for failure in failures:
