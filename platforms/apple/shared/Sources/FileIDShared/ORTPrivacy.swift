@@ -1,3 +1,4 @@
+import FileIDORTC
 import Foundation
 import OnnxRuntimeBindings
 
@@ -28,22 +29,9 @@ public enum ORTPrivacy {
         return env
     }
 
-    /// Calls the C API's `DisableTelemetryEvents`, which the Objective-C
-    /// bindings don't expose. It acts on the process-wide provider and ignores
-    /// its `OrtEnv` argument. Returns false when the runtime isn't linked.
+    /// Calls the C API's `DisableTelemetryEvents`; false if ONNX Runtime refused.
     @discardableResult
     public static func disableTelemetryEvents() -> Bool {
-        typealias GetApiBase = @convention(c) () -> UnsafeRawPointer?
-        typealias GetApi = @convention(c) (UInt32) -> UnsafeRawPointer?
-        typealias DisableTelemetry = @convention(c) (OpaquePointer?) -> OpaquePointer?
-        let defaultHandle = UnsafeMutableRawPointer(bitPattern: -2)
-        guard let symbol = dlsym(defaultHandle, "OrtGetApiBase"),
-              let base = unsafeBitCast(symbol, to: GetApiBase.self)(),
-              let api = base.load(as: GetApi.self)(1)
-        else { return false }
-        // OrtApi only grows at the end; DisableTelemetryEvents has been entry 6
-        // since API version 1.
-        let disable = api.load(fromByteOffset: 6 * MemoryLayout<UnsafeRawPointer>.stride, as: DisableTelemetry.self)
-        return disable(nil) == nil
+        fileid_ort_disable_telemetry_events()
     }
 }

@@ -42,9 +42,18 @@ let package = Package(
         // the app must not fork: merge suggestions over the catalog (GRDB) and
         // the CLIP text encoder (ONNX Runtime). Both executables already link
         // these packages.
+        // ONNX Runtime C API calls the Objective-C bindings don't expose.
+        .target(
+            name: "FileIDORTC",
+            dependencies: [
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+            ],
+            path: "shared/Sources/FileIDORTC"
+        ),
         .target(
             name: "FileIDShared",
             dependencies: [
+                "FileIDORTC",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
