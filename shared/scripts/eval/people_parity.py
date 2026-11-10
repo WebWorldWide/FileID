@@ -29,7 +29,7 @@ from eval_common import (Engine, database_path, diff_snapshots, live_state_snaps
 TABLES = {
     "persons": "SELECT id,name,title,first_name,middle_name,last_name,suffix,COALESCE(is_unknown,0),"
                "representative_face_id,file_count,centroid,anchor_radius FROM persons ORDER BY id",
-    "faces": "SELECT id,person_id FROM face_prints ORDER BY id",
+    "faces": "SELECT id,person_id,file_id,bbox,embedding_model,processing_version,source_revision,hex(arcface_embedding) FROM face_prints ORDER BY id",
     "verdicts": "SELECT person_a,person_b,same_person,face_a,face_b,file_a,bbox_a,file_b,bbox_b FROM face_verifications ORDER BY 1,2",
     "constraints": "SELECT * FROM face_identity_constraints ORDER BY 1,2,3",
     "merge_queue": "SELECT person_id,other_person_id,score,namespace FROM face_merge_suggestions ORDER BY 1,2",
@@ -104,7 +104,9 @@ def correct(binary: Path, state: Path, home: Path):
 
 
 def cluster(binary: Path, state: Path, home: Path, refresh: bool = False):
-    engine = Engine(binary, state, log=state / "engine.log", home=home)
+    # Both engines see the same face model: the Rust engine reads the Swift app's flat layout.
+    env = {"FILEID_MODELS_DIR": str(home / "Library/Application Support/FileID/Models")} if refresh else None
+    engine = Engine(binary, state, env=env, log=state / "engine.log", home=home)
     try:
         engine.wait("ready", 180)
         started = time.monotonic()
