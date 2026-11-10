@@ -1256,6 +1256,11 @@ pub struct EngineInfo {
     pub worker_cap: u32,
     #[serde(rename = "physicalMemoryGB")]
     pub physical_memory_gb: f64,
+    /// Schema 1.26.0. Which engine implementation sent ready: swift (the macOS Swift engine) or
+    /// rust (the shared Rust engine, also when the Mac app hosts it). Older engines omit it;
+    /// consumers fall back to their own detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
     /// HardwareInfo snapshot — same shape as the hardwareReprobed event's hardware field. V15.9+
     /// engines additionally populate: pCores, eCores, logicalCpuCores, workerCap, ramTotalMB,
     /// ramAvailableMB, memoryTier (low|balanced|high), vramMB, npuPresent, powerSource

@@ -28,66 +28,81 @@ const CHANNEL_CAPACITY: usize = 16384;
 // symmetric with the inbound caps, to carry a whole-library plan.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
+/// The event wire when it is not stdout: the macOS app-hosted engine writes
+/// events on fd 2, like the Swift engine (see [`route_events_to_stderr`]).
+static EVENT_WIRE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// Same rotation as the Swift engine's `engine-stderr.log`.
+#[cfg(unix)]
+const STDERR_LOG_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Move the event stream to fd 2 for the macOS app, which reads events from
+/// the engine's stderr. fd 2 is duplicated for the sink's exclusive use, then
+/// pointed at `<logs>/engine-stderr.log`, so tracing, panics and native
+/// library chatter (ORT, Metal) can never splice into an event line. Call once
+/// at process start, before any thread or native library writes to stderr.
+/// If the log cannot be opened the events still go to fd 2, shared as before.
+#[cfg(unix)]
+pub fn route_events_to_stderr(logs_dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // SAFETY: dup/fcntl on the process's own stderr descriptor; the new
+    // descriptor is owned by the File below and never closed elsewhere.
+    let wire = unsafe {
+        let saved = libc::dup(libc::STDERR_FILENO);
+        if saved < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::fcntl(saved, libc::F_SETFD, libc::FD_CLOEXEC);
+        std::fs::File::from_raw_fd(saved)
+    };
+    let log = (|| {
+        crate::util::read_only::require_writable(logs_dir).map_err(std::io::Error::other)?;
+        std::fs::create_dir_all(logs_dir)?;
+        let path = logs_dir.join("engine-stderr.log");
+        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > STDERR_LOG_ROTATE_BYTES) {
+            let _ = std::fs::rename(&path, logs_dir.join("engine-stderr.log.1"));
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(path)
+    })();
+    match log {
+        // SAFETY: both descriptors are open; dup2 atomically repoints fd 2.
+        Ok(log) => unsafe {
+            libc::dup2(log.as_raw_fd(), libc::STDERR_FILENO);
+        },
+        Err(error) => {
+            let _ = EVENT_WIRE.set(wire);
+            return Err(error);
+        }
+    }
+    EVENT_WIRE
+        .set(wire)
+        .map_err(|_| std::io::Error::other("the IPC event wire is already set"))
+}
+
 #[derive(Clone)]
 pub struct Sink {
     tx: mpsc::Sender<IpcEvent>,
 }
 
 impl Sink {
-    /// Create the sink and spawn the stdout writer task. Returns the sink
+    /// Create the sink and spawn the writer task (stdout, or fd 2 after
+    /// [`route_events_to_stderr`]). Returns the sink
     /// handle (cheap to clone) and a join handle for the writer task; the
     /// caller awaits the join handle on shutdown to flush in-flight events.
     pub fn spawn() -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<IpcEvent>(CHANNEL_CAPACITY);
 
-        let writer = tokio::task::spawn_blocking(move || {
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            let mut scratch: Vec<u8> = Vec::new();
-            // The runtime can't await on the blocking thread, so we use a
-            // sync-style consumer over the channel via blocking_recv.
-            //
-            // Coalesce flushes. blocking_recv blocks for the first
-            // event of a burst; we then drain every already-queued event with
-            // try_recv, writing each as a line WITHOUT flushing, and flush ONCE
-            // when the channel momentarily empties. During the bursts the 16384
-            // cap was sized for this cuts the flush syscall rate from per-frame
-            // to per-drain. Terminal events are NOT delayed: a drain cycle ends
-            // (and flushes) the instant try_recv finds nothing, so a terminal
-            // frame is on the wire within the same cycle it was written.
-            let mut closed = false;
-            while !closed {
-                let first = match rx.blocking_recv() {
-                    Some(event) => event,
-                    None => break, // channel closed and drained
-                };
-                if !write_line(&mut handle, &mut scratch, &first) {
-                    break;
-                }
-                // Drain the rest of the current burst without flushing.
-                loop {
-                    match rx.try_recv() {
-                        Ok(event) => {
-                            if !write_line(&mut handle, &mut scratch, &event) {
-                                closed = true;
-                                break;
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            closed = true;
-                            break;
-                        }
-                    }
-                }
-                // One flush per drained burst.
-                if let Err(err) = handle.flush() {
-                    tracing::error!(?err, "ipc sink flush failed");
-                    break;
-                }
+        let writer = tokio::task::spawn_blocking(move || match EVENT_WIRE.get() {
+            Some(wire) => {
+                let mut handle = std::io::BufWriter::with_capacity(64 * 1024, wire);
+                drain_to(&mut handle, &mut rx);
             }
-            // Channel closed: best-effort final flush.
-            let _ = handle.flush();
+            None => {
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                drain_to(&mut handle, &mut rx);
+            }
         });
 
         (Self { tx }, writer)
@@ -117,6 +132,55 @@ impl Sink {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
         (Self { tx }, rx)
     }
+}
+
+/// Write every event to `handle` until the channel closes or a write fails.
+fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
+    let mut scratch: Vec<u8> = Vec::new();
+    // The runtime can't await on the blocking thread, so we use a
+    // sync-style consumer over the channel via blocking_recv.
+    //
+    // Coalesce flushes. blocking_recv blocks for the first
+    // event of a burst; we then drain every already-queued event with
+    // try_recv, writing each as a line WITHOUT flushing, and flush ONCE
+    // when the channel momentarily empties. During the bursts the 16384
+    // cap was sized for this cuts the flush syscall rate from per-frame
+    // to per-drain. Terminal events are NOT delayed: a drain cycle ends
+    // (and flushes) the instant try_recv finds nothing, so a terminal
+    // frame is on the wire within the same cycle it was written.
+    let mut closed = false;
+    while !closed {
+        let first = match rx.blocking_recv() {
+            Some(event) => event,
+            None => break, // channel closed and drained
+        };
+        if !write_line(handle, &mut scratch, &first) {
+            break;
+        }
+        // Drain the rest of the current burst without flushing.
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if !write_line(handle, &mut scratch, &event) {
+                        closed = true;
+                        break;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        // One flush per drained burst.
+        if let Err(err) = handle.flush() {
+            tracing::error!(?err, "ipc sink flush failed");
+            break;
+        }
+    }
+    // Channel closed: best-effort final flush.
+    let _ = handle.flush();
 }
 
 /// Serialize `event` and write it as one newline-terminated frame. Does NOT
@@ -196,6 +260,7 @@ mod tests {
             pid: 1,
             worker_cap: 1,
             physical_memory_gb: 1.0,
+            engine: None,
             hardware: None,
         })))).await;
         drop(sink);

@@ -99,6 +99,7 @@ pub(crate) async fn emit_ready(sink: &Sink) {
         pid: std::process::id() as i32,
         worker_cap: platform::default_worker_cap(),
         physical_memory_gb: platform::physical_memory_gb(),
+        engine: Some("rust".into()),
         hardware: Some(hardware),
     };
     sink.send(IpcEvent::now(EventPayload::Ready(Wrap::new(info))))

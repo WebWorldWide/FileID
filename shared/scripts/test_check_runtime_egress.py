@@ -359,6 +359,9 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/commands/deep_scope.rs",
             "platforms/windows/src/engine/src/models/native_process.rs",
             "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
+            # The only Apple C interface (FileIDAppleKit): IOPM and bookmark
+            # declarations, no network or process API.
+            "platforms/windows/src/engine/src/apple/ffi.rs",
             "platforms/windows/src/engine/src/models/vlm.rs",
             "platforms/windows/src/engine/src/platform.rs",
             "platforms/windows/src/engine/src/shell/mod.rs",
