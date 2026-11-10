@@ -444,7 +444,7 @@ def tool(e, action, timeout=300, **kw):
     return inner(e.wait(lambda p: kind(p) == "toolResponse" and inner(p).get("requestID") == rid, timeout))
 
 
-def exp_rename_tools_kill():
+def exp_renames_kill():
     lab = Lab("rename")
     e = start(lab); scan(e, lab)
     rows = lab.sql("SELECT id, path_text FROM files WHERE path_text LIKE ? ORDER BY id LIMIT 12", (lab.lib + "/Trip/%",))
@@ -468,6 +468,8 @@ def exp_rename_tools_kill():
     lab.check("4 rename: rescan", layout=not stale)
     e.close()
 
+
+def exp_tools_kill():
     lab = Lab("tools")
     e = start(lab); scan(e, lab)
     ids = [r[0] for r in lab.sql("SELECT id FROM files WHERE path_text LIKE ? ORDER BY id LIMIT 8", (lab.lib + "/Trip/%",))]
@@ -635,8 +637,13 @@ def exp_claim_kill():
         e.close()
 
 
+def exp_rename_tools_kill():
+    exp_renames_kill()
+    exp_tools_kill()
+
+
 EXPERIMENTS = {"claim": exp_claim_kill, "conc": exp_concurrency, "scan": exp_scan_kill, "trash": exp_trash_kill, "restructure": exp_restructure_kill,
-               "rename": exp_rename_tools_kill, "wipe": exp_wipe_kill}
+               "rename": exp_rename_tools_kill, "renames": exp_renames_kill, "tools": exp_tools_kill, "wipe": exp_wipe_kill}
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or list(EXPERIMENTS)
