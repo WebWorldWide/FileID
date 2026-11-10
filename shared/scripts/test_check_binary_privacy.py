@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_binary_privacy import FORBIDDEN, scan
+from check_binary_privacy import FORBIDDEN, check_ort_runtime, scan
 
 
 class BinaryPrivacyTests(unittest.TestCase):
@@ -72,7 +72,47 @@ class BinaryPrivacyTests(unittest.TestCase):
             self.assertEqual(failures, [f"{dll}: posthog.com"])
             empty = root / "empty"
             empty.mkdir()
-            self.assertIn("no EXE/DLL binaries found", scan([empty])[0])
+            self.assertIn("no EXE/DLL/dylib/so binaries found", scan([empty])[0])
+
+    def test_rejects_onnxruntime_1ds_uploader_but_not_its_generic_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = root / "libonnxruntime.dylib"
+            clean.write_bytes(b"Unknown error during telemetry flush\x00 DeviceId: \x00ORT_DISABLE_TELEMETRY")
+            self.assertEqual(scan([clean]), [])
+            uploader = root / "libonnxruntime.1.30.0.dylib"
+            uploader.write_bytes(
+                b"https://mobile.events.data.microsoft.com/OneCollector/1.0\x00Microsoft/DeveloperTools/.onnxruntime"
+            )
+            self.assertEqual(
+                scan([uploader]),
+                [
+                    f"{uploader}: mobile.events.data.microsoft.com",
+                    f"{uploader}: onecollector",
+                    f"{uploader}: microsoft/developertools/.onnxruntime",
+                ],
+            )
+
+    def test_discovers_shared_libraries_in_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("libonnxruntime.dylib", "libonnxruntime.so.1.22.0"):
+                (root / name).write_bytes(b"OneCollector")
+            self.assertEqual(len(scan([root])), 2)
+
+    def test_ort_runtime_check_reports_unloadable_libraries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertIn("missing ONNX Runtime library", check_ort_runtime(root / "absent.dylib")[0])
+            fake = root / "libonnxruntime.dylib"
+            fake.write_bytes(b"not a library")
+            self.assertIn("could not create an ONNX Runtime environment", check_ort_runtime(fake)[0])
+
+    def test_macos_ci_scans_the_linked_onnxruntime_framework(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        text = (root / ".github/workflows/macos.yml").read_text(encoding="utf-8")
+        self.assertIn("onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime", text)
+        self.assertIn('.build/release/FileIDEngine "$ort"', text)
 
     def test_reports_missing_and_accepts_clean_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
