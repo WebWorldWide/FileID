@@ -8,7 +8,6 @@ enum CarefulTextRead {
     enum Languages: String, Sendable {
         case automatic
         case latinFirst
-        case latinOnly
     }
 
     static let configured = Languages(rawValue: ProcessInfo.processInfo.environment["FILEID_CAREFUL_READ"] ?? "") ?? .automatic
@@ -28,8 +27,6 @@ enum CarefulTextRead {
         switch languages {
         case .automatic:
             return await recognize(image, automatic: true).map(joined)
-        case .latinOnly:
-            return await recognize(image, automatic: false).map(joined)
         case .latinFirst:
             async let textBoxes = detectText(image)
             guard let latin = await recognize(image, automatic: false) else { return nil }
@@ -104,17 +101,30 @@ enum CarefulTextRead {
         return out
     }
 
-    /// Latin lines stay as read; a fallback line is added where no trusted Latin
-    /// line already is, and replaces the unsure Latin lines it overlaps.
+    /// Latin lines stay as read. A fallback line is added where no Latin line is;
+    /// over an unsure Latin line it is added only if it holds another script, and
+    /// then replaces that line (the Latin model's guess at the same text).
     static func merge(latin: [Line], fallback: [Line]) -> [Line] {
         let trusted = latin.filter { $0.confidence >= trustedConfidence }.map(\.box)
+        let all = latin.map(\.box)
         let added = fallback.filter {
-            !$0.text.trimmingCharacters(in: .whitespaces).isEmpty && coverage(of: $0.box, by: trusted) < 0.5
+            guard !$0.text.trimmingCharacters(in: .whitespaces).isEmpty,
+                  coverage(of: $0.box, by: trusted) < 0.5 else { return false }
+            return coverage(of: $0.box, by: all) < 0.5 || hasOtherScript($0.text)
         }
+        let replacing = added.filter { hasOtherScript($0.text) }.map(\.box)
         let kept = latin.filter { line in
-            line.confidence >= trustedConfidence || !added.contains { coverage(of: line.box, by: [$0.box]) >= 0.5 }
+            line.confidence >= trustedConfidence || coverage(of: line.box, by: replacing) < 0.5
         }
         return kept + added
+    }
+
+    /// Letters outside the Latin, Greek and Cyrillic blocks (Vietnamese's Latin
+    /// Extended Additional excepted): Hebrew, Arabic, Indic, Thai, CJK, Hangul, …
+    static func hasOtherScript(_ text: String) -> Bool {
+        text.unicodeScalars.contains {
+            $0.properties.isAlphabetic && $0.value >= 0x0590 && !(0x1E00...0x1EFF).contains($0.value)
+        }
     }
 
     /// Share of `box` inside the union of `others`, sampled on a 10 × 4 grid.

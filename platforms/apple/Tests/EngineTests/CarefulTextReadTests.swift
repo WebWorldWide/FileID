@@ -48,6 +48,17 @@ struct CarefulTextReadTests {
         #expect(merged.map(\.text) == ["Exit", "المخرج على اليسار"])
         let unsureKept = CarefulTextRead.merge(latin: [exit, invented], fallback: [])
         #expect(unsureKept.map(\.text) == ["Exit", "al aka Eati"])
+        let latinGuess = Line(text: "al aka East", confidence: 1, box: invented.box)
+        #expect(CarefulTextRead.merge(latin: [exit, invented], fallback: [latinGuess]).map(\.text) == ["Exit", "al aka Eati"])
+    }
+
+    @Test func otherScriptsAreThoseOutsideLatinGreekAndCyrillic() {
+        for text in ["Exit", "Добро пожаловать", "Ελλάδα", "Tiếng Việt", "piñata 2026"] {
+            #expect(!CarefulTextRead.hasOtherScript(text), "\(text)")
+        }
+        for text in ["会议记录", "ありがとう", "감사합니다", "ممنوع التدخين", "श्री कृष्ण", "שלום", "สวัสดี"] {
+            #expect(CarefulTextRead.hasOtherScript(text), "\(text)")
+        }
     }
 
     /// Opt-in like the other accurate-tier tests (model compile, Neural Engine).
