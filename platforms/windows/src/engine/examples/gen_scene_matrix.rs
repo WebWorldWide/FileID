@@ -4,7 +4,7 @@
 //! at the canonical path (`%LOCALAPPDATA%\FileID\Models\clip_text\`). Writes the
 //! engine-root `scene_embeddings_precomputed.rs` (the file `scene_vocab.rs`
 //! `include!`s). Must run from the engine crate dir.
-//!   $env:ORT_DYLIB_PATH = "<repo>\platforms\windows\build\runtime-cache\ort-directml-1.22.0\runtimes\win-x64\native\onnxruntime.dll"
+//!   $env:ORT_DYLIB_PATH = "<repo>\platforms\windows\build\runtime-cache\onnxruntime-1.22.0-dml-notelemetry\x64\onnxruntime.dll"
 //!   cargo run --example gen_scene_matrix --target x86_64-pc-windows-msvc
 
 use std::fmt::Write as _;

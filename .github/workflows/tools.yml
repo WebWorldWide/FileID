@@ -10,6 +10,9 @@ on:
       - 'scripts/build-tools.*'
       - 'scripts/package-tools.py'
       - 'scripts/test_package_tools.py'
+      - 'platforms/windows/build/fetch-runtime-deps.ps1'
+      - 'platforms/windows/build/build-ort-runtime.ps1'
+      - '.github/workflows/ort-runtime.yml'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
@@ -22,6 +25,9 @@ on:
       - 'scripts/build-tools.*'
       - 'scripts/package-tools.py'
       - 'scripts/test_package_tools.py'
+      - 'platforms/windows/build/fetch-runtime-deps.ps1'
+      - 'platforms/windows/build/build-ort-runtime.ps1'
+      - '.github/workflows/ort-runtime.yml'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
@@ -36,8 +42,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ort-runtime:
+    name: ONNX Runtime (no telemetry)
+    uses: ./.github/workflows/ort-runtime.yml
+
   verify:
     name: Engine + CLI + TUI — ${{ matrix.label }}
+    needs: ort-runtime
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +157,13 @@ jobs:
             platforms/windows/src/engine/target/release/FileIDEngine.exe `
             platforms/cli/target/release/fileid.exe `
             platforms/tui/target/release/fileid-tui.exe
+
+      - name: Download the telemetry-free ONNX Runtime
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: onnxruntime-dml-notelemetry-${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
+          path: platforms/windows/build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
 
       - name: Package smoke + staged payload privacy scan
         run: python scripts/package-tools.py --label "${{ matrix.artifact }}-ci" --output dist/tools-smoke

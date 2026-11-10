@@ -318,19 +318,17 @@ if (-not $SkipEngine) {
     $sz = [math]::Round((Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB, 1)
     Write-Host ("  FileIDEngine.exe staged ({0} MB)" -f $sz) -ForegroundColor Green
 
-    # V14.9-V: fetch ORT (DirectML build) + DirectML runtime DLLs and drop
-    # them alongside FileIDEngine.exe in every staging location. The `ort`
-    # crate's `download-binaries` feature should do this at compile time
-    # but doesn't (silently falls through with our cuda + directml feature
-    # combo). Without these DLLs the engine LoadLibrary's Windows System32's
-    # onnxruntime.dll (1.17.x), the ort crate panics on version mismatch
-    # ("expected 1.22.x, got 1.17.1"), and even when the version matches
-    # the DirectML EP can't initialize without DirectML.dll → silent
-    # fallback to CPU, no GPU acceleration.
+    # V14.9-V: stage ORT (FileID's telemetry-free DirectML build, see
+    # build-ort-runtime.ps1) + DirectML runtime DLLs alongside
+    # FileIDEngine.exe in every staging location. Without these DLLs the
+    # engine LoadLibrary's Windows System32's onnxruntime.dll (1.17.x), the
+    # ort crate panics on version mismatch ("expected 1.22.x, got 1.17.1"),
+    # and even when the version matches the DirectML EP can't initialize
+    # without DirectML.dll → silent fallback to CPU, no GPU acceleration.
     $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
     if (Test-Path $fetchScript) {
         Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
-        $runtimeOutput = & $fetchScript
+        $runtimeOutput = & $fetchScript -Architecture $(if ($Arm64) { 'arm64' } else { 'x64' })
         $runtimeDlls = @{}
         foreach ($line in $runtimeOutput) {
             if ($line -match '^RUNTIME_DLL=(.+)$') {

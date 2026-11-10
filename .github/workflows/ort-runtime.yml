@@ -1,0 +1,72 @@
+name: ONNX Runtime (no telemetry)
+
+# Builds the ONNX Runtime FileID ships on Windows (1.22.0, DirectML + CPU) from
+# Microsoft's source without --use_telemetry: Microsoft's own DirectML NuGet and
+# GitHub zips register ONNX Runtime's ETW provider in Windows' telemetry group
+# (DECISIONS 2026-11-10). Packaging workflows call this and download the
+# onnxruntime-dml-notelemetry-<arch> artifact into the folder
+# fetch-runtime-deps.ps1 reads. A cold build takes about an hour per
+# architecture; the result is cached per build-script revision.
+
+on:
+  workflow_call:
+    inputs:
+      architectures:
+        description: 'JSON list of architectures to build'
+        type: string
+        default: '["x64", "arm64"]'
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/build/build-ort-runtime.ps1'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/ort-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ONNX Runtime 1.22.0 DirectML — ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.architectures || '["x64", "arm64"]') }}
+    # ORT 1.22's build.py only knows the "Visual Studio 17 2022" generator.
+    runs-on: windows-2025
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUNTIME_DIR: platforms/windows/build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Restore cached runtime
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.RUNTIME_DIR }}
+          key: onnxruntime-1.22.0-dml-notelemetry-${{ matrix.arch }}-${{ hashFiles('platforms/windows/build/build-ort-runtime.ps1') }}
+
+      - name: Build from source without telemetry
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: ./platforms/windows/build/build-ort-runtime.ps1 -Architecture ${{ matrix.arch }} -WorkDir "${{ runner.temp }}\ort"
+
+      - name: Privacy — reject a Windows telemetry build
+        run: python shared/scripts/check_binary_privacy.py $env:RUNTIME_DIR
+
+      - name: Privacy — load the runtime and check it writes nothing
+        if: matrix.arch == 'x64'
+        run: python shared/scripts/check_binary_privacy.py --ort-runtime "$env:RUNTIME_DIR/onnxruntime.dll"
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: onnxruntime-dml-notelemetry-${{ matrix.arch }}
+          path: ${{ env.RUNTIME_DIR }}
+          if-no-files-found: error
+          retention-days: 7
