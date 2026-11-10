@@ -67,8 +67,12 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
                 guard let pixels = FaceMesh.Pixels(image) else { return nil }
                 for (index, detection) in judged.enumerated() {
                     guard let detection else { eyes[index] = nil; continue }
-                    guard let open = try? mesh.eyesOpen(pixels, detection) else { return nil }
-                    eyes[index] = open
+                    do {
+                        eyes[index] = try mesh.eyesOpen(pixels, detection)
+                    } catch {
+                        JSONLog.shared.warn(ev: "face_mesh_failed", error: "\(error)")
+                        return nil
+                    }
                 }
             } else {
                 eyes = eyes.map { _ in nil }
