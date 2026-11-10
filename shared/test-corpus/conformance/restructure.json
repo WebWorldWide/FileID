@@ -50,5 +50,45 @@
       {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "expect": {"applied": 0, "failed": 8}},
       {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "absent": ["Photos"]}}
     ]
+  },
+  {
+    "name": "cross-restructure-swift-apply-rust-undo",
+    "description": "One catalog and one undo journal pass Swift → Rust: Swift plans and applies the respect-stage moves, Rust reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Rust plans the same moves again.",
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
+    "start": "swift",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "swift plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "swift applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
+      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
+      {"restart": "rust"},
+      {"label": "rust undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
+      {"label": "rust second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
+      {"label": "rust plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
+    ]
+  },
+  {
+    "name": "cross-restructure-rust-apply-swift-undo",
+    "description": "One catalog and one undo journal pass Rust → Swift: Rust plans and applies the respect-stage moves, Swift reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Swift plans the same moves again.",
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
+    "start": "rust",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "rust plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "rust applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
+      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
+      {"restart": "swift"},
+      {"label": "swift undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
+      {"label": "swift second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
+      {"label": "swift plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
+    ]
   }
 ]
