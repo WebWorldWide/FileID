@@ -19,7 +19,7 @@ Plan for moving the macOS app from the Swift engine (`platforms/apple/engine`) t
 | Conformance | `shared/test-corpus/conformance/`: 14 files, 71 cases (61 single-engine, 10 cross-engine). Latest: Swift 63–68 pass, Rust 56–60 pass |
 | Known divergences | `files-trash-and-restore-round-trip` (Swift uses the real Trash; Rust has no macOS Trash backend; Rust on Windows uses the real Recycle Bin); `media-tools-recipe-validation-and-refusals` (trim/remux/audio/proxy/rotate available on Swift, not on Rust on macOS) |
 | CI | `macos.yml` runs Swift conformance with the Rust engine as peer, then Rust conformance; `windows-engine.yml` and `linux.yml` run Rust conformance |
-| Private eval sets | `shared/scripts/eval/{people_eval.py,timeline_eval.py}` take any `--engine`; data in `~/Library/Developer/FileIDEval` |
+| Private eval sets | `shared/scripts/eval/{people_eval.py,timeline_eval.py}` take any `--engine`; data in `~/FileIDDev/Eval` (`FILEID_EVAL_ROOT`) |
 
 **Mac baselines to match** (STATE/NEXT): baseball set 722 files 17.0 s local (43 files/s); warm scans 1,173 JPEGs 16.4 s, 900 ARWs 12.4 s, HEIC about 56/s; CLIP image (MLX) 3.2 ms, RAM++ (MLX) 102–124 ms per image; 1,440 HEIC faces clustered in 23.0 s; Qwen3-VL 4B 2.94–2.96 s per photo, peak 3.92 GB, about 107 MB parked; engine ready 0.03 s; first CLIP-text query 0.3 s; keyword search p95 on 100k files Swift 113 ms vs Rust 238 ms (2026-10-01); People held-out recall 0.797; timeline moment recall 0.772 / 0.778; selection checks (2B) held-out precision 0.88 / 0.81 / 0.81; search strength held-out precision 0.79, recall 0.54, absent subjects "none" 10 of 11.
 
