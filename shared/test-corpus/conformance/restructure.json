@@ -90,5 +90,56 @@
       {"label": "swift second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
       {"label": "swift plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
     ]
+  },
+  {
+    "name": "restructure-undo-of-an-unreadable-journal-ends-with-a-result",
+    "description": "Undo over a corrupt journal moves nothing and still ends with a restructureApplyResult (0 applied, 1 failed), so a client waiting on the result releases; the journal is kept.",
+    "tree": [
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}},
+      {"path": "DCIM/100MSDCF/DSC00002.JPG", "content": "dsc2", "row": {"id": 2, "kind": "image", "created_at": 1791108600}},
+      {"path": "{state}/FileID/restructure_undo.ndjson", "content": "{not json}\n"}
+    ],
+    "steps": [
+      {"label": "undo", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "{state}/FileID/restructure_undo.ndjson"]}}
+    ]
+  },
+  {
+    "name": "restructure-undo-refuses-another-librarys-journal",
+    "description": "A journal whose header names another library root is not replayed against this one: nothing moves and the reply is 0 applied, 1 failed.",
+    "extends": "restructure-undo-of-an-unreadable-journal-ends-with-a-result",
+    "tree": [
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}},
+      {"path": "DCIM/100MSDCF/DSC00002.JPG", "content": "dsc2", "row": {"id": 2, "kind": "image", "created_at": 1791108600}},
+      {"path": "{state}/FileID/restructure_undo.ndjson", "content": "{\"library_root\":\"/nonexistent/other-library\",\"version\":3}\n{\"file_id\":1,\"from\":\"/nonexistent/other-library/DSC00001.JPG\",\"to\":\"/nonexistent/other-library/old/DSC00001.JPG\"}\n"}
+    ],
+    "steps": [
+      {"label": "undo", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00002.JPG"]}}
+    ]
+  },
+  {
+    "name": "restructure-apply-refuses-a-destination-outside-the-root",
+    "description": "A move whose destination lies outside the library root is refused: the file stays, nothing is written outside, and the reply is 0 applied, 1 failed.",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "useSymlinks": false, "moves": [{"fileID": 1, "source": "{path:DCIM/100MSDCF/DSC00001.JPG}", "destination": "{state}/escape/DSC00001.JPG", "category": "escape"}]}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG"], "absent": ["{state}/escape"]}},
+      {"label": "row unchanged", "db": "SELECT path_text FROM files WHERE id=1", "expect": [["{path:DCIM/100MSDCF/DSC00001.JPG}"]]}
+    ]
+  },
+  {
+    "name": "restructure-shortcut-apply-and-undo",
+    "description": "Shortcut mode (useSymlinks) links each planned destination to its file and leaves the originals and rows in place; undo with the run's token removes exactly those links.",
+    "extends": "restructure-respect-stage",
+    "knownDivergences": [{"engine": "swift", "reason": "The Swift engine has no shortcut mode and refuses useSymlinks: true (DECISIONS 2026-06-14); the Mac app never sends it. The Rust engine keeps it for Windows and Linux and on the Mac it is checked here."}],
+    "steps": [
+      {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "apply as shortcuts", "save": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": true}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0, "shortcutUndoToken": {"$tol": "present"}}},
+      {"label": "links beside originals", "fs": {"symlinks": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "contents": {"Photos/2026/2026-10-04/DSC00001.JPG": "dsc1"}}},
+      {"label": "rows unchanged", "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"]]},
+      {"label": "undo the shortcuts", "command": {"undoRestructure": {"libraryRoot": "{root}", "shortcutUndoToken": {"$var": "apply.shortcutUndoToken"}}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "links gone, originals kept", "fs": {"absent": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1"}}}
+    ]
   }
 ]

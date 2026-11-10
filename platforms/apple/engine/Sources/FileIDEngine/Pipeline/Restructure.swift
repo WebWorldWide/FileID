@@ -1335,7 +1335,7 @@ public enum Restructure {
                     moved: 0, skipped: 0, failed: total, conflicts: []))
             }
             do {
-                undoHandle = try Self.openUndoJournalTruncating(at: journalURL)
+                undoHandle = try Self.openUndoJournalTruncating(at: journalURL, libraryRoot: libraryRoot)
             } catch {
                 JSONLog.shared.error(ev: "restructure_undo_journal_open_failed",
                                      error: "\((error as NSError).domain) \((error as NSError).code)")
@@ -1552,7 +1552,8 @@ public enum Restructure {
             if let h = undoHandle {
                 do {
                     try Self.appendUndoEntryRecovering(
-                        UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path),
+                        UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path,
+                                  sourceIdentity: FileIdentity(path: oldURL.path)),
                         to: h, writer: journalAppender)
                 } catch {
                     let ns = error as NSError
@@ -1659,10 +1660,56 @@ public enum Restructure {
         let fileID: Int64
         let from: String
         let to: String
+        var sourceIdentity: FileIdentity? = nil
 
         enum CodingKeys: String, CodingKey {
             case fileID = "file_id"
             case from, to
+            case sourceIdentity = "source_identity"
+        }
+    }
+
+    /// Volume-qualified identity of the moved file (st_dev, st_ino), as the shared
+    /// engine records it (`platform::FileIdentity`).
+    struct FileIdentity: Codable, Sendable, Equatable {
+        let volume: UInt64
+        let file: UInt64
+
+        init(volume: UInt64, file: UInt64) {
+            self.volume = volume
+            self.file = file
+        }
+
+        init?(path: String) {
+            var info = stat()
+            guard lstat(path, &info) == 0 else { return nil }
+            volume = UInt64(bitPattern: Int64(info.st_dev))
+            file = UInt64(info.st_ino)
+        }
+    }
+
+    /// First line of the shared engine's journal (the canonical format, DECISIONS
+    /// 2026-11-10): binds the journal to one library root. Journals written before it
+    /// have no header and are still read.
+    struct UndoJournalHeader: Codable, Sendable {
+        let version: Int
+        let libraryRoot: String
+
+        enum CodingKeys: String, CodingKey {
+            case version
+            case libraryRoot = "library_root"
+        }
+    }
+
+    static let undoJournalVersion = 3
+
+    /// An entry, or nil for the header line.
+    static func decodeUndoJournalLine(_ line: Data, decoder: JSONDecoder) throws -> UndoEntry? {
+        do {
+            return try decoder.decode(UndoEntry.self, from: line)
+        } catch {
+            guard (try? decoder.decode(UndoJournalHeader.self, from: line)) != nil else { throw error }
+            return nil
         }
     }
 
@@ -1675,7 +1722,7 @@ public enum Restructure {
 
     /// Open the undo journal truncating (fresh batch) for incremental append.
     /// "Last run only" semantics are established at the start of the batch.
-    static func openUndoJournalTruncating(at url: URL) throws -> FileHandle {
+    static func openUndoJournalTruncating(at url: URL, libraryRoot: URL? = nil) throws -> FileHandle {
         try ReadOnlyLocations.requireWritable(url)
         let fm = FileManager.default
         try fm.createDirectory(at: url.deletingLastPathComponent(),
@@ -1688,6 +1735,14 @@ public enum Restructure {
         do {
             try handle.truncate(atOffset: 0)
             try handle.seek(toOffset: 0)
+            if let libraryRoot {
+                var line = try JSONSerialization.data(
+                    withJSONObject: ["version": undoJournalVersion, "library_root": libraryRoot.path],
+                    options: [.sortedKeys, .withoutEscapingSlashes])
+                line.append(0x0A)
+                try handle.write(contentsOf: line)
+                try handle.synchronize()
+            }
             return handle
         } catch {
             try? handle.close()
@@ -1713,22 +1768,33 @@ public enum Restructure {
 
     /// Append and durably synchronize one inverse move before its filesystem move.
     static func appendUndoEntry(_ e: UndoEntry, to handle: FileHandle) throws {
-        let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
+        var obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
+        if let identity = e.sourceIdentity {
+            obj["source_identity"] = ["volume": identity.volume, "file": identity.file]
+        }
         var line = try JSONSerialization.data(withJSONObject: obj)
         line.append(0x0A)
         try handle.write(contentsOf: line)
         try handle.synchronize()
     }
 
-    private static func undoEntryCount(from url: URL) throws -> Int {
+    /// Entry count and the header, if any. A header is valid only as the first line.
+    private static func undoEntryCount(from url: URL) throws -> (count: Int, header: UndoJournalHeader?) {
         let reader = try NDJSONLineReader(url: url)
         let decoder = JSONDecoder()
         var count = 0
+        var header: UndoJournalHeader?
+        var first = true
         while let line = try reader.nextLine() {
-            _ = try decoder.decode(UndoEntry.self, from: line)
-            count += 1
+            if try decodeUndoJournalLine(line, decoder: decoder) != nil {
+                count += 1
+            } else {
+                guard first else { throw CocoaError(.fileReadCorruptFile) }
+                header = try decoder.decode(UndoJournalHeader.self, from: line)
+            }
+            first = false
         }
-        return count
+        return (count, header)
     }
 
     static func clearUndoJournal(_ url: URL?) {
@@ -1767,9 +1833,14 @@ public enum Restructure {
     /// "Undo last run" affordance.
     public static func hasUndoableRun(undoJournal: URL? = nil) -> Bool {
         guard let url = undoJournal ?? defaultUndoJournalURL,
-              let reader = try? NDJSONLineReader(url: url),
-              let line = try? reader.nextLine() else { return false }
-        return (try? JSONDecoder().decode(UndoEntry.self, from: line)) != nil
+              let reader = try? NDJSONLineReader(url: url) else { return false }
+        let decoder = JSONDecoder()
+        for _ in 0..<2 {
+            guard let line = try? reader.nextLine(),
+                  let decoded = try? decodeUndoJournalLine(line, decoder: decoder) else { return false }
+            if decoded != nil { return true }
+        }
+        return false
     }
 
     /// Undo the most recent `apply`: move every file the last run relocated back to
@@ -1798,7 +1869,16 @@ public enum Restructure {
         }
         let total: Int
         do {
-            total = try undoEntryCount(from: journalURL)
+            let scan = try undoEntryCount(from: journalURL)
+            total = scan.count
+            if let header = scan.header {
+                guard [2, undoJournalVersion].contains(header.version),
+                      ScanRootGuard.canonicalPath(header.libraryRoot)
+                        == ScanRootGuard.canonicalPath(libraryRoot.path) else {
+                    JSONLog.shared.warn(ev: "restructure_undo_journal_foreign_root")
+                    return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+                }
+            }
         } catch {
             JSONLog.shared.warn(ev: "restructure_undo_journal_invalid", error: "\(error)")
             return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
@@ -1823,8 +1903,12 @@ public enum Restructure {
             result = try await applyStream(
                 total: total,
                 nextProposal: {
-                    guard let line = try reader.nextLine() else { return nil }
-                    let entry = try decoder.decode(UndoEntry.self, from: line)
+                    var decoded: UndoEntry?
+                    while decoded == nil {
+                        guard let line = try reader.nextLine() else { return nil }
+                        decoded = try decodeUndoJournalLine(line, decoder: decoder)
+                    }
+                    guard let entry = decoded else { return nil }
                     return RestructureProposal(
                         fileID: try Self.undoFileID(for: entry, database: database), oldPath: entry.from,
                         newPath: entry.to, bucket: "")

@@ -22,7 +22,9 @@ substitutes a value saved by an earlier step's "save" (a name, or
 
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
-A case may reuse another case's tree, sql and env with "extends".
+A case may reuse another case's tree, sql and env with "extends". Tree paths expand
+placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
+also checks "symlinks".
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
 A case may list knownDivergences ({"engine", "reason", optional "os" list and
@@ -445,7 +447,7 @@ def match(expected, actual, ctx, where="$"):
 def build_tree(ctx, entries):
     rows = []
     for entry in entries:
-        target = ctx.root / entry["path"]
+        target = ctx.root / ctx.expand(entry["path"])
         target.parent.mkdir(parents=True, exist_ok=True)
         generator = entry.get("generate")
         if generator == "png":
@@ -575,8 +577,11 @@ def run_step(engine, ctx, step, binaries):
             if not Path(ctx.path(relative)).exists():
                 raise Failure(f"expected {relative} to exist")
         for relative in spec.get("absent", []):
-            if Path(ctx.path(relative)).exists():
+            if Path(ctx.path(relative)).exists() or Path(ctx.path(relative)).is_symlink():
                 raise Failure(f"expected {relative} to be absent")
+        for relative in spec.get("symlinks", []):
+            if not Path(ctx.path(relative)).is_symlink():
+                raise Failure(f"expected {relative} to be a symbolic link")
         for relative, text in spec.get("contents", {}).items():
             if Path(ctx.path(relative)).read_text(encoding="utf-8") != text:
                 raise Failure(f"{relative} content changed")
