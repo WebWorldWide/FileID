@@ -68,6 +68,7 @@ fn resolve_app_root() -> Result<PathBuf> {
 }
 
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+#[cfg_attr(test, allow(dead_code))]
 fn resolve_root() -> Result<PathBuf> {
     resolve_app_root()
 }
