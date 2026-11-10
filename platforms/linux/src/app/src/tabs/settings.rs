@@ -10,7 +10,7 @@ use gtk::glib;
 use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-const LOCAL_MODELS: [(&str, &str, &str); 3] = [
+const LOCAL_MODELS: [(&str, &str, &str); 4] = [
     (
         "mobileclip_s2",
         "Search by description",
@@ -20,6 +20,11 @@ const LOCAL_MODELS: [(&str, &str, &str); 3] = [
         "arcface",
         "Faces",
         "Recognizes the same person across your photos so People can group them. Models: YuNet and SFace (Apache-2.0), run on this computer.",
+    ),
+    (
+        "face_mesh",
+        "Eye check · optional",
+        "Improves closed-eye detection in Best Takes. Model: Face Mesh, 4.9 MB, Apache-2.0.",
     ),
     (
         "qwen2_5_vl_7b",

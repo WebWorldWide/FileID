@@ -32,6 +32,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.Clip.PropertyChanged += OnSlotChanged;
         Svc.Arcface.PropertyChanged += OnSlotChanged;
         Svc.RamPlus.PropertyChanged += OnSlotChanged;
+        Svc.FaceMesh.PropertyChanged += OnSlotChanged;
         Svc.DeepVlm.PropertyChanged += OnSlotChanged;
         Unloaded += (_, _) =>
         {
@@ -41,6 +42,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             Svc.Clip.PropertyChanged -= OnSlotChanged;
             Svc.Arcface.PropertyChanged -= OnSlotChanged;
             Svc.RamPlus.PropertyChanged -= OnSlotChanged;
+            Svc.FaceMesh.PropertyChanged -= OnSlotChanged;
             Svc.DeepVlm.PropertyChanged -= OnSlotChanged;
         };
         Loaded += (_, _) =>
@@ -635,6 +637,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             "arcface_buffalo" => Svc.Arcface,
             "mobileclip_s2" => Svc.Clip,
             "ram_plus" => Svc.RamPlus,
+            "face_mesh" => Svc.FaceMesh,
             _ => null,
         };
         if (slot is null) return;

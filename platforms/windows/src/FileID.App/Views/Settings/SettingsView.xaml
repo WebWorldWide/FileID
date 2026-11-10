@@ -5,7 +5,8 @@
 
  Hosts five panels:
       1. Local AI — install / re-install the face models (YuNet + SFace),
-         CLIP ViT-B/32, and RAM++ auto-tagger
+         CLIP ViT-B/32, RAM++ auto-tagger, and the optional Face Mesh
+         eye model
       2. Engine — version, PID, worker cap, "open log folder"
       3. Performance — GPU EP picker + Performance Pack downloader
       4. Storage — DB path, thumbs cache, model cache
@@ -238,6 +239,68 @@
                                     MinWidth="86"
                                     Visibility="{x:Bind ShowActionButton(Svc.RamPlus.Status), Mode=OneWay}"
                                     AutomationProperties.Name="Download the Photo tags model"/>
+                        </Grid>
+                    </Grid>
+
+                    <!-- Face Mesh: opt-in eye-openness model for Best Takes. -->
+                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
+                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Eye check · optional"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Improves closed-eye detection in Best Takes. Model: Face Mesh, 4.9 MB, Apache-2.0."
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <ProgressBar Maximum="1"
+                                         Value="{x:Bind Svc.FaceMesh.Fraction, Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.FaceMesh.Status, Svc.FaceMesh.HasStarted), Mode=OneWay}"
+                                         Foreground="{StaticResource GoldBrush}"
+                                         Visibility="{x:Bind VisibleIfDownloading(Svc.FaceMesh.Status), Mode=OneWay}"
+                                         Margin="0,4,0,0"
+                                         Height="4"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind ProgressLabel(Svc.FaceMesh.Message, Svc.FaceMesh.Fraction, Svc.FaceMesh.BytesDone, Svc.FaceMesh.TotalBytes), Mode=OneWay}"
+                                       Visibility="{x:Bind VisibleIfDownloading(Svc.FaceMesh.Status), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Margin="0,2,0,0"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind RateEtaLabel(Svc.FaceMesh.BytesPerSecond, Svc.FaceMesh.EtaSeconds), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.FaceMesh.Status, Svc.FaceMesh.HasStarted), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock Text="{x:Bind ErrorLabel(Svc.FaceMesh.LastError), Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Visibility="{x:Bind VisibleIfFailed(Svc.FaceMesh.Status), Mode=OneWay}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1"
+                                   Text="~4.9 MB"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="✓ Ready"
+                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"
+                                       Visibility="{x:Bind VisibleIfInstalled(Svc.FaceMesh.Status), Mode=OneWay}"/>
+                            <Button Content="{x:Bind ButtonLabel(Svc.FaceMesh.Status), Mode=OneWay}"
+                                    Tag="face_mesh"
+                                    Click="OnInstallModelClicked"
+                                    MinWidth="86"
+                                    Visibility="{x:Bind ShowActionButton(Svc.FaceMesh.Status), Mode=OneWay}"
+                                    AutomationProperties.Name="Download the Eye check model"/>
                         </Grid>
                     </Grid>
 
