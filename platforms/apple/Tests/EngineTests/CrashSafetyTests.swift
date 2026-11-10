@@ -61,6 +61,59 @@ struct CrashSafetyTests {
         #expect(try String(contentsOf: first, encoding: .utf8) == "one")
     }
 
+    @Test("restoreFromTrash puts back a batch the Rust engine journaled, with its catalog snapshot")
+    func restoresARustBatch() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let bin = root.appendingPathComponent("FakeTrash")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let original = root.appendingPathComponent("Trip/photo.jpg")
+        let trashed = bin.appendingPathComponent("photo.jpg")
+        try Data("rust".utf8).write(to: trashed)
+        let inode = try #require(Discovery.inode(of: trashed))
+        // One line exactly as the Rust engine's `trash_log::append` writes it (BTreeMap column
+        // order, base64 blobs, null as {}, other platforms' fields absent).
+        let json = """
+        {"batch_id":"rust-batch","timestamp":1700000000.25,"items":[{"file_id":7,"original_path":"\(original.path)",\
+        "source_identity":{"volume":1,"file":\(inode)},"trashed_path":"\(trashed.path)","rows":[\
+        {"table":"files","columns":{"extension":{"text":"jpg"},"file_ref":{"int":\(Int64(bitPattern: inode))},"id":{"int":7},\
+        "kind":{"text":"image"},"path_hash":{"int":\(StablePathHash.hash(original.path))},"path_text":{"text":"\(original.path)"},\
+        "scanned_at":{"real":2.5},"size_bytes":{"int":4},"vlm_description":{}}},\
+        {"table":"clip_embeddings","columns":{"embedding":{"blob":"AAECAw=="},"file_id":{"int":7},"model":{"text":"clip"}}},\
+        {"table":"tags","columns":{"file_id":{"int":7},"score":{},"source":{"text":"user"},"tag":{"text":"beach"}}}]}]}
+        """
+        let key = Data((0..<32).map { UInt8($0) })
+        try key.write(to: root.appendingPathComponent("log-hmac.key"))
+        func signed(_ text: String, with key: Data) -> String {
+            let mac = HMAC<SHA256>.authenticationCode(for: Data(text.utf8), using: SymmetricKey(data: key))
+            return text + "\t" + Data(mac).map { String(format: "%02x", $0) }.joined() + "\n"
+        }
+        let forged = json.replacingOccurrences(of: "\"beach\"", with: "\"forged\"")
+        try (signed(json, with: key) + signed(forged, with: Data(repeating: 9, count: 32)))
+            .write(to: root.appendingPathComponent("trash_log.json"), atomically: true, encoding: .utf8)
+        let journal = root.appendingPathComponent("trash-journal.json")
+        let logBefore = try Data(contentsOf: root.appendingPathComponent("trash_log.json"))
+
+        #expect(RustTrashLog.find("other", beside: journal) == nil)
+        let result = await TrashJournal.restore(batchID: "rust-batch", database: db, journal: journal)
+        #expect(result.succeeded == 1)
+        #expect(try String(contentsOf: original, encoding: .utf8) == "rust")
+        #expect(!FileManager.default.fileExists(atPath: trashed.path))
+        let (path, tag, blob): (String?, String?, Data?) = try await db.pool.read { sql in
+            (try String.fetchOne(sql, sql: "SELECT path_text FROM files WHERE id = 7"),
+             try String.fetchOne(sql, sql: "SELECT tag FROM tags WHERE file_id = 7"),
+             try Data.fetchOne(sql, sql: "SELECT embedding FROM clip_embeddings WHERE file_id = 7"))
+        }
+        #expect(path == original.path)
+        #expect(tag == "beach")
+        #expect(blob == Data([0, 1, 2, 3]))
+        // Read-only: the Rust log is untouched, and a wrong key finds nothing.
+        #expect(try Data(contentsOf: root.appendingPathComponent("trash_log.json")) == logBefore)
+        try Data(repeating: 7, count: 32).write(to: root.appendingPathComponent("log-hmac.key"))
+        #expect(RustTrashLog.find("rust-batch", beside: journal) == nil)
+    }
+
     @Test("trashFiles dual-writes the batch in the Rust engine's signed journal")
     func trashDualWritesTheRustJournal() async throws {
         let root = try makeRoot()

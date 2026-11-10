@@ -207,7 +207,7 @@ class Lab:
                 trashed_names = {os.path.basename(t) for t in self.trashed()}
                 pending_moves = set()
                 try:
-                    for raw in open(os.path.join(self.state, "path-moves.ndjson")):
+                    for raw in open(os.path.join(self.rust_root if RUST else self.state, "path-moves.ndjson")):
                         intent = json.loads(raw).get("intent")
                         if intent:
                             pending_moves.add(intent["from"])

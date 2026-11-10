@@ -32,8 +32,9 @@ stays honest.
 
 --test-trash-root is for a Rust engine built with the `test-trash-root` cargo
 feature (test builds only, never shipped): each case's engine moves trashed
-files into <state>/Trash instead of the user's Trash, and divergences marked
-"liftedByTestTrashRoot" no longer apply.
+files into <state>/Trash instead of the user's Trash, divergences marked
+"liftedByTestTrashRoot" no longer apply, and cases marked "requiresTestTrashRoot"
+run (they are skipped otherwise, so no engine ever reaches the user's Trash).
 """
 from __future__ import annotations
 
@@ -729,9 +730,13 @@ def main():
     for case in load_cases(args.case):
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or args.os not in case.get("os", [args.os]):
+        needs_trash_root = case.get("requiresTestTrashRoot") and not TEST_TRASH_ROOT
+        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root \
+                or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
-            reason = f"needs {', '.join(sorted(missing))} engine" if missing else "not applicable here"
+            reason = (f"needs {', '.join(sorted(missing))} engine" if missing
+                      else "needs a test-trash-root Rust build (--test-trash-root)" if needs_trash_root
+                      else "not applicable here")
             print(f"SKIP   {name} ({reason})")
             continue
         divergence = divergence_for(case, flavor, args.os)

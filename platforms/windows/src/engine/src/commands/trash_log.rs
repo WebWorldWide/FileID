@@ -381,16 +381,22 @@ pub(crate) fn recover_stranded_claims() -> usize {
 }
 
 /// Startup repair before the app reads the library: claims a killed
-/// `trashFiles` left behind, the Swift engine's journals when the Mac app
-/// hosts this engine, and (macOS) catalog rows of files a kill left in the
+/// `trashFiles` left behind, renames a kill left half done, the Swift engine's
+/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the
 /// Trash. Returns how many claims were put back.
 pub(crate) fn recover_at_startup(
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
 ) -> usize {
     let reclaimed = recover_stranded_claims();
     if let Some(db) = db {
+        if let Some(journal) = super::path_moves::journal_path() {
+            let repaired = super::path_moves::repair(&journal, &db.lock());
+            if repaired > 0 {
+                tracing::warn!(repaired, "pointed catalog rows at files a killed rename had already moved");
+            }
+        }
         if paths::APP_HOSTED {
-            super::journal_import::import_swift_journals(db);
+            super::journal_import::import_swift_journals();
         }
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {

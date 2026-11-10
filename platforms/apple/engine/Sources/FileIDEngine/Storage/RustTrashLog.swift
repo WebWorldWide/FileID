@@ -7,6 +7,10 @@ import Foundation
 /// after the app switches to the Rust engine. Kept for one release
 /// (DECISIONS 2026-11-10). Batches a kill interrupted are still covered: the
 /// Rust engine imports `trash-journal.json` once at startup.
+///
+/// The other direction, for a switch back to this engine: `find` reads a batch
+/// the Rust engine wrote (signature checked with the shared key, the log never
+/// modified), so `restoreFromTrash` puts it back with its catalog snapshot.
 enum RustTrashLog {
     struct Identity: Codable, Equatable {
         var volume: UInt64
@@ -92,5 +96,66 @@ enum RustTrashLog {
             Item(fileID: item.fileID, originalPath: item.originalPath, sourceIdentity: identities[item.fileID],
                  trashedPath: item.trashedPath.isEmpty ? nil : item.trashedPath, rows: item.rows)
         })
+    }
+
+    /// What `find` reads: other platforms' fields are ignored, and items
+    /// without a snapshot or Trash location still decode.
+    private struct LoggedItem: Decodable {
+        var fileID: Int64
+        var originalPath: String
+        var trashedPath: String?
+        var rows: [TrashJournal.TableRow]?
+
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id", originalPath = "original_path", trashedPath = "trashed_path", rows
+        }
+    }
+
+    private struct LoggedEntry: Decodable {
+        var batchID: String
+        var timestamp: Double
+        var items: [LoggedItem]
+
+        enum CodingKeys: String, CodingKey { case batchID = "batch_id", timestamp, items }
+    }
+
+    /// The newest signed entry for `batchID` in the Rust log beside `journal`,
+    /// as a Swift batch; nil without the shared key or a valid entry.
+    static func find(_ batchID: String, beside journal: URL) -> TrashJournal.Batch? {
+        let folder = journal.deletingLastPathComponent()
+        guard let key = FileManager.default.contents(atPath: folder.appendingPathComponent("log-hmac.key").path),
+              !key.isEmpty,
+              let raw = FileManager.default.contents(atPath: url(beside: journal).path) else { return nil }
+        let symmetric = SymmetricKey(data: key)
+        var found: LoggedEntry?
+        for line in raw.split(separator: 0x0A) {
+            guard let tab = line.firstIndex(of: 0x09) else { continue }
+            let payload = Data(line[line.startIndex..<tab])
+            let mac = String(decoding: line[line.index(after: tab)...], as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let macBytes = hexBytes(mac),
+                  HMAC<SHA256>.isValidAuthenticationCode(macBytes, authenticating: payload, using: symmetric),
+                  let entry = try? JSONDecoder().decode(LoggedEntry.self, from: payload),
+                  entry.batchID == batchID else { continue }
+            found = entry
+        }
+        guard let found else { return nil }
+        return TrashJournal.Batch(id: found.batchID, createdAt: found.timestamp, items: found.items.map {
+            TrashJournal.Item(fileID: $0.fileID, originalPath: $0.originalPath,
+                              trashedPath: $0.trashedPath ?? "", rows: $0.rows ?? [])
+        })
+    }
+
+    private static func hexBytes(_ text: String) -> Data? {
+        guard text.count == 64 else { return nil }
+        var bytes = Data(capacity: 32)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
     }
 }

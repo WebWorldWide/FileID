@@ -1,9 +1,8 @@
-//! One-shot import of the macOS Swift engine's journals when the Mac app
-//! switches to this engine: `trash-journal.json` (Trash undo batches) becomes
-//! signed `trash_log.json` entries, and pending `path-moves.ndjson` rename
-//! intents are repaired exactly as the Swift engine's startup would. Both live
-//! in the shared state folder (`paths::root()`), so only the app-hosted build
-//! calls this. The Swift files are left in place for a switch back.
+//! One-shot import of the macOS Swift engine's Trash journal when the Mac app
+//! switches to this engine: `trash-journal.json` batches become signed
+//! `trash_log.json` entries. It lives in the shared state folder
+//! (`paths::root()`), so only the app-hosted build calls this. The Swift file
+//! is left in place for a switch back.
 
 use std::path::Path;
 
@@ -31,33 +30,13 @@ struct SwiftItem {
     rows: Vec<SnapshotRow>,
 }
 
-#[derive(serde::Deserialize)]
-struct SwiftIntent {
-    #[serde(rename = "id")]
-    id: String,
-    #[serde(rename = "fileID")]
-    file_id: i64,
-    from: String,
-    to: String,
-    #[serde(rename = "fileRef", default)]
-    file_ref: Option<i64>,
-}
-
-#[derive(serde::Deserialize)]
-struct SwiftMoveLine {
-    #[serde(default)]
-    intent: Option<SwiftIntent>,
-    #[serde(default)]
-    done: Option<String>,
-}
-
 pub(crate) const SWIFT_TRASH_JOURNAL: &str = "trash-journal.json";
-pub(crate) const SWIFT_PATH_MOVES: &str = "path-moves.ndjson";
 const IMPORT_MARKER: &str = "trash-journal.json.imported";
 
-/// Imports both Swift journals from the state folder. Failures are logged:
-/// the Swift files stay, so the next start retries.
-pub(crate) fn import_swift_journals(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) {
+/// Imports the Swift Trash journal from the state folder. Failures are
+/// logged: the Swift file stays, so the next start retries. (`path-moves.ndjson`
+/// is shared by both engines: see `path_moves`.)
+pub(crate) fn import_swift_journals() {
     let Ok(root) = paths::root() else {
         return;
     };
@@ -68,10 +47,6 @@ pub(crate) fn import_swift_journals(db: &std::sync::Arc<parking_lot::Mutex<rusql
             Err(error) => tracing::warn!(?error, "could not import the Swift engine's Trash journal"),
         },
         _ => tracing::warn!("no Trash log or key; the Swift engine's Trash journal was not imported"),
-    }
-    let repaired = repair_swift_path_moves(&root.join(SWIFT_PATH_MOVES), &db.lock());
-    if repaired > 0 {
-        tracing::info!(repaired, "repaired renames the Swift engine left half done");
     }
 }
 
@@ -134,60 +109,6 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
             .find(|identity| identity.file == inode);
     }
     converted
-}
-
-/// The Swift engine's `PathMoveJournal.reconcile`: a rename intent without its
-/// "done" line whose source is gone and whose destination holds the same inode
-/// points the catalog row at the destination. The journal is then removed, as
-/// the Swift engine removes it after its own pass. Returns rows repaired.
-pub(crate) fn repair_swift_path_moves(journal: &Path, conn: &rusqlite::Connection) -> usize {
-    let Ok(raw) = std::fs::read(journal) else {
-        return 0;
-    };
-    let mut intents = Vec::new();
-    let mut done = std::collections::HashSet::new();
-    for line in raw.split(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<SwiftMoveLine>(line) else {
-            continue;
-        };
-        if let Some(intent) = line.intent {
-            intents.push(intent);
-        }
-        if let Some(id) = line.done {
-            done.insert(id);
-        }
-    }
-    let mut repaired = 0;
-    for intent in intents.iter().filter(|intent| !done.contains(&intent.id)) {
-        let moved = std::fs::symlink_metadata(&intent.from).is_err()
-            && intent.file_ref.is_some_and(|inode| {
-                crate::platform::file_ref(Path::new(&intent.to)) == Some(inode as u64)
-            });
-        if !moved {
-            continue;
-        }
-        let extension = Path::new(&intent.to)
-            .extension()
-            .map(|extension| extension.to_string_lossy().to_lowercase())
-            .filter(|extension| !extension.is_empty());
-        let updated = conn.execute(
-            "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?3, extension = ?4 \
-             WHERE id = ?5 AND path_text = ?6",
-            rusqlite::params![
-                intent.to,
-                crate::util::path_safety::stable_path_hash(&intent.to),
-                crate::pipeline::dbwriter::nfc_path_search(&intent.to),
-                extension,
-                intent.file_id,
-                intent.from,
-            ],
-        );
-        if let Ok(1) = updated {
-            repaired += 1;
-        }
-    }
-    let _ = std::fs::remove_file(journal);
-    repaired
 }
 
 #[cfg(test)]
@@ -295,57 +216,6 @@ mod tests {
         std::fs::write(root.join(SWIFT_TRASH_JOURNAL), b"[{\"id\":").unwrap();
         assert!(import_swift_trash_journal(&root, &root.join("trash_log.json"), b"k").is_err());
         assert!(!root.join(IMPORT_MARKER).exists());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn pending_swift_rename_is_repaired_and_the_journal_cleared() {
-        let root = scratch("moves");
-        let from = root.join("IMG_1.JPG");
-        let to = root.join("Beach.JPG");
-        let stale = root.join("Other.JPG");
-        std::fs::write(&to, b"moved").unwrap();
-        std::fs::write(&stale, b"stays").unwrap();
-        let inode = crate::platform::file_ref(&to).unwrap() as i64;
-        let conn = crate::db::test_support::memory_db();
-        crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
-        crate::db::test_support::insert_file(&conn, 2, &stale.to_string_lossy(), "photo");
-        let journal = root.join(SWIFT_PATH_MOVES);
-        let lines = [
-            serde_json::json!({"intent": {"id": "A", "fileID": 1, "from": from.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            // Finished: never replayed.
-            serde_json::json!({"intent": {"id": "B", "fileID": 2, "from": stale.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            serde_json::json!({"done": "B"}),
-        ];
-        let mut text: String = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-        text.push_str("\n{\"intent\":");
-        std::fs::write(&journal, text).unwrap();
-
-        assert_eq!(repair_swift_path_moves(&journal, &conn), 1);
-        let path: String = conn.query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0)).unwrap();
-        let other: String = conn.query_row("SELECT path_text FROM files WHERE id = 2", [], |row| row.get(0)).unwrap();
-        assert_eq!(path, to.to_string_lossy());
-        assert_eq!(other, stale.to_string_lossy());
-        assert!(!journal.exists());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn rename_to_a_different_file_is_not_repaired() {
-        let root = scratch("moves-other");
-        let from = root.join("a.jpg");
-        let to = root.join("b.jpg");
-        std::fs::write(&to, b"someone else").unwrap();
-        let conn = crate::db::test_support::memory_db();
-        crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
-        let journal = root.join(SWIFT_PATH_MOVES);
-        let wrong = crate::platform::file_ref(&to).unwrap() as i64 + 1;
-        std::fs::write(
-            &journal,
-            format!("{}\n", serde_json::json!({"intent": {"id": "A", "fileID": 1, "from": from.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": wrong}})),
-        )
-        .unwrap();
-        assert_eq!(repair_swift_path_moves(&journal, &conn), 0);
         std::fs::remove_dir_all(root).ok();
     }
 }

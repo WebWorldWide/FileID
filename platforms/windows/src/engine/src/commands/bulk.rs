@@ -591,6 +591,23 @@ fn commit_rename(
     BulkActionItem { file_id: Some(p.file_id), ok, message: Some(noted(message)) }
 }
 
+/// Closes each rename intent once its outcome is final. A file that moved but
+/// whose catalog update failed keeps its intent open for the startup repair.
+fn settle_rename_intents(
+    planned: &[PlannedRename],
+    results: &[Option<BulkActionItem>],
+    intents: Vec<(usize, String)>,
+) {
+    for (index, intent) in intents {
+        let p = &planned[index];
+        let ok = results[p.slot].as_ref().is_some_and(|item| item.ok);
+        let moved_uncommitted = !ok && std::fs::symlink_metadata(&p.src).is_err();
+        if !moved_uncommitted {
+            super::path_moves::finish(&intent);
+        }
+    }
+}
+
 fn failed_item(file_id: i64, message: String) -> Option<BulkActionItem> {
     Some(BulkActionItem { file_id: Some(file_id), ok: false, message: Some(message) })
 }
@@ -678,8 +695,14 @@ fn rename_files_blocking(
     for unit in units {
         let mut moved = Vec::new();
         let mut failure = None;
+        let mut intents = Vec::new();
         for &index in &unit {
             let p = &planned[index];
+            // Write-ahead: a kill after the move and before the catalog update
+            // is repaired at the next start (`path_moves::repair`).
+            if let Some(intent) = super::path_moves::begin(p.file_id, &p.src, &p.dest, p.identity.file) {
+                intents.push((index, intent));
+            }
             match rename(&p.src, &p.dest, p.identity) {
                 Ok(()) => moved.push(index),
                 Err(err) => {
@@ -692,6 +715,7 @@ fn rename_files_blocking(
             for &index in &unit {
                 results[planned[index].slot] = Some(commit_rename(db, &planned[index], Vec::new(), true));
             }
+            settle_rename_intents(&planned, &results, intents);
             continue;
         };
         let p = &planned[bad];
@@ -716,6 +740,7 @@ fn rename_files_blocking(
                 results[p.slot] = failed_item(p.file_id, why.clone());
             }
         }
+        settle_rename_intents(&planned, &results, intents);
     }
 
     let messages: Vec<BulkActionItem> = results.into_iter().flatten().collect();
