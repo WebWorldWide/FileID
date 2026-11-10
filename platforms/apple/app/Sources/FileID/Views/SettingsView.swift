@@ -11,6 +11,7 @@ struct SettingsTab: View {
     let store: ReadStore
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
     @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
+    @AppStorage(AppSettings.fastTextReadingKey) private var fastTextReading: Bool = AppSettings.fastTextReadingDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
     @State private var confirmFactoryReset = false
@@ -30,6 +31,15 @@ struct SettingsTab: View {
                         SettingToggleRow("Tag kept files after removing duplicates",
                                          subtitle: "After you move extra copies to Trash, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
                                          isOn: $cleanupAutoTag)
+                    }
+                }
+
+                Panel(padding: 16) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Scanning").font(Theme.Font.body(14, .semibold))
+                        SettingToggleRow("Faster text reading (Latin scripts only)",
+                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after you quit and reopen FileID.",
+                                         isOn: $fastTextReading)
                     }
                 }
 

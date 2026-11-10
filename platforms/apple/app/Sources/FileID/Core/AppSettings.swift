@@ -18,4 +18,11 @@ enum AppSettings {
     static let restructureGranularityKey = "restructure.granularity"
     static let restructureGranularityDefault = "normal"
     static let restructureGranularityValues = ["loose", "normal", "tight"]
+
+    /// Scan setting: careful text reads use Vision's Latin languages instead of automatic
+    /// language detection (faster; Chinese, Japanese, Korean, Arabic and other non-Latin
+    /// scripts are not read). `EngineClient` passes it as `FILEID_CAREFUL_READ` at spawn.
+    static let fastTextReadingKey = "scan.fastTextReading"
+    static let fastTextReadingDefault = false
+    static let fastTextReadingEngineValue = "latin"
 }

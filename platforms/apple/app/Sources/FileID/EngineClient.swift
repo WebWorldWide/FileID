@@ -442,6 +442,9 @@ public final class EngineClient {
            AppSettings.restructureGranularityValues.contains(g) {
             env["FILEID_RESTRUCTURE_GRANULARITY"] = g
         }
+        if UserDefaults.standard.bool(forKey: AppSettings.fastTextReadingKey) {
+            env["FILEID_CAREFUL_READ"] = AppSettings.fastTextReadingEngineValue
+        }
         proc.environment = env
         let inPipe = Pipe()
         let outPipe = Pipe()

@@ -4613,4 +4613,23 @@ Coordinator decision (owner-delegated): fix the 1024 px precision drop with high
 **Gate markers.** `mobile.events.data.microsoft.com`, `OneCollector` and `Microsoft/DeveloperTools/.onnxruntime` appear only in builds with the uploader. "telemetry flush" (`inference_session.cc`) and "DeviceId:" (`OrtDevice` printing) are in every ORT build, including pyke's and Homebrew's, so they are not used. Shipping a 1.29+ official runtime fails the gate even though the variable disables it. A shipped binary must not contain an uploader at all.
 
 **Windows left open.** Microsoft's DirectML NuGet and GPU zip 1.22.0 are built with `--use_telemetry`. In that version the ETW enable callback sets `enabled_` from the listening session, which overrides `DisableTelemetryEvents`, and `ProcessInfo` is logged inside `CreateEnv`. Only a build without `--use_telemetry` removes it (NEXT).
+## 2026-11-10 — Mac careful text reads: automatic detection stays the default; Latin-only is an opt-in setting
+
+Owner rule: careful reads try fixed Latin languages first with an automatic fall back to language detection; that becomes the default only if non-Latin text is still read, otherwise a "Faster text reading (Latin scripts only)" setting, off by default.
+
+**Measurement set** (private, `~/FileIDDev/Eval/text`): 237 screenshots, 319 sign/document photos and 399 mixed camera JPEG/HEIC copied from Adlon; 17 Adlon notes and signs found by name (one real Chinese sticky note); 10,172 more Adlon images screened with the automatic read for real non-Latin text (one more found: a Devanagari video title on a laptop screen; almost every other non-Latin output of the automatic read is a misread of handwriting or math); 54 synthetic images (CoreText; Chinese simplified and traditional, Japanese, Korean, Russian, Ukrainian, Arabic; plain, sign and photo backgrounds, some with an English line). Reference = today's careful read (accurate, automatic detection), identical across runs.
+
+**Fallback signals tried** (on the careful-read subset): Latin read empty; fast-read lines not covered by the Latin read; text rectangles (`DetectTextRectanglesRequest`, ~3–8 ms) not covered by a trusted (confidence ≥ 0.5) Latin line; low-confidence Latin lines (the Latin model scores what it invents over Chinese or Arabic at 0.3); NLLanguageRecognizer plus a vocabulary check on the Latin text (no separation: real non-Latin produced too few or plausible words). Best: uncovered text rectangles at least 2% of the image high, plus unsure Latin lines, re-read with detection on one widened crop; at 3% the owner's sticky note is lost. Glyph-shape features (character-box aspect, count) overlapped too much between CJK and distant Latin print.
+
+**Results** (release engines, isolated catalogs, back-to-back reps, load 17–44 from other agents):
+
+| | screenshots files/s | signs files/s | camera files/s | synthetic CJK/Arabic lines | sticky note / Devanagari |
+|---|---|---|---|---|---|
+| automatic (default) | 17.9 (6 reps) | 25.5 (5) | 53.7 (3) | 52/53 | read / read |
+| Latin first + fallback | 20.0 (+12%) | 27.7 (+9%) | 55.8 | 50/53 | read / lost |
+| Latin only | 22.9 (+32%, 4) | 36.8 (+42%, 3) | 53.8 | 0/53 | lost / lost |
+
+Percentages compare with the baseline reps run in the same rounds (Latin-only ran in the first two rounds, where screenshots averaged 17.4 and signs 25.9). The fallback fired on 30% (screenshots), 35% (signs) and 42% (camera) of careful reads, re-reading a crop that averaged a quarter of the image, which gave back most of the gain; it also missed text the detector does not box (two Arabic lines on a plain page, the laptop screen). Cyrillic is read by the Latin model (15/15). Latin-only words against the reference: 0.996 / 0.970 / 0.979; lost words are misreads (0, 7 and 0 dictionary words lost, 8, 13 and 3 gained); hits for 13 search words unchanged except "months" 8 → 7.
+
+**Decision.** Automatic detection stays the default. The setting turns on Latin-only careful reads (`FILEID_CAREFUL_READ=latin`, set by the app at engine spawn like `FILEID_RESTRUCTURE_GRANULARITY`, so no IPC change), because the fallback variant is not fast enough to be worth a setting and the setting's label already tells the user non-Latin text is not read. The env var is engine process configuration, not a command or event, so the IPC schema is unchanged. Camera libraries gain little either way: only 6–12% of photos take a careful read.
 
