@@ -8,7 +8,6 @@
 //! Parent exit or stdin EOF cancels active work, quiesces mutations, checkpoints
 //! the WAL when safe, flushes the sink, and exits.
 
-#[cfg(target_os = "macos")]
 use crate::ort_runtime;
 use crate::{
     catalog_index, commands, coordinator, db, job_queue, logging, models, paths, pipeline,
