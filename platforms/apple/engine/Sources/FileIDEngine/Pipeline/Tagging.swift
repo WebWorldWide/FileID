@@ -722,7 +722,7 @@ public enum Tagging {
         // previews are commonly only 160×120 and are too small for face gating.
         let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
             .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
-        guard let img = decodeBoundedImage(src, path: url.path, maxPixelSize: maxPixels) else { return nil }
+        guard let img = decodeScanImage(src, path: url.path, maxPixelSize: maxPixels) else { return nil }
         return (img, readEXIF(from: src))
     }
 
