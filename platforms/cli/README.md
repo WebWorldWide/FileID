@@ -144,7 +144,9 @@ fileid runtime install
 
 Use `fileid models list` for optional tagging, text-search, speech, and Deep
 Analyze models. `--all --dry-run` reports the full size and license set without
-downloading. Restricted models require their upstream terms to be accepted;
+downloading. `fileid models download face_mesh` adds the optional eye model
+that improves closed-eye detection in Best Takes (4.9 MB, Apache-2.0).
+Restricted models require their upstream terms to be accepted;
 the CLI never treats acceptance as implicit. The canonical license record is
 `shared/docs/MODELS.md`.
 

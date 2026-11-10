@@ -44,6 +44,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
+    private static readonly string[] FaceMeshSentinelIds = { "face_mesh" };
     // one-button GPU acceleration pack on the welcome sheet.
     // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
     // provider DLL — the thing that actually flips inference off DirectML) plus
@@ -79,6 +80,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// ONNX). Optional; when absent the engine falls back to CLIP scene tags,
     /// so it is NOT (yet) a gate on <see cref="AllInstalled"/>.</summary>
     public ModelSlot RamPlus { get; }
+    /// <summary>Opt-in eye-openness model for Best Takes. Never installed by
+    /// Install all and never a gate on <see cref="AllInstalled"/>.</summary>
+    public ModelSlot FaceMesh { get; }
     /// <summary>Deep Analyze welcome slot; recommends Qwen2.5-VL-7B or
     /// Gemma 3 4B. The Deep Analyze tab separately offers other VLMs,
     /// including optional Qwen3-VL 4B/8B.</summary>
@@ -161,6 +165,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 ClearCancelMarks("ram_plus");
                 return PrewarmAsync("ram_plus");
             }, uiDispatcher: _ui);
+        FaceMesh = new ModelSlot(
+            displayLabel: "Face Mesh eye model",
+            approxBytes: 4_920_995UL,
+            installAction: () =>
+            {
+                ClearCancelMarks("face_mesh");
+                return PrewarmAsync("face_mesh");
+            }, uiDispatcher: _ui);
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
             approxBytes: 6_100_000_000UL,
@@ -187,6 +199,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
         RamPlus.PropertyChanged += OnSlotPropertyChanged;
+        FaceMesh.PropertyChanged += OnSlotPropertyChanged;
         DeepVlm.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
@@ -234,6 +247,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // spinning forever with no Retry — and a stuck RamPlus blocks the
         // "Install all" button + onboarding auto-dismiss permanently.
         FailIfDownloading(RamPlus, "Engine restarted — please retry.");
+        FailIfDownloading(FaceMesh, "Engine restarted — please retry.");
         FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
         FailIfDownloading(Accelerator, "Engine restarted — please retry.");
 
@@ -393,6 +407,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Clip)) return "mobileclip_s2";
         if (ReferenceEquals(slot, Arcface)) return "arcface_default";
         if (ReferenceEquals(slot, RamPlus)) return "ram_plus";
+        if (ReferenceEquals(slot, FaceMesh)) return "face_mesh";
         if (ReferenceEquals(slot, DeepVlm)) return _deepVlmModelKind;
         if (ReferenceEquals(slot, Accelerator)) return "cudnn_runtime_x64";
         return null;
@@ -535,6 +550,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(RamPlus, RamPlusSentinelIds);
+        SeedSlot(FaceMesh, FaceMeshSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
@@ -756,6 +772,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "ram_plus":
             case "ram-plus":
                 return RamPlus;
+            case "face_mesh":
+                return FaceMesh;
             // The CUDA provider pack + cuDNN (NVIDIA) and the OpenVINO pack
             // (Intel) all route to the single Accelerator slot.
             case "ort_cuda_x64":
@@ -801,6 +819,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return DeepVlm;
         }
         if (path.Contains("ram_plus", StringComparison.OrdinalIgnoreCase)) return RamPlus;
+        if (path.Contains("face_mesh", StringComparison.OrdinalIgnoreCase)) return FaceMesh;
         return null;
     }
 
@@ -968,6 +987,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
         if (ReferenceEquals(slot, Instance.RamPlus)) return RamPlusSentinelIds;
+        if (ReferenceEquals(slot, Instance.FaceMesh)) return FaceMeshSentinelIds;
         if (ReferenceEquals(slot, Instance.DeepVlm)) return DeepVlmSentinelIds;
         if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();
