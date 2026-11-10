@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-10 — Mac: camera JPEGs scan 2.8× faster from their built-in preview; the Neural Engine is now the limit
+
+- **Swift engine** (agent; quiet M1 Pro, load 3–7, release engine, isolated catalogs, default models: CLIP on GPU, Vision, fast and careful text reads; RAM++ not installed): JPEG scans were limited by ImageIO's full-image decode (37.5/s for 25 MB Sony files at any thread count). The scan now decodes the full-frame preview the camera stores in the JPEG (Sony MPF 1616×1080) at 182/s, under the rule RAW previews already follow, with EXIF orientation and fallbacks to the full decode (non-sRGB, shape off by > 1%, other MPF types, parse failure). Face clustering, Best Takes, Deep Analyze and chat checks still decode the full image.
+- **Measured:** 1,000 Sony A7 V JPEGs 37 → 104 files/s; 600 ARWs 86 → 88; 1,000 iPhone HEICs 58 → 58; 320 screenshots 20 → 21; all 2,920 together 43.8 → 59.3 files/s. Against the full decode: faces 384 → 385 (8 lost, 9 gained, all borderline 40–80 px faces checked by eye), tags Jaccard 0.97, CLIP cosine 0.997, dHash at most 7 bits apart, text recall vs a 4096 px reference 0.83 before and after. The private people eval set was not on the Mac (deleted again outside the session), so `people_eval.py` could not run.
+- **Limit:** every photo type is now bound by the Neural Engine (about 5.5 ms per Vision pass, 59 ms per careful text read); 140 files/s allows 7.1 ms per file. Measured but not adopted because outputs change: careful reads on the GPU (+18–37%, 10–14% fewer words on signs); careful reads without automatic language detection (+18–55%, loses non-Latin text); skipping careful reads after an empty fast read (small saving, loses text).
+- Checks: 950 serial Swift tests; conformance Swift 68 / Rust 60; gates pass.
+
 ## 2026-11-08 — Eye openness in the shared engine; Qwen3.5 0.8B measured and not adopted
 
 - **Shared engine** (agent, owner-approved download): Best Takes judges eye openness from MediaPipe Face Mesh V2 (Apache-2.0, 4.9 MB ONNX pinned at `naklitechie/face-landmarks-onnx` @ `575c3381`; all 219 weight tensors checked identical to Google's official `face_landmarker.task`, and to a second independent conversion), used only when installed (`downloadModel face_mesh`; take-score cache id `yunet-mesh-v1`). On 825 newly labelled faces (private eval), held-out eyes-closed precision/recall 0.82 / 0.68 versus 0.76 / 0.31 for the Mac's Vision check; 9.6 ms per face. First crops came from labelled boxes, not YuNet (not installed here).
