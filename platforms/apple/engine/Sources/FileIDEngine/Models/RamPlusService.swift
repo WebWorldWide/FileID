@@ -233,7 +233,7 @@ public final class RamPlusService: @unchecked Sendable {
         do {
             let ortEnv: ORTEnv
             if let existing = cachedEnv { ortEnv = existing }
-            else { ortEnv = try ORTEnv(loggingLevel: ORTLoggingLevel.warning) }
+            else { ortEnv = try ORTPrivacy.makeEnv(loggingLevel: ORTLoggingLevel.warning) }
             let opts = try ORTSessionOptions()
             // MLComputeUnits = All (ANE + GPU + CPU): NOT setting useCPUAndGPU/
             // useCPUOnly leaves compute units at the All default so the ANE can

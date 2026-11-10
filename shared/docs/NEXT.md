@@ -42,6 +42,13 @@ Parity (Best Takes pages, Moments lanes, springs audits and the Models page fold
 
 Models: keep about 10-15 curated defaults (2-3 per hardware tier); the Windows and Linux Describe pickers list the portable catalog filtered by RAM/VRAM, curated first (2026-11-05; Linux filters by RAM only); build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
 
+## ONNX Runtime telemetry (2026-11-10, release blocker for Windows)
+
+- [x] Both engines set `ORT_DISABLE_TELEMETRY=1` before ORT loads and create every environment with telemetry events off; the privacy gate rejects ORT's 1DS uploader and can load a runtime to prove it writes nothing (`--ort-runtime`).
+- [ ] **Windows `onnxruntime.dll`:** `fetch-runtime-deps.ps1` ships Microsoft's `Microsoft.ML.OnnxRuntime.DirectML` 1.22.0, built with `--use_telemetry`. The CUDA pack is the official `onnxruntime-win-x64-gpu` 1.22.0, same build flags. Both join Windows' diagnostic-data pipeline through ETW, and `DisableTelemetryEvents` cannot hold in 1.22 (the ETW enable callback re-enables it). Replace them with a DirectML/CUDA build made without `--use_telemetry`: pyke's 1.22.0 Windows builds (plain CMake, telemetry off), or a source build. Then check on the RTX 2060 box that the DLL no longer carries the Microsoft telemetry provider group (`4f50731a-89cf-4782-b3e0-dce8c90476ba`, bytes `1a73504fcf898247b3e0dce8c90476ba`) and add that check to `check_binary_privacy.py` for `onnxruntime*.dll`. Needs owner sign-off: changes the shipped runtime package.
+- [ ] **Convergence:** if the Mac bundles `libonnxruntime.dylib` (CONVERGENCE.md decision 2), use the pinned 1.22.0 tgz or a `--no_telemetry` build. Official 1.29+ dylibs carry the uploader and fail the gate.
+- [ ] **Owner, optional:** to see which programs queued the events in `~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/onnxruntime.db`, copy it and list the process names stored in each event (FileID's are `FileIDEngine`). Setting `ORT_DISABLE_TELEMETRY=1` in the shell profile also stops headroom's runtime from queuing more.
+
 ## Where things stand (2026-10-20)
 
 - `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags; the pre-merge Mac completion checkpoint (including its dropped portable face-refresh Rust slice) is commit `03c50bcd`.
