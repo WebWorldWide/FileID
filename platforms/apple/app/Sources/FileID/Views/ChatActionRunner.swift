@@ -401,13 +401,16 @@ final class ChatActionRunner {
 
     nonisolated static let folderJobFailureKinds: Set<String> = [
         "restructure_busy", "plan_restructure_failed", "apply_restructure", "undo_restructure", "db_unavailable",
+        "restructure_already_running", "plan_restructure_cancelled", "plan_restructure_root", "plan_restructure_db",
+        "plan_restructure_store", "plan_restructure_library_busy", "plan_restructure_db_unavailable",
+        "plan_restructure_invalid",
     ]
 
     /// Why a folder job a card is waiting on will never send its reply.
     nonisolated static func folderJobInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {
         if engineRestarted { return "FileID's engine restarted before this finished. Check Organize Folders, then try again." }
         guard let newError, folderJobFailureKinds.contains(newError.kind) else { return nil }
-        return newError.kind == "restructure_busy"
+        return ["restructure_busy", "restructure_already_running"].contains(newError.kind)
             ? "Another folder job is already running. Wait for it to finish, then try again."
             : "This didn't finish. Check Organize Folders to see what changed, then try again."
     }

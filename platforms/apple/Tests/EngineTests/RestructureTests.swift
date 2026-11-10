@@ -677,6 +677,67 @@ struct RestructureApplyTests {
         #expect(!FileManager.default.fileExists(atPath: x.path))
     }
 
+    @Test("Apply writes the shared engine's journal: root header, then entries with source identity")
+    func applyWritesTheCanonicalJournal() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoFormat-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("a.txt")
+        let dest = root.appendingPathComponent("Docs/a.txt")
+        try Data("a".utf8).write(to: src)
+        let identity = try #require(Restructure.FileIdentity(path: src.path))
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+
+        let applied = try await Restructure.apply(
+            proposals: [RestructureProposal(fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "document")],
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(applied.moved == 1)
+        let lines = try String(contentsOf: journal, encoding: .utf8).split(separator: "\n").map { Data($0.utf8) }
+        #expect(lines.count == 2)
+        let header = try JSONDecoder().decode(Restructure.UndoJournalHeader.self, from: lines[0])
+        #expect(header.version == Restructure.undoJournalVersion)
+        #expect(header.libraryRoot == root.path)
+        let entry = try JSONDecoder().decode(Restructure.UndoEntry.self, from: lines[1])
+        #expect(entry.sourceIdentity == identity)
+        #expect(Restructure.hasUndoableRun(undoJournal: journal))
+
+        let undone = await Restructure.undoLast(database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 1)
+        #expect(undone.failed == 0)
+        #expect(FileManager.default.fileExists(atPath: src.path))
+        #expect(!FileManager.default.fileExists(atPath: journal.path))
+    }
+
+    @Test("Undo refuses a journal whose header names another library")
+    func undoRefusesAnotherLibrarysJournal() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoForeign-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let other = tmp.appendingPathComponent("Other")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Docs"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let moved = root.appendingPathComponent("Docs/a.txt")
+        try Data("a".utf8).write(to: moved)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: moved.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let handle = try Restructure.openUndoJournalTruncating(at: journal, libraryRoot: other)
+        try Restructure.appendUndoEntry(
+            Restructure.UndoEntry(fileID: 1, from: moved.path, to: root.appendingPathComponent("a.txt").path), to: handle)
+        try handle.close()
+
+        let undone = await Restructure.undoLast(database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 0)
+        #expect(undone.failed == 1)
+        #expect(FileManager.default.fileExists(atPath: moved.path))
+        #expect(FileManager.default.fileExists(atPath: journal.path))
+    }
+
     /// A CANCELLED undo must NOT clear the journal, so the user can
     /// re-run it and finish — otherwise a mistimed Stop orphans the un-restored
     /// files with no recovery path. Worst case: cancel before any move.

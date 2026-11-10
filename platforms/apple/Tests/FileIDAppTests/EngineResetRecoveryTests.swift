@@ -49,7 +49,8 @@ struct EngineResetRecoveryTests {
     @Test func folderJobRejectionsEndTheChatCardWait() {
         #expect(ChatActionRunner.folderJobInterruption(engineRestarted: true, newError: nil) != nil)
         #expect(ChatActionRunner.folderJobInterruption(engineRestarted: false, newError: nil) == nil)
-        for kind in ["restructure_busy", "plan_restructure_failed", "apply_restructure", "undo_restructure", "db_unavailable"] {
+        for kind in ["restructure_busy", "plan_restructure_failed", "apply_restructure", "undo_restructure", "db_unavailable",
+                     "restructure_already_running", "plan_restructure_cancelled", "plan_restructure_root"] {
             let reason = ChatActionRunner.folderJobInterruption(engineRestarted: false, newError: EngineError(kind: kind, message: "Apply failed: NSCocoaErrorDomain 4"))
             #expect(reason != nil)
             #expect(reason?.contains("NSCocoaErrorDomain") == false)

@@ -1836,9 +1836,12 @@ public enum Restructure {
               let reader = try? NDJSONLineReader(url: url) else { return false }
         let decoder = JSONDecoder()
         for _ in 0..<2 {
-            guard let line = try? reader.nextLine(),
-                  let decoded = try? decodeUndoJournalLine(line, decoder: decoder) else { return false }
-            if decoded != nil { return true }
+            guard let line = try? reader.nextLine() else { return false }
+            do {
+                if try decodeUndoJournalLine(line, decoder: decoder) != nil { return true }
+            } catch {
+                return false
+            }
         }
         return false
     }
