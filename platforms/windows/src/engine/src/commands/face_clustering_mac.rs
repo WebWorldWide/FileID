@@ -800,7 +800,7 @@ fn stable_ids(priors: &[(i64, Vec<i64>)], clusters: &[(Vec<i64>, i64)], fixed: &
             );
         } else {
             for (person, overlap) in counts {
-                if overlap >= ((sizes.get(&person).copied().unwrap_or(0) + 1) / 2).max(1) {
+                if overlap >= sizes.get(&person).copied().unwrap_or(0).div_ceil(2).max(1) {
                     edges.push((overlap, owner.get(rep) == Some(&person), person, index));
                 }
             }
@@ -1068,7 +1068,7 @@ fn persist(
             best.map(|(index, _)| index)
         });
         let Some(chosen) = chosen else { continue };
-        for slot in fixed.iter_mut() {
+        for slot in &mut fixed {
             if *slot == Some(owner) {
                 *slot = None;
             }
