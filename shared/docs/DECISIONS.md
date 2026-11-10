@@ -4535,3 +4535,25 @@ The owner delegated every open decision on 2026-11-10. Each is recorded here so 
   6. The Swift engine ships beside Rust for one release after the flip, selectable through `engine.backend`.
   7. The Swift-host / Rust-static-library topology stays rejected.
 - **Contact sheets and collages:** decided by the rebuilt people eval (see that entry when it lands), not by guess.
+
+## 2026-11-10 — ONNX Runtime telemetry is turned off by environment variable, not only by API
+
+**Measured** (scratch HOME, sandbox denying network, scan of 6 photos with CLIP + SFace; pip `onnxruntime` 1.30.0 dylib):
+
+| Setup | Telemetry folder | Queued events | Outbound attempts (unified log) |
+|---|---|---|---|
+| CreateEnv only | created | 9 (process, session, model, EP events) | 4 TLS connection attempts in 75 s |
+| CreateEnv + `DisableTelemetryEvents` | created | 3 (ProcessInfo, RegisterEpLibrary start/end) | not measured separately |
+| `ORT_DISABLE_TELEMETRY=1` | none | 0 | 0 |
+| Rust engine before the fix (`with_telemetry(false)`), start + shutdown, no models | created | 3 | — |
+| Rust engine before the fix, scan + text query + clustering | created | 3 | 11 log lines |
+| Rust engine after the fix, same runs | none | 0 | 0 |
+| Swift engine before / after (xcframework 1.24.2) | none | 0 | 0 |
+| Homebrew 1.31.1, either engine | none | 0 | 0 |
+
+**Decision.** `ORT_DISABLE_TELEMETRY=1` is set at the top of every FileID `main` that can load ORT. ORT reads it once, when its platform `Env` is built inside the first `CreateEnv`, and then latches telemetry off for the process. A plain `dlopen` creates nothing. The API call stays as a second layer (Windows ETW ignores the variable). Swift calls the C API through a small C target (`FileIDORTC`) rather than `dlsym`, which the egress gate rightly treats as a raw dynamic-loading API. In Rust, `commit_environment` runs before every `Session::builder()`: if eager init failed, `ort`'s lazy default would otherwise call `EnableTelemetryEvents`.
+
+**Gate markers.** `mobile.events.data.microsoft.com`, `OneCollector` and `Microsoft/DeveloperTools/.onnxruntime` appear only in builds with the uploader. "telemetry flush" (`inference_session.cc`) and "DeviceId:" (`OrtDevice` printing) are in every ORT build, including pyke's and Homebrew's, so they are not used. Shipping a 1.29+ official runtime fails the gate even though the variable disables it. A shipped binary must not contain an uploader at all.
+
+**Windows left open.** Microsoft's DirectML NuGet and GPU zip 1.22.0 are built with `--use_telemetry`. In that version the ETW enable callback sets `enabled_` from the listening session, which overrides `DisableTelemetryEvents`, and `ProcessInfo` is logged inside `CreateEnv`. Only a build without `--use_telemetry` removes it (NEXT).
+
