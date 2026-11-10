@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'platforms/apple/**'
+      - 'platforms/windows/src/engine/src/apple/**'
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - 'platforms/apple/**'
+      - 'platforms/windows/src/engine/src/apple/**'
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
