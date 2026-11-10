@@ -1,3 +1,4 @@
+import CryptoKit
 import AsyncAlgorithms
 import Foundation
 import GRDB
@@ -58,6 +59,60 @@ struct CrashSafetyTests {
         let restored = await TrashJournal.restore(batchID: batchID, database: db, journal: journal)
         #expect(restored.succeeded == 2)
         #expect(try String(contentsOf: first, encoding: .utf8) == "one")
+    }
+
+    @Test("trashFiles dual-writes the batch in the Rust engine's signed journal")
+    func trashDualWritesTheRustJournal() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let bin = root.appendingPathComponent("FakeTrash")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let photo = root.appendingPathComponent("photo.jpg")
+        try Data("one".utf8).write(to: photo)
+        let identity = try #require(RustTrashLog.identity(of: photo))
+        try await insert(db, id: 1, path: photo.path)
+        let journal = root.appendingPathComponent("trash-journal.json")
+        let result = await FileIDEngineMain.trashFiles(database: db, fileIDs: [1], journal: journal) { url in
+            let landed = bin.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: landed)
+            return landed
+        }
+        let batchID = try #require(result.action.split(separator: ":").last.map(String.init))
+
+        let key = try #require(FileManager.default.contents(atPath: root.appendingPathComponent("log-hmac.key").path))
+        #expect(key.count == 32)
+        let text = try String(contentsOf: RustTrashLog.url(beside: journal), encoding: .utf8)
+        let lines = text.split(separator: "\n")
+        #expect(lines.count == 1)
+        let parts = try #require(lines.first).split(separator: "\t").map(String.init)
+        #expect(parts.count == 2)
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(parts[0].utf8), using: SymmetricKey(data: key))
+        #expect(Data(mac).map { String(format: "%02x", $0) }.joined() == parts[1])
+
+        // The exact keys the Rust engine's `TrashLogEntry` reads.
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(parts[0].utf8)) as? [String: Any])
+        #expect(object["batch_id"] as? String == batchID)
+        let item = try #require((object["items"] as? [[String: Any]])?.first)
+        #expect(item["file_id"] as? Int == 1)
+        #expect(item["original_path"] as? String == photo.path)
+        #expect(item["trashed_path"] as? String == bin.appendingPathComponent("photo.jpg").path)
+        let source = try #require(item["source_identity"] as? [String: Any])
+        #expect((source["file"] as? NSNumber)?.uint64Value == identity.file)
+        let tables = (item["rows"] as? [[String: Any]])?.compactMap { $0["table"] as? String }
+        #expect(tables?.contains("files") == true && tables?.contains("tags") == true)
+
+        // A second batch reuses the key and appends.
+        try Data("two".utf8).write(to: photo)
+        try await insert(db, id: 2, path: photo.path)
+        _ = await FileIDEngineMain.trashFiles(database: db, fileIDs: [2], journal: journal) { url in
+            let landed = bin.appendingPathComponent("photo 2.jpg")
+            try FileManager.default.moveItem(at: url, to: landed)
+            return landed
+        }
+        let again = try String(contentsOf: RustTrashLog.url(beside: journal), encoding: .utf8)
+        #expect(again.split(separator: "\n").count == 2)
+        #expect(FileManager.default.contents(atPath: root.appendingPathComponent("log-hmac.key").path) == key)
     }
 
     @Test("Cleanup's exact duplicates are re-proved by the engine, journaled and restorable")
