@@ -9,6 +9,14 @@
 # Expects .build/release/{FileID,FileIDEngine} to exist (caller builds).
 # Copies the cached mlx.metallib when present; warns when absent (Deep
 # Analyze needs it at runtime).
+#
+# Shared Rust engine (dogfood; the app starts it only when engine.backend is
+# rust): FILEID_WITH_RUST_ENGINE=1 builds FileIDAppleKit and the Rust engine
+# with --features apple-adapters and bundles them as Contents/MacOS/fileidd and
+# Contents/Frameworks/libFileIDAppleKit.dylib. FILEID_RUST_ENGINE_BINARY skips
+# the cargo build with an engine already built that way; FILEID_RUST_TARGET_DIR
+# sets cargo's target folder. FILEID_ORT_DYLIB names the official MIT
+# libonnxruntime.dylib (>= 1.22, self-contained) to bundle in Frameworks.
 
 set -euo pipefail
 
@@ -69,6 +77,62 @@ if [ -f "$METALLIB_CACHE" ]; then
 else
     echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
     echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
+fi
+
+if [ "${FILEID_WITH_RUST_ENGINE:-0}" = "1" ]; then
+    SWIFT_SCRATCH="$(dirname "$BUILD_DIR")"
+    APPLE_KIT="$BUILD_DIR/libFileIDAppleKit.dylib"
+    swift build --package-path "$PROJECT_DIR" --scratch-path "$SWIFT_SCRATCH" \
+        -c "$BUILD_CONFIGURATION" --product FileIDAppleKit
+    [ -f "$APPLE_KIT" ] || { echo "❌ $APPLE_KIT missing after build"; exit 1; }
+    RUST_ENGINE="${FILEID_RUST_ENGINE_BINARY:-}"
+    if [ -z "$RUST_ENGINE" ]; then
+        RUST_TARGET_DIR="${FILEID_RUST_TARGET_DIR:-$SWIFT_SCRATCH/rust-engine}"
+        CARGO_PROFILE_ARGS=()
+        [ "$BUILD_CONFIGURATION" = "release" ] && CARGO_PROFILE_ARGS=(--release)
+        (cd "$PROJECT_DIR/../windows/src/engine" && \
+            LIBRARY_PATH="$BUILD_DIR" CARGO_TARGET_DIR="$RUST_TARGET_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 \
+            cargo build --locked "${CARGO_PROFILE_ARGS[@]}" --features apple-adapters)
+        RUST_ENGINE="$RUST_TARGET_DIR/$BUILD_CONFIGURATION/FileIDEngine"
+    fi
+    [ -x "$RUST_ENGINE" ] || { echo "❌ Rust engine missing: $RUST_ENGINE"; exit 1; }
+    otool -L "$RUST_ENGINE" | grep -F '@rpath/libFileIDAppleKit.dylib' >/dev/null || {
+        echo "❌ $RUST_ENGINE was not built with --features apple-adapters"; exit 1; }
+    # ort-sys links a pkg-config ONNX Runtime (e.g. Homebrew's) when it finds
+    # one; the engine must load the bundled runtime at run time instead.
+    if otool -L "$RUST_ENGINE" | tail -n +2 | grep -F 'libonnxruntime' >/dev/null; then
+        echo "❌ $RUST_ENGINE links an ONNX Runtime at build time; rebuild with LIBONNXRUNTIME_NO_PKG_CONFIG=1"; exit 1
+    fi
+    cp "$RUST_ENGINE" "$CONTENTS/MacOS/fileidd"
+    chmod +x "$CONTENTS/MacOS/fileidd"
+    cp "$APPLE_KIT" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"
+    if ! otool -l "$CONTENTS/MacOS/fileidd" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
+        install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/fileidd"
+    fi
+    if [ -n "${FILEID_ORT_DYLIB:-}" ]; then
+        # Bundle only a self-contained runtime (system libraries only), never
+        # a Homebrew build that links other Homebrew libraries.
+        FOREIGN="$(otool -L "$FILEID_ORT_DYLIB" | tail -n +2 | awk '{print $1}' \
+            | grep -vE '^(/usr/lib/|/System/Library/|@rpath/libonnxruntime)' || true)"
+        if [ -n "$FOREIGN" ]; then
+            echo "❌ $FILEID_ORT_DYLIB links non-system libraries:"; echo "$FOREIGN"; exit 1
+        fi
+        # Builds with Microsoft's telemetry client keep a device id and an event
+        # queue under ~/Library/Application Support/Microsoft/DeveloperTools
+        # (Homebrew's 1.31.1 does, even with telemetry turned off in the engine).
+        if strings -a "$FILEID_ORT_DYLIB" | grep -E 'telemetry flush|DeviceId:' >/dev/null; then
+            echo "❌ $FILEID_ORT_DYLIB carries a telemetry client; bundle a build without it"; exit 1
+        fi
+        cp "$FILEID_ORT_DYLIB" "$CONTENTS/Frameworks/libonnxruntime.dylib"
+    else
+        echo "⚠️  FILEID_ORT_DYLIB not set — the Rust engine will run without ONNX models."
+    fi
+    # Ad-hoc signatures keep dev bundles launchable after install_name_tool;
+    # release.sh re-signs everything with the Developer ID.
+    for code in "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/Frameworks/libonnxruntime.dylib" "$CONTENTS/MacOS/fileidd"; do
+        [ -f "$code" ] && codesign --force --sign - "$code" >/dev/null
+    done
+    echo "🦀 Bundled the Rust engine as Contents/MacOS/fileidd (dogfood: defaults write com.fileid.app engine.backend rust)"
 fi
 
 cat > "$CONTENTS/Info.plist" <<PLIST

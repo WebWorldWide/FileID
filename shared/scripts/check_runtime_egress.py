@@ -122,6 +122,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/commands/deep_scope.rs",
     "platforms/windows/src/engine/src/models/native_process.rs",
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
+    "platforms/windows/src/engine/src/apple/ffi.rs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/client.rs": "7fd2ec8192f167c89322230f17a3e304802a7133f445c5b8bc2ec0985e8a08f4",
@@ -130,7 +131,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "fa983d18f910b15e830adc64f18040039f49d06301607c622fc0f61c38ae51f7",
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "940130ce0a63ab8cde8023e168f5e7ad762833e94809c8a141325261c2068de5",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "f866922044a0278268c11089481e87a9f79782d330ea8e7308fa739731358cb7",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "5ea71c5cdb780ee61ab6fb865887be963dc8c2e8b24d1eaf0583e4d792e6b0e8",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "c21da9887868e00c68f94e9aeb594511626709a76268b63c231d34ec9493453c",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
@@ -144,7 +145,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "8220ffe36dcf6fd60c9afa9ab203e926b7a4e5a8ab2d18e7e0fcc6ce2a4b34ca",
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
   "platforms/cli/src/runtime.rs": "e86dcc98ce5482b51f23a79b59d567319c1a22d72cae535c7eaeca91e73346af",
-  "platforms/linux/src/app/src/engine_client.rs": "f5ce11c61b2b9cbef31acb415dbf89f6631850a5aa6d7f5aaa8a9ab5d5ad9e5e",
+  "platforms/linux/src/app/src/engine_client.rs": "c62d6561494089f4787c338c62840b8e5bf0734c04c1448b9b614bb517f698a2",
   "platforms/linux/src/app/src/tabs/settings.rs": "a900a39521fddd742b7a39818bfb9fa3aff10232ca7a89c1d04c539c5b9ff10f",
   "platforms/windows/src/FileID.App/App.xaml.cs": "fec87e4fc50ba035defeb6ff7517859cd3f162e3a1dd7728696637abb487b4c5",
   "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "771e0a1e5a9c776faf8d5237b067c8bc4a8f1ee2b46f1a0db412bd741af2d01e",
@@ -168,7 +169,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "4495e266f81959e85dda6e68dc5d8bf5b2fb5eccd3ffcfa5645aaf8ede6ffd0a",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "be3c426f5411a60ca7a91cc9387e578432aef5e9b9d932978fd12f1be46a41bd",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "9c25dd79fbf34123e32a40bf99d0aa5e90ba6b18e14d1c5c7ef2deab597886db",
-  "platforms/windows/src/engine/src/platform.rs": "80277b80bf6f7a3868924a24b37b0d4e2547c54c4a5cbed9fba9b506e637f6c0",
+  "platforms/windows/src/engine/src/platform.rs": "e2103002ec874afd8a2efbd76a7b09547ec7df010fe7159bf33b0bb60d30679e",
   "platforms/windows/src/engine/src/shell/heic.rs": "890bce8f247d2da9ddd21d544efd5b34f39ec12370c6b420cd5e579f42f00862",
   "platforms/windows/src/engine/src/shell/mod.rs": "c9a949728b1f1bf1d4db8160a72c696aee07f1f8a3a0ecd588069907cd73b3d1",
   "platforms/windows/src/engine/src/shell/ocr.rs": "30e431e99cfd34a81ba7af52d5d07712d8fce52e113c25790e12bc022bb29395",
@@ -177,6 +178,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
   "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "1e63b283f1610d78e6a23435930b621ae79fc4f7e1e8c960a50be7d498d8ed40",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",

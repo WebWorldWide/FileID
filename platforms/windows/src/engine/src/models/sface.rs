@@ -118,10 +118,10 @@ fn l2_normalize(v: &mut [f32]) {
 /// Per-EP variant-aware weights path: `sface/face_recognition_sface_2021dec.onnx`
 /// (or an `_int8`/`_qnn` sibling on accelerated EPs when present).
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
+    Ok(crate::paths::installed_model_file(&super::variants::resolve_model_path(
         &crate::paths::models_dir()?.join("sface"),
         "face_recognition_sface_2021dec",
-    ))
+    )))
 }
 
 #[cfg(test)]
