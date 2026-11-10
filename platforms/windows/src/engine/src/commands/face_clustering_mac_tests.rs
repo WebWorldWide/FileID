@@ -114,7 +114,7 @@ fn a_swift_catalog_keeps_person_ids_names_and_unknowns() {
     }
     catalog
         .conn
-        .execute("INSERT INTO face_verifications(person_a,person_b,same_person,face_a,face_b,created_at) VALUES(10,20,0,1,5,0)", [])
+        .execute("INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) VALUES(10,20,0,1,'user',0,1,5)", [])
         .unwrap();
     let before = catalog.assignments();
     let (catalog, outcome) = catalog.run();
@@ -187,8 +187,7 @@ fn the_vantage_point_join_finds_every_pair_the_sweep_finds() {
         })
         .collect();
     let small: Vec<bool> = (0..vectors.len()).map(|index| index % 3 == 0).collect();
-    let join = |vectors: &[Vec<f32>]| Join { vectors, small: &small, tight: 0.9, loose: 0.8, evaluations: 0, exceeded: false, found: Vec::new() };
-    let tree = join(&vectors).edges().unwrap();
+    let tree = Join { vectors: &vectors, small: &small, tight: 0.9, loose: 0.8, evaluations: 0, exceeded: false, found: Vec::new() }.edges().unwrap();
     let mut sweep = Vec::new();
     for i in 0..vectors.len() {
         for j in i + 1..vectors.len() {
