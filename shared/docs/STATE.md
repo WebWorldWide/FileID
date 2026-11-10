@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-08 — Owner-approved fixes in four digest-locked Mac files: fast VLM loads, free-space fallback, one frame sweep, 672 px selection checks
+
+- **VLM loads** (`VLMDownloader.swift`): after one full hash, a `-v2` record beside the verified sentinel stores each weight file's size, device, inode, mtime and ctime; later loads skip the hash only on an exact match, anything else re-hashes and rewrites it. Old (v1) sentinels re-hash once, then upgrade (seen on the real model copies). `bench_model_load.py`, release builds, scratch model copies, load average 20–29, 4 rounds: Qwen3-VL 2B prewarm 1.65–1.71 s → 0.67–0.70 s warm (first round, with the one-time re-hash, 1.95 → 1.93 s); 4B 2.76–2.98 s → 0.64–0.67 s warm (2.92 → 2.74 s first round).
+- **Free space** (`StreamingDownload.swift`): when "important usage" capacity reads 0 or nil, `volumeFreeBytes` uses the raw available capacity, so a download is refused only when that is also too small.
+- **Timeline frames** (`VideoFrameWorker.swift`): the per-user temp-folder sweep runs once per engine process (startup recovery or first sample), not before every sample.
+- **Selection checks** (`DeepAnalyze.swift`): `benchmarkPass` takes an image side; only the selection check passes 672 (same as Rust), model benchmarks and goal checks keep 448. Not re-measured; the earlier run found +2 of 25 matches for +44 % time on 4B.
+- Owner decision recorded: the on-demand "Suggest merges" sheet stays beside the merge queue.
+- **Checks:** Swift 946 serial (177 + 125 + 644), Rust 1,245 (1,242 lib + 3), conformance Swift 68 / Rust 60 (with peer engines), gates (egress with the four refreshed digests, its 29 tests, current docs, IPC DTOs). No URL, socket, HTTP client or process launch added. Live HF cache and FileID state untouched.
 ## 2026-11-08 — Plan for moving macOS onto the shared Rust engine
 
 - `shared/docs/CONVERGENCE.md` (planning agent, read-only survey of both engines): per-subsystem inventory with parity and Apple-only dependencies, the adapter architecture (in-process Swift `FileIDAppleKit` behind one reviewed C interface; ONNX via `ort`'s CoreML EP; MLX stays in Swift; no new crates), and 11 stages with acceptance gates, rollback and estimates (about 25–38 engineer-weeks). Key finding: the app cannot route some commands to each engine at once (two SQLite writers), so the switch is whole-engine at spawn and "subsystem by subsystem" is the readiness order. Owner decisions listed before Stage 0.

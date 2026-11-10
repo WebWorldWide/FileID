@@ -602,7 +602,7 @@ public actor DeepAnalyze {
 
     /// One fixed-prompt generation for ModelBenchmarkRunner: greedy decoding
     /// so runs are comparable, throughput from MLX's own completion info.
-    func benchmarkPass(prompt: String, image: CIImage?, maxTokens: Int) async throws -> ModelBenchmarkRunner.Sample {
+    func benchmarkPass(prompt: String, image: CIImage?, maxTokens: Int, imageSide: Int = 448) async throws -> ModelBenchmarkRunner.Sample {
         try await ensureResident()
         let lease = try await residencyGate.acquire()
         defer { Task { await self.releaseResidency(lease) } }
@@ -620,7 +620,7 @@ public actor DeepAnalyze {
                 .user(prompt, images: [], videos: [])
             }
             var input = UserInput(chat: [message], additionalContext: Self.templateContext)
-            if Self.acceptsResize(context) { input.processing.resize = .init(width: 448, height: 448) }
+            if Self.acceptsResize(context) { input.processing.resize = .init(width: imageSide, height: imageSide) }
             let prepared = try await context.processor.prepare(input: input)
             let stream = try MLXLMCommon.generate(input: prepared, parameters: parameters, context: context)
             for await item in stream {
