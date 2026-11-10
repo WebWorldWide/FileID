@@ -4,7 +4,12 @@
 //! entries. Lets the app's UndoStack stay process-local across restarts
 //! AND lets `restoreFromTrash` know which paths to bring back from the
 //! Recycle Bin without bloating the SQLite schema.
+//!
+//! This is the canonical Trash journal on every platform (DECISIONS
+//! 2026-11-10): the macOS Swift engine dual-writes it, and
+//! `journal_import` converts the Swift engine's older `trash-journal.json`.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::paths;
@@ -17,7 +22,7 @@ pub(crate) struct TrashLogEntry {
     pub(crate) items: Vec<TrashLogItem>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TrashLogItem {
     pub(crate) file_id: i64,
     pub(crate) original_path: String,
@@ -30,6 +35,179 @@ pub(crate) struct TrashLogItem {
     pub(crate) recycle_physical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_identity: Option<crate::platform::FileIdentity>,
+    /// Where the macOS Trash put the item, once known. A write-ahead entry has
+    /// none; restore and startup recovery then find the item by its inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trashed_path: Option<String>,
+    /// The file's catalog rows (`SNAPSHOT_TABLES`) as they were before Trash,
+    /// put back on restore so tags, CLIP vector and take signals return at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rows: Vec<SnapshotRow>,
+}
+
+impl TrashLogItem {
+    /// The inode the item had when it was trashed: the journaled identity, else
+    /// the snapshot's `file_ref` (Swift journals carry only that).
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    pub(crate) fn expected_inode(&self) -> Option<u64> {
+        self.source_identity.map(|identity| identity.file).or_else(|| {
+            self.rows
+                .iter()
+                .find(|row| row.table == "files")
+                .and_then(|row| row.columns.get("file_ref"))
+                .and_then(|value| value.int)
+                .map(|inode| inode as u64)
+        })
+    }
+}
+
+/// Catalog tables a Trash snapshot keeps, with the column naming the file.
+/// `files` comes first so the other rows' foreign keys resolve on restore.
+pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 4] = [
+    ("files", "id"),
+    ("clip_embeddings", "file_id"),
+    ("tags", "file_id"),
+    ("take_quality", "file_id"),
+];
+
+/// One SQLite value. Same JSON shape as the Swift engine's `TrashJournal.Value`
+/// (null is `{}`, blobs are standard base64), so either engine reads the other's.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SnapshotValue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) int: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) real: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) blob: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SnapshotRow {
+    pub(crate) table: String,
+    pub(crate) columns: BTreeMap<String, SnapshotValue>,
+}
+
+impl SnapshotValue {
+    fn from_sql(value: rusqlite::types::ValueRef<'_>) -> Self {
+        use base64::Engine as _;
+        use rusqlite::types::ValueRef;
+        match value {
+            ValueRef::Null => Self::default(),
+            ValueRef::Integer(int) => Self { int: Some(int), ..Self::default() },
+            ValueRef::Real(real) => Self { real: Some(real), ..Self::default() },
+            ValueRef::Text(text) => Self {
+                text: Some(String::from_utf8_lossy(text).into_owned()),
+                ..Self::default()
+            },
+            ValueRef::Blob(blob) => Self {
+                blob: Some(base64::engine::general_purpose::STANDARD.encode(blob)),
+                ..Self::default()
+            },
+        }
+    }
+
+    fn to_sql(&self) -> anyhow::Result<rusqlite::types::Value> {
+        use base64::Engine as _;
+        use rusqlite::types::Value;
+        Ok(if let Some(int) = self.int {
+            Value::Integer(int)
+        } else if let Some(real) = self.real {
+            Value::Real(real)
+        } else if let Some(text) = &self.text {
+            Value::Text(text.clone())
+        } else if let Some(blob) = &self.blob {
+            Value::Blob(base64::engine::general_purpose::STANDARD.decode(blob)?)
+        } else {
+            Value::Null
+        })
+    }
+}
+
+fn table_columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached("SELECT name FROM pragma_table_info(?1)")?;
+    let names = stmt.query_map([table], |row| row.get::<_, String>(0))?;
+    names.collect()
+}
+
+/// The file's rows in every `SNAPSHOT_TABLES` table this catalog has.
+pub(crate) fn snapshot_rows(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+) -> rusqlite::Result<Vec<SnapshotRow>> {
+    let mut out = Vec::new();
+    for (table, key) in SNAPSHOT_TABLES {
+        if table_columns(conn, table)?.is_empty() {
+            continue;
+        }
+        let mut stmt = conn.prepare_cached(&format!("SELECT * FROM \"{table}\" WHERE \"{key}\" = ?1"))?;
+        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+        let mut rows = stmt.query([file_id])?;
+        while let Some(row) = rows.next()? {
+            let mut columns = BTreeMap::new();
+            for (index, name) in names.iter().enumerate() {
+                columns.insert(name.clone(), SnapshotValue::from_sql(row.get_ref(index)?));
+            }
+            out.push(SnapshotRow { table: table.to_owned(), columns });
+        }
+    }
+    Ok(out)
+}
+
+/// Puts a restored file's snapshot back, as the Swift engine does: only when
+/// neither its id nor its path is taken, every row with `INSERT OR IGNORE`,
+/// and only columns this catalog still has. Returns whether the `files` row
+/// was inserted (false: no snapshot, or the catalog already has the file).
+pub(crate) fn restore_snapshot(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    original_path: &str,
+    rows: &[SnapshotRow],
+) -> anyhow::Result<bool> {
+    if !rows.iter().any(|row| row.table == "files") {
+        return Ok(false);
+    }
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 OR path_text = ?2)",
+        rusqlite::params![file_id, original_path],
+        |row| row.get(0),
+    )?;
+    if taken {
+        return Ok(false);
+    }
+    let mut inserted_file = false;
+    for row in rows {
+        let Some((table, key)) = SNAPSHOT_TABLES.iter().find(|(table, _)| *table == row.table) else {
+            continue;
+        };
+        if row.columns.get(*key).and_then(|value| value.int) != Some(file_id) {
+            anyhow::bail!("Trash snapshot row for {table} names another file");
+        }
+        let existing = table_columns(conn, table)?;
+        let names: Vec<&String> = row.columns.keys().filter(|name| existing.contains(name)).collect();
+        if names.is_empty() {
+            continue;
+        }
+        let values = names
+            .iter()
+            .map(|name| row.columns[*name].to_sql())
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let columns = names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(",");
+        let marks = vec!["?"; names.len()].join(",");
+        let changed = conn.execute(
+            &format!("INSERT OR IGNORE INTO \"{table}\"({columns}) VALUES({marks})"),
+            rusqlite::params_from_iter(values),
+        )?;
+        if *table == "files" {
+            inserted_file = changed == 1;
+            if !inserted_file {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(inserted_file)
 }
 
 /// The append-only log is trimmed to the last `MAX_ENTRIES` lines so it can't
@@ -55,7 +233,14 @@ fn sync_parent(_path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
-    let path = paths::trash_log_path()?;
+    append_at(&paths::trash_log_path()?, &hmac::log_hmac_key()?, entry)
+}
+
+pub(crate) fn append_at(
+    path: &std::path::Path,
+    key: &[u8],
+    entry: &TrashLogEntry,
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -63,22 +248,47 @@ pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
     // HMAC-sign each entry so a local attacker who appends a forged
     // entry can't get it accepted by restoreFromTrash. Entry format is
     // `{json}\t{hex_hmac}`.
-    let mac = hmac::hmac_sha256_hex(&hmac::log_hmac_key()?, json.as_bytes());
+    let mac = hmac::hmac_sha256_hex(key, json.as_bytes());
     {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)?;
+            .open(path)?;
         writeln!(file, "{json}\t{mac}")?;
         // Force flush so a crash immediately after delete-to-trash doesn't lose
         // the log entry (which would orphan the Recycle Bin items).
         file.sync_all()?;
     }
-    sync_parent(&path)?;
+    sync_parent(path)?;
     // Enforce the documented cap. Best-effort: a trim failure must not fail the
     // delete (the entry is already durably appended above).
-    trim_to_cap(&path).ok();
+    trim_to_cap(path).ok();
     Ok(())
+}
+
+/// Every signed entry, keeping only the newest line of each batch (a later
+/// receipt supersedes the write-ahead line), oldest batch first.
+pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
+    let mut order: Vec<String> = Vec::new();
+    let mut latest: std::collections::HashMap<String, TrashLogEntry> = std::collections::HashMap::new();
+    for line in raw.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Some((payload, mac)) = line.trim_end_matches('\r').split_once('\t') else {
+            continue;
+        };
+        if !hmac::constant_time_eq_str(&hmac::hmac_sha256_hex(key, payload.as_bytes()), mac) {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) else {
+            continue;
+        };
+        order.retain(|id| id != &entry.batch_id);
+        order.push(entry.batch_id.clone());
+        latest.insert(entry.batch_id.clone(), entry);
+    }
+    order.into_iter().filter_map(|id| latest.remove(&id)).collect()
 }
 
 /// Keep only the last `MAX_ENTRIES` non-empty lines, atomically (temp + rename).
@@ -168,6 +378,87 @@ pub(crate) fn recover_stranded_claims() -> usize {
     hmac::log_hmac_key()
         .map(|key| recover_claims_in(&raw, &key))
         .unwrap_or(0)
+}
+
+/// Startup repair before the app reads the library: claims a killed
+/// `trashFiles` left behind, the Swift engine's journals when the Mac app
+/// hosts this engine, and (macOS) catalog rows of files a kill left in the
+/// Trash. Returns how many claims were put back.
+pub(crate) fn recover_at_startup(
+    db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+) -> usize {
+    let reclaimed = recover_stranded_claims();
+    if let Some(db) = db {
+        if paths::APP_HOSTED {
+            super::journal_import::import_swift_journals(db);
+        }
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        {
+            let dropped = reconcile_trashed_rows(db, crate::shell::trash::locate);
+            if dropped > 0 {
+                tracing::warn!(dropped, "dropped catalog rows of files a killed trashFiles left in the Trash");
+            }
+        }
+    }
+    reclaimed
+}
+
+/// Batches startup recovery looks at (the Swift engine keeps 50).
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+const RECONCILE_BATCHES: usize = 50;
+
+/// A kill between the Trash move and the catalog commit leaves a row for a file
+/// that is now in the Trash. For the newest batches, drops each row whose file
+/// is gone from its path and provably in the Trash (`locate` checks identity),
+/// and journals a found location the write-ahead entry did not have yet.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) fn reconcile_trashed_rows(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    locate: impl Fn(&TrashLogItem) -> Option<std::path::PathBuf>,
+) -> usize {
+    let (Ok(path), Ok(key)) = (paths::trash_log_path(), hmac::log_hmac_key()) else {
+        return 0;
+    };
+    let Ok(raw) = std::fs::read(&path) else {
+        return 0;
+    };
+    let entries = latest_entries(&raw, &key);
+    let mut dropped = 0;
+    for mut entry in entries.into_iter().rev().take(RECONCILE_BATCHES) {
+        let mut found_new = false;
+        for item in entry.items.iter_mut() {
+            let ghost = db
+                .lock()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)",
+                    rusqlite::params![item.file_id, item.original_path],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+                && std::fs::symlink_metadata(&item.original_path).is_err();
+            if !ghost {
+                continue;
+            }
+            let Some(found) = locate(item) else {
+                continue;
+            };
+            let found = found.to_string_lossy().into_owned();
+            if item.trashed_path.as_deref() != Some(found.as_str()) {
+                item.trashed_path = Some(found);
+                found_new = true;
+            }
+            if let Ok(1) = db.lock().execute(
+                "DELETE FROM files WHERE id = ?1 AND path_text = ?2",
+                rusqlite::params![item.file_id, item.original_path],
+            ) {
+                dropped += 1;
+            }
+        }
+        if found_new && let Err(error) = append_at(&path, &key, &entry) {
+            tracing::warn!(?error, "could not journal recovered Trash locations");
+        }
+    }
+    dropped
 }
 
 /// Only signed entries count, the claim must still be the journaled file, and an
@@ -264,6 +555,7 @@ mod tests {
                 recycle_bin_id: None,
                 recycle_physical_path: None,
                 source_identity: None,
+                ..Default::default()
             }],
         }
     }

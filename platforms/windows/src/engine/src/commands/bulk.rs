@@ -756,6 +756,9 @@ struct TrashCandidate {
 #[derive(Debug)]
 enum CheckedTrashOutcome {
     Trashed,
+    /// macOS: in the Trash at this path; journaled before the catalog commit.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    TrashedAt(PathBuf),
     Rejected(String),
     Failed(String),
 }
@@ -930,6 +933,7 @@ fn validate_trash_candidate_at(
     Ok(None)
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters", not(test)), allow(dead_code))]
 fn restore_failed_claim(candidate: &TrashCandidate, reason: String) -> CheckedTrashOutcome {
     match crate::util::rename_no_replace(&candidate.staging_path, &candidate.path) {
         Ok(()) => CheckedTrashOutcome::Rejected(reason),
@@ -940,6 +944,7 @@ fn restore_failed_claim(candidate: &TrashCandidate, reason: String) -> CheckedTr
     }
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters", not(test)), allow(dead_code))]
 fn checked_trash_one_with(
     candidate: &TrashCandidate,
     trash: impl FnOnce(
@@ -974,8 +979,42 @@ fn checked_trash_one_with(
     }
 }
 
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     checked_trash_one_with(candidate, crate::shell::trash::trash_path_as)
+}
+
+/// macOS trashes in place, as the Swift engine does, so the Trash shows the
+/// file's own name and Finder's Put Back works: the identity and content
+/// checks run on the path itself and the backend re-checks identity on both
+/// sides of FileManager.trashItem.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
+    let _exact_guards = match validate_trash_candidate_at(candidate, &candidate.path, true) {
+        Ok(guards) => guards,
+        Err(reason) => return CheckedTrashOutcome::Rejected(reason),
+    };
+    match crate::shell::trash::trash_in_place(&candidate.path, candidate.source_identity) {
+        Ok(landed) => CheckedTrashOutcome::TrashedAt(landed),
+        Err(error) => CheckedTrashOutcome::Failed(error.to_string()),
+    }
+}
+
+/// Journals where each file landed before the catalog commit. Best effort:
+/// without it restore and startup recovery find the item by its inode.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn bind_macos_trash_receipts(outcomes: &mut [CheckedTrashOutcome], entry: &mut TrashLogEntry) {
+    let mut landed_any = false;
+    for (index, outcome) in outcomes.iter_mut().enumerate() {
+        if let CheckedTrashOutcome::TrashedAt(landed) = outcome {
+            entry.items[index].trashed_path = Some(landed.to_string_lossy().into_owned());
+            *outcome = CheckedTrashOutcome::Trashed;
+            landed_any = true;
+        }
+    }
+    if landed_any && let Err(error) = trash_log::append(entry) {
+        tracing::warn!(?error, "could not journal Trash locations; restore will find items by inode");
+    }
 }
 
 fn checked_trash_candidates(candidates: &[TrashCandidate]) -> Vec<CheckedTrashOutcome> {
@@ -1135,6 +1174,7 @@ pub(crate) async fn handle_trash_files(
         let mut seen_ids = std::collections::HashSet::with_capacity(file_ids.len());
         file_ids.retain(|file_id| seen_ids.insert(*file_id));
         let mut candidates = Vec::with_capacity(file_ids.len());
+        let mut snapshots = std::collections::HashMap::new();
         let mut exact_by_id = std::collections::HashMap::new();
         for identity in payload.exact_identities.unwrap_or_default() {
             let file_id = identity.file_id;
@@ -1168,7 +1208,14 @@ pub(crate) async fn handle_trash_files(
                                     uuid::Uuid::new_v4()
                                 ));
                                 match crate::platform::file_identity(&path) {
-                                    Some(source_identity) => candidates.push(TrashCandidate {
+                                    Some(source_identity) => {
+                                        match trash_log::snapshot_rows(&conn, *fid) {
+                                            Ok(rows) => {
+                                                snapshots.insert(*fid, rows);
+                                            }
+                                            Err(error) => tracing::warn!(?error, file_id = fid, "Trash snapshot failed; restore will re-catalog the file without its tags"),
+                                        }
+                                        candidates.push(TrashCandidate {
                                         file_id: *fid,
                                         path,
                                         staging_path,
@@ -1177,7 +1224,8 @@ pub(crate) async fn handle_trash_files(
                                         indexed_content_hash,
                                         source_identity,
                                         expected_exact: exact_by_id.remove(fid),
-                                    }),
+                                    })
+                                    }
                                     None => {
                                         failed += 1;
                                         messages.push(BulkActionItem {
@@ -1225,9 +1273,13 @@ pub(crate) async fn handle_trash_files(
                 .map(|candidate| TrashLogItem {
                     file_id: candidate.file_id,
                     original_path: candidate.path.to_string_lossy().into_owned(),
-                    recycle_bin_id: Some(candidate.staging_path.to_string_lossy().into_owned()),
+                    // macOS trashes in place: there is no claim to recover.
+                    recycle_bin_id: (!cfg!(all(target_os = "macos", feature = "apple-adapters")))
+                        .then(|| candidate.staging_path.to_string_lossy().into_owned()),
                     recycle_physical_path: None,
                     source_identity: Some(candidate.source_identity),
+                    trashed_path: None,
+                    rows: snapshots.remove(&candidate.file_id).unwrap_or_default(),
                 })
                 .collect(),
         };
@@ -1241,6 +1293,8 @@ pub(crate) async fn handle_trash_files(
 
         let mut outcomes = checked_trash_candidates(&candidates);
         bind_windows_trash_receipts(&candidates, &mut outcomes, &mut entry);
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        bind_macos_trash_receipts(&mut outcomes, &mut entry);
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         for (candidate, outcome) in candidates.iter().zip(outcomes) {
@@ -3120,6 +3174,7 @@ mod tests {
                 recycle_bin_id: Some(candidate.staging_path.to_string_lossy().into_owned()),
                 recycle_physical_path: None,
                 source_identity: Some(candidate.source_identity),
+                ..Default::default()
             }],
         };
         let locate = |claims: &[&str]| {
