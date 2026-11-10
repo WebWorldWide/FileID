@@ -29,6 +29,11 @@ A case may list knownDivergences ({"engine", "reason", optional "os" list and
 "run": false when running it is unsafe}). A divergent case is expected to fail on
 that engine; if it passes, the marker is stale and the run fails so the tracker
 stays honest.
+
+--test-trash-root is for a Rust engine built with the `test-trash-root` cargo
+feature (test builds only, never shipped): each case's engine moves trashed
+files into <state>/Trash instead of the user's Trash, and divergences marked
+"liftedByTestTrashRoot" no longer apply.
 """
 from __future__ import annotations
 
@@ -92,14 +97,18 @@ def engine_env(state):
     return environment
 
 
+TEST_TRASH_ROOT = False
+
+
 def case_env(state, case):
     """Per-case defaults: UTC day boundaries, an empty Rust model directory and an
     empty CoreFoundation home (where the macOS engine looks for models), so results
     never depend on the runner's clock zone or installed models."""
     home = Path(state) / "home"
     home.mkdir(exist_ok=True)
+    trash = {"FILEID_TEST_TRASH_ROOT": str(Path(state) / "Trash")} if TEST_TRASH_ROOT else {}
     return {"TZ": "UTC", "FILEID_MODELS_DIR": str(Path(state) / "Models"), "CFFIXED_USER_HOME": str(home),
-            **case.get("env", {})}
+            **trash, **case.get("env", {})}
 
 
 class Engine:
@@ -577,6 +586,9 @@ def run_step(engine, ctx, step, binaries):
         for relative in spec.get("absent", []):
             if Path(ctx.path(relative)).exists():
                 raise Failure(f"expected {relative} to be absent")
+        for name in spec.get("inTestTrash", []) if TEST_TRASH_ROOT else []:
+            if not (ctx.state / "Trash" / name).exists():
+                raise Failure(f"expected {name} in the test Trash root")
         for relative, text in spec.get("contents", {}).items():
             if Path(ctx.path(relative)).read_text(encoding="utf-8") != text:
                 raise Failure(f"{relative} content changed")
@@ -627,6 +639,8 @@ def start(binaries, flavor, ctx):
 
 def divergence_for(case, flavor, os_name):
     for item in case.get("knownDivergences", []):
+        if item.get("liftedByTestTrashRoot") and TEST_TRASH_ROOT:
+            continue
         if item["engine"] == flavor and os_name in item.get("os", [os_name]):
             return item
     return None
@@ -698,7 +712,11 @@ def main():
     parser.add_argument("--case", action="append", default=[], help="glob of case names to run")
     parser.add_argument("--os", default=host_os(), help=argparse.SUPPRESS)
     parser.add_argument("--fixture-parent", type=Path, default=Path(tempfile.gettempdir()))
+    parser.add_argument("--test-trash-root", action="store_true",
+                        help="the Rust engine was built with the test-trash-root feature (see above)")
     args = parser.parse_args()
+    global TEST_TRASH_ROOT
+    TEST_TRASH_ROOT = args.test_trash_root
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
     flavor = detect_flavor(binary, parent) if args.flavor == "auto" else args.flavor

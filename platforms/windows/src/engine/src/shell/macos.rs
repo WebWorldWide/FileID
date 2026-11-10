@@ -53,12 +53,14 @@ pub mod trash {
             Ok(Backend::Folder(root)) => vec![root],
             Ok(Backend::Finder) => {
                 let mut folders = Vec::new();
-                if let Some(home) = user_home() {
+                let home = user_home();
+                let home_volume = home.as_deref().and_then(crate::platform::file_identity).map(|id| id.volume);
+                if let Some(home) = home {
                     folders.push(home.join(".Trash"));
                 }
-                if let Some(volume) = original.parent().and_then(mount_point)
-                    && volume != Path::new("/")
-                {
+                let parent = original.parent();
+                let other_volume = parent.and_then(crate::platform::file_identity).map(|id| id.volume) != home_volume;
+                if other_volume && let Some(volume) = parent.and_then(mount_point) {
                     // SAFETY: getuid has no preconditions.
                     folders.push(volume.join(".Trashes").join(unsafe { libc::getuid() }.to_string()));
                 }
@@ -261,8 +263,12 @@ pub mod trash {
         #[test]
         fn mount_point_of_a_temporary_folder_is_a_volume_root() {
             let dir = scratch("mount");
+            // The Data volume's mount point, reached through firmlinks: compare devices.
             let mount = mount_point(&dir).unwrap();
-            assert!(dir.starts_with(&mount) || dir.canonicalize().unwrap().starts_with(&mount));
+            assert_eq!(
+                crate::platform::file_identity(&mount).map(|id| id.volume),
+                crate::platform::file_identity(&dir).map(|id| id.volume)
+            );
             std::fs::remove_dir_all(dir).ok();
         }
     }

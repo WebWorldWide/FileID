@@ -213,7 +213,7 @@ mod tests {
                     {"table": "files", "columns": {
                         "id": {"int": 7}, "path_text": {"text": original.to_string_lossy()},
                         "path_hash": {"int": 1}, "size_bytes": {"int": 5}, "scanned_at": {"real": 2.0},
-                        "kind": {"text": "photo"}, "file_ref": {"int": inode as i64}, "vlm_description": {}
+                        "kind": {"text": "photo"}, "extension": {"text": "jpg"}, "modified_at": {"real": 1.0}, "file_ref": {"int": inode as i64}, "vlm_description": {}
                     }},
                     {"table": "tags", "columns": {"file_id": {"int": 7}, "tag": {"text": "beach"},
                         "source": {"text": "user"}, "score": {}}},
