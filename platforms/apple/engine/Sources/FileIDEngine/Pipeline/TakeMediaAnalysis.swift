@@ -15,12 +15,47 @@ protocol TakeFaceAnalyzing: Sendable {
     /// used once but not cached. `people` is empty when the platform has no
     /// person detector.
     func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
+    /// `detail` is a larger decode of the same photo for per-face models.
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
     /// Faces only, for the tiles of a wide frame.
     func faces(in image: CGImage) -> [TakeScoring.Face]?
 }
 
 extension TakeFaceAnalyzing {
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? { analyze(image) }
     func faces(in image: CGImage) -> [TakeScoring.Face]? { analyze(image)?.faces }
+}
+
+/// The photo decoded at the tile size, made at most once and only when asked for:
+/// Face Mesh reads eyelids from it (at 1024 px its closed-eye precision falls from
+/// about 0.7 to 0.5), and wide frames are tiled from it.
+final class TakeDetailImage: @unchecked Sendable {
+    private let lock = NSLock()
+    private let make: () -> CGImage?
+    private var decoded: CGImage??
+    private var drawn: FaceMesh.Pixels??
+
+    init(_ make: @escaping () -> CGImage?) { self.make = make }
+
+    var image: CGImage? {
+        lock.withLock { decodedLocked() }
+    }
+
+    var pixels: FaceMesh.Pixels? {
+        lock.withLock {
+            if let drawn { return drawn }
+            let value = decodedLocked().flatMap(FaceMesh.Pixels.init)
+            drawn = .some(value)
+            return value
+        }
+    }
+
+    private func decodedLocked() -> CGImage? {
+        if let decoded { return decoded }
+        let value = make()
+        decoded = .some(value)
+        return value
+    }
 }
 
 /// Apple Vision faces with capture quality. Eye openness comes from Face Mesh when its
@@ -52,21 +87,21 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
         return Self.faces(landmarks.results ?? [], qualities: quality.results ?? [], mesh: mesh, image: image)
     }
 
-    /// Nil only when the mesh failed to run, so the result is not cached.
+    /// Nil only when the mesh failed to run, so the result is not cached. Face sizes are
+    /// judged on `image`; the mesh reads `detail` when it is larger.
     static func faces(_ found: [VNFaceObservation], qualities: [VNFaceObservation],
-                      mesh: FaceMeshService? = nil, image: CGImage? = nil) -> [TakeScoring.Face]? {
+                      mesh: FaceMeshService? = nil, image: CGImage? = nil, detail: TakeDetailImage? = nil) -> [TakeScoring.Face]? {
         let kept = Array(found.prefix(16))
         var eyes = kept.map { eyesOpen($0) }
         if let mesh, let image {
-            let w = Float(image.width), h = Float(image.height)
-            let judged = kept.map { face -> FaceMesh.Detection? in
-                let d = meshDetection(face, width: w, height: h)
-                return Double(min(d.x2 - d.x1, d.y2 - d.y1)) >= TakeScoring.minFacePixels ? d : nil
-            }
-            if judged.contains(where: { $0 != nil }) {
-                guard let pixels = FaceMesh.Pixels(image) else { return nil }
-                for (index, detection) in judged.enumerated() {
-                    guard let detection else { eyes[index] = nil; continue }
+            let w = Double(image.width), h = Double(image.height)
+            let judged = kept.map { min($0.boundingBox.width * w, $0.boundingBox.height * h) >= TakeScoring.minFacePixels }
+            if judged.contains(true) {
+                let larger = detail?.image.flatMap { $0.width > image.width ? $0 : nil }
+                guard let pixels = larger != nil ? detail?.pixels : FaceMesh.Pixels(image) else { return nil }
+                for (index, face) in kept.enumerated() {
+                    guard judged[index] else { eyes[index] = nil; continue }
+                    let detection = meshDetection(face, width: Float(pixels.width), height: Float(pixels.height))
                     do {
                         eyes[index] = try mesh.eyesOpen(pixels, detection)
                     } catch {
@@ -109,6 +144,10 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
     static let openRatio = 0.26
 
     func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
+        analyze(image, detail: nil)
+    }
+
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         let landmarks = VNDetectFaceLandmarksRequest()
         let quality = VNDetectFaceCaptureQualityRequest()
@@ -131,7 +170,7 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
                             width: TakeScoring.round4(h.boundingBox.width), height: TakeScoring.round4(h.boundingBox.height))
         }
         guard let found = landmarks.results else { return ([], people) }
-        guard let faces = Self.faces(found, qualities: quality.results ?? [], mesh: mesh, image: image) else { return nil }
+        guard let faces = Self.faces(found, qualities: quality.results ?? [], mesh: mesh, image: image, detail: detail) else { return nil }
         return (faces, people)
     }
 
@@ -158,10 +197,13 @@ enum TakeMediaAnalysis {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let decoded = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.analysisLongSide),
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
-        guard let found = analyzer.analyze(fitted.image) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
+        let longSide = sourceLongSide(source)
+        let detail = longSide > TakeScoring.analysisLongSide
+            ? TakeDetailImage { decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide) } : nil
+        guard let found = analyzer.analyze(fitted.image, detail: detail) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
         let size = fitted.luma
-        guard TakeScoring.wantsTiles(sourceLongSide: sourceLongSide(source), width: size.width, height: size.height, faces: found.faces, people: found.people),
-              let wide = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide),
+        guard TakeScoring.wantsTiles(sourceLongSide: longSide, width: size.width, height: size.height, faces: found.faces, people: found.people),
+              let wide = detail?.image,
               max(wide.width, wide.height) * 2 >= TakeScoring.analysisLongSide * 3
         else { return (TakeScoring.signals(fitted.luma, faces: found.faces, people: found.people), true) }
         var tiled: [TakeScoring.Face] = []

@@ -89,6 +89,44 @@ struct FaceMeshTests {
         #expect(d.eyeA.y < d.nose.y && d.eyeA.x < d.eyeB.x)
     }
 
+    @Test func detailImageIsMadeOnceAndOnlyWhenRead() throws {
+        nonisolated(unsafe) var made = 0
+        let context = try #require(CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let image = try #require(context.makeImage())
+        let detail = TakeDetailImage { made += 1; return image }
+        #expect(made == 0)
+        #expect(detail.pixels?.width == 40 && detail.image?.height == 20 && detail.pixels?.height == 20)
+        #expect(made == 1)
+    }
+
+    private final class Recorder: TakeFaceAnalyzing, @unchecked Sendable {
+        let id = "recorder"
+        var detailWidth: Int??
+        func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? { ([], []) }
+        func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
+            detailWidth = .some(detail?.image?.width)
+            return ([], [])
+        }
+    }
+
+    @Test func meshDetailIsTheTileSizeDecodeOfLargePhotos() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for (width, expected) in [(3000, 2048 as Int?), (800, nil)] {
+            let context = try #require(CGContext(data: nil, width: width, height: width / 2, bitsPerComponent: 8, bytesPerRow: 0,
+                                                 space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            let url = directory.appendingPathComponent("\(width).png")
+            let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, try #require(context.makeImage()), nil)
+            #expect(CGImageDestinationFinalize(destination))
+            let recorder = Recorder()
+            _ = await TakeMediaAnalysis.signals(path: url.path, isVideo: false, faces: recorder)
+            #expect(recorder.detailWidth == .some(expected))
+        }
+    }
+
     @Test func cacheIDNamesTheEyeModel() {
         #expect(VisionTakeFaceAnalyzer(mesh: nil).id == "vision-landmarks-humans-v1")
         #expect(VisionTakeFaceAnalyzer(mesh: FaceMeshService()).id == "vision-mesh-humans-v1")
@@ -99,7 +137,8 @@ struct FaceMeshTests {
     /// FILEID_FACE_MESH_MODEL the pinned ONNX. Writes FILEID_FACE_MESH_OUT as JSON lines with
     /// the box-only mesh ratio (as the Rust eye_state_eval example), the mesh ratio and the
     /// Vision openness for the Vision face that best overlaps the box, and timings.
-    /// FILEID_FACE_MESH_LONG_SIDE first fits each image as take scoring does (1024).
+    /// FILEID_FACE_MESH_LONG_SIDE first fits each image as take scoring does (1024); with
+    /// FILEID_FACE_MESH_DETAIL=1 faces are still found there but the mesh reads the file's own size.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_FACE_MESH_JOBS"] != nil))
     func evalHarness() throws {
         let env = ProcessInfo.processInfo.environment
@@ -108,6 +147,7 @@ struct FaceMeshTests {
         struct Job: Decodable { let id: String; let image: String; let bbox: [Float] }
         var out = ""
         var cache: (path: String, image: CGImage, pixels: FaceMesh.Pixels, faces: [VNFaceObservation])?
+        let detail = env["FILEID_FACE_MESH_DETAIL"] == "1"
         var scale: Float = 1
         for line in try String(contentsOfFile: try #require(env["FILEID_FACE_MESH_JOBS"]), encoding: .utf8).split(separator: "\n") {
             let job = try JSONDecoder().decode(Job.self, from: Data(line.utf8))
@@ -121,13 +161,14 @@ struct FaceMeshTests {
                 scale = Float(image.width) / Float(decoded.width)
                 let request = VNDetectFaceLandmarksRequest()
                 try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-                cache = (job.image, image, try #require(FaceMesh.Pixels(image)), request.results ?? [])
+                cache = (job.image, image, try #require(FaceMesh.Pixels(detail ? decoded : image)), request.results ?? [])
             }
             guard let (_, image, pixels, faces) = cache else { continue }
             let (W, H) = (Float(image.width), Float(image.height))
             let b = job.bbox.map { $0 * scale }
+            let m = detail ? job.bbox : b
             var started = CFAbsoluteTimeGetCurrent()
-            let boxRatio = try mesh.eyeRatio(pixels, .boxOnly(x1: b[0], y1: b[1], x2: b[2], y2: b[3]))
+            let boxRatio = try mesh.eyeRatio(pixels, .boxOnly(x1: m[0], y1: m[1], x2: m[2], y2: m[3]))
             let boxMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
             func iou(_ d: FaceMesh.Detection) -> Float {
                 let ix = max(0, min(d.x2, b[2]) - max(d.x1, b[0])), iy = max(0, min(d.y2, b[3]) - max(d.y1, b[1]))
@@ -138,7 +179,7 @@ struct FaceMeshTests {
             var record: [String: Any] = ["id": job.id, "boxRatio": boxRatio ?? NSNull(), "boxMs": boxMs]
             if let best, iou(best.1) >= 0.3 {
                 started = CFAbsoluteTimeGetCurrent()
-                let visionCropRatio = try mesh.eyeRatio(pixels, best.1)
+                let visionCropRatio = try mesh.eyeRatio(pixels, VisionTakeFaceAnalyzer.meshDetection(best.0, width: Float(pixels.width), height: Float(pixels.height)))
                 record["meshRatio"] = visionCropRatio ?? NSNull()
                 record["meshMs"] = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 record["visionOpen"] = VisionTakeFaceAnalyzer.eyesOpen(best.0) ?? NSNull()

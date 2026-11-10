@@ -274,10 +274,37 @@ struct FileRow {
 /// detector could not run, so the result is used once but not cached.
 pub trait TakeFaceAnalyzer {
     fn id(&self) -> &str;
-    fn faces(&mut self, rgb: &[u8], width: u32, height: u32) -> Option<Vec<Face>>;
+    /// `detail` is a larger decode of the same photo for per-face models.
+    fn faces(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<Vec<Face>>;
     /// False when no detector is installed, so wide frames are not tiled for nothing.
     fn detects(&self) -> bool {
         true
+    }
+}
+
+/// The photo at the tile size, resized from the full decode at most once and only when
+/// asked for: Face Mesh reads eyelids from it (at 1024 px its closed-eye precision falls
+/// from about 0.7 to 0.5), and wide frames are tiled from it.
+pub struct Detail<'a> {
+    source: &'a [u8],
+    width: u32,
+    height: u32,
+    resized: Option<(Vec<u8>, u32, u32)>,
+}
+
+impl<'a> Detail<'a> {
+    pub fn new(source: &'a [u8], width: u32, height: u32) -> Self {
+        Self { source, width, height, resized: None }
+    }
+
+    pub fn image(&mut self) -> (&[u8], u32, u32) {
+        let (rgb, w, h) = self.resized.get_or_insert_with(|| fit_from(self.source, self.width, self.height, take_scoring::TILE_LONG_SIDE));
+        (rgb, *w, *h)
+    }
+
+    fn take(mut self) -> (Vec<u8>, u32, u32) {
+        self.image();
+        self.resized.unwrap_or_default()
     }
 }
 
@@ -306,7 +333,7 @@ impl YuNetFaces {
 impl TakeFaceAnalyzer for YuNetFaces {
     fn id(&self) -> &str {
         match (&self.model, &self.mesh) {
-            (Some(_), Some(_)) => "yunet-mesh-v1",
+            (Some(_), Some(_)) => "yunet-mesh-v2",
             (Some(_), None) => "yunet-v1",
             _ => "no-faces-v1",
         }
@@ -316,7 +343,7 @@ impl TakeFaceAnalyzer for YuNetFaces {
         self.model.is_some()
     }
 
-    fn faces(&mut self, rgb: &[u8], width: u32, height: u32) -> Option<Vec<Face>> {
+    fn faces(&mut self, rgb: &[u8], width: u32, height: u32, mut detail: Option<&mut Detail>) -> Option<Vec<Face>> {
         let Some(model) = self.model.as_mut() else { return Some(vec![]) };
         let found = model.detect(rgb, width, height).ok()?;
         let (w, h) = (width as f64, height as f64);
@@ -325,7 +352,11 @@ impl TakeFaceAnalyzer for YuNetFaces {
             let [x1, y1, x2, y2] = d.bbox;
             let eyes_open = match self.mesh.as_mut() {
                 Some(mesh) if f64::from((x2 - x1).min(y2 - y1)) >= take_scoring::MIN_FACE_PIXELS => {
-                    mesh.eyes_open(rgb, width, height, &d).ok()?.map(take_scoring::round4)
+                    let open = match detail.as_deref_mut().map(Detail::image) {
+                        Some((big, bw, bh)) if bw > width => mesh.eyes_open(big, bw, bh, &scaled(&d, bw as f32 / width as f32, bh as f32 / height as f32)),
+                        _ => mesh.eyes_open(rgb, width, height, &d),
+                    };
+                    open.ok()?.map(take_scoring::round4)
                 }
                 _ => None,
             };
@@ -341,6 +372,15 @@ impl TakeFaceAnalyzer for YuNetFaces {
             });
         }
         Some(faces)
+    }
+}
+
+fn scaled(d: &crate::models::face_geometry::Detection, sx: f32, sy: f32) -> crate::models::face_geometry::Detection {
+    let [x1, y1, x2, y2] = d.bbox;
+    crate::models::face_geometry::Detection {
+        bbox: [x1 * sx, y1 * sy, x2 * sx, y2 * sy],
+        landmarks: d.landmarks.map(|[x, y]| [x * sx, y * sy]),
+        score: d.score,
     }
 }
 
@@ -449,18 +489,19 @@ fn image_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signa
     let (source, sw, sh) = crate::pipeline::tagging::decode_image_sync(path, None).ok()?;
     let (rgb, w, h) = fit_from(&source, sw, sh, take_scoring::ANALYSIS_LONG_SIDE);
     let luma = Luma::from_rgb(&rgb, w as usize, h as usize);
-    let Some(found) = faces.faces(&rgb, w, h) else {
+    let mut detail = (sw.max(sh) > take_scoring::ANALYSIS_LONG_SIDE).then(|| Detail::new(&source, sw, sh));
+    let Some(found) = faces.faces(&rgb, w, h, detail.as_mut()) else {
         return Some((take_scoring::signals(&luma, vec![], None::<Vec<Box2>>), false));
     };
     if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, None) {
         return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), true));
     }
-    let (wide, ww, wh) = fit_from(&source, sw, sh, take_scoring::TILE_LONG_SIDE);
+    let (wide, ww, wh) = detail.map_or_else(|| fit_from(&source, sw, sh, take_scoring::TILE_LONG_SIDE), Detail::take);
     drop(source);
     let mut tiled = Vec::new();
     for tile in take_scoring::tiles(ww as usize, wh as usize) {
         let crop = crop_rgb(&wide, ww as usize, &tile);
-        let Some(found_in_tile) = faces.faces(&crop, tile.width as u32, tile.height as u32) else {
+        let Some(found_in_tile) = faces.faces(&crop, tile.width as u32, tile.height as u32, None) else {
             return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), false));
         };
         tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
@@ -541,6 +582,7 @@ mod tests {
     struct Scripted {
         calls: Vec<(u32, u32)>,
         detects: bool,
+        detail: Vec<Option<(u32, u32)>>,
     }
 
     impl TakeFaceAnalyzer for Scripted {
@@ -550,8 +592,12 @@ mod tests {
         fn detects(&self) -> bool {
             self.detects
         }
-        fn faces(&mut self, _: &[u8], width: u32, height: u32) -> Option<Vec<Face>> {
+        fn faces(&mut self, _: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<Vec<Face>> {
             self.calls.push((width, height));
+            self.detail.push(detail.map(|d| {
+                let (_, w, h) = d.image();
+                (w, h)
+            }));
             let face = Face { x: 0.45, y: 0.45, width: 0.1, height: 0.1, quality: Some(0.5), eyes_open: Some(0.9) };
             Some(if self.calls.len() == 1 { vec![] } else { vec![face] })
         }
@@ -563,14 +609,16 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("wide.png");
         image::RgbImage::from_fn(4096, 2048, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 128])).save(&path).unwrap();
-        let mut faces = Scripted { calls: vec![], detects: true };
+        let mut faces = Scripted { calls: vec![], detects: true, detail: vec![] };
         let (signals, complete) = image_signals(&path, &mut faces).unwrap();
         assert!(complete);
         assert_eq!(faces.calls[0], (1024, 512));
         assert_eq!(faces.calls.len(), 1 + take_scoring::TILE_GRID * take_scoring::TILE_GRID);
+        assert_eq!(faces.detail[0], Some((2048, 1024)), "the mesh reads the tile-size decode");
+        assert!(faces.detail[1..].iter().all(Option::is_none), "tiles are already at that size");
         assert_eq!(signals.face_long_side, Some(2048));
         assert_eq!(signals.faces.len(), 4);
-        let mut idle = Scripted { calls: vec![], detects: false };
+        let mut idle = Scripted { calls: vec![], detects: false, detail: vec![] };
         let (plain, _) = image_signals(&path, &mut idle).unwrap();
         assert_eq!(idle.calls.len(), 1);
         assert_eq!(plain.face_long_side, None);
