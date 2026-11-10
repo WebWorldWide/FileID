@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.25.0",
+  "version": "1.26.0",
 
   "$defs": {
     "IPCCommand": {
@@ -888,6 +888,7 @@
               "pid":              { "type": "integer", "minimum": 0, "description": "Engine process ID (Int32 on macOS; positive on all OSes for our use)." },
               "workerCap":        { "type": "integer", "minimum": 1 },
               "physicalMemoryGB": { "type": "number", "minimum": 0 },
+              "engine":           { "type": ["string", "null"], "enum": ["swift", "rust", null], "description": "Schema 1.26.0. Which engine implementation sent ready: swift (the macOS Swift engine) or rust (the shared Rust engine, also when the Mac app hosts it). Older engines omit it; consumers fall back to their own detection." },
               "hardware":         { "type": ["object", "null"], "description": "HardwareInfo snapshot — same shape as the hardwareReprobed event's hardware field. V15.9+ engines additionally populate: pCores, eCores, logicalCpuCores, workerCap, ramTotalMB, ramAvailableMB, memoryTier (low|balanced|high), vramMB, npuPresent, powerSource (ac|battery|unknown), batteryPercent, activeProfile (eco|auto|performance). Older engines omit those fields; consumers must default them." }
             }
           }

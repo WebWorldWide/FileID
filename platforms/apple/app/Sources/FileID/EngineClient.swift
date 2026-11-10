@@ -248,18 +248,37 @@ public final class EngineClient {
         }
     }
 
-    public static func locateEngineBinary() -> URL? {
+    /// Dogfood switch for the shared Rust engine (`Contents/MacOS/fileidd`):
+    /// `FILEID_ENGINE_BACKEND=rust` or `defaults write com.fileid.app
+    /// engine.backend rust`. Anything else, and App Store builds, run the Swift
+    /// engine. Read at every (re)start; one engine process at a time.
+    nonisolated public static let engineBackendKey = "engine.backend"
+
+    nonisolated public static func requestedEngineBackend(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> String {
+        #if FILEID_APP_STORE
+        return "swift"
+        #else
+        let requested = environment["FILEID_ENGINE_BACKEND"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? defaults.string(forKey: engineBackendKey)
+        return requested?.lowercased() == "rust" ? "rust" : "swift"
+        #endif
+    }
+
+    /// Engine binaries to try, in order. The Rust engine falls back to the
+    /// Swift one when it is not in the bundle; Swift never falls forward.
+    nonisolated public static func engineBinaryNames(backend: String) -> [String] {
+        backend == "rust" ? ["fileidd", "FileIDEngine"] : ["FileIDEngine"]
+    }
+
+    public static func locateEngineBinary(backend: String = requestedEngineBackend()) -> URL? {
         let exec = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        let execURL = URL(fileURLWithPath: exec)
-        let candidate = execURL.deletingLastPathComponent().appendingPathComponent("fileidd")
-        if FileManager.default.isExecutableFile(atPath: candidate.path) {
-            return candidate
-        }
-        let altCandidate = execURL.deletingLastPathComponent().appendingPathComponent("FileIDEngine")
-        if FileManager.default.isExecutableFile(atPath: altCandidate.path) {
-            return altCandidate
-        }
-        return nil
+        let directory = URL(fileURLWithPath: exec).deletingLastPathComponent()
+        return engineBinaryNames(backend: backend)
+            .map { directory.appendingPathComponent($0) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
     public func start() {
