@@ -1,22 +1,20 @@
 import Foundation
 import Darwin
 import CoreImage
-#if !FILEID_APPLE_ADAPTER
-import FileIDShared
-#endif
+import FileIDModelInfo
 import MLX
 
 /// On-device MLX benchmark in the spirit of Magnitude's hardware scoring:
 /// fixed prompts, a cold load, fresh runs, medians, peak memory and a
 /// hardware fingerprint. Never downloads; only installed models qualify.
-enum ModelBenchmarkRunner {
+package enum ModelBenchmarkRunner {
     static let runsPerWorkload = 2
 
-    struct Sample: Sendable {
-        let promptTokensPerSecond: Double
-        let generatedTokensPerSecond: Double
-        let wallSeconds: Double
-        let output: String
+    package struct Sample: Sendable {
+        package let promptTokensPerSecond: Double
+        package let generatedTokensPerSecond: Double
+        package let wallSeconds: Double
+        package let output: String
     }
 
     struct Workload: Sendable {
@@ -82,7 +80,7 @@ enum ModelBenchmarkRunner {
 
     /// Deterministic 448×448 test card: red circle on a blue field with a
     /// yellow bar, so the colour probe has one right answer.
-    static func syntheticImage() -> CIImage {
+    package static func syntheticImage() -> CIImage {
         let extent = CGRect(x: 0, y: 0, width: 448, height: 448)
         let background = CIImage(color: CIColor(red: 0.12, green: 0.32, blue: 0.78)).cropped(to: extent)
         let bar = CIImage(color: CIColor(red: 0.98, green: 0.82, blue: 0.1))
@@ -109,7 +107,7 @@ enum ModelBenchmarkRunner {
         }
     }
 
-    static func run(
+    package static func run(
         kind: AIModelKind,
         isInstalled: (AIModelKind) -> Bool = { $0.isInstalledOnDisk() },
         progress: @escaping @Sendable (String, Int, Int) async -> Void
@@ -184,7 +182,7 @@ enum ModelBenchmarkRunner {
         (Double(bytes) / 1_000_000_000 * 100).rounded() / 100
     }
 
-    static func physicalFootprintBytes() -> Int {
+    package static func physicalFootprintBytes() -> Int {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -209,11 +207,11 @@ final class FootprintSampler: @unchecked Sendable {
 }
 
 /// Last benchmark per model for this Mac, kept beside the engine's other state.
-enum ModelBenchmarkStore {
+package enum ModelBenchmarkStore {
     static var fileURL: URL { EngineStateRoot.directory.appendingPathComponent("model-benchmarks.json") }
     private static let lock = NSLock()
 
-    static func all(at url: URL = fileURL) -> [String: ModelBenchmark] {
+    package static func all(at url: URL = fileURL) -> [String: ModelBenchmark] {
         lock.lock(); defer { lock.unlock() }
         guard let data = FileManager.default.contents(atPath: url.path),
               let decoded = try? JSONDecoder().decode([String: ModelBenchmark].self, from: data) else { return [:] }
@@ -221,7 +219,7 @@ enum ModelBenchmarkStore {
         return decoded.filter { $0.value.hardware == hardware }
     }
 
-    static func save(_ benchmark: ModelBenchmark, for kind: String, at url: URL = fileURL) {
+    package static func save(_ benchmark: ModelBenchmark, for kind: String, at url: URL = fileURL) {
         var current = all(at: url)
         current[kind] = benchmark
         lock.lock(); defer { lock.unlock() }
@@ -237,16 +235,16 @@ enum ModelBenchmarkStore {
 }
 
 /// One benchmark at a time; `cancelBenchmark` cancels it.
-actor ModelBenchmarkSlot {
-    static let shared = ModelBenchmarkSlot()
+package actor ModelBenchmarkSlot {
+    package static let shared = ModelBenchmarkSlot()
     private var task: Task<Void, Never>?
 
-    func claim(_ make: () -> Task<Void, Never>) -> Bool {
+    package func claim(_ make: () -> Task<Void, Never>) -> Bool {
         guard task == nil else { return false }
         task = make()
         return true
     }
 
-    func finish() { task = nil }
-    func cancel() { task?.cancel() }
+    package func finish() { task = nil }
+    package func cancel() { task?.cancel() }
 }

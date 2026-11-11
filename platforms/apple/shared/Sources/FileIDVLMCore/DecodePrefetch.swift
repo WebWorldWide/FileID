@@ -3,8 +3,8 @@ import CoreGraphics
 
 /// Decodes the next Describe Files image on the CPU while the GPU generates for the
 /// current one. Holds at most two pending decodes; older unused ones are dropped.
-final class DecodePrefetch: @unchecked Sendable {
-    static let shared = DecodePrefetch()
+package final class DecodePrefetch: @unchecked Sendable {
+    package static let shared = DecodePrefetch()
     static let waitSeconds: UInt64 = 10
 
     private struct Decoded: @unchecked Sendable { let image: CGImage? }
@@ -26,7 +26,7 @@ final class DecodePrefetch: @unchecked Sendable {
         environment["FILEID_VLM_PREFETCH"] != "0"
     }
 
-    func start(_ url: URL, maxPixelSize: Int) {
+    package func start(_ url: URL, maxPixelSize: Int) {
         guard Self.enabled() else { return }
         lock.lock(); defer { lock.unlock() }
         if slots.contains(where: { $0.path == url.path && $0.size == maxPixelSize }) { return }

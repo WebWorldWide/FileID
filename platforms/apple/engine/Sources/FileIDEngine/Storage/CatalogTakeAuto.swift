@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import CoreImage
 import CryptoKit
 import Foundation

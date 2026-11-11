@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // Deep Analyze's text transcription: when the scan flagged an image (or an
 // image-only PDF) as text-bearing but its OCR is missing or mangled, the loaded
 // VLM transcribes it into ocr_text with source 'vlm'. Mirrors the Rust engine's

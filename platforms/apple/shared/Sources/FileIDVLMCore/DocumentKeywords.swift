@@ -1,6 +1,6 @@
 import Foundation
 
-enum DocumentKeywords {
+package enum DocumentKeywords {
     private static let maxTags = 8
     private static let minPhraseBytes = 3
     private static let maxPhraseBytes = 60
@@ -16,7 +16,7 @@ enum DocumentKeywords {
         "while", "would",
     ]
 
-    static func extract(_ text: String) -> [(label: String, score: Double)] {
+    package static func extract(_ text: String) -> [(label: String, score: Double)] {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         let phrases = splitIntoPhrases(text)
         guard !phrases.isEmpty else { return [] }

@@ -6,6 +6,8 @@
 import AVFoundation
 import CoreImage
 import FileIDImaging
+import FileIDModelInfo
+import FileIDVLMCore
 import Foundation
 import ImageIO
 import MLX
@@ -45,7 +47,10 @@ struct VLMFailure: LocalizedError {
 }
 
 public final class VLMHost: @unchecked Sendable {
-    public static let shared = VLMHost()
+    public static let shared: VLMHost = {
+        VLMModelRegistry.installHostHooks()
+        return VLMHost()
+    }()
 
     private let lock = NSLock()
     private var tasks: [UInt64: Task<Void, Never>] = [:]
@@ -131,8 +136,8 @@ public final class VLMHost: @unchecked Sendable {
             guard let spec = request.model else { throw VLMFailure(message: "No model to load.") }
             // Without its Metal library MLX crashes on the first kernel instead of failing.
             guard metallibPresent() else { throw VLMFailure(message: "mlx.metallib is missing next to FileIDAppleKit, so local AI models can't run on this build.") }
-            VLMModelRegistry.shared.register(spec)
-            try await analyzer.ensureLoaded(kind: AIModelKind(rawValue: spec.kind)) { fraction, message, done, total in
+            let kind = try VLMModelRegistry.shared.register(spec)
+            try await analyzer.ensureLoaded(kind: kind) { fraction, message, done, total in
                 let body: [String: Any] = ["fraction": fraction, "message": message, "bytesDone": done, "totalBytes": total]
                 if let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) { emit(.progress, data) }
             }
@@ -212,8 +217,8 @@ public final class VLMHost: @unchecked Sendable {
             return ["description": result.description]
         case "benchmark":
             guard let spec = request.model else { throw VLMFailure(message: "No model to benchmark.") }
-            VLMModelRegistry.shared.register(spec)
-            let result = try await ModelBenchmarkRunner.run(kind: AIModelKind(rawValue: spec.kind)) { phase, done, total in
+            let kind = try VLMModelRegistry.shared.register(spec)
+            let result = try await ModelBenchmarkRunner.run(kind: kind) { phase, done, total in
                 let body: [String: Any] = ["phase": phase, "completed": done, "total": total]
                 if let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) { emit(.progress, data) }
             }
@@ -246,7 +251,7 @@ public final class VLMHost: @unchecked Sendable {
             "cacheBytes": cache,
             "peakBytes": peak,
             "footprintBytes": ModelBenchmarkRunner.physicalFootprintBytes(),
-            "retainedMB": await ResourceScheduler.shared.retainedMB,
+            "retainedMB": await VLMCoreHost.retainedMB(),
             "parked": await analyzer.isParked,
             "analyzing": await analyzer.isAnalyzing,
             "metallib": metallib,

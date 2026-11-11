@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import Foundation
 import MLX
 
@@ -20,7 +21,7 @@ extension DeepAnalyze {
             return try await catchingMLX { await self.runCancellableAnalysis(operation) }
         } catch {
             JSONLog.shared.error(ev: "mlx_error", error: error.localizedDescription)
-            return AnalysisResult(description: "Inference failed: \(error.localizedDescription)", proposedName: nil)
+            return AnalysisResult.make(description: "Inference failed: \(error.localizedDescription)", proposedName: nil)
         }
     }
 }

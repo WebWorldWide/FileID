@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // Tagging stage — Stage B of the pipeline.
 //
 // Per-file work: load CGImage, run Vision primary pass, optionally OCR,

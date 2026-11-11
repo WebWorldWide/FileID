@@ -6,6 +6,7 @@ import AsyncAlgorithms
 import Testing
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 @testable import FileIDImaging
 
 @Suite("Handwriting text reading")

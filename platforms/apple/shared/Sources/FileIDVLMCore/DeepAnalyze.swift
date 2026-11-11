@@ -15,9 +15,7 @@ import MLXVLM
 import MLXLLM
 import MLXHuggingFace
 import Tokenizers
-#if !FILEID_APPLE_ADAPTER
-import FileIDShared
-#endif
+import FileIDModelInfo
 import FileIDImaging
 
 public actor DeepAnalyze {
@@ -98,7 +96,7 @@ public actor DeepAnalyze {
         environment["FILEID_VLM_MERGED_TAGS"] != "0"
     }
 
-    enum ReplyFormat: String, Sendable {
+    package enum ReplyFormat: String, Sendable {
         /// DESCRIPTION / FILENAME / TAGS lines.
         case sections
         /// One line: `sentence | filename | tag, tag`.
@@ -173,10 +171,10 @@ public actor DeepAnalyze {
     }
     public func clearCancel()   { cancelRequested = false }
     /// Stops only the generation in flight; a batch around it keeps going.
-    func cancelCurrentAnalysis() { currentAnalysisTask?.cancel() }
+    package func cancelCurrentAnalysis() { currentAnalysisTask?.cancel() }
     public func isCancelled() -> Bool { cancelRequested }
 
-    func answerCatalog(prompt: String, onToken: @escaping @Sendable (String) async -> Void) async throws -> String {
+    package func answerCatalog(prompt: String, onToken: @escaping @Sendable (String) async -> Void) async throws -> String {
         try await ensureResident()
         let lease = try await residencyGate.acquire()
         defer { Task { await self.releaseResidency(lease) } }
@@ -216,7 +214,7 @@ public actor DeepAnalyze {
 
     /// Greedy transcription of the text in one image (`TextReading.transcriptionPrompt`).
     /// Larger than the caption's 448 px so handwriting stays legible.
-    func transcribeText(_ image: CGImage) async throws -> String {
+    package func transcribeText(_ image: CGImage) async throws -> String {
         guard loadedKind?.supportsVision == true else { return "" }
         try await ensureResident()
         let lease = try await residencyGate.acquire()
@@ -585,7 +583,7 @@ public actor DeepAnalyze {
     }
 
     private var parkedKind: AIModelKind?
-    var isParked: Bool { parkedKind != nil && container == nil }
+    package var isParked: Bool { parkedKind != nil && container == nil }
 
     /// Reloads a parked model before use; a no-op otherwise.
     func ensureResident() async throws {
@@ -600,12 +598,12 @@ public actor DeepAnalyze {
         if container != nil { parkedKind = nil }
     }
 
-    var isAnalyzing: Bool { currentAnalysisTask != nil }
-    var loadedModelKind: AIModelKind? { loadedKind }
+    package var isAnalyzing: Bool { currentAnalysisTask != nil }
+    package var loadedModelKind: AIModelKind? { loadedKind }
 
     /// One fixed-prompt generation for ModelBenchmarkRunner: greedy decoding
     /// so runs are comparable, throughput from MLX's own completion info.
-    func benchmarkPass(prompt: String, image: CIImage?, maxTokens: Int, imageSide: Int = 448) async throws -> ModelBenchmarkRunner.Sample {
+    package func benchmarkPass(prompt: String, image: CIImage?, maxTokens: Int, imageSide: Int = 448) async throws -> ModelBenchmarkRunner.Sample {
         try await ensureResident()
         let lease = try await residencyGate.acquire()
         defer { Task { await self.releaseResidency(lease) } }
@@ -719,12 +717,12 @@ public actor DeepAnalyze {
     }
 
     /// Describe one video moment from 2–8 ordered frames sampled at `times`.
-    func analyzeMomentSequence(imageURLs: [URL], times: [Double]) async -> AnalysisResult {
+    package func analyzeMomentSequence(imageURLs: [URL], times: [Double]) async -> AnalysisResult {
         let request = TimelineMomentAnalysis.request(times: times)
         return await analyzeSequence(imageURLs: imageURLs, times: times, prompt: request.prompt, labels: request.labels)
     }
 
-    func analyzeTakeOutcomeSequence(imageURLs: [URL], times: [Double], goal: String) async -> AnalysisResult {
+    package func analyzeTakeOutcomeSequence(imageURLs: [URL], times: [Double], goal: String) async -> AnalysisResult {
         await analyzeSequence(imageURLs: imageURLs, times: times, prompt: TakeOutcomeAnalysis.prompt(goal: goal, times: times))
     }
 
@@ -1293,7 +1291,7 @@ public actor DeepAnalyze {
     /// Parse the strict-format VLM output into description + filename.
     /// Defensive: if the model deviates from the format, fall back to
     /// using the whole reply as the description and skipping the name.
-    static func parse(rawOutput: String, format: ReplyFormat) -> AnalysisResult {
+    package static func parse(rawOutput: String, format: ReplyFormat) -> AnalysisResult {
         guard format == .compact else { return parse(rawOutput: rawOutput) }
         let line = rawOutput.split(whereSeparator: \.isNewline).map(String.init).first { $0.contains("|") }
         guard let line else { return parse(rawOutput: rawOutput) }
@@ -1352,7 +1350,7 @@ public actor DeepAnalyze {
         return tokenizer.encode(text: " " + words.joined(separator: "-") + " " + words.joined(separator: " "), addSpecialTokens: false)
     }
 
-    static func parse(rawOutput: String) -> AnalysisResult {
+    package static func parse(rawOutput: String) -> AnalysisResult {
         var tagsLine: String?
         var body = rawOutput
         if let tRange = rawOutput.range(of: "\nTAGS:", options: [.caseInsensitive, .backwards]) {
@@ -1466,7 +1464,7 @@ public actor DeepAnalyze {
         return words.allSatisfy { !generic.contains(String($0).lowercased()) }
     }
 
-    static func hasMinimumGeneratedFilenameWords(_ name: String?) -> Bool {
+    package static func hasMinimumGeneratedFilenameWords(_ name: String?) -> Bool {
         guard let name else { return false }
         return name.split { $0 == "-" || $0 == "_" }.count >= 2
     }
@@ -1669,7 +1667,7 @@ public actor DeepAnalyze {
         }
     }
 
-    nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) async -> CGImage? {
+    package nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) async -> CGImage? {
         let ext = url.pathExtension.lowercased()
         if ext == "pdf" {
             return renderFirstPDFPage(url: url, maxPixelSize: maxPixelSize)
@@ -1707,7 +1705,7 @@ public actor DeepAnalyze {
     /// API is callback-based, but Deep Analyze's loader is synchronous —
     /// so we bridge with a DispatchSemaphore. Only the engine's serial
     /// VLM-prep stage calls this, so blocking briefly is fine.
-    nonisolated static func quickLookThumbnail(url: URL, maxPixelSize: Int) -> CGImage? {
+    package nonisolated static func quickLookThumbnail(url: URL, maxPixelSize: Int) -> CGImage? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let req = QLThumbnailGenerator.Request(
             fileAt: url,
@@ -1862,7 +1860,7 @@ public actor DeepAnalyze {
     }
 
     /// Common video container extensions. Mirrors FileTypes.kind.
-    nonisolated static func isVideoExtension(_ ext: String) -> Bool {
+    package nonisolated static func isVideoExtension(_ ext: String) -> Bool {
         FileTypes.videos.contains(ext.lowercased())
     }
 
@@ -1897,11 +1895,11 @@ public actor DeepAnalyze {
         init(_ value: T) { self.value = value }
     }
 
-    struct TimedVideoFrame: @unchecked Sendable { let image: CGImage; let seconds: Double }
-    nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int, requestedSeconds: Double? = nil) async -> CGImage? {
+    package struct TimedVideoFrame: @unchecked Sendable { package let image: CGImage; package let seconds: Double }
+    package nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int, requestedSeconds: Double? = nil) async -> CGImage? {
         await extractTimedVideoFrame(url: url, maxPixelSize: maxPixelSize, requestedSeconds: requestedSeconds)?.image
     }
-    nonisolated static func extractTimedVideoFrame(url: URL, maxPixelSize: Int, requestedSeconds: Double? = nil) async -> TimedVideoFrame? {
+    package nonisolated static func extractTimedVideoFrame(url: URL, maxPixelSize: Int, requestedSeconds: Double? = nil) async -> TimedVideoFrame? {
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false
         ])
@@ -1947,7 +1945,7 @@ public actor DeepAnalyze {
         return requestedSeconds == nil ? await generate(at: .zero) : nil
     }
 
-    nonisolated static func loadVideoDurationSeconds(
+    package nonisolated static func loadVideoDurationSeconds(
         _ asset: AVAsset,
         timeoutSeconds: UInt64
     ) async -> Double? {

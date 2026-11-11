@@ -761,6 +761,7 @@
     "sources": [
       "platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift",
       "platforms/apple/shared/Sources/FileIDShared/CatalogProtocol.swift",
+      "platforms/apple/shared/Sources/FileIDModelInfo/ModelInfoDTOs.swift",
       "platforms/apple/shared/Sources/FileIDShared/ChatProtocol.swift",
       "platforms/apple/shared/Sources/FileIDShared/ToolProtocol.swift"
     ],

@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import AVFoundation
 import CoreImage
 import Foundation

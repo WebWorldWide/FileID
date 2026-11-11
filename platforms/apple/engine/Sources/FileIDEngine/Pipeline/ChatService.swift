@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import Foundation
 import GRDB
 import FileIDShared
@@ -498,8 +499,8 @@ actor ChatService {
                         let text = try await DeepAnalyze.shared.answerCatalog(prompt: prompt) { chunk in
                             await ChatService.shared.stream(request, chunk: chunk, hits: hits, database: database, sink: sink)
                         }
-                        return DeepAnalyze.AnalysisResult(description: text, proposedName: nil)
-                    } catch { return DeepAnalyze.AnalysisResult(description: "Inference failed: \(error.localizedDescription)", proposedName: nil) }
+                        return DeepAnalyze.AnalysisResult.make(description: text, proposedName: nil)
+                    } catch { return DeepAnalyze.AnalysisResult.make(description: "Inference failed: \(error.localizedDescription)", proposedName: nil) }
                 }
                 return DeepAnalyzeRunner.isAnalysisFailure(result) || result.description.isEmpty ? nil : result.description
             }

@@ -2,6 +2,7 @@
 // the curated VLM picks resolve through it.
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 import Foundation
 
 private func repoRootURL() -> URL {

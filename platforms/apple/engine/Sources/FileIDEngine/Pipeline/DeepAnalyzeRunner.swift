@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // DeepAnalyzeRunner — batch driver around `DeepAnalyze.shared`.
 //
 // Glue between IPC commands and the model. Picks the right set of files
@@ -478,7 +479,7 @@ public enum DeepAnalyzeRunner {
                         _ = await analyzer.guardedAnalysis {
                             await Self.transcribeTextIfNeeded(analyzer: analyzer, database: database,
                                                               fileID: fileID, url: url, kind: kind)
-                            return DeepAnalyze.AnalysisResult(description: "", proposedName: nil)
+                            return DeepAnalyze.AnalysisResult.make(description: "", proposedName: nil)
                         }
                     }
                 } catch {

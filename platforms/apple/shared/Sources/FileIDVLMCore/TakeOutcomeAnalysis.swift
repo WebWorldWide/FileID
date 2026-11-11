@@ -1,36 +1,36 @@
 import Foundation
 
-struct TakeOutcomeAnalysis {
-    enum Status: String, Codable, Sendable { case succeeded, failed, unknown }
-    enum Scope: String, Codable, Sendable { case moment, wholeClip }
+package struct TakeOutcomeAnalysis {
+    package enum Status: String, Codable, Sendable { case succeeded, failed, unknown }
+    package enum Scope: String, Codable, Sendable { case moment, wholeClip }
 
-    struct Observation: Codable, Sendable, Equatable {
-        let status: Status
-        let scope: Scope
-        let summary: String
-        let confidence: Double
-        let firstFrame: Int?
-        let lastFrame: Int?
+    package struct Observation: Codable, Sendable, Equatable {
+        package let status: Status
+        package let scope: Scope
+        package let summary: String
+        package let confidence: Double
+        package let firstFrame: Int?
+        package let lastFrame: Int?
     }
 
-    struct Evidence: Codable, Sendable, Equatable {
-        let start: Double
-        let end: Double
-        let frameTimes: [Double]
-        let observedStart: Double?
-        let observedEnd: Double?
-        let observation: Observation
+    package struct Evidence: Codable, Sendable, Equatable {
+        package let start: Double
+        package let end: Double
+        package let frameTimes: [Double]
+        package let observedStart: Double?
+        package let observedEnd: Double?
+        package let observation: Observation
     }
 
-    struct Assessment: Sendable, Equatable {
-        let outcome: Double?
-        let confidence: Double
-        let explanation: String
+    package struct Assessment: Sendable, Equatable {
+        package let outcome: Double?
+        package let confidence: Double
+        package let explanation: String
     }
 
-    struct InvalidResponse: Error {}
+    package struct InvalidResponse: Error {}
 
-    static func parse(_ raw: String, frameCount: Int) throws -> Observation {
+    package static func parse(_ raw: String, frameCount: Int) throws -> Observation {
         guard (2...8).contains(frameCount), raw.utf8.count <= 16_384,
               let begin = raw.firstIndex(of: "{"), let finish = raw.lastIndex(of: "}"), begin <= finish,
               let observation = try? JSONDecoder().decode(Observation.self, from: Data(raw[begin...finish].utf8)),
@@ -50,7 +50,7 @@ struct TakeOutcomeAnalysis {
         return true
     }
 
-    static func evidence(_ observation: Observation, times: [Double], window: TimelineMomentAnalysis.Window) throws -> Evidence {
+    package static func evidence(_ observation: Observation, times: [Double], window: TimelineMomentAnalysis.Window) throws -> Evidence {
         guard (2...8).contains(times.count), valid(observation, frameCount: times.count),
               times.allSatisfy({ $0.isFinite && $0 >= window.start && $0 <= window.end }),
               zip(times, times.dropFirst()).allSatisfy({ $0 < $1 }) else { throw InvalidResponse() }
@@ -59,7 +59,7 @@ struct TakeOutcomeAnalysis {
                         observedEnd: observation.lastFrame.map { times[$0] }, observation: observation)
     }
 
-    static func valid(_ evidence: Evidence) -> Bool {
+    package static func valid(_ evidence: Evidence) -> Bool {
         guard evidence.start.isFinite, evidence.end.isFinite, evidence.start >= 0,
               evidence.end > evidence.start, evidence.end <= 21_600,
               (2...8).contains(evidence.frameTimes.count),
@@ -74,7 +74,7 @@ struct TakeOutcomeAnalysis {
             && end == evidence.frameTimes[evidence.observation.lastFrame!]
     }
 
-    static func assess(_ evidence: [Evidence], expectedWindows: [TimelineMomentAnalysis.Window]) -> Assessment {
+    package static func assess(_ evidence: [Evidence], expectedWindows: [TimelineMomentAnalysis.Window]) -> Assessment {
         let unknown = Assessment(outcome: nil, confidence: 0,
                                  explanation: "Insufficient desired-outcome evidence in sampled frames. Review the take or resume analysis.")
         guard !expectedWindows.isEmpty else { return unknown }

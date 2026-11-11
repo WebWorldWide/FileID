@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import Testing
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 /// MLX needs its Metal library beside the binary that links it; without one
 /// these tests skip (CI builds have none).
@@ -27,7 +28,7 @@ struct MLXErrorScopeTests {
     @Test func anAnalysisWithAnMLXErrorFailsThatFile() async {
         let result = await DeepAnalyze.shared.guardedAnalysis {
             _ = MLXArray(0 ..< 10, [2, 5]) + MLXArray(0 ..< 15, [3, 5])
-            return DeepAnalyze.AnalysisResult(description: "A caption.", proposedName: nil)
+            return DeepAnalyze.AnalysisResult.make(description: "A caption.", proposedName: nil)
         }
         #expect(result.description.hasPrefix("Inference failed"))
         #expect(DeepAnalyzeRunner.isAnalysisFailure(result.description))

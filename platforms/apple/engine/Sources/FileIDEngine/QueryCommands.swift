@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import Foundation
 import GRDB
 import ImageIO

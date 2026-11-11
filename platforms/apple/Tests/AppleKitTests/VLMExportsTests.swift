@@ -3,6 +3,8 @@ import Foundation
 import Testing
 @testable import FileIDAppleKit
 @testable import FileIDAppleVLM
+import FileIDModelInfo
+@testable import FileIDVLMCore
 
 /// Collects the events of one `fileid_apple_vlm_submit` request.
 private final class Reply: @unchecked Sendable {
@@ -85,7 +87,7 @@ struct VLMExportsTests {
         let (event, reply) = try submit(["op": "load", "model": spec(root: root)])
         #expect(event == 4)
         let message = reply["message"] as? String ?? ""
-        #expect(message.contains("isn't installed") || message.contains("mlx.metallib is missing"))
+        #expect(message.contains("isn't installed") || message.contains("mlx.metallib is missing") || message.contains("model catalog"))
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
@@ -107,15 +109,35 @@ struct VLMExportsTests {
         #expect(!VLMDownloader.verified(modelDir: model, revision: "abc"))
     }
 
-    @Test func modelKindsTakeTheHostsSpec() throws {
-        let root = FileManager.default.temporaryDirectory
-        let data = try JSONSerialization.data(withJSONObject: spec(kind: "test_kind", root: root).merging(["architecture": "smolvlm"]) { $1 })
-        VLMModelRegistry.shared.register(try JSONDecoder().decode(VLMModelSpec.self, from: data))
-        let kind = AIModelKind(rawValue: "test_kind")
-        #expect(kind.sourceRepo == "mlx-community/Test-VLM")
-        #expect(kind.ramBudgetGB == 3.0)
-        #expect(ModelLicenseAcceptance.isAccepted(for: kind))
-        #expect(ModelCachePaths.huggingFaceRoot.path == root.standardizedFileURL.path)
-        #expect(!DeepAnalyze.acceptsResize(architecture: MLXModelCatalog.entry(forRepo: kind.sourceRepo)?.architecture))
+    /// The Rust host's spec must agree with the catalog this library reads
+    /// (repository, pinned revision, model folder), or the load is refused.
+    @Test func hostSpecsMustAgreeWithTheCatalog() throws {
+        let kind = AIModelKind.qwen3VL2B
+        let root = ModelCachePaths.huggingFaceRoot
+        let pin = try #require(ModelManifest.vlmPin(forKind: kind.rawValue))
+        func spec(repo: String = kind.sourceRepo, revision: String? = pin.revision, root: URL = root, kind name: String = kind.rawValue) throws -> VLMModelSpec {
+            let body: [String: Any] = ["kind": name, "repo": repo, "huggingFaceRoot": root.path, "revision": revision as Any,
+                                       "displayName": kind.displayName, "vision": true, "ramBudgetGB": kind.ramBudgetGB, "licenseAccepted": true]
+            return try JSONDecoder().decode(VLMModelSpec.self, from: JSONSerialization.data(withJSONObject: body.compactMapValues { $0 is NSNull ? nil : $0 }))
+        }
+        #expect(VLMModelRegistry.disagreement(try spec()) == nil)
+        #expect(VLMModelRegistry.disagreement(try spec(repo: "someone/Other-VLM"))?.contains("repositories") == true)
+        #expect(VLMModelRegistry.disagreement(try spec(revision: "0000000"))?.contains("revisions") == true)
+        #expect(VLMModelRegistry.disagreement(try spec(root: URL(fileURLWithPath: "/tmp/elsewhere")))?.contains("model folders") == true)
+        #expect(VLMModelRegistry.disagreement(try spec(kind: "not_a_model"))?.contains("catalog") == true)
+    }
+
+    /// Every model kind the Rust engine offers on the Mac names the catalog's
+    /// repository and pin (the Rust side lists them in `apple::vlm::MODELS`).
+    @Test func rustHostKindsAreInTheCatalog() throws {
+        let vlm = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("windows/src/engine/src/apple/vlm.rs")
+        let source = try String(contentsOf: vlm, encoding: .utf8)
+        let kinds = source.matches(of: /\("([a-z0-9_]+)", "[^"]+", [0-9.]+\)/).map { String($0.output.1) }
+        #expect(kinds.count >= 5)
+        for name in kinds {
+            let kind = try #require(AIModelKind(rawValue: name), "\(name) isn't in the Swift catalog")
+            #expect(ModelManifest.vlmPin(forKind: name)?.repo == kind.sourceRepo, "\(name)")
+        }
     }
 }

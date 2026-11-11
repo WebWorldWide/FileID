@@ -338,8 +338,8 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
             "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
             "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
-            "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift",
+            "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
+            "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
             "platforms/apple/app/Sources/FileID/EngineClient.swift",
@@ -637,7 +637,7 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_reviewed_local_loader_content_is_digest_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = self.source_tree(directory)
-            relative = "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift"
+            relative = "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift"
             path = root / relative
             source = path.read_text(encoding="utf-8").replace(
                 "using: #huggingFaceTokenizerLoader()",
@@ -668,14 +668,14 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_symlinked_sources_are_checked_at_their_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             root = self.source_tree(directory)
-            target = root / "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift"
+            target = root / "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift"
             shared = root / "platforms/apple/adapters/Sources/FileIDAppleVLM/Engine/DeepAnalyze.swift"
             shared.parent.mkdir(parents=True)
             shared.symlink_to(os.path.relpath(target, shared.parent))
             self.assertEqual(source_boundary_violations(root), [])
             target.write_text(target.read_text(encoding="utf-8") + "\n// altered\n", encoding="utf-8")
             failures = source_boundary_violations(root)
-            self.assertTrue(any("FileIDEngine/Pipeline/DeepAnalyze.swift" in failure and "digest changed" in failure for failure in failures))
+            self.assertTrue(any("FileIDVLMCore/DeepAnalyze.swift" in failure and "digest changed" in failure for failure in failures))
             self.assertFalse(any("FileIDAppleVLM" in failure for failure in failures))
             rogue = Path(outside) / "Beacon.swift"
             rogue.write_text("func go() { _ = URLSession(configuration: .default) }\n", encoding="utf-8")
