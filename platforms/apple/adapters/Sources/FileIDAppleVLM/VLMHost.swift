@@ -108,7 +108,9 @@ public final class VLMHost: @unchecked Sendable {
     private static func run(_ data: Data, emit: @escaping Emit) async {
         do {
             let request = try JSONDecoder().decode(VLMRequest.self, from: data)
-            let reply = try await perform(request, emit: emit)
+            // An MLX or Metal error (a GPU timeout, an allocation failure)
+            // fails this request instead of aborting the host process.
+            let reply = try await withError { try await perform(request, emit: emit) }
             // MLX ends a generation stream quietly when its task is cancelled.
             try Task.checkCancellation()
             emit(.done, try JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys]))

@@ -487,7 +487,7 @@ enum ChatSelection {
 
     static func ask(_ image: CIImage, prompt: String) async -> (Verdict, String)? {
         do {
-            return parseVerdict(try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: checkTokens, imageSide: checkSide).output)
+            return parseVerdict(try await catchingMLX { try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: checkTokens, imageSide: checkSide) }.output)
         } catch {
             JSONLog.shared.warn(ev: "chat_selection_check_failed", error: "\(error)")
             return nil
@@ -527,7 +527,7 @@ extension ChatService {
             } else if let kind = wake, await Self.canWake() {
                 await emit(request, status: "queued", message: "Waking \(kind.displayName) to look at the selected \(prepared.noun); the first time takes a few seconds.", database: database, sink: sink)
                 do {
-                    try await DeepAnalyze.shared.ensureLoaded(kind: kind)
+                    try await catchingMLX { try await DeepAnalyze.shared.ensureLoaded(kind: kind) }
                     if case .ready(let loaded) = await DeepAnalyze.shared.loadState, loaded == kind { model = loaded } else { why = .notStarted }
                 } catch {
                     JSONLog.shared.warn(ev: "chat_model_wake_failed", error: "\(error)")

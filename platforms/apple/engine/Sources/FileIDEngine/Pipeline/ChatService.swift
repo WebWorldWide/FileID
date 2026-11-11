@@ -99,7 +99,7 @@ actor ChatService {
                     } else if let kind = Self.wakeableKind(request), await Self.canWake() {
                         await emit(request, status: "queued", message: "Results are ready. Waking \(kind.displayName) to write the answer; the first time takes a few seconds.", hits: hits, database: database, sink: sink)
                         do {
-                            try await DeepAnalyze.shared.ensureLoaded(kind: kind)
+                            try await catchingMLX { try await DeepAnalyze.shared.ensureLoaded(kind: kind) }
                             if case .ready(let loaded) = await DeepAnalyze.shared.loadState, loaded == kind { readyModel = loaded }
                         } catch {
                             JSONLog.shared.warn(ev: "chat_model_wake_failed", error: "\(error)")
@@ -493,7 +493,7 @@ actor ChatService {
             }) ?? []
             let history = Self.historyBlock(Array(earlier.dropLast()))
             func generate(_ prompt: String) async -> String? {
-                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                let result = await DeepAnalyze.shared.guardedAnalysis {
                     do {
                         let text = try await DeepAnalyze.shared.answerCatalog(prompt: prompt) { chunk in
                             await ChatService.shared.stream(request, chunk: chunk, hits: hits, database: database, sink: sink)

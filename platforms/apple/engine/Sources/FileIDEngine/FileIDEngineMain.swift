@@ -729,13 +729,15 @@ struct FileIDEngineMain {
                 SleepGuard.shared.begin(reason: "Model prewarm")
                 defer { SleepGuard.shared.end() }
                 do {
-                    try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
-                        Task {
-                            await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
-                                modelKind: kind.rawValue, fraction: frac, message: msg,
-                                bytesDone: done > 0 ? done : nil,
-                                totalBytes: total > 0 ? total : nil
-                            )))
+                    try await catchingMLX {
+                        try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
+                            Task {
+                                await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                                    modelKind: kind.rawValue, fraction: frac, message: msg,
+                                    bytesDone: done > 0 ? done : nil,
+                                    totalBytes: total > 0 ? total : nil
+                                )))
+                            }
                         }
                     }
                     await DeepAnalyze.shared.markInstalledSentinel(kind: kind)

@@ -191,7 +191,7 @@ actor TimelineAnalysis {
                         guard frame.metadata.revision == source.1 else { throw SourceChanged() }
                         try await requireRunning(id, database: database)
                         let temporary = frame.url
-                        let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                        let result = await DeepAnalyze.shared.guardedAnalysis {
                             await DeepAnalyze.shared.analyze(imageURL: temporary, mediaKind: .video)
                         }
                         try await requireRunning(id, database: database)
@@ -312,7 +312,7 @@ actor TimelineAnalysis {
                                                   modelVersion: version, window: window, jobID: jobID)
                 }
                 if !began { continue }
-                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                let result = await DeepAnalyze.shared.guardedAnalysis {
                     await DeepAnalyze.shared.analyzeTakeOutcomeSequence(imageURLs: urls, times: times, goal: goal.text)
                 }
                 try await requireRunning(jobID, database: database)
@@ -386,7 +386,7 @@ actor TimelineAnalysis {
                     prefetched = (next.start, task)
                     prefetchTask = task
                 }
-                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                let result = await DeepAnalyze.shared.guardedAnalysis {
                     await DeepAnalyze.shared.analyzeMomentSequence(imageURLs: urls, times: times)
                 }
                 try await requireRunning(jobID, database: database)
@@ -518,7 +518,7 @@ actor TimelineAnalysis {
             }
             if exists { continue }
             let frameURL = pool.url(pool.manifest.frames[scene.representative])
-            let result = await DeepAnalyze.shared.runCancellableAnalysis {
+            let result = await DeepAnalyze.shared.guardedAnalysis {
                 await DeepAnalyze.shared.analyze(imageURL: frameURL, mediaKind: .video, proposeFilename: false, sceneCaption: true)
             }
             try await requireRunning(jobID, database: database)
@@ -587,7 +587,7 @@ actor TimelineAnalysis {
                 let times = picked.map(\.seconds)
                 let momentWindow = TimelineMomentAnalysis.Window(start: window.start, end: window.end, times: times)
                 let urls = picked.map { pool.url($0) }
-                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                let result = await DeepAnalyze.shared.guardedAnalysis {
                     await DeepAnalyze.shared.analyzeMomentSequence(imageURLs: urls, times: times)
                 }
                 try await requireRunning(jobID, database: database)
