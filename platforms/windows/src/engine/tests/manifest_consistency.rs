@@ -20,6 +20,14 @@ const CANONICAL_KINDS: &[&str] = &[
     "face_mesh",
 ];
 
+/// The engine the Mac app hosts serves the Mac's ONNX set; its VLMs are MLX
+/// repos (`vlmRepos`), resolved in `models::mlx`.
+const MAC_APP_KINDS: &[&str] = &["yunet_sface", "mobileclip_s2", "clip_text", "ram_plus", "bge_text", "face_mesh"];
+
+fn platform() -> &'static str {
+    if fileid_engine::paths::APP_HOSTED { "macos" } else { "windows" }
+}
+
 fn manifest() -> serde_json::Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../shared/models/manifest.json");
@@ -28,7 +36,7 @@ fn manifest() -> serde_json::Value {
     serde_json::from_str(&raw).expect("manifest.json must parse")
 }
 
-/// url -> (sha256, approxBytes) for every windows-platform artifact.
+/// url -> (sha256, approxBytes) for every artifact of this engine's platform.
 fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
     manifest()["artifacts"]
         .as_array()
@@ -39,7 +47,7 @@ fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
                 .as_array()
                 .expect("platforms array")
                 .iter()
-                .any(|p| p == "windows")
+                .any(|p| p == platform())
         })
         .map(|a| {
             (
@@ -62,7 +70,8 @@ fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
 fn registry_matches_manifest_exactly() {
     let mut manifest_entries = manifest_windows_artifacts();
 
-    for kind in CANONICAL_KINDS {
+    let kinds = if fileid_engine::paths::APP_HOSTED { MAC_APP_KINDS } else { CANONICAL_KINDS };
+    for kind in kinds {
         let LookupResult::Found(model) = lookup_full(kind) else {
             panic!("registry no longer knows kind {kind:?}");
         };

@@ -132,7 +132,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "82573f40be15c75c087190ecfa95ceae627b40c854767de6a2f03ccea844fa96",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "5ea71c5cdb780ee61ab6fb865887be963dc8c2e8b24d1eaf0583e4d792e6b0e8",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "efb0ee6123f7bdf3c82eba9e9f1da3334abc781efdf1c56f3186f1ad36f3c2ac",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "2acb357c84a8e751973a7d70a36220b5f3180f73059cfaa67df6b017c7157168",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "f7809c1d0ad7d98de0314d4c0645dd8e0dd697cc43554a541bdd9ef4e5c6b8eb",
@@ -158,10 +158,10 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "142a2d22dc127043e2e658e559d39f77fcd9101e5549aeec53d9883bc3740e21",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "71797eb7ddc4944cafa74210618a2c37deffb167b2493ad8afa78a54d8f95400",
   "platforms/windows/src/engine/src/commands/bulk.rs": "78f80ce07fca49d86c2a6a4e6c3b23285a46bbd968a1ae5f0ca55f06ca978ef6",
-  "platforms/windows/src/engine/src/commands/prewarm.rs": "ea0c1ce27ccc5bfdd54ecf0c6e16425f19a60716dd81f1451c11edbdf6b508ee",
+  "platforms/windows/src/engine/src/commands/prewarm.rs": "af8da065e3609511846ea45533609ca2cf16aa41d72335f30135569e00ee5fda",
   "platforms/windows/src/engine/src/commands/restructure.rs": "a026f31dd15f33cf1b3f96190c1e68cef410f654d0ab3d697e9dde5fe0b099b8",
   "platforms/windows/src/engine/src/commands/trash.rs": "f41c2162dbb7a5473b4bd304dd8cf1b641da17e3598a6d83737fe04e507c98ac",
-  "platforms/windows/src/engine/src/downloader.rs": "5195c88965e11864e11078e59051f44bdab37a8ad7ca0a9c559bde409b4d12a4",
+  "platforms/windows/src/engine/src/downloader.rs": "9d8dbe7ec8abacc2679afcb5c255cfc2fdf65411827699d8681ffd05cf11da84",
   "platforms/windows/src/engine/src/server.rs": "c1088435deedc2935f14105adf2be8024dd4d933133f00aedb724c6b3c3474e2",
   "platforms/windows/src/engine/src/models/runtime.rs": "94b93c3d0ea4be9f507b4f313a6e70bec562c7ff2c0c69b8d6bee52d73799785",
   "platforms/windows/src/engine/src/models/vlm.rs": "da06866186668cb34ef298152cf4d4d2bad7fd0ede656313c43fa59d5967444f",
@@ -214,7 +214,7 @@ RAW_NETWORK_PATTERNS = {
     ),
 }
 SAFE_NETWORK_SINK_PATTERNS = {
-    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel)\s*\("),
+    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel|fetch_repo_listing)\s*\("),
     ".swift": re.compile(r"\b(?:streamingDownload|parallelStreamingDownload)\s*\("),
     ".cs": re.compile(r"$^"),
 }

@@ -249,10 +249,12 @@ fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
     finish(&plan).unwrap();
     let written = std::fs::read(verified_record_path(&dir, revision)).unwrap();
     assert_eq!(String::from_utf8(written).unwrap(), fixture["rustManifest"].as_str().unwrap());
-    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
-    assert_eq!(identity["version"], 2);
-    assert_eq!(identity["manifestSHA256"], fixture["rustManifestSHA256"]);
-    assert_eq!(identity["files"].as_array().unwrap().len(), 2);
+    if cfg!(unix) {
+        let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
+        assert_eq!(identity["version"], 2);
+        assert_eq!(identity["manifestSHA256"], fixture["rustManifestSHA256"]);
+        assert_eq!(identity["files"].as_array().unwrap().len(), 2);
+    }
     assert!(installed_marker_path(&dir).is_file());
     assert!(installed(repo));
 }
@@ -267,11 +269,13 @@ fn swift_record_is_accepted_and_gains_an_identity_record() {
     std::fs::write(verified_record_path(&dir, revision), fixture["swiftManifest"].as_str().unwrap()).unwrap();
 
     assert!(installed(repo));
-    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
-    assert_eq!(identity["manifestSHA256"], fixture["swiftManifestSHA256"]);
     let paths = vec!["config.json".to_string(), "weights/model.safetensors".to_string()];
     let manifest = std::fs::read(verified_record_path(&dir, revision)).unwrap();
-    assert!(identity_matches(&dir, revision, &manifest, &paths));
+    if cfg!(unix) {
+        let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
+        assert_eq!(identity["manifestSHA256"], fixture["swiftManifestSHA256"]);
+        assert!(identity_matches(&dir, revision, &manifest, &paths));
+    }
     assert!(installed(repo));
 
     std::fs::write(dir.join("weights/model.safetensors"), vec![8u8; 4096]).unwrap();

@@ -522,6 +522,7 @@ mod tests {
     /// snake-vs-dotted split is what made vlm::find_weights (and the app's
     /// Deep Analyze cards) report installed VLMs as missing.
     #[test]
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), ignore = "the Mac app registers MLX models, not GGUF bundles")]
     fn vlm_kind_aliases_and_dirs_agree() {
         for (snake, dotted) in [
             ("mistral_small_3_2", "mistral-small-3.2"),
@@ -756,6 +757,32 @@ mod tests {
         std::fs::write(&legacy, b"ram_plus").unwrap();
         migrate_legacy_sentinel(&dir, &model, &keyed);
         assert!(keyed.exists() && legacy.exists(), "existing keyed sentinel must not trigger a rename");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The engine the Mac app hosts installs each ONNX model where the app's own
+    /// installers put it (`shared/test-corpus/mac-model-layout.json`).
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn mac_app_bundles_follow_the_shared_layout() {
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let dir = unique_sentinel_dir("mac-layout");
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let layout: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../../shared/test-corpus/mac-model-layout.json")).unwrap();
+        for (kind, files) in layout["kinds"].as_object().unwrap() {
+            let LookupResult::Found(model) = lookup_full(kind) else { panic!("{kind} did not resolve") };
+            let dests: Vec<String> =
+                model.files.iter().map(|f| f.dest.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+            let expected: Vec<String> = files.as_array().unwrap().iter().map(|f| f.as_str().unwrap().to_string()).collect();
+            assert_eq!(dests, expected, "{kind}");
+        }
+        assert!(matches!(lookup_full("qwen2_5_vl_7b"), LookupResult::Unknown), "no GGUF models on the Mac app");
+        match saved {
+            Some(value) => unsafe { std::env::set_var("FILEID_MODELS_DIR", value) },
+            None => unsafe { std::env::remove_var("FILEID_MODELS_DIR") },
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

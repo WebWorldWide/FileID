@@ -315,7 +315,11 @@ fn tier(gigabytes: f64) -> &'static str {
 }
 
 /// The Swift engine's `listModels` reply: favourites, then the bundled catalog.
-pub fn catalog_items(role: Option<&str>, physical_memory_gb: f64, benchmarks: &HashMap<String, ModelBenchmark>) -> Vec<ModelCatalogItem> {
+pub fn catalog_items<S: std::hash::BuildHasher>(
+    role: Option<&str>,
+    physical_memory_gb: f64,
+    benchmarks: &HashMap<String, ModelBenchmark, S>,
+) -> Vec<ModelCatalogItem> {
     listed()
         .filter_map(|repo| {
             let kind_role = if repo.vision { "vision" } else { "text" };
@@ -445,14 +449,24 @@ pub fn file_identity(file: &Path, path: &str) -> Option<FileIdentity> {
     Some(FileIdentity {
         path: path.to_string(),
         size: i64::try_from(meta.size()).ok()?,
-        // Darwin's st_dev is a signed 32-bit value; Swift widens it with sign.
-        device: meta.dev() as i32 as i64,
+        device: device_number(meta.dev()),
         inode: meta.ino(),
         modified_seconds: meta.mtime(),
         modified_nanoseconds: meta.mtime_nsec(),
         changed_seconds: meta.ctime(),
         changed_nanoseconds: meta.ctime_nsec(),
     })
+}
+
+/// Darwin's `st_dev` is a signed 32-bit value that Swift widens with its sign.
+#[cfg(target_os = "macos")]
+fn device_number(dev: u64) -> i64 {
+    dev as i32 as i64
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn device_number(dev: u64) -> i64 {
+    dev as i64
 }
 
 #[cfg(not(unix))]
@@ -646,16 +660,18 @@ pub fn parse_listing(bytes: &[u8]) -> Result<Vec<RepoFile>> {
 /// `VLMDownloader.shouldDownload`.
 fn should_download(file: &RepoFile) -> bool {
     let path = file.path.to_lowercase();
-    !(path == "readme.md" || path == ".gitattributes" || path.ends_with(".png") || path.ends_with(".jpg"))
+    let image = path.rsplit_once('.').is_some_and(|(_, extension)| extension == "png" || extension == "jpg");
+    !(path == "readme.md" || path == ".gitattributes" || image)
 }
 
 fn encode_path(path: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
             out.push(byte as char);
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _ = write!(out, "%{byte:02X}");
         }
     }
     out
