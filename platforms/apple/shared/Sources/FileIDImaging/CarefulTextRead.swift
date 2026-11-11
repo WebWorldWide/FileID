@@ -5,23 +5,23 @@ import CoreGraphics
 import Foundation
 import Vision
 
-enum CarefulTextRead {
-    enum Languages: String, Sendable {
+package enum CarefulTextRead {
+    package enum Languages: String, Sendable {
         case automatic
         case latin
     }
 
-    static let configured = languages(from: ProcessInfo.processInfo.environment["FILEID_CAREFUL_READ"])
+    package static let configured = languages(from: ProcessInfo.processInfo.environment["FILEID_CAREFUL_READ"])
 
-    static func languages(from value: String?) -> Languages {
+    package static func languages(from value: String?) -> Languages {
         value.flatMap(Languages.init(rawValue:)) ?? .automatic
     }
 
     /// Vision's Latin model also reads Cyrillic; Chinese, Japanese, Korean, Arabic,
     /// Thai and Devanagari need automatic detection.
-    static let latinLanguages = ["en-US", "fr-FR", "de-DE", "es-ES", "pt-BR", "it-IT"].map(Locale.Language.init(identifier:))
+    package static let latinLanguages = ["en-US", "fr-FR", "de-DE", "es-ES", "pt-BR", "it-IT"].map(Locale.Language.init(identifier:))
 
-    static func read(_ image: CGImage, languages: Languages) async -> String? {
+    package static func read(_ image: CGImage, languages: Languages) async -> String? {
         var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true

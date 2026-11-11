@@ -7,6 +7,7 @@
 
 pub mod faces;
 mod ffi;
+pub mod scan;
 
 use std::ffi::{CStr, CString, OsString, c_char};
 use std::os::unix::ffi::OsStringExt;
@@ -40,6 +41,7 @@ pub fn run_hosted() -> ! {
         eprintln!("FileIDEngine: FileIDAppleKit interface {abi}, engine expects {ABI_VERSION}");
         hard_exit(EXIT_ABI_MISMATCH);
     }
+    scan::start_ocr_warmup_when_idle();
     let code = match crate::server::run() {
         Ok(()) => 0,
         Err(error) => {

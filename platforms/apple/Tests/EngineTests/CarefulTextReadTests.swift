@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreText
 import Testing
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 @Suite("Careful text read languages")
 struct CarefulTextReadTests {

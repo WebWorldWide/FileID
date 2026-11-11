@@ -216,9 +216,7 @@ fn now_unix() -> f64 {
 }
 
 fn system_time_to_unix(time: SystemTime) -> Option<f64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs_f64())
+    crate::util::catalog_unix_seconds(time)
 }
 
 #[cfg(test)]

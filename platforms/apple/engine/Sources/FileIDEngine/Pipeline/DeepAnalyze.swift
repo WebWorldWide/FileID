@@ -16,6 +16,7 @@ import MLXLLM
 import MLXHuggingFace
 import Tokenizers
 import FileIDShared
+import FileIDImaging
 
 public actor DeepAnalyze {
 

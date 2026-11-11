@@ -8,6 +8,7 @@
 import Foundation
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 public enum DeepAnalyzeScope: Sendable {
     case singleFile(Int64)

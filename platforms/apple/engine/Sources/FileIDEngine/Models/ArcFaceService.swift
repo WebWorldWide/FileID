@@ -6,6 +6,7 @@ import CoreGraphics
 import Accelerate
 import FileIDShared
 import OnnxRuntimeBindings
+import FileIDImaging
 
 public final class ArcFaceService: @unchecked Sendable {
     public static let shared = ArcFaceService()

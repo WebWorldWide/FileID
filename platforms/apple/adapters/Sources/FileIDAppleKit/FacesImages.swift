@@ -6,6 +6,7 @@
 // The decoded image stays behind a handle; Rust frees it with
 // fileid_apple_faces_close.
 import CoreGraphics
+import FileIDImaging
 import Foundation
 import ImageIO
 import Vision

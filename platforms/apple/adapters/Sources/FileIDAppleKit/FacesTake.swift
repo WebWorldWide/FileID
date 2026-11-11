@@ -4,6 +4,7 @@
 // capture quality and human rectangles; the Rust engine keeps tiling, merging,
 // Face Mesh and scoring (take_scoring.rs, catalog_take_auto.rs).
 import CoreGraphics
+import FileIDImaging
 import Foundation
 import ImageIO
 import Vision
