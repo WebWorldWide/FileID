@@ -118,9 +118,9 @@ fn one_invalid_entry_rejects_the_catalog() {
     let mut bad = entry.clone();
     bad["files"][0]["sha256"] = serde_json::json!("C".repeat(64));
     assert!(parse_catalog(&document(vec![entry.clone(), bad])).is_empty());
-    let mut unsized = entry.clone();
-    unsized["weightBytes"] = serde_json::json!(11);
-    assert!(parse_catalog(&document(vec![unsized])).is_empty());
+    let mut wrong_total = entry.clone();
+    wrong_total["weightBytes"] = serde_json::json!(11);
+    assert!(parse_catalog(&document(vec![wrong_total])).is_empty());
     let mut traversal = entry;
     traversal["files"][0]["path"] = serde_json::json!("../model.safetensors");
     assert!(parse_catalog(&document(vec![traversal])).is_empty());
@@ -166,6 +166,7 @@ fn favorites_follow_the_manifest_in_swift_order() {
 
 #[test]
 fn list_items_follow_the_swift_engine() {
+    let _scratch = Scratch::new("list");
     let items = catalog_items(None, 16.0, &HashMap::new());
     assert_eq!(items.len(), listed().count());
     let first = &items[0];
