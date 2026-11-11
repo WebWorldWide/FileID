@@ -474,25 +474,63 @@ pub struct Scored {
 
 /// Decodes and measures every shot without a current cache entry.
 pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
+    let measured = missing(&job).into_iter().map(|(id, row)| (id, measure(row, faces))).collect();
+    finish(job, measured)
+}
+
+/// [`compute`] with one analyzer per worker, a photo each at a time, as the
+/// Swift engine's `CatalogTakeAuto` measures up to four at once.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [A]) -> Scored {
+    let queue = parking_lot::Mutex::new(missing(&job));
+    let measured = parking_lot::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for faces in analyzers.iter_mut() {
+            let (queue, measured) = (&queue, &measured);
+            scope.spawn(move || {
+                while let Some((id, row)) = queue.lock().pop() {
+                    let value = measure(row, faces);
+                    measured.lock().push((id, value));
+                }
+            });
+        }
+    });
+    finish(job, measured.into_inner())
+}
+
+/// Primary photos without cached signals, in shot order.
+fn missing(job: &ScoreJob) -> Vec<(i64, &FileRow)> {
+    let mut rows: Vec<(i64, &FileRow)> = job
+        .shots
+        .iter()
+        .filter(|shot| !job.cached.contains_key(&shot.primary_file_id))
+        .filter_map(|shot| job.rows.get(&shot.primary_file_id).map(|row| (shot.primary_file_id, row)))
+        .collect();
+    rows.reverse();
+    rows
+}
+
+fn measure(row: &FileRow, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
+    if row.kind == "video" {
+        video_signals(Path::new(&row.path)).map(|s| (s, true))
+    } else {
+        photo_signals(Path::new(&row.path), faces)
+    }
+}
+
+fn finish(job: ScoreJob, mut measured: Vec<(i64, Option<(Signals, bool)>)>) -> Scored {
+    measured.sort_by_key(|(id, _)| *id);
     let mut signals: HashMap<i64, Signals> = job.cached;
     let mut fresh = Vec::new();
-    for shot in &job.shots {
-        if signals.contains_key(&shot.primary_file_id) {
-            continue;
+    for (id, value) in measured {
+        let Some((value, complete)) = value else { continue };
+        if complete
+            && let Some(row) = job.rows.get(&id)
+            && let Ok(json) = serde_json::to_string(&value)
+        {
+            fresh.push((id, row.revision.clone(), json));
         }
-        let Some(row) = job.rows.get(&shot.primary_file_id) else { continue };
-        let measured = if row.kind == "video" {
-            video_signals(Path::new(&row.path)).map(|s| (s, true))
-        } else {
-            photo_signals(Path::new(&row.path), faces)
-        };
-        if let Some((value, complete)) = measured {
-            if complete
-                && let Ok(json) = serde_json::to_string(&value) {
-                    fresh.push((shot.primary_file_id, row.revision.clone(), json));
-                }
-            signals.insert(shot.primary_file_id, value);
-        }
+        signals.insert(id, value);
     }
     let scored = take_scoring::score(
         &job.shots

@@ -125,17 +125,23 @@ fn execute_with_index(
 /// Scores outside the database lock: the lock is held only to read the files
 /// and their cached signals, and again to store new signals.
 fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
-    use super::catalog_take_auto::{compute, prepare, store, TakeFaceAnalyzer};
+    use super::catalog_take_auto::{prepare, store, TakeFaceAnalyzer};
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
         bail!("Invalid catalog request")
     }
     let ids = request.file_ids.as_deref().ok_or_else(|| anyhow::anyhow!("File IDs required"))?;
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    let mut faces = crate::apple::faces::VisionFaces::load();
+    let scored = {
+        let mut workers = crate::apple::faces::VisionFaces::load_workers();
+        let job = prepare(&database.lock(), ids, workers[0].id())?;
+        super::catalog_take_auto::compute_with(job, &mut workers)
+    };
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
-    let mut faces = super::catalog_take_auto::YuNetFaces::load();
-    let job = prepare(&database.lock(), ids, faces.id())?;
-    let scored = compute(job, &mut faces);
+    let scored = {
+        let mut faces = super::catalog_take_auto::YuNetFaces::load();
+        let job = prepare(&database.lock(), ids, faces.id())?;
+        super::catalog_take_auto::compute(job, &mut faces)
+    };
     if let Err(error) = store(&database.lock(), &scored) {
         tracing::warn!(%error, "take scores were not cached");
     }

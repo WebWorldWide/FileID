@@ -471,6 +471,13 @@ pub struct VisionFaces {
 }
 
 impl VisionFaces {
+    /// One analyzer per take worker (at most four, as `CatalogTakeAuto`); each
+    /// holds its own Face Mesh session when the model is installed.
+    pub fn load_workers() -> Vec<Self> {
+        let workers = std::thread::available_parallelism().map_or(1, usize::from).clamp(1, 4);
+        (0..workers).map(|_| Self::load()).collect()
+    }
+
     pub fn load() -> Self {
         let mesh = crate::models::face_mesh::default_weights_path()
             .ok()
