@@ -16,6 +16,7 @@ import ImageIO
 import CoreGraphics
 import FileIDShared
 import Vision
+import FileIDImaging
 
 public enum FaceClustering {
 

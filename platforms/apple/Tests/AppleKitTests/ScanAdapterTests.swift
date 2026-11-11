@@ -4,6 +4,7 @@ import ImageIO
 import Testing
 import UniformTypeIdentifiers
 @testable import FileIDAppleKit
+@testable import FileIDImaging
 
 /// Stage 5 scan adapters: every export, on synthetic files (no models needed).
 @Suite("FileIDAppleKit scan adapters", .serialized)

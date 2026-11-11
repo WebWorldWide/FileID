@@ -3,6 +3,7 @@ import CoreImage
 import Foundation
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 /// Exact-match questions over the files the user attached to a chat send
 /// (`ChatRequest.scopeFileIDs`): rank the selection by stored evidence, then let

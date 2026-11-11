@@ -4,6 +4,7 @@
 // so the Rust host stores the same tags, faces and text as the Swift engine.
 import CoreGraphics
 import Foundation
+import FileIDImaging
 
 enum ScanVision {
     static let docHints: Set<String> = ["document", "text", "screenshot", "receipt", "presentation", "menu", "sign"]

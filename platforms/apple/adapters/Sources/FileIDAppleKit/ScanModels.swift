@@ -7,6 +7,7 @@
 // manifest before it asks for a load; the ONNX Runtime fallback stays in Rust.
 import CoreGraphics
 import Foundation
+import FileIDImaging
 
 enum ScanGPU {
     /// `DeepAnalyzeCapability.metallibPresent`: MLX aborts the process without
@@ -235,6 +236,6 @@ public func fileid_apple_ramplus_tag(
        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
         for (key, value) in object { if let number = value as? NSNumber { vision[key] = number.floatValue } }
     }
-    let combined = TagAgreement.combine(ram: tags, vision: vision, faceCount: faceCount)
+    let combined = TagAgreement.combine(ram: tags, vision: vision, faceCount: faceCount, peopleWords: ScanRamPlus.peopleWords)
     return scanJSON(combined.map { [$0.tag, Double($0.score)] as [Any] })
 }

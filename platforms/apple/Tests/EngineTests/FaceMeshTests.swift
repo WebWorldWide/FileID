@@ -4,6 +4,7 @@ import ImageIO
 import Testing
 import Vision
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 @Suite("Face Mesh eye openness (shared geometry fixture)")
 struct FaceMeshTests {

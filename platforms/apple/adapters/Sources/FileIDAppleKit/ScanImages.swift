@@ -7,6 +7,7 @@
 import AVFoundation
 import CoreGraphics
 import Foundation
+import FileIDImaging
 import ImageIO
 
 final class ScanImages: @unchecked Sendable {

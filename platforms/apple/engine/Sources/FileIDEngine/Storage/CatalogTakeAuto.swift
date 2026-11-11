@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 /// Zero-setup Best Takes: suggested groups of tries straight from the scan
 /// (capture time + CLIP + pHash via NearDuplicateGrouping), model-free scores

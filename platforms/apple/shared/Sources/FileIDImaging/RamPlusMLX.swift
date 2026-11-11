@@ -6,8 +6,8 @@ import MLX
 /// op: fp16 activations, with LayerNorm, softmax and the head's scaled scores
 /// in fp32 where the export casts. The ONNX graph is fixed at batch 1 and runs
 /// mostly on the CPU under the CoreML provider (~1.3 s per image).
-final class RamPlusMLX: @unchecked Sendable {
-    static let inputSize = 384
+package final class RamPlusMLX: @unchecked Sendable {
+    package static let inputSize = 384
     private static let patch = 4
     private static let window = 12
     private static let swinEps: Float = 1e-5
@@ -19,14 +19,14 @@ final class RamPlusMLX: @unchecked Sendable {
     private static let headHeads = 4
 
     private struct Block {
-        let n1w, n1b, qkvW, qkvB, projW, projB, n2w, n2b, fc1W, fc1B, fc2W, fc2B, bias: MLXArray
-        let mask: MLXArray?
-        let heads: Int
+        package let n1w, n1b, qkvW, qkvB, projW, projB, n2w, n2b, fc1W, fc1B, fc2W, fc2B, bias: MLXArray
+        package let mask: MLXArray?
+        package let heads: Int
     }
     private struct Merge { let nw, nb, reduction: MLXArray }
     private struct Stage { let blocks: [Block]; let merge: Merge? }
     private struct HeadLayer {
-        let qW, qB, kW, kB, vW, vB, oW, oB, ln1w, ln1b, iW, iB, o2W, o2B, ln2w, ln2b: MLXArray
+        package let qW, qB, kW, kB, vW, vB, oW, oB, ln1w, ln1b, iW, iB, o2W, o2B, ln2w, ln2b: MLXArray
     }
 
     private let patchW, patchB, patchNW, patchNB: MLXArray
@@ -42,9 +42,9 @@ final class RamPlusMLX: @unchecked Sendable {
     private let lock = NSLock()
     private var forward: (@Sendable (MLXArray) -> MLXArray)?
 
-    var classCount: Int { classes }
+    package var classCount: Int { classes }
 
-    init(onnxURL: URL) throws {
+    package init(onnxURL: URL) throws {
         typealias LoadError = CLIPVisionMLX.LoadError
         var named: [String: MLXArray] = [:]
         var byNode: [String: MLXArray] = [:]
@@ -201,7 +201,7 @@ final class RamPlusMLX: @unchecked Sendable {
 
     /// `pixels` holds `count` ImageNet-normalized CHW 384×384 images back to
     /// back. Returns `count` logit vectors, one per tag class.
-    func logits(pixels: [Float], count: Int) -> [[Float]] {
+    package func logits(pixels: [Float], count: Int) -> [[Float]] {
         lock.lock(); defer { lock.unlock() }
         if forward == nil {
             forward = compile { [unowned self] input in tagLogits(imageEmbeds(input)) }
@@ -217,7 +217,7 @@ final class RamPlusMLX: @unchecked Sendable {
         return MLXArray(pixels, [count, 3, grid, patch, grid, patch]).asType(.float16)
     }
 
-    func imageEmbeds(pixels: [Float], count: Int) -> MLXArray { imageEmbeds(Self.input(pixels, count: count)) }
+    package func imageEmbeds(pixels: [Float], count: Int) -> MLXArray { imageEmbeds(Self.input(pixels, count: count)) }
 
     private func imageEmbeds(_ input: MLXArray) -> MLXArray {
         let count = input.dim(0), grid = Self.inputSize / Self.patch
@@ -236,7 +236,7 @@ final class RamPlusMLX: @unchecked Sendable {
         return matmul(concatenated([pooled, x], axis: 1), imageProjW) + imageProjB
     }
 
-    func tagLogits(_ embeds: MLXArray) -> MLXArray {
+    package func tagLogits(_ embeds: MLXArray) -> MLXArray {
         let count = embeds.dim(0)
         let cls = embeds[0..., 0, 0...].asType(.float32)
         let length = sqrt((cls * cls).sum(axis: -1, keepDims: true)).asType(.float16).asType(.float32)

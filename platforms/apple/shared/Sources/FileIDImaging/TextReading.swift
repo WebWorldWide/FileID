@@ -4,14 +4,14 @@
 // shared conformance case pins the search side.
 import Foundation
 
-enum TextReading {
-    static let minimumReadableCharacters = 24
-    static let garbledShareThreshold = 0.3
-    static let maxTranscriptionCharacters = 4_000
+package enum TextReading {
+    package static let minimumReadableCharacters = 24
+    package static let garbledShareThreshold = 0.3
+    package static let maxTranscriptionCharacters = 4_000
 
     /// Scene tags (Vision classifier identifiers and RAM++ tags, lowercased with
     /// `_` read as a space) that suggest handwriting.
-    static let handwritingHints: Set<String> = [
+    package static let handwritingHints: Set<String> = [
         "handwriting", "whiteboard", "blackboard", "chalkboard", "chalk", "sticky note",
         "notebook", "notepad", "note", "manuscript", "calligraphy", "signature",
         "journal", "diary", "letter", "envelope", "postcard", "greeting card",
@@ -19,22 +19,22 @@ enum TextReading {
 
     /// Tags that suggest printed or mixed text worth reading. RAM++ puts "writing"
     /// on printed receipts and forms too, so it only gates the read.
-    static let paperHints: Set<String> = [
+    package static let paperHints: Set<String> = [
         "document", "printed page", "paper", "receipt", "bill", "form", "contract",
         "certificate", "recipe", "list", "menu", "newspaper", "poster", "screenshot",
         "sign", "diagram", "calendar", "checkbook", "text", "presentation", "writing", "write",
     ]
 
-    static func normalized(_ tag: String) -> String {
+    package static func normalized(_ tag: String) -> String {
         tag.lowercased().replacingOccurrences(of: "_", with: " ")
             .trimmingCharacters(in: .whitespaces)
     }
 
-    static func hasHandwritingHint(_ tags: [String]) -> Bool {
+    package static func hasHandwritingHint(_ tags: [String]) -> Bool {
         tags.contains { handwritingHints.contains(normalized($0)) }
     }
 
-    static func isTextBearing(_ tags: [String]) -> Bool {
+    package static func isTextBearing(_ tags: [String]) -> Bool {
         tags.contains {
             let tag = normalized($0)
             return handwritingHints.contains(tag) || paperHints.contains(tag)
@@ -44,7 +44,7 @@ enum TextReading {
     /// A scanner-shaped page (US Letter 11:8.5 or A4 √2, either orientation) with
     /// no camera EXIF: worth a text read even when the classifier saw no paper.
     /// Tight bands, because 4:3 (1.333) is every camera-less phone export.
-    static func isDocumentShape(width: Int, height: Int, hasCamera: Bool) -> Bool {
+    package static func isDocumentShape(width: Int, height: Int, hasCamera: Bool) -> Bool {
         guard !hasCamera, width > 0, height > 0 else { return false }
         let ratio = Double(max(width, height)) / Double(min(width, height))
         return abs(ratio - 11.0 / 8.5) < 0.015 || abs(ratio - 2.0.squareRoot()) < 0.015
@@ -53,7 +53,7 @@ enum TextReading {
     /// Words a character-level reader typically mangles on handwriting: case flips
     /// inside a word ("syMc", "PMitri"), symbols between letters ("denti&t"), or
     /// five consonants in a row ("Swvbda").
-    static func isGarbledWord(_ raw: Substring) -> Bool {
+    package static func isGarbledWord(_ raw: Substring) -> Bool {
         let edge = CharacterSet(charactersIn: ".,:;!?'\"()[]{}")
         let word = raw.trimmingCharacters(in: edge)
         let letters = word.filter(\.isLetter)
@@ -84,7 +84,7 @@ enum TextReading {
         return false
     }
 
-    static func garbled(_ text: String) -> (count: Int, share: Double) {
+    package static func garbled(_ text: String) -> (count: Int, share: Double) {
         let words = text.split(whereSeparator: \.isWhitespace)
             .filter { $0.filter(\.isLetter).count >= 2 }
         guard !words.isEmpty else { return (0, 0) }
@@ -93,7 +93,7 @@ enum TextReading {
     }
 
     /// After the fast read: does this image deserve Vision's accurate tier?
-    static func needsCarefulRead(fastText: String, tags: [String], textBearing: Bool) -> Bool {
+    package static func needsCarefulRead(fastText: String, tags: [String], textBearing: Bool) -> Bool {
         if hasHandwritingHint(tags) { return true }
         let compact = fastText.trimmingCharacters(in: .whitespacesAndNewlines)
         if compact.count < minimumReadableCharacters { return true }
@@ -104,7 +104,7 @@ enum TextReading {
     /// Label the careful read as handwriting on a handwriting tag, or on a
     /// paper-like image whose fast read mangled or missed much of the text; a clean
     /// printed page that the accurate tier merely polished stays "Text in image".
-    static func isHandwritten(fastText: String, carefulText: String, tags: [String], paperLike: Bool) -> Bool {
+    package static func isHandwritten(fastText: String, carefulText: String, tags: [String], paperLike: Bool) -> Bool {
         guard !carefulText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         if hasHandwritingHint(tags) { return true }
         guard paperLike else { return false }
@@ -113,12 +113,12 @@ enum TextReading {
     }
 
     /// Tags that mean text in a scene rather than on paper.
-    static let sceneTextHints: Set<String> = ["sign", "street sign", "banner", "poster", "text"]
+    package static let sceneTextHints: Set<String> = ["sign", "street sign", "banner", "poster", "text"]
 
     /// A scan, screenshot or paper-tagged photo. On a camera photo of a sign or an
     /// outfield banner the fast tier also misses distant print, which would read as
     /// handwriting (21 of 300 photos in a sports corpus before this gate).
-    static func isPaperLike(tags: [String], hasCamera: Bool) -> Bool {
+    package static func isPaperLike(tags: [String], hasCamera: Bool) -> Bool {
         !hasCamera || tags.contains {
             let tag = normalized($0)
             return (handwritingHints.contains(tag) || paperHints.contains(tag)) && !sceneTextHints.contains(tag)
@@ -129,7 +129,7 @@ enum TextReading {
     /// edge punctuation ignored). The fast tier reads print almost as well as the
     /// accurate one (a receipt: 0.22) but loses most handwritten words (a sticky
     /// note: 0.67; script the fast tier can't see at all: 1.0).
-    static func disagreement(fast: String, careful: String) -> Double {
+    package static func disagreement(fast: String, careful: String) -> Double {
         let edge = CharacterSet.punctuationCharacters.union(.symbols)
         func words(_ text: String) -> [String] {
             text.lowercased().split(whereSeparator: \.isWhitespace)
@@ -144,7 +144,7 @@ enum TextReading {
     }
 
     /// The careful read when it found text, else the fast read.
-    static func preferred(fast: String, careful: String?) -> String {
+    package static func preferred(fast: String, careful: String?) -> String {
         guard let careful, !careful.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fast }
         return careful
     }
@@ -152,7 +152,7 @@ enum TextReading {
     /// Deep Analyze: should the VLM transcribe this file's text? Images the scan
     /// flagged as text-bearing whose stored reading is missing, short or mangled, and
     /// PDFs with no text layer and no OCR. Never repeats a VLM transcription.
-    static func needsTranscription(kind: String, tags: [String], ocrText: String?, ocrSource: String?, hasDocText: Bool) -> Bool {
+    package static func needsTranscription(kind: String, tags: [String], ocrText: String?, ocrSource: String?, hasDocText: Bool) -> Bool {
         if ocrSource == "vlm" { return false }
         let compact = (ocrText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         switch kind {
@@ -166,14 +166,14 @@ enum TextReading {
         }
     }
 
-    static let transcriptionPrompt = """
+    package static let transcriptionPrompt = """
         Transcribe every word of handwritten or printed text visible in this image, exactly as written, one line per line of text. \
         Do not describe the image and do not guess at illegible words. If there is no readable text, reply NONE. \
         End with one final line: HANDWRITTEN: yes if most of the text is handwritten, otherwise HANDWRITTEN: no.
         """
 
     /// Parsed transcription, or nil when the model saw no readable text.
-    static func parseTranscription(_ raw: String) -> (text: String, handwritten: Bool)? {
+    package static func parseTranscription(_ raw: String) -> (text: String, handwritten: Bool)? {
         var handwritten = false
         var lines: [String] = []
         for line in raw.replacingOccurrences(of: "\r", with: "").split(separator: "\n", omittingEmptySubsequences: true) {

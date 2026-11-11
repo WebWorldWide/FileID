@@ -1,1 +1,0 @@
-../../../../engine/Sources/FileIDEngine/Pipeline/CarefulTextRead.swift

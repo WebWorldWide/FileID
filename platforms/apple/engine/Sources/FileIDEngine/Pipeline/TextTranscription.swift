@@ -6,6 +6,7 @@ import Foundation
 import CoreGraphics
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 extension DeepAnalyzeRunner {
     static func transcriptionCandidate(_ db: GRDB.Database, fileID: Int64) throws -> Bool {

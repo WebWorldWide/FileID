@@ -5,6 +5,7 @@
 // are not handled here; the Rust engine's extractor reads those.
 import AppKit
 import Foundation
+import FileIDImaging
 import PDFKit
 
 enum ScanDocuments {
