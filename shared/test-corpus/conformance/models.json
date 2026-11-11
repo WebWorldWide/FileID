@@ -1,0 +1,501 @@
+[
+  {
+    "name": "models-mac-mlx-catalog",
+    "description": "The engine the Mac app hosts lists the Mac's MLX models as the Swift engine does: the manifest favourites first, then the bundled MLX catalog; installed means config.json is in the Hugging Face model folder.",
+    "os": [
+      "darwin"
+    ],
+    "hosted": true,
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
+        "content": "{}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "all roles",
+        "command": {
+          "listModels": {
+            "requestID": "models-all"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "models-all"
+        },
+        "expect": {
+          "vramMB": 0,
+          "models": {
+            "$tol": "prefix",
+            "value": [
+              {
+                "id": "qwen2_5_vl_7b",
+                "name": "Qwen2.5-VL 7B (4-bit)",
+                "family": "Qwen2.5-VL-7B-Instruct-4bit",
+                "upstream": "Qwen/Qwen2.5-VL-7B-Instruct",
+                "role": "vision",
+                "format": "mlx",
+                "quantization": "4bit",
+                "license": "Apache-2.0",
+                "termsRequired": false,
+                "downloadBytes": 4300000000,
+                "estimatedResidentGB": 7,
+                "tier": "medium",
+                "status": "curated",
+                "runnable": true,
+                "installed": false
+              },
+              {
+                "id": "qwen3_vl_2b",
+                "name": "Qwen3-VL 2B (4-bit)",
+                "family": "Qwen3-VL-2B-Instruct-4bit",
+                "upstream": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+                "role": "vision",
+                "format": "mlx",
+                "quantization": "4bit",
+                "license": "Apache-2.0",
+                "termsRequired": false,
+                "downloadBytes": 1800000000,
+                "estimatedResidentGB": 3,
+                "tier": "tiny",
+                "status": "curated",
+                "runnable": true,
+                "installed": true
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "catalog candidates",
+        "command": {
+          "listModels": {
+            "requestID": "models-text",
+            "role": "text"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "models-text"
+        },
+        "expect": {
+          "models": {
+            "$tol": "contains",
+            "value": [
+              {
+                "status": "candidate",
+                "format": "mlx",
+                "role": "text",
+                "runnable": true,
+                "termsRequired": false,
+                "license": "Apache-2.0"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "gated favourite",
+        "command": {
+          "listModels": {
+            "requestID": "models-vision",
+            "role": "vision"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "models-vision"
+        },
+        "expect": {
+          "models": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": "gemma_3_4b",
+                "license": "Gemma",
+                "termsRequired": true,
+                "quantization": "4bit",
+                "estimatedResidentGB": 4.5
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "no embedding models",
+        "command": {
+          "listModels": {
+            "requestID": "models-embedding",
+            "role": "embedding"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "models-embedding"
+        },
+        "expect": {
+          "models": {
+            "$tol": "count",
+            "value": 0
+          }
+        }
+      },
+      {
+        "label": "unknown role",
+        "command": {
+          "listModels": {
+            "requestID": "models-bad",
+            "role": "painting"
+          }
+        },
+        "await": "error",
+        "filter": {
+          "kind": "invalid_list_models_request"
+        },
+        "expect": {
+          "message": "listModels needs a 1–128 character ASCII request ID and a known role."
+        }
+      },
+      {
+        "label": "shutdown",
+        "shutdown": {
+          "exitCode": 0
+        }
+      }
+    ]
+  },
+  {
+    "name": "models-mac-mlx-terms-and-unknown-kinds",
+    "description": "A Gemma-licensed MLX model is refused until its terms are accepted, with the Swift engine's wording; an unregistered kind is unknown_model.",
+    "os": [
+      "darwin"
+    ],
+    "hosted": true,
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "steps": [
+      {
+        "label": "gated",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "gemma_3_4b"
+          }
+        },
+        "await": "error",
+        "filter": {
+          "kind": "model_license_not_accepted"
+        },
+        "expect": {
+          "modelKind": "gemma_3_4b",
+          "message": "Open FileID and accept the Gemma Terms of Use before downloading or using Gemma 3 4B (QAT 4-bit)."
+        }
+      },
+      {
+        "label": "unknown",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "not_a_registered_model"
+          }
+        },
+        "await": "error",
+        "filter": {
+          "kind": "unknown_model"
+        },
+        "expect": {
+          "modelKind": "not_a_registered_model"
+        }
+      },
+      {
+        "label": "shutdown",
+        "shutdown": {
+          "exitCode": 0
+        }
+      }
+    ]
+  },
+  {
+    "name": "models-mac-mlx-verified-install-needs-no-download",
+    "description": "A verified MLX install (.fileid-verified-<revision>, here in the Rust engine's form) is accepted without a download: both engines add the -v2 file-identity record and the .fileid-installed marker the app reads.",
+    "os": [
+      "darwin"
+    ],
+    "hosted": true,
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
+        "content": "{}"
+      },
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+        "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "prewarm",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "round trip",
+        "command": {
+          "healthCheck": {
+            "requestID": "after-prewarm"
+          }
+        },
+        "await": "healthCheckResult"
+      },
+      {
+        "label": "records",
+        "fs": {
+          "exists": [
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
+          ],
+          "contents": {
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+          }
+        }
+      },
+      {
+        "label": "shutdown",
+        "shutdown": {
+          "exitCode": 0
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-engine-mlx-install-record",
+    "description": "The Swift engine accepts a Rust-recorded MLX install, then the Rust engine accepts the identity record the Swift engine kept, both without a download.",
+    "os": [
+      "darwin"
+    ],
+    "hosted": true,
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "start": "rust",
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
+        "content": "{}"
+      },
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+        "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "rust verifies",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "to swift",
+        "restart": "swift"
+      },
+      {
+        "label": "swift verifies",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "swift round trip",
+        "command": {
+          "healthCheck": {
+            "requestID": "after-swift"
+          }
+        },
+        "await": "healthCheckResult"
+      },
+      {
+        "label": "back to rust",
+        "restart": "rust"
+      },
+      {
+        "label": "rust verifies again",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "records",
+        "fs": {
+          "exists": [
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
+          ],
+          "contents": {
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+          }
+        }
+      },
+      {
+        "label": "shutdown",
+        "shutdown": {
+          "exitCode": 0
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-engine-mlx-install-record-swift-first",
+    "description": "The Rust engine accepts a Swift-recorded MLX install (the Swift encoder escapes '/' in paths) and the identity record the Swift engine wrote, then the Swift engine accepts the Rust engine's, all without a download.",
+    "os": [
+      "darwin"
+    ],
+    "hosted": true,
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "start": "swift",
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
+        "content": "{}"
+      },
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors",
+        "content": "tensor-bytes"
+      },
+      {
+        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+        "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift verifies",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "swift round trip",
+        "command": {
+          "healthCheck": {
+            "requestID": "after-swift"
+          }
+        },
+        "await": "healthCheckResult"
+      },
+      {
+        "label": "to rust",
+        "restart": "rust"
+      },
+      {
+        "label": "rust verifies",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "back to swift",
+        "restart": "swift"
+      },
+      {
+        "label": "swift verifies again",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0
+        }
+      },
+      {
+        "label": "swift round trip again",
+        "command": {
+          "healthCheck": {
+            "requestID": "after-swift-2"
+          }
+        },
+        "await": "healthCheckResult"
+      },
+      {
+        "label": "records",
+        "fs": {
+          "exists": [
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
+          ],
+          "contents": {
+            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+          }
+        }
+      },
+      {
+        "label": "shutdown",
+        "shutdown": {
+          "exitCode": 0
+        }
+      }
+    ]
+  }
+]
