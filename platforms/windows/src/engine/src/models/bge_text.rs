@@ -51,6 +51,7 @@ impl BgeText {
         // so a CPU-only chain registers no GPU dispatch. Semantic doc-search is
         // unchanged (same weights, same output) — only the EP differs.
         let chain = vec![ExecutionProvider::Cpu];
+        crate::ort_runtime::commit_environment().context("ORT environment")?;
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
             configure_session_builder(builder).context("configure session (BGE)")?;

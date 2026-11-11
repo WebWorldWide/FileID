@@ -15,18 +15,60 @@ protocol TakeFaceAnalyzing: Sendable {
     /// used once but not cached. `people` is empty when the platform has no
     /// person detector.
     func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
+    /// `detail` is a larger decode of the same photo for per-face models.
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
     /// Faces only, for the tiles of a wide frame.
     func faces(in image: CGImage) -> [TakeScoring.Face]?
 }
 
 extension TakeFaceAnalyzing {
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? { analyze(image) }
     func faces(in image: CGImage) -> [TakeScoring.Face]? { analyze(image)?.faces }
 }
 
-/// Apple Vision faces with capture quality and an eye-openness estimate from
-/// the eye-contour landmarks (height over width of each eye outline).
+/// The photo decoded at up to the tile size, made at most once and only when asked
+/// for: Face Mesh reads eyelids from it (at 1024 px its closed-eye precision falls
+/// from about 0.7 to 0.5). Camera JPEGs give their stored preview (1616 px on Sony),
+/// which decodes about 20× faster than the full image; a full-size decode is reused
+/// for tiles.
+final class TakeDetailImage: @unchecked Sendable {
+    private let lock = NSLock()
+    private let make: () -> CGImage?
+    private var decoded: CGImage??
+    private var drawn: FaceMesh.Pixels??
+
+    init(_ make: @escaping () -> CGImage?) { self.make = make }
+
+    var image: CGImage? {
+        lock.withLock { decodedLocked() }
+    }
+
+    var pixels: FaceMesh.Pixels? {
+        lock.withLock {
+            if let drawn { return drawn }
+            let value = decodedLocked().flatMap(FaceMesh.Pixels.init)
+            drawn = .some(value)
+            return value
+        }
+    }
+
+    private func decodedLocked() -> CGImage? {
+        if let decoded { return decoded }
+        let value = make()
+        decoded = .some(value)
+        return value
+    }
+}
+
+/// Apple Vision faces with capture quality. Eye openness comes from Face Mesh when its
+/// model is installed (as in the shared engine), else from Vision's eye contours
+/// (height over width of each eye outline).
 struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
-    let id = "vision-landmarks-humans-v1"
+    let mesh: FaceMeshService?
+
+    init(mesh: FaceMeshService? = FaceMeshService.installed()) { self.mesh = mesh }
+
+    var id: String { mesh == nil ? "vision-landmarks-humans-v1" : "vision-mesh-humans-v1" }
 
     func faces(in image: CGImage) -> [TakeScoring.Face]? {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
@@ -44,22 +86,70 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
             } catch {}
         }
         guard finished else { return nil }
-        return Self.faces(landmarks.results ?? [], qualities: quality.results ?? [])
+        return Self.faces(landmarks.results ?? [], qualities: quality.results ?? [], mesh: mesh, image: image)
     }
 
-    static func faces(_ found: [VNFaceObservation], qualities: [VNFaceObservation]) -> [TakeScoring.Face] {
-        found.prefix(16).enumerated().map { index, face in
+    /// Nil only when the mesh failed to run, so the result is not cached. Face sizes are
+    /// judged on `image`; the mesh reads `detail` when it is larger.
+    static func faces(_ found: [VNFaceObservation], qualities: [VNFaceObservation],
+                      mesh: FaceMeshService? = nil, image: CGImage? = nil, detail: TakeDetailImage? = nil) -> [TakeScoring.Face]? {
+        let kept = Array(found.prefix(16))
+        var eyes = kept.map { eyesOpen($0) }
+        if let mesh, let image {
+            let w = Double(image.width), h = Double(image.height)
+            let judged = kept.map { min($0.boundingBox.width * w, $0.boundingBox.height * h) >= TakeScoring.minFacePixels }
+            if judged.contains(true) {
+                let larger = detail?.image.flatMap { $0.width > image.width ? $0 : nil }
+                guard let pixels = larger != nil ? detail?.pixels : FaceMesh.Pixels(image) else { return nil }
+                for (index, face) in kept.enumerated() {
+                    guard judged[index] else { eyes[index] = nil; continue }
+                    let detection = meshDetection(face, width: Float(pixels.width), height: Float(pixels.height))
+                    do {
+                        eyes[index] = try mesh.eyesOpen(pixels, detection)
+                    } catch {
+                        JSONLog.shared.warn(ev: "face_mesh_failed", error: "\(error)")
+                        return nil
+                    }
+                }
+            } else {
+                eyes = eyes.map { _ in nil }
+            }
+        }
+        return kept.enumerated().map { index, face in
             let r = face.boundingBox
             let q = index < qualities.count ? qualities[index].faceCaptureQuality.map(Double.init) : nil
             return TakeScoring.Face(x: TakeScoring.round4(r.minX), y: TakeScoring.round4(1 - r.maxY),
                                     width: TakeScoring.round4(r.width), height: TakeScoring.round4(r.height),
-                                    quality: q.map(TakeScoring.round4), eyesOpen: Self.eyesOpen(face).map(TakeScoring.round4))
+                                    quality: q.map(TakeScoring.round4), eyesOpen: eyes[index].map(TakeScoring.round4))
         }
     }
+
+    /// Vision's box and eye and nose centres in top-left pixels, the inputs YuNet gives
+    /// the shared engine; a face without landmarks gets guesses from its box.
+    static func meshDetection(_ face: VNFaceObservation, width: Float, height: Float) -> FaceMesh.Detection {
+        let r = face.boundingBox
+        let x1 = Float(r.minX) * width, x2 = Float(r.maxX) * width
+        let y1 = (1 - Float(r.maxY)) * height, y2 = (1 - Float(r.minY)) * height
+        let size = CGSize(width: CGFloat(width), height: CGFloat(height))
+        func centre(_ region: VNFaceLandmarkRegion2D?) -> FaceMesh.Point? {
+            guard let points = region?.pointsInImage(imageSize: size), !points.isEmpty else { return nil }
+            let n = CGFloat(points.count)
+            let x = points.reduce(0) { $0 + $1.x } / n, y = points.reduce(0) { $0 + $1.y } / n
+            return FaceMesh.Point(x: Float(x), y: height - Float(y))
+        }
+        guard let a = centre(face.landmarks?.leftEye), let b = centre(face.landmarks?.rightEye),
+              let nose = centre(face.landmarks?.nose) else { return .boxOnly(x1: x1, y1: y1, x2: x2, y2: y2) }
+        return FaceMesh.Detection(x1: x1, y1: y1, x2: x2, y2: y2, eyeA: a, eyeB: b, nose: nose)
+    }
+
     static let closedRatio = 0.12
     static let openRatio = 0.26
 
     func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
+        analyze(image, detail: nil)
+    }
+
+    func analyze(_ image: CGImage, detail: TakeDetailImage?) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         let landmarks = VNDetectFaceLandmarksRequest()
         let quality = VNDetectFaceCaptureQualityRequest()
@@ -82,7 +172,8 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
                             width: TakeScoring.round4(h.boundingBox.width), height: TakeScoring.round4(h.boundingBox.height))
         }
         guard let found = landmarks.results else { return ([], people) }
-        return (Self.faces(found, qualities: quality.results ?? []), people)
+        guard let faces = Self.faces(found, qualities: quality.results ?? [], mesh: mesh, image: image, detail: detail) else { return nil }
+        return (faces, people)
     }
 
     static func eyesOpen(_ face: VNFaceObservation) -> Double? {
@@ -108,10 +199,14 @@ enum TakeMediaAnalysis {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let decoded = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.analysisLongSide),
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
-        guard let found = analyzer.analyze(fitted.image) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
+        let longSide = sourceLongSide(source)
+        let detail = longSide > TakeScoring.analysisLongSide
+            ? TakeDetailImage { decodeScanImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide) } : nil
+        guard let found = analyzer.analyze(fitted.image, detail: detail) else { return (TakeScoring.signals(fitted.luma, faces: []), false) }
         let size = fitted.luma
-        guard TakeScoring.wantsTiles(sourceLongSide: sourceLongSide(source), width: size.width, height: size.height, faces: found.faces, people: found.people),
-              let wide = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide),
+        guard TakeScoring.wantsTiles(sourceLongSide: longSide, width: size.width, height: size.height, faces: found.faces, people: found.people),
+              let wide = detail?.image.flatMap({ max($0.width, $0.height) >= min(longSide, TakeScoring.tileLongSide) ? $0 : nil })
+                ?? decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.tileLongSide),
               max(wide.width, wide.height) * 2 >= TakeScoring.analysisLongSide * 3
         else { return (TakeScoring.signals(fitted.luma, faces: found.faces, people: found.people), true) }
         var tiled: [TakeScoring.Face] = []

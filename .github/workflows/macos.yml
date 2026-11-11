@@ -287,5 +287,8 @@ jobs:
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" .build/release/FileID .build/release/FileIDEngine
+          # The ONNX Runtime framework both binaries link, scanned on its own so
+          # an onnxruntime package update that adds Microsoft's uploader fails here.
+          ort=.build/artifacts/onnxruntime-swift-package-manager/onnxruntime/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" .build/release/FileID .build/release/FileIDEngine "$ort"
           echo "No telemetry strings detected. ✅"
