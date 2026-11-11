@@ -1,7 +1,9 @@
 import Foundation
 import Darwin
 import CoreImage
+#if !FILEID_APPLE_ADAPTER
 import FileIDShared
+#endif
 import MLX
 
 /// On-device MLX benchmark in the spirit of Magnitude's hardware scoring:

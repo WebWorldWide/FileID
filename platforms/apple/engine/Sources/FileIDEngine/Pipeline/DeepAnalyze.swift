@@ -15,7 +15,9 @@ import MLXVLM
 import MLXLLM
 import MLXHuggingFace
 import Tokenizers
+#if !FILEID_APPLE_ADAPTER
 import FileIDShared
+#endif
 
 public actor DeepAnalyze {
 

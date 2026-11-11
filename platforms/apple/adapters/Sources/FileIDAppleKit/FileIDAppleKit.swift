@@ -2,6 +2,7 @@
 // (`fileidd`). The interface is `adapters/include/fileid_apple.h`; the Rust
 // mirror is `platforms/windows/src/engine/src/apple/ffi.rs`. Change all three
 // together and bump `fileIDAppleABIVersion`.
+import FileIDAppleVLM
 import Foundation
 
 public let fileIDAppleABIVersion: UInt32 = 1
@@ -15,6 +16,7 @@ public func fileid_apple_abi_version() -> UInt32 {
 public func fileid_apple_shutdown() {
     SleepAssertions.shared.releaseAll()
     BookmarkLeases.shared.closeAll()
+    VLMHost.shared.shutdown()
 }
 
 @_cdecl("fileid_apple_free")
