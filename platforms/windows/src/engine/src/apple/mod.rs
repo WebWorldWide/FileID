@@ -7,8 +7,8 @@
 
 mod ffi;
 pub(crate) mod media;
-pub mod vlm;
 pub mod scan;
+pub mod vlm;
 
 use std::ffi::{CStr, CString, OsString, c_char};
 use std::os::unix::ffi::OsStringExt;

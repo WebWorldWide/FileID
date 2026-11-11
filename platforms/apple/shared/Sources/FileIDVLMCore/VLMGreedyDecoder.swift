@@ -123,7 +123,7 @@ enum VLMGreedyDecoder {
         return nil
     }
 
-    static func run(
+    package static func run(
         input: LMInput,
         cache providedCache: [KVCache]?,
         state providedState: LMOutput.State?,

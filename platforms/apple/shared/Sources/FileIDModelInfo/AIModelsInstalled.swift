@@ -1,8 +1,5 @@
-// Engine-only extensions on the shared AIModelKind. These rely on
-// `Hardware` (engine-side) and the local filesystem (HuggingFace cache),
-// which the app process doesn't have direct access to.
+// Whether a model's weights are on disk (the Hugging Face cache layout).
 import Foundation
-import FileIDShared
 
 extension AIModelKind {
     /// Heuristic: weights live in MLX's HuggingFace hub cache. We treat

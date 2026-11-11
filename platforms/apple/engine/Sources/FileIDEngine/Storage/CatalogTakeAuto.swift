@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import CoreImage
 import CryptoKit
 import Foundation
@@ -309,7 +310,7 @@ enum CatalogTakeAuto {
         }
         guard loaded == nil, let kind = goalModel(loaded: nil, ramGB: Hardware.physicalMemoryGB, installed: { $0.isInstalledOnDisk() }),
               await ChatService.canWake() else { return }
-        do { try await DeepAnalyze.shared.ensureLoaded(kind: kind) } catch {
+        do { try await catchingMLX { try await DeepAnalyze.shared.ensureLoaded(kind: kind) } } catch {
             JSONLog.shared.warn(ev: "take_goal_model_wake_failed", error: "\(error)")
         }
     }
@@ -332,7 +333,7 @@ enum CatalogTakeAuto {
         guard let sheet = TakeMediaAnalysis.contactSheet(paths: paths) else { throw CatalogStore.InvalidRequest() }
         let prompt = TakeMediaAnalysis.goalPrompt(goal: goal, count: paths.count)
         let image = CIImage(cgImage: sheet)
-        let sample = try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: 160)
+        let sample = try await catchingMLX { try await DeepAnalyze.shared.benchmarkPass(prompt: prompt, image: image, maxTokens: 160) }
         guard let reply = TakeMediaAnalysis.parseGoalReply(sample.output, count: paths.count) else {
             return CatalogTakeGoalRanking(goal: goal, status: "unclear", order: primaryIDs, metFileIDs: [],
                                           summary: "The model's answer was unclear. The ranking stays on photo quality.", model: kind.rawValue)

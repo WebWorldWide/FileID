@@ -1,12 +1,12 @@
 import Foundation
 
-enum ModelMemoryAdmission {
-    static func maximumWorkingSetMB(totalMB: UInt64) -> UInt64 {
+package enum ModelMemoryAdmission {
+    package static func maximumWorkingSetMB(totalMB: UInt64) -> UInt64 {
         let reserve = min(8192, max(2048, totalMB / 4))
         return totalMB > reserve ? totalMB - reserve : 0
     }
 
-    static func minimumFreeMemoryMB(totalMB: UInt64) -> UInt64 {
+    package static func minimumFreeMemoryMB(totalMB: UInt64) -> UInt64 {
         min(2048, max(512, totalMB / 16))
     }
 

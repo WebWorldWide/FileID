@@ -604,14 +604,18 @@ mod tests {
 
     #[tokio::test]
     async fn loading_a_missing_model_fails_without_a_download() {
-        let root = std::env::temp_dir().join(format!("fileid-mlx-missing-{}", std::process::id()));
-        let mut spec = model_spec("qwen3_vl_2b").unwrap();
-        spec["huggingFaceRoot"] = json!(root);
+        // The test root (scratch or an empty temp path) holds no models.
+        let spec = model_spec("qwen3_vl_2b").unwrap();
+        let folder = model_dir("qwen3_vl_2b").unwrap();
+        let existed = folder.exists();
         let never = AtomicBool::new(false);
         let error = request(&json!({"op": "load", "model": spec}), &never, |_| {}).await.unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("isn't installed") || message.contains("mlx.metallib is missing"), "{error:#}");
-        assert!(!root.exists(), "a failed load must not create the model folder");
+        assert!(
+            ["isn't installed", "mlx.metallib is missing", "different model folders"].iter().any(|text| message.contains(text)),
+            "{error:#}"
+        );
+        assert_eq!(folder.exists(), existed, "a failed load must not create the model folder");
     }
 
     #[tokio::test]

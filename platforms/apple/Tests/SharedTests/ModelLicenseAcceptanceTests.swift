@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("Model license acceptance")
 struct ModelLicenseAcceptanceTests {

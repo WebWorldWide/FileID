@@ -122,6 +122,30 @@ fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta
     }
 }
 
+/// Keeps a run's proposed names unique per folder, as the Swift engine does
+/// (`RESERVES_PROPOSED_NAMES`), and stores the reserved name.
+fn reserve_name(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    file_id: i64,
+    name: Option<String>,
+    reserved: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    use crate::pipeline::deep_analyze_naming::{reserve_proposed_name, RESERVES_PROPOSED_NAMES};
+    if !RESERVES_PROPOSED_NAMES || name.is_none() {
+        return name;
+    }
+    let conn = db.lock();
+    let path: String = conn.query_row("SELECT path_text FROM files WHERE id=?1", [file_id], |row| row.get(0)).unwrap_or_default();
+    let unique = reserve_proposed_name(name.clone(), &path, reserved);
+    if unique != name
+        && let Err(error) = conn.execute("UPDATE files SET vlm_proposed_name=?1 WHERE id=?2", rusqlite::params![unique, file_id])
+    {
+        tracing::warn!(?error, file_id, "storing the reserved proposed name failed");
+        return name;
+    }
+    unique
+}
+
 /// Deep Analyze `file_ids` with the MLX model; sends the terminal complete.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batch(
@@ -163,6 +187,7 @@ pub(crate) async fn run_batch(
     let grouping = crate::pipeline::near_duplicate_grouping::plan(&db.lock(), &file_ids);
     let ordered = grouping.ordered.clone();
     let mut shared: std::collections::HashMap<usize, (i64, Vec<String>, Option<String>)> = std::collections::HashMap::new();
+    let mut reserved = std::collections::HashSet::new();
     let (mut processed, mut failed) = (0u64, 0u64);
     let batch_started = Instant::now();
     let mut rolling_fps = 0.0f64;
@@ -193,7 +218,8 @@ pub(crate) async fn run_batch(
                 })
             };
             match inherited {
-                Some(Ok(out)) => {
+                Some(Ok(mut out)) => {
+                    out.proposed_name = reserve_name(&db, file_id, out.proposed_name, &mut reserved);
                     processed += 1;
                     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(DeepAnalyzeFileDone {
                         file_id: out.file_id,
@@ -278,7 +304,8 @@ pub(crate) async fn run_batch(
             (other, _) => other,
         };
         match outcome {
-            Ok(out) => {
+            Ok(mut out) => {
+                out.proposed_name = reserve_name(&db, file_id, out.proposed_name, &mut reserved);
                 processed += 1;
                 sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(DeepAnalyzeFileDone {
                     file_id: out.file_id,

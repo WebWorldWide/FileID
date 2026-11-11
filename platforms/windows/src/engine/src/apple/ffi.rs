@@ -78,20 +78,6 @@ unsafe extern "C" {
     pub fn fileid_apple_speech_transcribe(path: *const c_char, start: f64, end: f64, cancel: *const bool) -> *mut c_char;
     // --- end Stage 8 ---
 
-    // --- Stage 7: MLX vision-language models ---
-    /// Start a VLM request (UTF-8 JSON with an `op`). Returns a handle, 0 when
-    /// refused (the callback is then never called). The callback runs on any
-    /// thread and gets exactly one terminal event (`DONE` or `FAILED`).
-    pub fn fileid_apple_vlm_submit(
-        request: *const u8,
-        length: usize,
-        callback: VlmCallback,
-        context: *mut c_void,
-    ) -> u64;
-    /// Cancel a running request; it still reports its terminal event.
-    pub fn fileid_apple_vlm_cancel(handle: u64);
-    // --- end Stage 7 ---
-
     // --- Stage 5: scan decode and per-file ML ---
     /// The scan's working image; `out_image` receives its handle. JSON info.
     pub fn fileid_apple_image_decode(path: *const c_char, size_bytes: i64, max_pixel_size: u32, out_image: *mut u64) -> *mut c_char;
@@ -131,6 +117,20 @@ unsafe extern "C" {
     /// RAM++ tags agreed with the primary pass. JSON `[[tag, score], ...]`.
     pub fn fileid_apple_ramplus_tag(image: u64, vision_confidences: *const c_char, face_count: usize) -> *mut c_char;
     // --- end Stage 5 ---
+
+    // --- Stage 7: MLX vision-language models ---
+    /// Start a VLM request (UTF-8 JSON with an `op`). Returns a handle, 0 when
+    /// refused (the callback is then never called). The callback runs on any
+    /// thread and gets exactly one terminal event (`DONE` or `FAILED`).
+    pub fn fileid_apple_vlm_submit(
+        request: *const u8,
+        length: usize,
+        callback: VlmCallback,
+        context: *mut c_void,
+    ) -> u64;
+    /// Cancel a running request; it still reports its terminal event.
+    pub fn fileid_apple_vlm_cancel(handle: u64);
+    // --- end Stage 7 ---
 }
 
 // --- Stage 7: MLX vision-language models ---

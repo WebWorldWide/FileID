@@ -39,8 +39,12 @@ METALLIB_CACHE="${FILEID_METALLIB_CACHE:-$PROJECT_DIR/.build/cache/mlx.metallib}
 [ -x "$BUILD_DIR/FileID" ]       || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 [ -x "$BUILD_DIR/FileIDEngine" ] || { echo "❌ $BUILD_DIR/FileIDEngine missing — build first"; exit 1; }
 
-if [ ! -f "$BUILD_DIR/FileID_FileIDShared.bundle/model-catalog.json" ] && [ ! -f "$BUILD_DIR/FileID_FileIDShared.bundle/Contents/Resources/model-catalog.json" ]; then
-    echo "❌ Shared model catalog resources missing — rebuild FileID first."
+# The MLX model catalog (FileIDModelInfo). The app, the Swift engine and
+# libFileIDAppleKit all read it from Contents/Resources; without it no local
+# AI model is offered, so refuse to assemble.
+MODEL_INFO_BUNDLE="FileID_FileIDModelInfo.bundle"
+if [ ! -f "$BUILD_DIR/$MODEL_INFO_BUNDLE/model-catalog.json" ] && [ ! -f "$BUILD_DIR/$MODEL_INFO_BUNDLE/Contents/Resources/model-catalog.json" ]; then
+    echo "❌ $MODEL_INFO_BUNDLE (model catalog) missing — rebuild FileID first."
     exit 1
 fi
 
@@ -57,6 +61,10 @@ for resource_bundle in "$BUILD_DIR/"*.bundle; do
     cp -R "$resource_bundle" "$CONTENTS/Resources/"
 done
 shopt -u nullglob
+if [ ! -f "$CONTENTS/Resources/$MODEL_INFO_BUNDLE/model-catalog.json" ] && [ ! -f "$CONTENTS/Resources/$MODEL_INFO_BUNDLE/Contents/Resources/model-catalog.json" ]; then
+    echo "❌ $MODEL_INFO_BUNDLE didn't reach Contents/Resources."
+    exit 1
+fi
 
 mkdir -p "$CONTENTS/Frameworks"
 xcrun swift-stdlib-tool --copy --platform macosx \
