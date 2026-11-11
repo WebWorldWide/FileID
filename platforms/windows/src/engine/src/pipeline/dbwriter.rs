@@ -347,6 +347,9 @@ impl DbWriter {
             let mut face_stmt = tx
                 .prepare_cached(INSERT_FACE_SQL)
                 .context("preparing face insert")?;
+            let mut vision_face_stmt = tx
+                .prepare_cached("INSERT INTO face_prints (file_id, print_data, bbox, face_quality, excluded) VALUES (?1, X'', ?2, ?3, ?4)")
+                .context("preparing Vision face insert")?;
             let mut tag_delete = tx
                 .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto'")
                 .context("preparing tag delete")?;
@@ -359,7 +362,7 @@ impl DbWriter {
             // AFTER DELETE trigger only when recursive triggers are enabled,
             // which would strand the old text's FTS postings.
             let mut ocr_text_stmt = tx
-                .prepare_cached("INSERT INTO ocr_text (file_id, text) SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
+                .prepare_cached("INSERT INTO ocr_text (file_id, text, handwritten) SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
                 .context("preparing ocr_text insert")?;
             let mut ocr_text_delete = tx
                 .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1 AND source = 'ocr'")
@@ -569,6 +572,14 @@ impl DbWriter {
                             });
                         }
                     }
+                    // Vision faces (the Mac adapters scan): the Swift engine's
+                    // scan-time rows, with no vector or namespace until the
+                    // Mac face pipeline extracts them.
+                    for face in &f.vision_faces {
+                        vision_face_stmt
+                            .execute(params![file_id, face.bbox, face.quality, face.excluded])
+                            .with_context(|| format!("Vision face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                    }
                     // New AUTOINCREMENT ids never collide with the deleted ones,
                     // so every captured id is now orphaned. Defer the file delete
                     // until after commit (below) so a rollback can't orphan crops.
@@ -590,7 +601,7 @@ impl DbWriter {
                     if let Some(text) = &f.ocr_text
                         && !text.trim().is_empty() {
                             ocr_text_stmt
-                                .execute(params![file_id, text])
+                                .execute(params![file_id, text, f.ocr_handwritten])
                                 .with_context(|| format!("ocr_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                 }
@@ -1103,8 +1114,10 @@ mod tests {
             scanned_unix: 1_700_000_100.0,
             has_faces: false,
             faces: vec![],
+            vision_faces: vec![],
             has_text: false,
             ocr_text: None,
+            ocr_handwritten: false,
             phash: None,
             aesthetic: None,
             image_width: 0,

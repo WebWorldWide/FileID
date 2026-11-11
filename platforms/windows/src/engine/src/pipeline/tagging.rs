@@ -177,9 +177,14 @@ pub struct TaggedFile {
 
     pub has_faces: bool,
     pub faces: Vec<DetectedFace>,
+    /// Faces as the Swift scan stores them (Vision boxes, no vectors yet);
+    /// only the Mac adapters path fills these.
+    pub vision_faces: Vec<VisionFace>,
 
     pub has_text: bool,
     pub ocr_text: Option<String>,
+    /// The text read judged the text handwritten (Vision's accurate tier).
+    pub ocr_handwritten: bool,
 
     pub phash: Option<i64>,
     pub aesthetic: Option<f64>,
@@ -264,6 +269,16 @@ pub struct TaggedFile {
     /// auto-tags. Set just before the normal return (false if the GPU died), and
     /// left false on the timeout / GPU-dead-bail rows.
     pub tags_evaluated: bool,
+}
+
+/// A face from Apple Vision's primary pass, stored the way the Swift engine's
+/// scan stores it: normalized "x,y,w,h" box (lower-left origin), capture
+/// quality and the clustering hold; the vector comes later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisionFace {
+    pub bbox: String,
+    pub quality: Option<f64>,
+    pub excluded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +428,11 @@ pub struct ModelStack {
     /// itself drops available RAM), silently serializing a 4-session pool to
     /// one permit (the 2026-07-20 overnight regression).
     pub pool_size: usize,
+    /// The Mac adapters run this scan (Vision faces, MLX CLIP and RAM++):
+    /// unloaded face and RAM++ pools are expected, not load failures.
+    pub apple_scan: bool,
+    /// CLIP image embeddings come from the MLX adapter.
+    pub apple_clip: bool,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -706,34 +726,6 @@ impl ModelStack {
             (pool, None)
         };
 
-        // BGE-small text embedder — single session, only built when both the
-        // weights AND the vocab.txt are on disk. Drives semantic search over
-        // document text; absent → just no text embedding row, FTS5 still
-        // works.
-        let bge_text = match (
-            crate::models::bge_text::default_weights_path(),
-            crate::models::bge_text::default_vocab_path(),
-        ) {
-            (Ok(wp), Ok(vp)) if wp.exists() && vp.exists() => match BgeText::load(wp.clone(), vp) {
-                Ok(m) => {
-                    tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model loaded");
-                    Some(Mutex::new(m))
-                }
-                Err(err) => {
-                    tracing::warn!(model = "BGE-small", ?err, "model load failed; stage will skip");
-                    None
-                }
-            },
-            (Ok(wp), _) => {
-                tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model not installed; stage will skip");
-                None
-            }
-            (Err(err), _) => {
-                tracing::warn!(model = "BGE-small", ?err, "model path unresolved");
-                None
-            }
-        };
-
         // RAM++ multi-label tagger pool — the primary in-scan tagger. Loaded
         // like the other pooled models; a missing ONNX (e.g. the HF repo not
         // yet populated) yields None and tagging falls back to CLIP scene-tags
@@ -798,7 +790,29 @@ impl ModelStack {
             }
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch, pool_size }
+        Self {
+            arcface,
+            scrfd,
+            mobileclip_pool,
+            mobileclip_batch,
+            scene_labeler,
+            bge_text: load_bge_text(),
+            ram_plus,
+            ram_plus_batch,
+            pool_size,
+            apple_scan: false,
+            apple_clip: false,
+        }
+    }
+
+    /// The scan's models: the Mac adapters' set when the app hosts the engine,
+    /// else whatever is installed (nothing without ONNX Runtime).
+    pub fn load_for_scan(worker_count: usize, runtime_available: bool) -> Self {
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        if mac::enabled() {
+            return mac::model_stack(worker_count, runtime_available);
+        }
+        if runtime_available { Self::load_default(worker_count) } else { Self::empty() }
     }
 
     pub fn empty() -> Self {
@@ -812,6 +826,35 @@ impl ModelStack {
             ram_plus: None,
             ram_plus_batch: None,
             pool_size: 1,
+            apple_scan: false,
+            apple_clip: false,
+        }
+    }
+}
+
+/// BGE-small document embedder, when its weights and vocabulary are installed.
+fn load_bge_text() -> Option<Mutex<BgeText>> {
+    match (
+        crate::models::bge_text::default_weights_path(),
+        crate::models::bge_text::default_vocab_path(),
+    ) {
+        (Ok(wp), Ok(vp)) if wp.exists() && vp.exists() => match BgeText::load(wp.clone(), vp) {
+            Ok(m) => {
+                tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model loaded");
+                Some(Mutex::new(m))
+            }
+            Err(err) => {
+                tracing::warn!(model = "BGE-small", ?err, "model load failed; stage will skip");
+                None
+            }
+        },
+        (Ok(wp), _) => {
+            tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model not installed; stage will skip");
+            None
+        }
+        (Err(err), _) => {
+            tracing::warn!(model = "BGE-small", ?err, "model path unresolved");
+            None
         }
     }
 }
@@ -1247,8 +1290,10 @@ impl Tagger {
                                     .as_secs_f64(),
                                 has_faces: false,
                                 faces: Vec::new(),
+                                vision_faces: Vec::new(),
                                 has_text: false,
                                 ocr_text: None,
+                                ocr_handwritten: false,
                                 phash: None,
                                 aesthetic: None,
                                 image_width: 0,
@@ -1313,7 +1358,19 @@ pub struct PreDecoded {
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
+    /// Set when the Mac adapters decoded the file; the worker then runs the
+    /// Mac per-file path.
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    mac: Option<MacFrame>,
 }
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+#[path = "tagging_mac.rs"]
+mod mac;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+type MacFrame = mac::Frame;
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+enum MacFrame {}
 
 impl PreDecoded {
     fn failed(file: DiscoveredFile, message: &str) -> Self {
@@ -1326,6 +1383,7 @@ impl PreDecoded {
             legacy_hashes: None,
             exif: None,
             budget: None,
+            mac: None,
         }
     }
 }
@@ -1508,6 +1566,11 @@ fn predecode_one(
         file.path.file_name().is_none_or(|name| name != "fileid-test-decoder-panic"),
         "injected decoder panic"
     );
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if mac::enabled() {
+        let _ = (coord, budget);
+        return Some(mac::predecode(file, legacy));
+    }
     {
         let decode_started = Instant::now();
 
@@ -1740,6 +1803,7 @@ fn predecode_one(
             legacy_hashes,
             exif: exif_data,
             budget: budget_guard,
+            mac: None,
         })
     }
 }
@@ -2127,7 +2191,12 @@ async fn process_file_predecoded(
 ) -> TaggedFile {
     // `_budget` keeps the byte-budget reservation alive while this worker
     // holds the frame; it releases when the function returns.
-    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, legacy_hashes, exif, budget: _budget } =
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if predecoded.mac.is_some() {
+        let _ = (vision_sem, clip_sem, worker_idx, coord);
+        return mac::process(predecoded, models).await;
+    }
+    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, legacy_hashes, exif, budget: _budget, mac: _ } =
         predecoded;
     let file = &file;
     let started = Instant::now();
@@ -2146,8 +2215,10 @@ async fn process_file_predecoded(
         scanned_unix,
         has_faces: false,
         faces: Vec::new(),
+        vision_faces: Vec::new(),
         has_text: false,
         ocr_text: None,
+        ocr_handwritten: false,
         phash: None,
         aesthetic: None,
         image_width: 0,
@@ -4085,8 +4156,10 @@ mod tests {
             scanned_unix: 1_710_504_001.0,
             has_faces: false,
             faces: Vec::new(),
+            vision_faces: Vec::new(),
             has_text: false,
             ocr_text: None,
+            ocr_handwritten: false,
             phash: None,
             aesthetic: None,
             image_width: w,

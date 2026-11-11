@@ -23,6 +23,9 @@ substitutes a value saved by an earlier step's "save" (a name, or
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends".
+A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
+"appHosted": true runs a case only on engines that write events on stderr: the Swift
+engine and the Rust engine the Mac app hosts (built with the Apple adapters).
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
 A case may list knownDivergences ({"engine", "reason", optional "os" list and
@@ -456,6 +459,8 @@ def build_tree(ctx, entries):
             wav_bytes(target)
         elif generator == "pdf":
             target.write_bytes(pdf_bytes(entry.get("content", "FileID conformance")))
+        elif "copy" in entry:
+            target.write_bytes((ROOT / entry["copy"]).read_bytes())
         elif "contentHex" in entry:
             target.write_bytes(bytes.fromhex(entry["contentHex"]))
         else:
@@ -672,14 +677,20 @@ def load_cases(selected):
             if not selected or any(fnmatch.fnmatch(case["name"], pattern) for pattern in selected)]
 
 
-def detect_flavor(binary, parent):
+def detect_engine(binary, parent):
+    """The engine's flavour and whether it writes events on stderr (the Swift
+    engine and the Rust engine the Mac app hosts)."""
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         engine = Engine(binary, temporary)
         try:
             engine.wait("ready")
-            return engine.flavor
+            return engine.flavor, engine.stream.get("ready") == "stderr"
         finally:
             engine.close()
+
+
+def detect_flavor(binary, parent):
+    return detect_engine(binary, parent)[0]
 
 
 def safe_parent(path):
@@ -701,7 +712,8 @@ def main():
     args = parser.parse_args()
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
-    flavor = detect_flavor(binary, parent) if args.flavor == "auto" else args.flavor
+    detected, hosted = detect_engine(binary, parent)
+    flavor = detected if args.flavor == "auto" else args.flavor
     binaries = {flavor: binary}
     if args.peer_engine:
         peer = args.peer_engine.resolve(strict=True)
@@ -711,9 +723,10 @@ def main():
     for case in load_cases(args.case):
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or args.os not in case.get("os", [args.os]):
+        unhosted = case.get("appHosted") and not hosted
+        if flavor not in case.get("engines", ["swift", "rust"]) or missing or unhosted or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
-            reason = f"needs {', '.join(sorted(missing))} engine" if missing else "not applicable here"
+            reason = f"needs {', '.join(sorted(missing))} engine" if missing else "needs the Mac app's engine" if unhosted else "not applicable here"
             print(f"SKIP   {name} ({reason})")
             continue
         divergence = divergence_for(case, flavor, args.os)
