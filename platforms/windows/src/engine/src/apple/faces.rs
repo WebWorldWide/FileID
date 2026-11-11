@@ -172,32 +172,53 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
         .collect()
 }
 
-/// SFace as the Mac pipeline runs it, shared by the extraction workers.
+/// SFace as the Mac pipeline runs it, shared by the extraction workers. `ort`
+/// runs a session through `&mut`, so a small pool of sessions lets workers
+/// embed at once as `ArcFaceService` does with one thread-safe ORT session.
 pub struct MacSFace {
-    model: Mutex<crate::models::sface::SFace>,
+    sessions: Vec<Mutex<crate::models::sface::SFace>>,
+    next: std::sync::atomic::AtomicUsize,
     version: String,
     provider: &'static str,
 }
 
+/// Sessions in the pool (measured in DECISIONS 2026-11-11); `FILEID_SFACE_SESSIONS`
+/// (1–4) overrides it.
+fn sface_sessions() -> usize {
+    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
+}
+
 impl MacSFace {
-    /// Loads the installed SFace weights. `FILEID_FACE_EP=coreml` binds the
-    /// CoreML execution provider (compiled program cached under
-    /// `ModelCache/CoreML`), `cpu` or the default keeps ORT's CPU provider:
-    /// the 2026-11-10 A/B in DECISIONS.md.
+    /// Loads the installed SFace weights as `ArcFaceService` does: the CoreML
+    /// execution provider (compiled program cached under `ModelCache/CoreML`),
+    /// ORT's CPU provider when CoreML cannot bind or `FILEID_FACE_EP=cpu`.
+    /// CoreML gives the Swift engine's vectors bit for bit (DECISIONS 2026-11-11).
     pub fn load() -> Result<Self> {
+        use crate::models::sface::{Provider, SFace};
         let path = crate::models::sface::default_weights_path()?;
         anyhow::ensure!(path.is_file(), "SFace weights missing");
         let digest = crate::commands::face_refresh::current_model().context("SFace weights unreadable")?;
-        let coreml = std::env::var("FILEID_FACE_EP").map(|v| v.trim().eq_ignore_ascii_case("coreml")).unwrap_or(false);
-        let provider = if coreml {
-            crate::models::sface::Provider::CoreMl { cache_dir: coreml_cache_dir(&digest)? }
-        } else {
-            crate::models::sface::Provider::Cpu
+        let cpu_only = std::env::var("FILEID_FACE_EP").is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
+        let cache = if cpu_only { None } else { Some(coreml_cache_dir(&digest)?) };
+        let first = cache
+            .clone()
+            .and_then(|cache_dir| SFace::load_with(&path, Provider::CoreMl { cache_dir }).map_err(|error| tracing::warn!(?error, "arcface_coreml_ep_unavailable")).ok());
+        let (first, provider) = match first {
+            Some(model) => (model, "coreml"),
+            None => (SFace::load_with(&path, Provider::Cpu)?, "cpu"),
         };
-        let label = if coreml { "coreml" } else { "cpu" };
-        let model = crate::models::sface::SFace::load_with(&path, provider)?;
-        let version = model.model_version().to_string();
-        Ok(Self { model: Mutex::new(model), version, provider: label })
+        let version = first.model_version().to_string();
+        let mut sessions = vec![Mutex::new(first)];
+        while sessions.len() < sface_sessions() {
+            let provider = match (&cache, provider) {
+                (Some(cache_dir), "coreml") => Provider::CoreMl { cache_dir: cache_dir.clone() },
+                _ => Provider::Cpu,
+            };
+            let model = SFace::load_with(&path, provider)?;
+            anyhow::ensure!(model.model_version() == version, "SFace weights changed during load");
+            sessions.push(Mutex::new(model));
+        }
+        Ok(Self { sessions, next: std::sync::atomic::AtomicUsize::new(0), version, provider })
     }
 
     pub fn model_version(&self) -> &str {
@@ -209,7 +230,12 @@ impl MacSFace {
     }
 
     pub fn embed(&self, rgba_112: &[u8]) -> Option<Vec<f32>> {
-        self.model.lock().embed_rgba(rgba_112).map_err(|error| tracing::warn!(?error, "SFace embed failed")).ok()
+        let start = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = self.sessions.len();
+        let mut session = (0..count)
+            .find_map(|offset| self.sessions[(start + offset) % count].try_lock())
+            .unwrap_or_else(|| self.sessions[start % count].lock());
+        session.embed_rgba(rgba_112).map_err(|error| tracing::warn!(?error, "SFace embed failed")).ok()
     }
 }
 
@@ -528,6 +554,10 @@ impl crate::commands::catalog_take_auto::TakeFaceAnalyzer for VisionFaces {
         if self.mesh.is_some() { "vision-mesh-humans-v1" } else { "vision-landmarks-humans-v1" }
     }
 
+    fn reads_detail(&self) -> bool {
+        self.mesh.is_some()
+    }
+
     fn faces(
         &mut self,
         rgb: &[u8],
@@ -562,13 +592,19 @@ pub fn take_image_signals(
     let (w, h) = (fitted.width, fitted.height);
     let luma = Luma::from_rgb(&fitted.rgb, w as usize, h as usize);
     let long_side = fitted.source_long_side;
-    let detail = (long_side > take_scoring::ANALYSIS_LONG_SIDE).then(|| take_decode(path, TakeDecode::Detail, take_scoring::TILE_LONG_SIDE)).flatten();
+    // Swift decodes the detail image lazily: for Face Mesh, or as the tile source.
+    let large = long_side > take_scoring::ANALYSIS_LONG_SIDE;
+    let detail_decode = || take_decode(path, TakeDecode::Detail, take_scoring::TILE_LONG_SIDE);
+    let mut detail = (large && faces.reads_detail()).then(detail_decode).flatten();
     let mut view = detail.as_ref().map(|d| Detail::new(&d.rgb, d.width, d.height));
     let Some((found, people)) = first_pass(faces, &fitted.rgb, w, h, view.as_mut()) else {
         return Some((take_scoring::signals(&luma, vec![], None), false));
     };
     if !faces.detects() || !take_scoring::wants_tiles(long_side, w as usize, h as usize, &found, people.as_deref()) {
         return Some((take_scoring::signals(&luma, found, people), true));
+    }
+    if detail.is_none() && large {
+        detail = detail_decode();
     }
     let reuse = detail.filter(|d| d.width.max(d.height) >= long_side.min(take_scoring::TILE_LONG_SIDE));
     let Some(wide) = reuse.or_else(|| take_decode(path, TakeDecode::Wide, take_scoring::TILE_LONG_SIDE)) else {

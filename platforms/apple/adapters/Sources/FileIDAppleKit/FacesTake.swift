@@ -60,8 +60,9 @@ enum FacesTake {
         return drawn ? buffer : nil
     }
 
-    /// The sRGB image Vision reads, over packed RGB8 (the Swift engine reads
-    /// the same bytes from the context it drew into).
+    /// The sRGB image Vision reads, over packed RGB8, with the bitmap layout of
+    /// `TakeMediaAnalysis.fit`'s context: Vision's boxes and landmarks move by
+    /// up to 0.006 of the frame when the same bytes are tagged 32-bit big-endian.
     static func image(rgb: UnsafeBufferPointer<UInt8>, width: Int, height: Int) -> CGImage? {
         guard width > 0, height > 0, rgb.count == width * height * 3 else { return nil }
         var rgbx = [UInt8](repeating: 255, count: width * height * 4)
@@ -73,7 +74,7 @@ enum FacesTake {
         return rgbx.withUnsafeMutableBytes { raw -> CGImage? in
             CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)?.makeImage()
+                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)?.makeImage()
         }
     }
 

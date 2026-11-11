@@ -286,6 +286,12 @@ pub trait TakeFaceAnalyzer {
     fn detects(&self) -> bool {
         true
     }
+    /// Whether the first pass reads `detail`, so a platform that decodes it
+    /// separately (the Mac) skips that decode otherwise.
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    fn reads_detail(&self) -> bool {
+        true
+    }
 }
 
 /// The full decode of a photo whose faces were found on a smaller copy. Face Mesh
