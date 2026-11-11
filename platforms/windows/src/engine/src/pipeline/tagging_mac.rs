@@ -167,7 +167,7 @@ fn base_row(file: &DiscoveredFile) -> TaggedFile {
         scanned_unix: now_unix(),
         has_faces: false,
         faces: Vec::new(),
-        vision_faces: Vec::new(),
+        vision_faces: None,
         has_text: false,
         ocr_text: None,
         ocr_handwritten: false,
@@ -420,11 +420,12 @@ async fn image_row(
     row.location_lat = info.lat;
     row.location_lon = info.lon;
     row.has_faces = pass.face_count > 0;
-    row.vision_faces = pass
-        .faces
-        .into_iter()
-        .map(|face| VisionFace { bbox: face.bbox, quality: face.quality, excluded: face.excluded })
-        .collect();
+    row.vision_faces = Some(
+        pass.faces
+            .into_iter()
+            .map(|face| VisionFace { bbox: face.bbox, quality: face.quality, excluded: face.excluded })
+            .collect(),
+    );
     row.faces_evaluated = true;
     row.ocr_stage_ran = read.ran;
     row.ocr_handwritten = read.handwritten && read.text.is_some();

@@ -178,8 +178,9 @@ pub struct TaggedFile {
     pub has_faces: bool,
     pub faces: Vec<DetectedFace>,
     /// Faces as the Swift scan stores them (Vision boxes, no vectors yet);
-    /// only the Mac adapters path fills these.
-    pub vision_faces: Vec<VisionFace>,
+    /// `Some` only on the Mac adapters path, which leaves the file revision to
+    /// the Mac face pipeline as the Swift scan does.
+    pub vision_faces: Option<Vec<VisionFace>>,
 
     pub has_text: bool,
     pub ocr_text: Option<String>,
@@ -1290,7 +1291,7 @@ impl Tagger {
                                     .as_secs_f64(),
                                 has_faces: false,
                                 faces: Vec::new(),
-                                vision_faces: Vec::new(),
+                                vision_faces: None,
                                 has_text: false,
                                 ocr_text: None,
                                 ocr_handwritten: false,
@@ -2215,7 +2216,7 @@ async fn process_file_predecoded(
         scanned_unix,
         has_faces: false,
         faces: Vec::new(),
-        vision_faces: Vec::new(),
+        vision_faces: None,
         has_text: false,
         ocr_text: None,
         ocr_handwritten: false,
@@ -4156,7 +4157,7 @@ mod tests {
             scanned_unix: 1_710_504_001.0,
             has_faces: false,
             faces: Vec::new(),
-            vision_faces: Vec::new(),
+            vision_faces: None,
             has_text: false,
             ocr_text: None,
             ocr_handwritten: false,
