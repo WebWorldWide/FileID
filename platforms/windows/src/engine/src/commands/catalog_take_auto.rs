@@ -513,16 +513,17 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
     std::thread::scope(|scope| {
         for faces in analyzers.iter_mut() {
             let (queue, measured) = (&queue, &measured);
+            // User-initiated QoS, as the Swift engine's request tasks: Vision
+            // schedules by the caller's QoS.
             scope.spawn(move || {
-                super::face_extract_mac::user_initiated_qos();
-                loop {
+                crate::util::qos::interactive(|| loop {
                     // Bound first: a guard in the `while let` scrutinee would be
                     // held through the body and serialise the workers.
                     let next = queue.lock().pop();
                     let Some((id, row)) = next else { break };
                     let value = measure(row, faces);
                     measured.lock().push((id, value));
-                }
+                })
             });
         }
     });

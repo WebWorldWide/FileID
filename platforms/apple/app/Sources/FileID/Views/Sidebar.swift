@@ -197,7 +197,7 @@ struct Sidebar: View {
         case "scan_failed": return "The scan stopped"
         case "db_unavailable": return "The library couldn't be opened"
         case "model_load_failed": return "An AI model didn't load"
-        case "restructure_busy": return "A folder move is already running"
+        case "restructure_busy", "restructure_already_running": return "A folder move is already running"
         default: return kind
         }
     }

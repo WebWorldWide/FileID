@@ -69,10 +69,35 @@ impl Judged {
         self
     }
 }
+/// A read-only connection lent out for one search and returned afterwards, so
+/// searches skip opening the catalog and parsing its schema each time.
+pub(crate) struct Reader<'a> {
+    slot: &'a Mutex<Option<Connection>>,
+    conn: Option<Connection>,
+}
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("held until drop")
+    }
+}
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take()
+            && conn.is_autocommit()
+        {
+            let mut slot = self.slot.lock();
+            if slot.is_none() {
+                *slot = Some(conn);
+            }
+        }
+    }
+}
 pub struct CatalogIndex {
     writer: Arc<Mutex<Connection>>,
     database: PathBuf,
     directory: PathBuf,
+    reader: Mutex<Option<Connection>>,
     state: Mutex<State>,
     changed: Condvar,
     scheduler: Arc<ResourceScheduler>,
@@ -97,6 +122,7 @@ impl CatalogIndex {
             writer,
             database,
             directory,
+            reader: Mutex::new(None),
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
             scheduler,
@@ -112,7 +138,21 @@ impl CatalogIndex {
         conn.execute("UPDATE catalog_jobs SET state='paused',error='Interrupted. Resume visual index preparation from the last verified snapshot.',updated_at=?1 WHERE kind='catalogIndex' AND state IN ('queued','running')", [now()])?;
         Ok(())
     }
+    /// The cached read connection, or a new one while another search holds it.
+    pub(crate) fn reader(&self) -> Result<Reader<'_>> {
+        let cached = self.reader.lock().take();
+        let conn = match cached {
+            Some(conn) => conn,
+            None => {
+                let conn = db::open_read(&self.database)?;
+                conn.set_prepared_statement_cache_capacity(32);
+                conn
+            }
+        };
+        Ok(Reader { slot: &self.reader, conn: Some(conn) })
+    }
     pub fn close(&self) {
+        self.reader.lock().take();
         self.state.lock().closed = true;
         self.shutdown();
         self.state.lock().cache = None;
@@ -182,7 +222,10 @@ impl CatalogIndex {
     /// The reply plus the files judged weaker look-alikes (Swift `CatalogSearch.judged`).
     pub(crate) fn judged(self: &Arc<Self>, request: &CatalogRequest, encode: &dyn Fn(&str) -> Option<Vec<f32>>) -> Result<Judged> {
         let root = match request.root_id {
-            Some(id) => crate::commands::roots::RootScope::load(&db::open_read(&self.database)?, Some(id))?,
+            Some(id) => {
+                let conn = self.reader()?;
+                crate::commands::roots::RootScope::load(&conn, Some(id))?
+            }
             None => None,
         };
         if request.captured_from.is_none() && request.captured_to.is_none() {
@@ -201,7 +244,7 @@ impl CatalogIndex {
         wide.limit = Some(100);
         let mut judged = self.search_unfiltered(&wide, root.as_ref(), encode)?;
         let response = &mut judged.response;
-        let conn = db::open_read(&self.database)?;
+        let conn = self.reader()?;
         let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
         let mut inside = std::collections::HashSet::new();
         for hit in &response.hits {
@@ -270,7 +313,7 @@ impl CatalogIndex {
                 || false,
             )?)
         };
-        let conn = db::open_read(&self.database)?;
+        let conn = self.reader()?;
         let tx = conn.unchecked_transaction()?;
         let keyword = if mode == "semantic" {
             vec![]

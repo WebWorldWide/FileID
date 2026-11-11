@@ -272,16 +272,19 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
         let results = Mutex::new(Vec::<FileResult>::new());
         std::thread::scope(|scope| {
             for _ in 0..EXTRACTION_THREADS.min(files.max(1)) {
+                // As Swift's `extractOneFile` (`DispatchQueue.global(qos: .userInitiated)`):
+                // Vision and the HEVC decoder schedule by the caller's QoS.
                 scope.spawn(|| {
-                    user_initiated_qos();
-                    loop {
-                        if cancelled() {
-                            return;
+                    crate::util::qos::interactive(|| {
+                        loop {
+                            if cancelled() {
+                                return;
+                            }
+                            let Some(rows) = queue.lock().pop() else { return };
+                            let result = extract_one(rows, extractor);
+                            results.lock().push(result);
                         }
-                        let Some(rows) = queue.lock().pop() else { return };
-                        let result = extract_one(rows, extractor);
-                        results.lock().push(result);
-                    }
+                    })
                 });
             }
         });
@@ -331,18 +334,6 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
             return Ok(total);
         }
         cursor = last;
-    }
-}
-
-/// Runs the calling worker at the QoS of the Swift engine's `extractOneFile`
-/// (`DispatchQueue.global(qos: .userInitiated)`): Vision and the hardware HEVC
-/// decoder schedule work by the caller's QoS, so default-QoS workers lose the
-/// Neural Engine and GPU to other work (DECISIONS 2026-11-11).
-pub(crate) fn user_initiated_qos() {
-    #[cfg(target_os = "macos")]
-    // SAFETY: changes only the calling thread's QoS class.
-    unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0);
     }
 }
 

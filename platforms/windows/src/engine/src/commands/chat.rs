@@ -107,7 +107,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     }
     let summarizing = request.action == "history" && summary_running(&conversation);
     let action = request.action.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         let Some(database) = database else {
             bail!("The catalog database is unavailable")
         };
@@ -125,7 +125,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
         }
         
         execute_with(&mut database.lock(), &request, &no_semantic)
-    })
+    }))
     .await;
     let mut response = match result {
         Ok(Ok(response)) => response,
@@ -191,7 +191,7 @@ fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, se
 }
 
 pub(super) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(work).await.map_err(|error| anyhow!(error))?
+    tokio::task::spawn_blocking(move || crate::util::qos::interactive(work)).await.map_err(|error| anyhow!(error))?
 }
 
 async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request: ChatRequest, model: &str) -> Result<()> {

@@ -106,7 +106,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
         return;
     }
 
-    let result = tokio::task::spawn_blocking(move || embed_text_blocking(&payload.query)).await;
+    let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| embed_text_blocking(&payload.query))).await;
 
     match result {
         Ok(Ok(embedding)) => {
