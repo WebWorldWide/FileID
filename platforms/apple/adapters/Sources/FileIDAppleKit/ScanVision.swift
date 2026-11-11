@@ -1,5 +1,5 @@
 // Stage 5: Vision for the scan. The primary pass and the OCR tiers run the Swift
-// engine's VisionWorker and TextReading (ScanShared/), and the text read and
+// engine's VisionWorker and TextReading (FileIDImaging), and the text read and
 // the scanned-PDF read follow Tagging.processImage / processPDF step for step,
 // so the Rust host stores the same tags, faces and text as the Swift engine.
 import CoreGraphics

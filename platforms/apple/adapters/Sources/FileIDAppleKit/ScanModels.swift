@@ -1,6 +1,6 @@
 // Stage 5: CLIP image embeddings and RAM++ tags on the GPU through MLX, as the
 // Swift engine's MobileCLIPService and RamPlusService run them: the same MLX
-// graphs (ScanShared/CLIPVisionMLX.swift, RamPlusMLX.swift) behind the same
+// graphs (FileIDImaging CLIPVisionMLX, RamPlusMLX) behind the same
 // GPURequestBatcher, one queue and MLX stream per model so concurrent scan
 // workers share GPU batches. Preprocessing and tag selection follow those
 // services line for line. The Rust engine checks the model files against the
