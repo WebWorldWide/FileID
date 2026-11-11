@@ -237,11 +237,11 @@ pub struct Summary {
 /// faces (`skip` left out), photos read on a few threads outside the catalog
 /// lock, vectors saved and failures recorded per batch, crop JPEGs written to
 /// `crops` for saved faces. Stops between photos once `cancelled` turns true.
-pub fn extract_pending(
+pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
     database: &Arc<Mutex<Connection>>,
     extractor: &dyn Extractor,
     processing: &str,
-    skip: &HashSet<i64>,
+    skip: &HashSet<i64, S>,
     crops: Option<&Path>,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> rusqlite::Result<Summary> {

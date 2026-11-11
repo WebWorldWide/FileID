@@ -285,7 +285,7 @@ mod tests {
 
     /// Prints the fixture's expected values: `cargo test print_aligned_fixture -- --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "prints fixture values"]
     fn print_aligned_fixture() {
         for case in aligned_fixtures() {
             println!("{} {:?}", case.name, aligned_actual(&case));

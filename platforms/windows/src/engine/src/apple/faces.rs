@@ -491,7 +491,7 @@ impl VisionFaces {
                     }
                 }
             } else {
-                eyes.iter_mut().for_each(|eye| *eye = None);
+                eyes.fill(None);
             }
         }
         let faces = analysis

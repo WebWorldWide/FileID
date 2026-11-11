@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "prints fixture values"]
     fn print_padded_fixture() {
         for case in padded_fixtures() {
             println!("PAD {} {:?}", case.bbox, padded_crop_rect(&case.bbox, case.width, case.height, case.orientation));
