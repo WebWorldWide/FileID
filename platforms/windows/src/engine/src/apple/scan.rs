@@ -43,7 +43,6 @@ fn take_json<T: for<'de> Deserialize<'de>>(pointer: *mut c_char) -> Option<T> {
 pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
-    dhash: String,
     #[serde(default)]
     pub camera_model: Option<String>,
     #[serde(default)]
@@ -52,13 +51,6 @@ pub struct ImageInfo {
     pub lon: Option<f64>,
     #[serde(default)]
     pub captured_at: Option<f64>,
-}
-
-impl ImageInfo {
-    /// The Swift engine's 9x8 CoreGraphics dHash, stored bit for bit.
-    pub fn dhash(&self) -> i64 {
-        self.dhash.parse::<u64>().map(|hash| hash as i64).unwrap_or(0)
-    }
 }
 
 /// A decoded image held by the adapter, released on drop.
@@ -157,6 +149,14 @@ pub struct PdfRead {
 }
 
 impl Image {
+    /// The Swift engine's 9x8 CoreGraphics dHash, stored bit for bit. Call it
+    /// after Vision and CLIP: a JPEG-backed image keeps the decode its first
+    /// draw needed, and a 9x8 draw first would leave CLIP a coarse decode.
+    pub fn dhash(&self) -> i64 {
+        // SAFETY: plain handle argument.
+        unsafe { ffi::fileid_apple_image_dhash(self.id) as i64 }
+    }
+
     /// Packed sRGB RGB8 at the image's own size.
     pub fn rgb(&self) -> Option<(Vec<u8>, u32, u32)> {
         let (mut pixels, mut length, mut width, mut height) = (std::ptr::null_mut::<u8>(), 0usize, 0u32, 0u32);
@@ -300,7 +300,7 @@ mod tests {
         let size = std::fs::metadata(&path).unwrap().len();
         let image = decode_image(&path, size).expect("decode");
         assert_eq!((image.info.width, image.info.height), (640, 480));
-        assert!(image.info.dhash().count_ones() >= 56, "a left-bright gradient sets nearly every bit");
+        assert!(image.dhash().count_ones() >= 56, "a left-bright gradient sets nearly every bit");
         assert!(image.info.camera_model.is_none());
         let (rgb, w, h) = image.rgb().expect("pixels");
         assert_eq!(rgb.len(), (w * h * 3) as usize);
@@ -361,3 +361,4 @@ mod tests {
         assert!(video_keyframe(&path, 512, Duration::from_secs(6)).is_none());
     }
 }
+

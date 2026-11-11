@@ -60,14 +60,18 @@ void fileid_apple_bookmark_close(uint64_t lease);
 /* The scan's working image (Tagging.loadImageAndEXIF: ImageIO, MPF and RAW
  * previews, the VideoToolbox HEIF decoder; long edge max_pixel_size, 0 for
  * FILEID_SCAN_MAX_PIXELS or 1536). *out_image receives the handle. JSON:
- * width, height, dhash (decimal string), cameraModel, lat, lon, capturedAt. */
+ * width, height, cameraModel, lat, lon, capturedAt. */
 char *fileid_apple_image_decode(const char *path, int64_t size_bytes,
                                 uint32_t max_pixel_size, uint64_t *out_image);
 
 /* AVFoundation keyframe at a quarter of the duration, abandoned after
- * timeout_ms. JSON: width, height, dhash. */
+ * timeout_ms. JSON: width, height. */
 char *fileid_apple_video_keyframe(const char *path, uint32_t max_pixel_size,
                                   uint32_t timeout_ms, uint64_t *out_image);
+
+/* The Swift scan's 9x8 CoreGraphics dHash. Call it after Vision and CLIP have
+ * read the image: a JPEG-backed image keeps the decode its first draw needed. */
+uint64_t fileid_apple_image_dhash(uint64_t image);
 
 /* Packed sRGB RGB8 of an image (free *out_pixels with fileid_apple_free). */
 bool fileid_apple_image_rgb(uint64_t image, uint8_t **out_pixels, size_t *out_length,

@@ -232,7 +232,7 @@ enum ScanVideo {
 }
 
 private func scanImageInfo(_ image: CGImage, exif: ScanDecode.EXIF?) -> [String: Any] {
-    var info: [String: Any] = ["width": image.width, "height": image.height, "dhash": String(ScanDecode.dHash(image))]
+    var info: [String: Any] = ["width": image.width, "height": image.height]
     if let exif {
         info["cameraModel"] = exif.cameraModel
         info["lat"] = exif.lat
@@ -287,6 +287,15 @@ public func fileid_apple_video_keyframe(
         outImage?.pointee = ScanImages.shared.insert(image)
         return scanJSON(info)
     }
+}
+
+/// The image's dHash. Call it after Vision and CLIP have read the image, as
+/// Tagging.processImage does: a JPEG-backed image keeps the decode its first
+/// draw needed, so a 9x8 draw first would leave CLIP a coarse decode.
+@_cdecl("fileid_apple_image_dhash")
+public func fileid_apple_image_dhash(_ image: UInt64) -> UInt64 {
+    guard let cgImage = ScanImages.shared.image(image) else { return 0 }
+    return autoreleasepool { ScanDecode.dHash(cgImage) }
 }
 
 @_cdecl("fileid_apple_image_rgb")

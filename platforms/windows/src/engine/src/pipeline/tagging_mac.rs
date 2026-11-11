@@ -392,7 +392,7 @@ async fn image_row(
         let ram = if RAM_PLUS_READY.load(Ordering::Acquire) { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
-        Some((pass, ram, read))
+        Some((pass, ram, read, image.dhash()))
     })
     .await
     .flatten();
@@ -400,7 +400,7 @@ async fn image_row(
     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
     let (clip, clip_elapsed) = clip_task.await.unwrap_or((None, Duration::ZERO));
     STATS_CLIP_US.fetch_add(clip_elapsed.as_micros() as u64, Ordering::Relaxed);
-    let Some((pass, ram, read)) = analysis else {
+    let Some((pass, ram, read, dhash)) = analysis else {
         row.failed = true;
         row.error_message = Some(VISION_TIMEOUT.into());
         return;
@@ -414,7 +414,7 @@ async fn image_row(
     row.captured_from_exif = info.captured_at.is_some();
     row.image_width = info.width;
     row.image_height = info.height;
-    row.phash = Some(info.dhash());
+    row.phash = Some(dhash);
     row.aesthetic = Some(aesthetic(info.width, info.height, file.size_bytes));
     row.camera_model = info.camera_model.clone();
     row.location_lat = info.lat;

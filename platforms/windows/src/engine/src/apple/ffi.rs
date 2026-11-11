@@ -41,6 +41,8 @@ unsafe extern "C" {
     pub fn fileid_apple_image_decode(path: *const c_char, size_bytes: i64, max_pixel_size: u32, out_image: *mut u64) -> *mut c_char;
     /// AVFoundation keyframe at a quarter of the duration. JSON info.
     pub fn fileid_apple_video_keyframe(path: *const c_char, max_pixel_size: u32, timeout_ms: u32, out_image: *mut u64) -> *mut c_char;
+    /// The Swift scan's dHash; after Vision and CLIP have read the image.
+    pub fn fileid_apple_image_dhash(image: u64) -> u64;
     /// Packed sRGB RGB8 of an image; free `out_pixels` with `fileid_apple_free`.
     pub fn fileid_apple_image_rgb(
         image: u64,
