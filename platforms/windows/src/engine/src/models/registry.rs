@@ -65,6 +65,9 @@ struct Bundle {
 /// destination under the models root. URLs, SHA256 pins, sizes and licenses
 /// come only from `shared/models/manifest.json`.
 fn bundle(model_kind: &str) -> Option<Bundle> {
+    if paths::APP_HOSTED && let Some(bundle) = mac_app_bundle(model_kind) {
+        return Some(bundle);
+    }
     let (id, display_name, files): (_, _, &'static [_]) = match model_kind {
         // YuNet detection + SFace recognition. The id "arcface" and its
         // aliases keep the C# install slot, sentinel and pre-scan gate unchanged.
@@ -140,6 +143,25 @@ fn bundle(model_kind: &str) -> Option<Bundle> {
     Some(Bundle { id, display_name, files })
 }
 
+/// The engine the Mac app hosts installs what the app's own installers did
+/// (`ModelInstaller`, `CLIPModelInstaller`), where they put it: faces need
+/// only SFace (Vision detects them), and SFace and the CLIP image encoder use
+/// the app's file names. The other bundles already share their paths.
+fn mac_app_bundle(model_kind: &str) -> Option<Bundle> {
+    let (id, display_name, files): (_, _, &'static [_]) = match model_kind {
+        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" | "yunet_sface" | "sface" => {
+            ("arcface", "Face recognition", &[("sface_embedder", "face_recognition_sface_2021dec.onnx")])
+        }
+        "mobileclip_s2" | "mobileclip" => (
+            "mobileclip_s2",
+            "CLIP ViT-B/32 image encoder",
+            &[("clip_vitb32_image", "mobileclip_image/clip_vitb32_image.onnx")],
+        ),
+        _ => return None,
+    };
+    Some(Bundle { id, display_name, files })
+}
+
 /// Resolve a model_kind string into a downloadable bundle: a curated manifest
 /// bundle, else a runnable catalog model. Every file carries its mandatory
 /// SHA256 pin, which the downloader verifies. A manifest that fails validation
@@ -152,6 +174,8 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
     };
     let model = match bundle(vlm_dir_name(model_kind).unwrap_or(model_kind)) {
         Some(bundle) => manifest_model(&models_root, &bundle),
+        // The Mac app runs no GGUF models; its MLX models resolve in `mlx`.
+        None if paths::APP_HOSTED => None,
         None => catalog_model(&models_root, model_kind),
     };
     model.map_or(LookupResult::Unknown, LookupResult::Found)
@@ -162,7 +186,8 @@ fn manifest_model(models_root: &Path, bundle: &Bundle) -> Option<Model> {
         .files
         .iter()
         .map(|&(artifact_id, dest)| {
-            let artifact = super::manifest::artifact(artifact_id).filter(|artifact| artifact.platforms.iter().any(|p| p == "windows"))?;
+            let platform = if paths::APP_HOSTED { "macos" } else { "windows" };
+            let artifact = super::manifest::artifact(artifact_id).filter(|artifact| artifact.platforms.iter().any(|p| p == platform))?;
             Some(FileEntry {
                 url: artifact.url(),
                 dest: dest.split('/').fold(models_root.to_path_buf(), |path, part| path.join(part)),

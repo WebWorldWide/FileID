@@ -1221,6 +1221,43 @@ async fn download_range_with_retry(
     }
 }
 
+/// The file listing of one pinned Hugging Face repo revision (the Mac app's
+/// MLX models), fetched through [`download_simple`] — the same allowlisted,
+/// CA-pinned, redirect-checked path as model files — into `scratch`, read back
+/// and removed. The caller verifies every listed file it then downloads.
+pub async fn fetch_repo_listing(
+    client: Arc<reqwest::Client>,
+    repo: &str,
+    revision: &str,
+    scratch: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<u8>> {
+    const MAX_LISTING_BYTES: u64 = 8 * 1024 * 1024;
+    let well_formed = repo.split('/').count() == 2
+        && repo.bytes().all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+        && !repo.contains("..")
+        && revision.len() == 40
+        && revision.bytes().all(|b| b.is_ascii_hexdigit());
+    anyhow::ensure!(well_formed, "refusing to list an unpinned model repository");
+    let request = DownloadRequest {
+        url: format!("https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true"),
+        destination: scratch.to_path_buf(),
+        expected_sha256: None,
+        expected_bytes: None,
+    };
+    let fetched = download_simple(client, request, cancel, |_| {}).await;
+    let bytes = match fetched {
+        Ok(()) => match tokio::fs::metadata(scratch).await {
+            Ok(meta) if meta.len() <= MAX_LISTING_BYTES => tokio::fs::read(scratch).await.context("reading the model file listing"),
+            Ok(_) => Err(anyhow::anyhow!("the model file listing is too large")),
+            Err(err) => Err(anyhow::Error::new(err).context("reading the model file listing")),
+        },
+        Err(err) => Err(err),
+    };
+    let _ = tokio::fs::remove_file(scratch).await;
+    bytes
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Blocking model installer.
 //

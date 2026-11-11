@@ -20,6 +20,7 @@ use crate::downloader::{
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, IpcEvent, ModelDownloadProgress, Wrap,
 };
+use crate::models::mlx;
 use crate::models::registry::{self, LookupResult, ModelFile};
 use crate::platform;
 use crate::util;
@@ -145,6 +146,99 @@ fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'stat
     }
 }
 
+/// The Mac app's MLX models (app-hosted engine only), as `VLMDownloader`
+/// fetches them: a verified install needs no network; otherwise the pinned
+/// revision's file listing becomes the download plan. `None` when the prewarm
+/// has already reported its outcome.
+async fn prepare_repo_install(
+    sink: &Sink,
+    model_kind: &str,
+    repo: &'static mlx::Repo,
+    http_client: &Arc<reqwest::Client>,
+    cancel: &Arc<AtomicBool>,
+) -> Option<mlx::Plan> {
+    if !mlx::terms_accepted(repo) {
+        let message = format!("Open FileID and accept the {} before downloading or using {}.", mlx::license_name(repo), repo.display_name);
+        sink.send(EngineError::new("model_license_not_accepted", message).with_model(model_kind.to_string()).into_event()).await;
+        return None;
+    }
+    let verified = tokio::task::spawn_blocking(move || mlx::installed(repo) && mlx::mark_installed(repo).is_ok()).await.unwrap_or(false);
+    if verified {
+        sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(ModelDownloadProgress {
+            model_kind: model_kind.to_string(),
+            fraction: 1.0,
+            message: format!("{} already installed", repo.display_name),
+            bytes_done: None,
+            total_bytes: None,
+        }))))
+        .await;
+        tracing::info!(model_kind, outcome = "already_installed", "[PREWARM] exiting");
+        return None;
+    }
+    let failed = |message: String| EngineError::new("prewarm_failed", format!("Prewarm {} failed: {message}", repo.display_name)).with_model(model_kind.to_string()).into_event();
+    let Some(dir) = mlx::model_dir(repo) else {
+        sink.send(failed("FileID couldn't resolve its Hugging Face model folder.".into())).await;
+        return None;
+    };
+    if crate::util::read_only::require_writable(&dir).and_then(|()| std::fs::create_dir_all(&dir)).is_err() {
+        sink.send(failed("The model folder isn't writable.".into())).await;
+        return None;
+    }
+    let scratch = dir.join(format!(".fileid-listing-{}.json", std::process::id()));
+    let listing = match crate::downloader::fetch_repo_listing(http_client.clone(), repo.repo, repo.revision, &scratch, cancel.clone()).await {
+        Ok(listing) => listing,
+        Err(err) => {
+            if cancel.load(Ordering::Relaxed) {
+                sink.send(EngineError::new("prewarm_cancelled", format!("Download of {model_kind} cancelled.")).with_model(model_kind.to_string()).into_event()).await;
+                return None;
+            }
+            tracing::warn!(model_kind, "model file listing failed; details suppressed");
+            let (kind, hint) = download_failure_kind_and_hint(crate::downloader::chain_has_pin_failure(&err), crate::downloader::chain_has_disk_full(&err));
+            sink.send(EngineError::new(kind, format!("Couldn't list the files of {}.\n\n{hint}", repo.display_name)).with_model(model_kind.to_string()).into_event()).await;
+            return None;
+        }
+    };
+    match tokio::task::spawn_blocking(move || mlx::parse_listing(&listing).and_then(|files| mlx::plan(repo, files))).await {
+        Ok(Ok(plan)) => Some(plan),
+        Ok(Err(err)) => {
+            sink.send(failed(err.to_string())).await;
+            None
+        }
+        Err(_) => {
+            sink.send(failed("The download plan could not be made.".into())).await;
+            None
+        }
+    }
+}
+
+/// Attest every file of an MLX install in the Swift engine's record format
+/// (`.fileid-verified-<revision>` + `-v2`) and drop `.fileid-installed`.
+async fn finish_repo_install(sink: &Sink, model_kind: &str, plan: mlx::Plan, total_bytes: u64) {
+    let display_name = plan.repo.display_name;
+    match tokio::task::spawn_blocking(move || mlx::finish(&plan)).await {
+        Ok(Ok(())) => {
+            sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(ModelDownloadProgress {
+                model_kind: model_kind.to_string(),
+                fraction: 1.0,
+                message: format!("{display_name} installed"),
+                bytes_done: Some(total_bytes),
+                total_bytes: Some(total_bytes),
+            }))))
+            .await;
+            tracing::info!(model_kind, outcome = "installed", "[PREWARM] exiting");
+        }
+        outcome => {
+            let reason = match outcome {
+                Ok(Err(err)) => err.to_string(),
+                _ => "verification stopped unexpectedly".into(),
+            };
+            let message = format!("Couldn't verify {display_name}: {reason}. The model was not marked installed; try again.");
+            sink.send(EngineError::new("model_integrity_failed", message).with_model(model_kind.to_string()).into_event()).await;
+            tracing::warn!(model_kind, outcome = "verification_failed", "[PREWARM] exiting");
+        }
+    }
+}
+
 #[cfg(test)]
 async fn write_install_sentinel(model: &registry::Model, tmp: &std::path::Path) -> std::io::Result<()> {
     let body = registry::installation_attestation(model)
@@ -251,7 +345,16 @@ pub(crate) async fn handle_prewarm_model(
         return;
     }
 
-    let model = match registry::lookup_full(&model_kind) {
+    let repo_plan = match mlx::repo(&model_kind) {
+        Some(repo) => match prepare_repo_install(&sink, &model_kind, repo, &http_client, &cancel).await {
+            Some(plan) => Some(plan),
+            None => return,
+        },
+        None => None,
+    };
+
+    let found = repo_plan.as_ref().map(|plan| LookupResult::Found(plan.fetch.clone()));
+    let model = match found.unwrap_or_else(|| registry::lookup_full(&model_kind)) {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => {
             sink.send(EngineError::new(
@@ -561,6 +664,11 @@ pub(crate) async fn handle_prewarm_model(
             }
         }
         per_file_done[idx].store(file.approx_bytes, Ordering::Relaxed);
+    }
+
+    if let Some(plan) = repo_plan {
+        finish_repo_install(&sink, &model_kind, plan, total_bytes_estimate).await;
+        return;
     }
 
     // Atomic write so a kill mid-write can never leave a half-written

@@ -52,6 +52,11 @@ fn platform() -> &'static str {
 pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -> Vec<ModelCatalogItem> {
     let mut items = Vec::new();
     let measured = crate::models::benchmark::local_results();
+    // The engine the Mac app hosts serves the app's MLX models, as the Swift
+    // engine does; GGUF models never run there.
+    if crate::paths::APP_HOSTED {
+        return crate::models::mlx::catalog_items(role, physical_memory_gb, &measured);
+    }
     if role.is_none_or(|r| r == "vision") {
         for model in &CURATED_VISION {
             let registry::LookupResult::Found(found) = registry::lookup_full(model.kind) else { continue };
@@ -120,7 +125,7 @@ pub async fn handle(sink: Sink, payload: ListModelsPayload) {
     }
     let catalog = tokio::task::spawn_blocking(move || {
         let physical_memory_gb = crate::platform::physical_memory_gb();
-        let vram_mb = crate::platform::dedicated_vram_mb().unwrap_or(0);
+        let vram_mb = if crate::paths::APP_HOSTED { 0 } else { crate::platform::dedicated_vram_mb().unwrap_or(0) };
         ModelCatalog { request_id: payload.request_id, physical_memory_gb, vram_mb, models: build(payload.role.as_deref(), physical_memory_gb, vram_mb) }
     })
     .await;
