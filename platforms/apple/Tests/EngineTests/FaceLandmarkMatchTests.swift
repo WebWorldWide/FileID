@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import CoreGraphics
+import CryptoKit
 @testable import FileIDEngine
 
 @Suite struct FaceLandmarkMatchTests {
@@ -23,6 +24,73 @@ import CoreGraphics
                 let actual = try #require(fit)
                 for (a, e) in zip([actual.0, actual.1, actual.2, actual.3], expected) { #expect(abs(a - e) < 0.001) }
             } else { #expect(fit == nil) }
+        }
+    }
+
+    private struct SharedFixture: Decodable {
+        struct Aligned: Decodable { let name: String; let width: Int; let height: Int; let landmarks: [[Float]]; let fitBits: [String]?; let sha256: String? }
+        struct Padded: Decodable { let bbox: String; let width: Int; let height: Int; let orientation: Int; let expected: [Int]? }
+        let aligned: [Aligned]
+        let paddedCrops: [Padded]
+    }
+
+    private func sharedFixture() throws -> SharedFixture {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        return try JSONDecoder().decode(SharedFixture.self, from: Data(contentsOf: root.appendingPathComponent("shared/test-corpus/face-alignment.json")))
+    }
+
+    private func pattern(_ width: Int, _ height: Int) -> [UInt8] {
+        var out = [UInt8]()
+        out.reserveCapacity(width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                out += [UInt8((x * 7 + y * 13) % 256), UInt8((x * x + 3 * y) % 256), UInt8(((x ^ y) * 5) % 256), 255]
+            }
+        }
+        return out
+    }
+
+    /// The shared Rust engine's `face_align::align_112_rgba` checks the same digests.
+    @Test func sharedAlignedCropsMatchBitForBit() throws {
+        let fixture = try sharedFixture()
+        #expect(fixture.aligned.count >= 4)
+        for item in fixture.aligned {
+            let landmarks = item.landmarks.map { ($0[0], $0[1]) }
+            let fit = FaceAlign.fitSimilarity(src: landmarks, dst: FaceAlign.template)
+            let bits = fit.map { [$0.0, $0.1, $0.2, $0.3].map { String(format: "%08x", $0.bitPattern) } }
+            #expect(bits == item.fitBits, "\(item.name)")
+            let source = FaceAlign.SourcePixels(rgba: pattern(item.width, item.height), width: item.width, height: item.height)
+            let crop = FaceAlign.align112(source: source, landmarks: landmarks)
+            let digest = crop.flatMap { image -> String? in
+                guard let data = image.dataProvider?.data as Data? else { return nil }
+                return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            }
+            #expect(digest == item.sha256, "\(item.name)")
+        }
+    }
+
+    @Test func sharedPaddedCropsMatchTheRustRects() throws {
+        for item in try sharedFixture().paddedCrops {
+            let space = CGColorSpaceCreateDeviceRGB()
+            var pixels = pattern(item.width, item.height)
+            let image = try #require(pixels.withUnsafeMutableBytes { buffer in
+                CGContext(data: buffer.baseAddress, width: item.width, height: item.height, bitsPerComponent: 8, bytesPerRow: item.width * 4,
+                          space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)?.makeImage()
+            })
+            let crop = FaceClustering.cropFaceCGImage(cgImage: image, bboxString: item.bbox, sourceOrientation: item.orientation)
+            guard let expected = item.expected else { #expect(crop == nil, "\(item.bbox)"); continue }
+            let found = try #require(crop, "\(item.bbox)")
+            #expect(found.width == expected[2] && found.height == expected[3], "\(item.bbox)")
+            var first = [UInt8](repeating: 0, count: 4)
+            first.withUnsafeMutableBytes { buffer in
+                let context = CGContext(data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: space,
+                                        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+                context?.draw(found, in: CGRect(x: 0, y: 1 - found.height, width: found.width, height: found.height))
+            }
+            let origin = pattern(item.width, item.height)
+            let index = (expected[1] * item.width + expected[0]) * 4
+            #expect(Array(first[0..<3]) == Array(origin[index..<index + 3]), "\(item.bbox) origin")
         }
     }
 

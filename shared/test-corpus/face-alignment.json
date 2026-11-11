@@ -141,5 +141,230 @@
       ],
       "expected": null
     }
+  ],
+  "pattern": "Aligned sources are RGBA8, row-major from the top-left: pixel (x, y) = [(x*7 + y*13) % 256, (x*x + 3*y) % 256, ((x XOR y) * 5) % 256, 255]. fitBits are the IEEE-754 bits of (a, b, tx, ty); sha256 is of the 112x112 RGBA8 crop (FaceAlign.align112 / face_align::align_112_rgba). paddedCrops are the integral pixel rects (top-left origin) of FaceClustering.cropFaceCGImage / face_landmark_match::padded_crop_rect.",
+  "aligned": [
+    {
+      "name": "near-template",
+      "width": 160,
+      "height": 120,
+      "landmarks": [
+        [
+          97.5318,
+          69.5014
+        ],
+        [
+          62.2946,
+          69.6963
+        ],
+        [
+          80.0252,
+          89.7366
+        ],
+        [
+          94.7299,
+          110.2041
+        ],
+        [
+          65.5493,
+          110.3655
+        ]
+      ],
+      "fitBits": [
+        "3f800000",
+        "b355a99c",
+        "c1c00002",
+        "c18ffffe"
+      ],
+      "sha256": "694c568df8bbd63acc59b53efd94a7cae4de75da54a4072a55fab656cf81c2b3"
+    },
+    {
+      "name": "tilted-face",
+      "width": 160,
+      "height": 120,
+      "landmarks": [
+        [
+          100.25,
+          46.5
+        ],
+        [
+          60.75,
+          50.125
+        ],
+        [
+          82.5,
+          70.0
+        ],
+        [
+          98.0,
+          90.5
+        ],
+        [
+          66.25,
+          92.75
+        ]
+      ],
+      "fitBits": [
+        "3f6bc5a1",
+        "3d3cfbe2",
+        "c17d9fff",
+        "406c4e8e"
+      ],
+      "sha256": "ece8a46e225aabdacf62a5f90f8f60b0714d4994fb68b733216a314f3541b5b6"
+    },
+    {
+      "name": "small-face-upscaled",
+      "width": 64,
+      "height": 48,
+      "landmarks": [
+        [
+          28.4,
+          20.2
+        ],
+        [
+          20.1,
+          20.6
+        ],
+        [
+          24.3,
+          24.9
+        ],
+        [
+          27.6,
+          28.8
+        ],
+        [
+          21.0,
+          29.1
+        ]
+      ],
+      "fitBits": [
+        "4091e728",
+        "3da0f6a4",
+        "c252f078",
+        "c22adec6"
+      ],
+      "sha256": "b21b1d6adbfeca8e16dd8b1782847076774da9622e6a57ca0a65470c3ef55b38"
+    },
+    {
+      "name": "off-frame-corner",
+      "width": 96,
+      "height": 80,
+      "landmarks": [
+        [
+          30.0,
+          6.0
+        ],
+        [
+          4.0,
+          8.0
+        ],
+        [
+          16.0,
+          22.0
+        ],
+        [
+          28.0,
+          36.0
+        ],
+        [
+          6.0,
+          37.0
+        ]
+      ],
+      "fitBits": [
+        "3fae501c",
+        "3cdbd04f",
+        "4206ee1f",
+        "42270c9e"
+      ],
+      "sha256": "a346452e75ea7e75abf76f6fd761cd75ea189fd87ba03267efe435947545d655"
+    },
+    {
+      "name": "degenerate",
+      "width": 32,
+      "height": 32,
+      "landmarks": [
+        [
+          10,
+          10
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          10,
+          10
+        ]
+      ],
+      "fitBits": null,
+      "sha256": null
+    }
+  ],
+  "paddedCrops": [
+    {
+      "bbox": "0.4,0.4,0.2,0.2",
+      "width": 1000,
+      "height": 500,
+      "orientation": 1,
+      "expected": [
+        370,
+        185,
+        260,
+        130
+      ]
+    },
+    {
+      "bbox": "0.0,0.0,0.1,0.1",
+      "width": 1000,
+      "height": 500,
+      "orientation": 1,
+      "expected": [
+        0,
+        435,
+        130,
+        65
+      ]
+    },
+    {
+      "bbox": "0.8123,0.6017,0.1733,0.2591",
+      "width": 2048,
+      "height": 1365,
+      "orientation": 6,
+      "expected": [
+        1610,
+        136,
+        438,
+        461
+      ]
+    },
+    {
+      "bbox": "0.5,0.5,0.004,0.004",
+      "width": 1000,
+      "height": 1000,
+      "orientation": 1,
+      "expected": null
+    },
+    {
+      "bbox": "{\"x\":100,\"y\":50,\"w\":200,\"h\":220}",
+      "width": 640,
+      "height": 480,
+      "orientation": 1,
+      "expected": [
+        70,
+        16,
+        260,
+        287
+      ]
+    }
   ]
 }

@@ -78,6 +78,41 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
     Some(out)
 }
 
+/// The macOS engine's alignment (`FaceAlign.align112` over one rendered
+/// buffer): RGBA8 in (tightly packed, top-left origin), 112×112 RGBA8 out with
+/// alpha 255, and no off-frame rejection. Kept bit-identical to the Swift code
+/// so a face embedded here lands in the `macos-landmark-overlap-v3-orientation`
+/// space next to the Swift engine's vectors (`face-alignment.json` pins it).
+pub fn align_112_rgba(rgba: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5]) -> Option<Vec<u8>> {
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 || rgba.len() != expected {
+        return None;
+    }
+    let (a, b, tx, ty) = fit_similarity(landmarks, &TEMPLATE)?;
+    let det = a * a + b * b;
+    if !det.is_finite() || det.abs() < 1e-9 {
+        return None;
+    }
+    let mut out = vec![255u8; OUT * OUT * 4];
+    for oy in 0..OUT {
+        for ox in 0..OUT {
+            let dx = ox as f32 - tx;
+            let dy = oy as f32 - ty;
+            let sx = (a * dx + b * dy) / det;
+            let sy = (-b * dx + a * dy) / det;
+            let px = bilinear_strided(rgba, 4, width, height, sx, sy);
+            let o = (oy * OUT + ox) * 4;
+            out[o..o + 3].copy_from_slice(&px);
+        }
+    }
+    Some(out)
+}
+
+/// The similarity fit `align_112_rgba` uses, exposed for the shared fixtures.
+pub fn fit_to_template(src: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
+    fit_similarity(src, &TEMPLATE)
+}
+
 /// Least-squares 2D similarity fit: solve (a, b, tx, ty) minimizing
 /// Σ ‖[[a,-b],[b,a]]·src_i + [tx,ty] - dst_i‖² via the 4×4 normal equations.
 fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
@@ -146,6 +181,12 @@ fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
 
 /// Bilinear RGB sample with edge clamping.
 fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
+    bilinear_strided(rgb, 3, width, height, x, y)
+}
+
+/// Bilinear RGB sample with edge clamping from pixels `stride` bytes apart
+/// (3 for RGB, 4 for RGBA with alpha ignored).
+fn bilinear_strided(pixels: &[u8], stride: usize, width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
     let x = x.clamp(0.0, (width - 1) as f32);
     let y = y.clamp(0.0, (height - 1) as f32);
     let (w, h) = (width as i32, height as i32);
@@ -156,8 +197,8 @@ fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
     let sample = |xi: i32, yi: i32| -> [f32; 3] {
         let xc = xi.clamp(0, w - 1) as usize;
         let yc = yi.clamp(0, h - 1) as usize;
-        let o = (yc * (width as usize) + xc) * 3;
-        [f32::from(rgb[o]), f32::from(rgb[o + 1]), f32::from(rgb[o + 2])]
+        let o = (yc * (width as usize) + xc) * stride;
+        [f32::from(pixels[o]), f32::from(pixels[o + 1]), f32::from(pixels[o + 2])]
     };
     let p00 = sample(x0, y0);
     let p10 = sample(x0 + 1, y0);
@@ -191,6 +232,83 @@ mod tests {
                 for (actual, target) in [a,b,x,y].into_iter().zip(expected) { assert!((actual-target).abs() < 0.001); }
             } else { assert!(fit.is_none()); }
         }
+    }
+
+    /// The source image the shared fixture describes in `pattern`.
+    fn pattern(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                out.extend_from_slice(&[((x * 7 + y * 13) % 256) as u8, ((x * x + 3 * y) % 256) as u8, (((x ^ y) * 5) % 256) as u8, 255]);
+            }
+        }
+        out
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Aligned {
+        name: String,
+        width: u32,
+        height: u32,
+        landmarks: [[f32; 2]; 5],
+        #[serde(rename = "fitBits")]
+        fit_bits: Option<[String; 4]>,
+        sha256: Option<String>,
+    }
+
+    fn aligned_fixtures() -> Vec<Aligned> {
+        #[derive(serde::Deserialize)]
+        struct Fixture { aligned: Vec<Aligned> }
+        let fixture: Fixture = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/face-alignment.json")).unwrap();
+        fixture.aligned
+    }
+
+    fn aligned_actual(case: &Aligned) -> (Option<[String; 4]>, Option<String>) {
+        use sha2::Digest;
+        let fit = fit_to_template(&case.landmarks).map(|(a, b, x, y)| [a, b, x, y].map(|v| format!("{:08x}", v.to_bits())));
+        let crop = align_112_rgba(&pattern(case.width, case.height), case.width, case.height, &case.landmarks);
+        (fit, crop.map(|bytes| hex::encode(sha2::Sha256::digest(&bytes))))
+    }
+
+    /// Bit for bit with the Swift engine's `FaceAlign` (FaceLandmarkMatchTests
+    /// checks the same fixture).
+    #[test]
+    fn shared_aligned_crops_match_bit_for_bit() {
+        let cases = aligned_fixtures();
+        assert!(cases.len() >= 4);
+        for case in &cases {
+            let (fit, digest) = aligned_actual(case);
+            assert_eq!(fit, case.fit_bits, "{} fit", case.name);
+            assert_eq!(digest, case.sha256, "{} crop", case.name);
+        }
+    }
+
+    /// Prints the fixture's expected values: `cargo test print_aligned_fixture -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_aligned_fixture() {
+        for case in aligned_fixtures() {
+            println!("{} {:?}", case.name, aligned_actual(&case));
+        }
+    }
+
+    #[test]
+    fn rgba_alignment_keeps_alpha_and_needs_a_full_buffer() {
+        let mut lm = TEMPLATE;
+        for p in &mut lm {
+            p[0] += 24.0;
+            p[1] += 24.0;
+        }
+        let crop = align_112_rgba(&pattern(160, 160), 160, 160, &lm).unwrap();
+        assert_eq!(crop.len(), 112 * 112 * 4);
+        assert!(crop.chunks(4).all(|px| px[3] == 255));
+        assert!(align_112_rgba(&pattern(160, 160)[4..], 160, 160, &lm).is_none());
+        let mut far = TEMPLATE;
+        for p in &mut far {
+            p[0] += 90.0;
+            p[1] += 90.0;
+        }
+        assert!(align_112_rgba(&pattern(60, 60), 60, 60, &far).is_some(), "the Mac pipeline keeps off-frame crops");
     }
 
     #[test]
