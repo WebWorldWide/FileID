@@ -27,7 +27,7 @@ let package = Package(
         .executable(name: "FileIDEngine", targets: ["FileIDEngine"]),
         // Swift adapters the shared Rust engine (`Contents/MacOS/fileidd`)
         // links through the C interface in adapters/include/fileid_apple.h.
-        // Shipped in Contents/Frameworks. No package dependencies.
+        // Shipped in Contents/Frameworks. Links MLX for CLIP and RAM++.
         .library(name: "FileIDAppleKit", type: .dynamic, targets: ["FileIDAppleKit"])
     ],
     dependencies: [
@@ -114,10 +114,14 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
-        // Apple-framework adapters for the Rust engine (IOPM, bookmarks so
-        // far). Exports @_cdecl functions only; see adapters/include.
+        // Apple-framework adapters for the Rust engine. Exports @_cdecl
+        // functions only; see adapters/include. ScanShared/ links the Swift
+        // engine's decode, Vision and MLX sources so both engines run the same code.
         .target(
             name: "FileIDAppleKit",
+            dependencies: [
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
             path: "adapters/Sources/FileIDAppleKit",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
