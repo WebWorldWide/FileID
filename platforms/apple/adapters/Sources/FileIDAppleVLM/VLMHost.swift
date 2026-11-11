@@ -5,6 +5,7 @@
 // maps requests onto the engine's MLX code.
 import AVFoundation
 import CoreImage
+import FileIDImaging
 import Foundation
 import ImageIO
 import MLX

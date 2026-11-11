@@ -6,6 +6,7 @@
 //! writes, job policy and ranking stay in Rust.
 
 mod ffi;
+pub mod scan;
 pub mod vlm;
 
 use std::ffi::{CStr, CString, OsString, c_char};
@@ -40,6 +41,7 @@ pub fn run_hosted() -> ! {
         eprintln!("FileIDEngine: FileIDAppleKit interface {abi}, engine expects {ABI_VERSION}");
         hard_exit(EXIT_ABI_MISMATCH);
     }
+    scan::start_ocr_warmup_when_idle();
     let code = match crate::server::run() {
         Ok(()) => 0,
         Err(error) => {

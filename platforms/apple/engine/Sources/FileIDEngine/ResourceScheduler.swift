@@ -1,4 +1,5 @@
 import Foundation
+import FileIDImaging
 
 actor ResourceScheduler {
     struct MemoryLease: Hashable, Sendable {

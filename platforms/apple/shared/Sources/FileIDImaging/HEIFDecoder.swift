@@ -16,8 +16,8 @@ import VideoToolbox
 /// is handled: an `hvc1` image or a `grid` of `hvc1` tiles sharing one 8-bit 4:2:0
 /// configuration, sRGB or Display P3 colour, and no clean-aperture crop. Anything else
 /// returns nil and the caller uses ImageIO.
-enum HEIFDecoder {
-    static func decode(path: String, maxPixelSize: Int) -> CGImage? {
+package enum HEIFDecoder {
+    package static func decode(path: String, maxPixelSize: Int) -> CGImage? {
         guard maxPixelSize > 0, let file = try? read(path) else { return nil }
         return withExtendedLifetime(file) {
             try? decode(bytes: UnsafeBufferPointer(start: file.bytes, count: file.count), maxPixelSize: maxPixelSize)
@@ -27,11 +27,11 @@ enum HEIFDecoder {
     /// Anonymous memory straight from the kernel, unmapped when released. Large malloc
     /// blocks freed after each photo stayed resident in the allocator's cache (+420 MB of
     /// footprint during a 1,500-photo HEIC scan).
-    final class PageBuffer: @unchecked Sendable {
-        let base: UnsafeMutableRawPointer
-        let count: Int
+    package final class PageBuffer: @unchecked Sendable {
+        package let base: UnsafeMutableRawPointer
+        package let count: Int
 
-        init(count: Int) throws {
+        package init(count: Int) throws {
             guard count > 0, let pointer = mmap(nil, count, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0),
                   pointer != MAP_FAILED else { throw Unsupported() }
             base = pointer
@@ -40,22 +40,22 @@ enum HEIFDecoder {
 
         deinit { munmap(base, count) }
 
-        var bytes: UnsafeMutablePointer<UInt8> { base.assumingMemoryBound(to: UInt8.self) }
+        package var bytes: UnsafeMutablePointer<UInt8> { base.assumingMemoryBound(to: UInt8.self) }
     }
 
     /// Keeps up to `limit` bytes of released buffers for the next photo. Fresh pages cost a
     /// zero-fill fault each (a HEIC scan ran 47 instead of 55 photos/s); the cap keeps the
     /// cache from growing like malloc's.
-    final class BufferPool: @unchecked Sendable {
-        static let shared = BufferPool(limitBytes: 128 << 20)
+    package final class BufferPool: @unchecked Sendable {
+        package static let shared = BufferPool(limitBytes: 128 << 20)
         private let lock = NSLock()
         private let limit: Int
         private var cached: [PageBuffer] = []
         private var cachedBytes = 0
 
-        init(limitBytes: Int) { limit = limitBytes }
+        package init(limitBytes: Int) { limit = limitBytes }
 
-        func take(_ count: Int) throws -> PageBuffer {
+        package func take(_ count: Int) throws -> PageBuffer {
             lock.lock()
             if let index = cached.indices.filter({ cached[$0].count >= count && cached[$0].count <= count * 2 })
                 .min(by: { cached[$0].count < cached[$1].count }) {
@@ -69,7 +69,7 @@ enum HEIFDecoder {
             return try PageBuffer(count: (count + granule - 1) / granule * granule)
         }
 
-        func give(_ buffer: PageBuffer) {
+        package func give(_ buffer: PageBuffer) {
             guard buffer.count <= limit else { return }
             lock.lock()
             cached.append(buffer)
@@ -78,7 +78,7 @@ enum HEIFDecoder {
             lock.unlock()
         }
 
-        var bytesCached: Int {
+        package var bytesCached: Int {
             lock.lock(); defer { lock.unlock() }
             return cachedBytes
         }
@@ -104,35 +104,35 @@ enum HEIFDecoder {
         return buffer
     }
 
-    struct Unsupported: Error {}
+    package struct Unsupported: Error {}
 
     /// Caps the full-resolution planes held at once (1.5 bytes per pixel): a 48 MP photo
     /// needs ~73 MB while its tiles are assembled, and a scan decodes up to 14 at a time.
     /// 160 MB measured as fast as 320 MB on 12-24 MP iPhone photos (96 MB was 15% slower).
     /// One file always proceeds, however large.
-    final class PlaneBudget: @unchecked Sendable {
-        static let shared = PlaneBudget(limitBytes: 160 << 20)
+    package final class PlaneBudget: @unchecked Sendable {
+        package static let shared = PlaneBudget(limitBytes: 160 << 20)
         private let condition = NSCondition()
         private let limit: Int
         private var used = 0
 
-        init(limitBytes: Int) { limit = limitBytes }
+        package init(limitBytes: Int) { limit = limitBytes }
 
-        func acquire(_ bytes: Int) {
+        package func acquire(_ bytes: Int) {
             condition.lock()
             while used > 0 && used + bytes > limit { condition.wait() }
             used += bytes
             condition.unlock()
         }
 
-        func release(_ bytes: Int) {
+        package func release(_ bytes: Int) {
             condition.lock()
             used -= bytes
             condition.broadcast()
             condition.unlock()
         }
 
-        var inUse: Int {
+        package var inUse: Int {
             condition.lock(); defer { condition.unlock() }
             return used
         }
@@ -141,21 +141,21 @@ enum HEIFDecoder {
     // MARK: - Container
 
     private struct Box {
-        let type: UInt32
-        let start: Int
-        let end: Int
+        package let type: UInt32
+        package let start: Int
+        package let end: Int
     }
 
     private struct Cursor {
-        let bytes: UnsafeBufferPointer<UInt8>
-        var position: Int
-        let end: Int
+        package let bytes: UnsafeBufferPointer<UInt8>
+        package var position: Int
+        package let end: Int
 
-        init(_ bytes: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) {
+        package init(_ bytes: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) {
             self.bytes = bytes; position = start; self.end = end
         }
 
-        mutating func uint(_ count: Int) throws -> Int {
+        package mutating func uint(_ count: Int) throws -> Int {
             guard count >= 0, count <= 8, position + count <= end else { throw Unsupported() }
             var value: UInt64 = 0
             for index in 0..<count { value = value << 8 | UInt64(bytes[position + index]) }
@@ -164,11 +164,11 @@ enum HEIFDecoder {
             return Int(value)
         }
 
-        mutating func u8() throws -> Int { try uint(1) }
-        mutating func u16() throws -> Int { try uint(2) }
-        mutating func u32() throws -> Int { try uint(4) }
+        package mutating func u8() throws -> Int { try uint(1) }
+        package mutating func u16() throws -> Int { try uint(2) }
+        package mutating func u32() throws -> Int { try uint(4) }
 
-        mutating func skip(_ count: Int) throws {
+        package mutating func skip(_ count: Int) throws {
             guard count >= 0, position + count <= end else { throw Unsupported() }
             position += count
         }
@@ -195,18 +195,18 @@ enum HEIFDecoder {
     }
 
     private struct Location {
-        var method = 0
-        var extents: [(offset: Int, length: Int)] = []
+        package var method = 0
+        package var extents: [(offset: Int, length: Int)] = []
     }
 
     private struct Container {
-        var primary = -1
-        var types: [Int: UInt32] = [:]
-        var locations: [Int: Location] = [:]
-        var tiles: [Int: [Int]] = [:]
-        var properties: [Box] = []
-        var associations: [Int: [Int]] = [:]
-        var idat: Box?
+        package var primary = -1
+        package var types: [Int: UInt32] = [:]
+        package var locations: [Int: Location] = [:]
+        package var tiles: [Int: [Int]] = [:]
+        package var properties: [Box] = []
+        package var associations: [Int: [Int]] = [:]
+        package var idat: Box?
     }
 
     private static func parse(_ bytes: UnsafeBufferPointer<UInt8>) throws -> Container {
@@ -318,10 +318,10 @@ enum HEIFDecoder {
     // MARK: - Colour
 
     private struct Colour {
-        var matrix: Int?
-        var primaries: Int?
-        var transfer: Int?
-        var icc: Data?
+        package var matrix: Int?
+        package var primaries: Int?
+        package var transfer: Int?
+        package var icc: Data?
     }
 
     private static func colour(_ boxes: [Box], _ bytes: UnsafeBufferPointer<UInt8>, into result: inout Colour) throws {
@@ -372,8 +372,8 @@ enum HEIFDecoder {
     // MARK: - Decode
 
     private struct Configuration {
-        let parameterSets: [[UInt8]]
-        let lengthSize: Int
+        package let parameterSets: [[UInt8]]
+        package let lengthSize: Int
     }
 
     private static func configuration(_ box: Box, _ bytes: UnsafeBufferPointer<UInt8>) throws -> Configuration {
@@ -416,8 +416,8 @@ enum HEIFDecoder {
     }
 
     private final class Output: @unchecked Sendable {
-        var buffer: CVPixelBuffer?
-        var status: OSStatus = noErr
+        package var buffer: CVPixelBuffer?
+        package var status: OSStatus = noErr
     }
 
     private static func decodeTile(_ data: [UInt8], session: VTDecompressionSession, format: CMFormatDescription) throws -> CVPixelBuffer {

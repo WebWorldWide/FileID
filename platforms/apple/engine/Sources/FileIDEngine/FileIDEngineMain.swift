@@ -12,6 +12,7 @@ import Foundation
 import CoreGraphics
 import Darwin
 import FileIDShared
+import FileIDImaging
 import AsyncAlgorithms
 import GRDB
 
@@ -21,6 +22,10 @@ struct FileIDEngineMain {
 
     static func main() async {
         ORTPrivacy.disableTelemetryBeforeLoad()
+        ImagingLog.route { level, event, error, metrics in
+            if level == "warn" { return JSONLog.shared.warn(ev: event, error: error) }
+            JSONLog.shared.info(ev: event, extra: metrics.isEmpty ? nil : metrics.mapValues { AnyCodable($0) })
+        }
         if Array(CommandLine.arguments.dropFirst()) == ["--model-catalog-status"] {
             let entries = MLXModelCatalog.entries
             let vision = entries.filter { $0.role == .vision }.count
@@ -137,7 +142,7 @@ struct FileIDEngineMain {
         JSONLog.shared.info(ev: "engine_ready",
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
-        AccurateOCRWarmup.shared.startWhenIdle()
+        AccurateOCRWarmup.shared.startWhenIdle { await JobQueue.shared.hasActive(category: .scan) }
         QueryCommands.prewarmTextEncoder()
 
         // Capability check: Deep Analyze needs mlx.metallib next to the

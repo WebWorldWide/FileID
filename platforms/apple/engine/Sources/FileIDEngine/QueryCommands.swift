@@ -3,6 +3,7 @@ import GRDB
 import ImageIO
 import UniformTypeIdentifiers
 import FileIDShared
+import FileIDImaging
 
 /// Read-only query commands whose replies mirror the shared Rust engine:
 /// merge suggestions, CLIP query vectors and on-demand video thumbnails.

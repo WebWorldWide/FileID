@@ -643,8 +643,7 @@ fn classify_entry(
     let modified = metadata
         .modified()
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs_f64())
+        .and_then(crate::util::catalog_unix_seconds)
         .unwrap_or(0.0);
     // Incremental skip: drop a file only when the DB row for THIS path is
     // genuinely current — same size AND same on-disk mtime as the stored values.
@@ -666,11 +665,7 @@ fn classify_entry(
             };
         }
     }
-    let created_unix = metadata
-        .created()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs_f64());
+    let created_unix = metadata.created().ok().and_then(crate::util::catalog_unix_seconds);
 
     let online_only = is_online_only(&metadata);
 

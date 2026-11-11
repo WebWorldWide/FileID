@@ -4667,6 +4667,16 @@ Percentages compare with the baseline reps run in the same rounds (Latin-only ra
 - **Job controls need a worker.** Pause, resume and cancel of a job whose kind the engine has no worker for (or a missing id) are refused with Swift's "This job has no supported worker in this engine."; Rust used to change their state. Pinned in `conformance/catalog.json`.
 - **Search-strength set rebuilt** in `~/FileIDDev/Eval/search` from the 499 People photo copies (the 2026-11-08 set was deleted): 72 subjects, labelled per photo from 3×3 contact sheets (yes / ambiguous), split by a hash of the query text. Stage 4 acceptance on it is Swift/Rust parity (identical results), not the old set's 0.79 / 0.54 / 10 of 11.
 
+## 2026-11-11 — Convergence Stage 5: what the Mac-hosted Rust scan stores, and how it rounds file times
+
+**Faces.** On the Mac path the Rust scan stores Vision face boxes, quality and the clustering hold with no vectors, as the Swift scan does. The Mac face pipeline then extracts vectors in `macos-landmark-overlap-v3-orientation` and records the file revision itself. Rust does not write `catalog_revisions` for these files: a portable revision would mark them stale. The alternative, YuNet + SFace in Rust, would put the faces in `rust-align112-v1` and force a library-wide refresh (Stage 6 decides that).
+
+**File times.** Swift compares a catalog `modified_at` exactly with Foundation's `Date.timeIntervalSince1970`. Foundation builds that as `(sec − 978307200 + 1e-9·nsec) + 978307200`, which differs from Rust's `Duration::as_secs_f64` in the last bit for about a fifth of files (64 of 300 copied Adlon files). With the Rust value, Swift kept 26 of 127 faces "source changed" after reopening. The `apple-adapters` build now stores Foundation's rounding (`util::catalog_unix_seconds`). Other builds keep `as_secs_f64`, so existing Windows/Linux face revisions (`to_bits` of the mtime) stay current. Rust's own comparisons already allow 1 µs.
+
+**dHash order.** The adapters take the dHash after Vision and CLIP have read the image, as `Tagging.processImage` does. A JPEG-backed `CGImage` keeps the decode its first draw needed, so drawing the 9×8 dHash first gave CLIP a coarse decode.
+
+**Shared Swift code, not symlinks.** The first cut linked 11 Swift engine files into FileIDAppleKit through tracked symlinks, with stand-ins for the engine types they used. `check_bootstrap_supply_chain.py` forbids tracked symlinks, and the gate stays strict. So the files moved into a SwiftPM library target, `FileIDImaging` (`platforms/apple/shared/Sources/FileIDImaging`). It depends only on the `MLXLMCommon` product both consumers already use, and declarations are `package`-visible. The engine-only types they touched are now hooks: `ImagingLog.route` (the engine forwards to `JSONLog`; unrouted lines go to stderr as JSON, which under the Rust host is the engine-stderr log), `AccurateOCRWarmup.startWhenIdle(busy:)` (the engine passes its job-queue check), `TagAgreement.combine(peopleWords:)`, and `ScanSideResult` (now in the target; `Tagging.ScanSideResult` is an alias). Stage 6's three symlinks (`BoundedImageDecode`, `HEIFDecoder`, `JPEGPreview`) are in this target too.
+
 
 ## 2026-11-11 — Stage 7: the shared engine runs the Swift engine's own MLX code, behind one Rust lease
 

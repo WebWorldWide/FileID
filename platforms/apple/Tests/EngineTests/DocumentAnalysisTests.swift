@@ -4,6 +4,7 @@ import GRDB
 import Testing
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 private typealias EngineDatabase = FileIDEngine.Database
 

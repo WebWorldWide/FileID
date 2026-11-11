@@ -164,6 +164,12 @@ Served by the Rust engine on the Mac and proved headlessly; on-screen checks and
 - **Search strength.** The 2026-11-08 labelled set was deleted with `~/Library/Developer/FileIDEval`; a new one (499 photo copies, 72 queries) lives in `~/FileIDDev/Eval/search` and `shared/scripts/eval/search_eval.py` scores it. Swift and Rust return identical good-match lists and full orders for all 72 queries in hybrid and semantic modes, so the numbers are the same for both (STATE 2026-11-10); they are not comparable with the old set's 0.79 / 0.54 / 10 of 11.
 - **Not in Stage 4.** Take scoring's face judgement (Stage 6), chat generation and selection checks (Stage 7), `enqueueTimeline` workers (Stage 8). The measurements used the pip ORT 1.30 dylib (taken before `ORT_DISABLE_TELEMETRY` landed; the macOS CLIP text session now commits the telemetry-off environment like the others); the bundled official dylib is still a Stage 0 owner item.
 
+### Stage 5 status (2026-11-11, `agent/converge-5`)
+
+- **Landed.** Scan entry points in `src/apple/ffi.rs` (image decode + EXIF, video keyframe, dHash, RGB, Vision primary pass, text read, PDF OCR, OCR warm-up, document text, MLX CLIP and RAM++ load/run), safe wrappers in `src/apple/scan.rs`, and FileIDAppleKit `Scan*.swift`. The decode, Vision, text-read and MLX image code both engines run lives in the SwiftPM target `FileIDImaging` (`platforms/apple/shared/Sources/FileIDImaging`), which the Swift engine and FileIDAppleKit both depend on (no symlinks, no copies). `pipeline/tagging_mac.rs` stores rows as `Tagging.processFile` does and stores faces as Vision boxes for the Mac face pipeline. Mac-hosted file times are rounded as Foundation rounds them. New conformance case `scan-mac-adapters-store-what-the-swift-scan-stores`.
+- **Measured** (see STATE 2026-11-11): 300 Adlon copies identical on every stored field, CLIP cosine ≥ 0.999995. A Rust-scanned catalog reopens and clusters in Swift exactly as Swift's own does. Release scans: Rust 4.52 s vs Swift 4.64 s (median), peak 2.3 vs 2.6–2.8 GB. With RAM++ installed: tag sets identical on 300/300, scans 31.0 s vs 30.8 s (median).
+- **Left.** An app-launched scan with `engine.backend rust` on screen.
+
 Stages 1–4 can overlap once Stage 0 lands; Stages 5–8 depend on the adapter skeleton and Stage 0's memory governance. Total about 25–38 engineer-weeks plus 1–2 for retirement.
 
 ## 4. Retiring the Swift engine

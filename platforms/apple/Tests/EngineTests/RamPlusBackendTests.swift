@@ -5,6 +5,7 @@ import ImageIO
 import OnnxRuntimeBindings
 import MLX
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 /// Opt-in: FILEID_GPU_TESTS=1 with RAM++ installed. FILEID_RAMPLUS_IMAGES
 /// names a folder of real photos; synthetic cards stand in without it.

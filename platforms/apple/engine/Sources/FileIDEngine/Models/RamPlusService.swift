@@ -22,6 +22,7 @@ import Foundation
 import CoreGraphics
 import FileIDShared
 import OnnxRuntimeBindings
+import FileIDImaging
 
 public final class RamPlusService: @unchecked Sendable {
     public static let shared = RamPlusService()

@@ -18,6 +18,7 @@ import Tokenizers
 #if !FILEID_APPLE_ADAPTER
 import FileIDShared
 #endif
+import FileIDImaging
 
 public actor DeepAnalyze {
 
