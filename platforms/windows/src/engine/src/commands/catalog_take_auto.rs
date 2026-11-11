@@ -514,6 +514,7 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
         for faces in analyzers.iter_mut() {
             let (queue, measured) = (&queue, &measured);
             scope.spawn(move || {
+                super::face_extract_mac::user_initiated_qos();
                 loop {
                     // Bound first: a guard in the `while let` scrutinee would be
                     // held through the body and serialise the workers.
