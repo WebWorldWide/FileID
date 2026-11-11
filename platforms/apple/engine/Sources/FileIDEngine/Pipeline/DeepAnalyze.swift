@@ -417,7 +417,6 @@ public actor DeepAnalyze {
             }
         }
         loadState = .loading(progress: 0, message: "Preparing \(kind.displayName)…")
-        Memory.cacheLimit = Self.mlxCacheLimitMB(for: kind) * 1_048_576
         JSONLog.shared.info(ev: "deep_load_about_to_loadcontainer",
                             extra: ["kind": AnyCodable(kind.rawValue),
                                     "repo": AnyCodable(kind.sourceRepo)])
@@ -466,6 +465,8 @@ public actor DeepAnalyze {
             )
             let modelDirectory = documentsHF.appending(component: "models")
                 .appending(component: kind.sourceRepo)
+            guard DeepAnalyzeCapability.mlxKernelsAvailable else { throw MLXKernelsUnavailable() }
+            Memory.cacheLimit = Self.mlxCacheLimitMB(for: kind) * 1_048_576
             // Checked after the download so busy memory delays loading, not fetching.
             let initialAvailableMB = UInt64(max(0, Hardware.availableMemoryMB()))
             if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: initialAvailableMB, requestedMB: requestedMB) {
@@ -505,7 +506,7 @@ public actor DeepAnalyze {
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             JSONLog.shared.flush()
         } catch {
-            MLX.GPU.clearCache()
+            if DeepAnalyzeCapability.mlxKernelsAvailable { MLX.GPU.clearCache() }
             if let pendingMemoryLease {
                 await ResourceScheduler.shared.release(pendingMemoryLease)
             }
@@ -531,7 +532,7 @@ public actor DeepAnalyze {
         prefixCache.reset(); chatPromptCache.reset()
         loadedKind = nil
         loadState = .notLoaded
-        MLX.GPU.clearCache()
+        if DeepAnalyzeCapability.mlxKernelsAvailable { MLX.GPU.clearCache() }
         if let modelMemoryLease {
             self.modelMemoryLease = nil
             await ResourceScheduler.shared.release(modelMemoryLease)
