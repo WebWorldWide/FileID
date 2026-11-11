@@ -294,7 +294,7 @@ mod tests {
             "SELECT start_seconds,end_seconds FROM catalog_coverage WHERE id LIKE '%:chunk:1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(extract, (43.5, 91.5), "chunk coverage spans the overlapping extract, as in the Swift engine");
 
-        resumed.chunks.lock()[1] = Some(words("Blow out the candles", 0.5));
+        resumed.chunks.lock()[1] = Some(words("Blow out the candles", 5.0));
         transcribe_with(resumed.clone(), probe_100s, &id, &job, &cancel, &sink, &database, 0.8).await.unwrap();
         assert_eq!(resumed.calls.load(Ordering::SeqCst), 3, "only the unreadable chunk is retried");
         let file: String = database.lock().query_row(
