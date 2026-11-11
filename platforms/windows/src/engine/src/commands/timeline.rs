@@ -1195,7 +1195,12 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
                 .await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-            let moments = analysis::parse_moments(&raw, &kept)?;
+            // One malformed reply leaves only its window incomplete (written
+            // above), as in the Swift engine; the job goes on.
+            let Ok(moments) = analysis::parse_moments(&raw, &kept) else {
+                tracing::info!(file_id, start = window.start, "moment reply unparsable; window left incomplete");
+                continue;
+            };
             let chapters = analysis::moment_chapters(&moments, &kept, window, file_id, &source.revision, &version);
             let prefix = analysis::moment_prefix(file_id, &source.revision, window.start);
             let (job_id, checked, model_version, (start, end)) = (id.to_owned(), source.clone(), version.clone(), (window.start, window.end));

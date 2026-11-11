@@ -710,6 +710,8 @@ fn wav_header_sizes_are_rewritten_for_streamed_audio() {
 
 struct OrderedModel {
     log: Arc<Mutex<Vec<String>>>,
+    /// The first window's reply is not moment JSON.
+    malformed_first: bool,
 }
 
 impl FrameModel for OrderedModel {
@@ -725,10 +727,18 @@ impl FrameModel for OrderedModel {
     ) -> impl Future<Output = Result<String>> + Send {
         let log = self.log.clone();
         let first = images[0].file_stem().unwrap().to_string_lossy().into_owned();
+        let malformed_first = self.malformed_first;
         async move {
             log.lock().push(format!("infer-start {first}"));
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            log.lock().push(format!("infer-end {first}"));
+            let malformed = {
+                let mut log = log.lock();
+                log.push(format!("infer-end {first}"));
+                malformed_first && log.iter().filter(|line| line.starts_with("infer-end")).count() == 1
+            };
+            if malformed {
+                return Ok("I can't tell what happens in these frames.".to_owned());
+            }
             Ok("{\"moments\":[{\"title\":\"Ball thrown\",\"summary\":\"\",\"firstFrame\":1,\"lastFrame\":2}]}".to_owned())
         }
     }
@@ -772,7 +782,7 @@ async fn next_moment_window_decodes_while_the_model_runs() {
         write_jpeg(output, vec![128; (size.0 * size.1 * 3) as usize], size.0, size.1)
     };
     let (sink, _events) = Sink::channel_for_test(1_024);
-    let model = OrderedModel { log: log.clone() };
+    let model = OrderedModel { log: log.clone(), malformed_first: false };
     let duration = 6.0;
     let windows = analysis::windows(duration, &[]);
     assert_eq!(windows.len(), 2);
@@ -808,6 +818,79 @@ async fn next_moment_window_decodes_while_the_model_runs() {
         ),
         2
     );
+    assert!(std::fs::read_dir(&frames).unwrap().next().is_none(), "temporary frames are removed");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn a_malformed_moment_reply_leaves_only_its_window_incomplete() {
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-malformed-{}", uuid::Uuid::new_v4()));
+    let frames = directory.join("frames");
+    std::fs::create_dir_all(&frames).unwrap();
+    let path = directory.join("clip.mp4");
+    std::fs::write(&path, b"fixture video bytes").unwrap();
+    let modified = std::fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let mut conn = crate::db::test_support::memory_db();
+    conn.execute(
+        "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,19,?2,0,'video','mp4')",
+        params![path.to_str().unwrap(), modified],
+    )
+    .unwrap();
+    let (id, _) = enqueue(
+        &mut conn,
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    start(&conn, &id).unwrap().unwrap();
+    let database = Arc::new(Mutex::new(conn));
+    let source = Source::load(&database.lock(), 1).unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let decode_log = log.clone();
+    let decoder = move |_: &Path, _: f64, size: (u32, u32), output: &Path, _: &AtomicBool| -> Result<()> {
+        decode_log.lock().push(format!("decode {}", output.file_stem().unwrap().to_string_lossy()));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_jpeg(output, vec![128; (size.0 * size.1 * 3) as usize], size.0, size.1)
+    };
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let model = OrderedModel { log: log.clone(), malformed_first: true };
+    let duration = 6.0;
+    let windows = analysis::windows(duration, &[]);
+    assert_eq!(windows.len(), 2);
+    analyze_moments(
+        &id,
+        1,
+        &source,
+        duration,
+        (&[], None),
+        (4, 4),
+        "fixture",
+        (0, 1, 1.0),
+        &model,
+        &frames,
+        &Arc::new(AtomicBool::new(false)),
+        &sink,
+        &database,
+        decoder,
+    )
+    .await
+    .unwrap();
+
+    // As in the Swift engine: the job goes on, the bad window stays incomplete.
+    let statuses = |status: &str| {
+        count(
+            &database,
+            &format!("SELECT COUNT(*) FROM catalog_coverage WHERE file_id=1 AND id LIKE 'moment-window:%' AND status='{status}'"),
+        )
+    };
+    assert_eq!((statuses("sampled"), statuses("incomplete")), (1, 1));
     assert!(std::fs::read_dir(&frames).unwrap().next().is_none(), "temporary frames are removed");
     std::fs::remove_dir_all(directory).unwrap();
 }
