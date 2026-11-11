@@ -88,6 +88,11 @@ public final class VLMHost: @unchecked Sendable {
         running.forEach { $0.cancel() }
     }
 
+    /// Tests only: the C-interface suite's shutdown test closes the shared host.
+    func reopen() {
+        lock.lock(); closed = false; lock.unlock()
+    }
+
     var activeCount: Int {
         lock.lock(); defer { lock.unlock() }
         return tasks.count
@@ -229,16 +234,19 @@ public final class VLMHost: @unchecked Sendable {
 
     static func status() async -> [String: Any] {
         let analyzer = DeepAnalyze.shared
+        // MLX aborts on its first call without the Metal library; nothing can be resident then.
+        let metallib = metallibPresent()
+        let (active, cache, peak) = metallib ? (Memory.activeMemory, Memory.cacheMemory, Memory.peakMemory) : (0, 0, 0)
         var reply: [String: Any] = [
-            "residentBytes": Memory.activeMemory + Memory.cacheMemory,
-            "activeBytes": Memory.activeMemory,
-            "cacheBytes": Memory.cacheMemory,
-            "peakBytes": Memory.peakMemory,
+            "residentBytes": active + cache,
+            "activeBytes": active,
+            "cacheBytes": cache,
+            "peakBytes": peak,
             "footprintBytes": ModelBenchmarkRunner.physicalFootprintBytes(),
             "retainedMB": await ResourceScheduler.shared.retainedMB,
             "parked": await analyzer.isParked,
             "analyzing": await analyzer.isAnalyzing,
-            "metallib": metallibPresent(),
+            "metallib": metallib,
         ]
         if let kind = await analyzer.loadedModelKind { reply["loaded"] = kind.rawValue }
         return reply

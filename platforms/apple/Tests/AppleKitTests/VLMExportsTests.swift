@@ -52,6 +52,8 @@ private func spec(kind: String = "qwen3_vl_2b", root: URL, revision: String? = "
 
 @Suite("FileIDAppleKit VLM requests (Stage 7)", .serialized)
 struct VLMExportsTests {
+    init() { VLMHost.shared.reopen() }
+
     @Test func statusReportsNoLoadedModel() throws {
         let (event, reply) = try submit(["op": "status"])
         #expect(event == 3)
