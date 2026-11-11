@@ -67,6 +67,58 @@ char *fileid_apple_tags_read(const char *path, char **out_error);
 int32_t fileid_apple_tags_write(const char *path, const char *const *tags, size_t count,
                                 char **out_error);
 
+/* --- Stage 6: faces --- */
+
+/* Open a photo for face extraction (FaceClustering.extractOneFile): files
+ * under 256 B are refused, the EXIF orientation must be 1-8, the image is
+ * decoded upright with its long edge at most max_pixel_size (HEIF through the
+ * hardware decoder). With landmarks true, Vision's face landmarks run once on
+ * it. Returns an image handle (0 on failure) and *out_json (free with
+ * fileid_apple_free): {"width","height","orientation","faces":[{"bounds",
+ * "points"}]}; bounds are the normalized bottom-left box as four Double bit
+ * patterns, points five top-left pixel points [hi-x eye, lo-x eye, nose, hi-x
+ * mouth corner, lo-x mouth corner] as ten Float bit patterns. */
+uint64_t fileid_apple_faces_open(const char *path, uint32_t max_pixel_size, bool landmarks,
+                                 char **out_json);
+
+/* The open image drawn into tightly packed RGBA8 (device RGB, top-left origin,
+ * FaceAlign.renderRGBA8). Free *out_rgba with fileid_apple_free. */
+bool fileid_apple_faces_pixels(uint64_t image, uint8_t **out_rgba, size_t *out_length,
+                               uint32_t *out_width, uint32_t *out_height);
+
+/* The integral pixel rect (top-left origin) of the open image drawn at 112x112
+ * into out_rgba112 (112*112*4 bytes, the SFace input ArcFaceService draws),
+ * and *out_jpeg the crop at JPEG quality 0.85 (may stay NULL). */
+bool fileid_apple_faces_crop(uint64_t image, int64_t x, int64_t y, int64_t width, int64_t height,
+                             uint8_t *out_rgba112, uint8_t **out_jpeg, size_t *out_jpeg_length);
+
+/* JPEG (quality 0.85) of tightly packed RGBA8, as face_crops/<id>.jpg are
+ * written. Free with fileid_apple_free; NULL on failure. */
+uint8_t *fileid_apple_faces_jpeg(const uint8_t *rgba, uint32_t width, uint32_t height,
+                                 size_t *out_length);
+
+/* Release an image handle. Unknown handles are ignored. */
+void fileid_apple_faces_close(uint64_t image);
+
+/* Best Takes' photo as packed sRGB RGB8 (TakeMediaAnalysis.signals): kind 0
+ * decodeBoundedImage fitted to long_side, 1 decodeScanImage drawn unscaled
+ * (Face Mesh's detail image), 2 decodeBoundedImage drawn unscaled (tiles).
+ * *out_source_long_side is the file's long side. Free *out_rgb. */
+bool fileid_apple_take_decode(const char *path, uint32_t kind, uint32_t long_side,
+                              uint8_t **out_rgb, size_t *out_length, uint32_t *out_width,
+                              uint32_t *out_height, uint32_t *out_source_long_side);
+
+/* VisionTakeFaceAnalyzer over packed sRGB RGB8: face landmarks and capture
+ * quality, human rectangles when people is true. Face Mesh inputs are given
+ * for this image and, when detail_width is nonzero, for the detail image.
+ * JSON (free with fileid_apple_free): {"complete","faces":[{"box","minSide",
+ * "quality","eyes","mesh":{"bits","boxOnly"},"meshDetail"}],"people":[{"box"}]},
+ * numbers as IEEE-754 bit patterns. */
+char *fileid_apple_take_faces(const uint8_t *rgb, uint32_t width, uint32_t height, bool people,
+                              uint32_t detail_width, uint32_t detail_height);
+
+/* --- end Stage 6 --- */
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,7 @@
 //! C interface in `ffi.rs`; this module wraps it in safe types. Catalog
 //! writes, job policy and ranking stay in Rust.
 
+pub mod faces;
 mod ffi;
 
 use std::ffi::{CStr, CString, OsString, c_char};
