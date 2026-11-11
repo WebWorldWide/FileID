@@ -122,8 +122,8 @@ Landed and proved headlessly; notarization and the on-screen dogfood run need th
 ### Stage 5 status (2026-11-11, `agent/converge-5`)
 
 - **Landed.** Scan entry points in `src/apple/ffi.rs` (image decode + EXIF, video keyframe, dHash, RGB, Vision primary pass, text read, PDF OCR, OCR warm-up, document text, MLX CLIP and RAM++ load/run), safe wrappers in `src/apple/scan.rs`, and FileIDAppleKit `Scan*.swift` over symlinked Swift engine sources (`ScanShared/`). `pipeline/tagging_mac.rs` stores rows as `Tagging.processFile` does and stores faces as Vision boxes for the Mac face pipeline. Mac-hosted file times are rounded as Foundation rounds them. New conformance case `scan-mac-adapters-store-what-the-swift-scan-stores`.
-- **Measured** (see STATE 2026-11-11): 300 Adlon copies identical on every stored field, CLIP cosine ≥ 0.999995. A Rust-scanned catalog reopens and clusters in Swift exactly as Swift's own does. Release scans: Rust 4.52 s vs Swift 4.64 s (median), peak 2.3 vs 2.6–2.8 GB.
-- **Left.** RAM++ tag parity with RAM++ installed; an app-launched scan with `engine.backend rust` on screen.
+- **Measured** (see STATE 2026-11-11): 300 Adlon copies identical on every stored field, CLIP cosine ≥ 0.999995. A Rust-scanned catalog reopens and clusters in Swift exactly as Swift's own does. Release scans: Rust 4.52 s vs Swift 4.64 s (median), peak 2.3 vs 2.6–2.8 GB. With RAM++ installed: tag sets identical on 300/300, scans 31.0 s vs 30.8 s (median).
+- **Left.** An app-launched scan with `engine.backend rust` on screen.
 
 Stages 1–4 can overlap once Stage 0 lands; Stages 5–8 depend on the adapter skeleton and Stage 0's memory governance. Total about 25–38 engineer-weeks plus 1–2 for retirement.
 
