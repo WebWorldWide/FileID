@@ -128,6 +128,19 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
         capabilities: vec![],
     }
 }
+/// The Swift engine's wording in the Mac app's engine (the reference there).
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const UNSUPPORTED_RECIPE: &str = "Choose files, an output folder, and a supported recipe.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const UNSUPPORTED_RECIPE: &str = "Unsupported export recipe";
+
+fn preview_message(count: usize) -> String {
+    if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
+        format!("Creates {count} new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.")
+    } else {
+        "Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into()
+    }
+}
 fn capabilities() -> Vec<ToolCapability> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     let video = apple_video::capabilities();
@@ -406,7 +419,7 @@ fn run_action(
                 || ids.iter().collect::<HashSet<_>>().len() != ids.len()
                 || !supports(recipe)
             {
-                bail!("Unsupported export recipe")
+                bail!(UNSUPPORTED_RECIPE)
             }
             let destination = Path::new(request.destination.as_deref().context("Choose an output folder")?);
             read_only::require_source_mutation(destination)?;
@@ -511,7 +524,7 @@ fn run_action(
             db.with(|conn| Ok(conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,plan_json,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?))?;
             result.outputs = plan.items.into_iter().map(|i| i.output).collect();
             result.operation_id = Some(id);
-            result.message="Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into();
+            result.message = preview_message(result.outputs.len());
         }
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first")?;

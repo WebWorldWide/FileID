@@ -5,7 +5,7 @@
 //! chunks the other verified, and an unreadable chunk stays incomplete.
 
 use super::{
-    blocking, interrupted_or, publish, running_source, set_progress, timeline_media, upsert_coverage, while_running, with_db,
+    blocking, interrupted_or, publish, running_source, set_progress, upsert_coverage, while_running, with_db,
     Interrupted, Job,
 };
 use crate::ipc::sink::Sink;
@@ -56,7 +56,7 @@ pub(super) async fn transcribe(
     visual_share: f64,
 ) -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    return transcribe_with(Arc::new(AppleSpeech), timeline_media::probe, id, job, cancel, sink, database, visual_share).await;
+    return transcribe_with(Arc::new(AppleSpeech), super::timeline_media::probe, id, job, cancel, sink, database, visual_share).await;
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
         let _ = (id, job, cancel, sink, database, visual_share);
