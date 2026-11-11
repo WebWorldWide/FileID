@@ -20,10 +20,13 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     );
     let (id, response) = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), true).unwrap();
     assert_eq!(response.status, "ok");
-    assert!(response
-        .message
-        .unwrap()
-        .contains("Install a speech model from the model catalog"));
+    // The Mac app's engine uses Apple Speech, which needs no model install.
+    let speech_note = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
+        "on-device speech"
+    } else {
+        "Install a speech model from the model catalog"
+    };
+    assert!(response.message.unwrap().contains(speech_note));
     assert_eq!(response.jobs.len(), 1);
     let (kind, ids, recipe, state): (String, String, String, String) = conn
         .query_row(

@@ -1146,8 +1146,10 @@ mod tests {
             r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#
         )
         .is_err());
+        // The Mac app's engine enlarges video conventionally, as the Swift engine does.
+        let mac = cfg!(all(target_os = "macos", feature = "apple-adapters"));
         for (kind, format, dimension) in [("chapters", "json", 64), ("video", "mp4", 1920), ("photo", "png", 8193)] {
-            assert!(!supports(&ToolRecipe {
+            assert_eq!(mac && kind == "video", supports(&ToolRecipe {
                 kind: kind.into(),
                 format: format.into(),
                 max_dimension: dimension,
@@ -1165,7 +1167,7 @@ mod tests {
             serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":"9:16"}"#)
                 .unwrap();
         assert_eq!(framed.video_aspect_ratio.as_deref(), Some("9:16"));
-        assert_eq!(supports(&framed), super::super::video_export::available());
+        assert_eq!(supports(&framed), super::super::timeline_media::available());
         assert!(serde_json::from_str::<ToolRecipe>(
             r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":1}"#
         )
@@ -1939,8 +1941,8 @@ mod tests {
 
     #[test]
     fn media_recipes_refuse_before_any_output_without_the_vetted_runtime() {
-        if super::super::video_export::available() {
-            eprintln!("the vetted FFmpeg runtime is installed; the unavailable path cannot be exercised");
+        if media_recipes::runtime().is_some() {
+            eprintln!("a media runtime is available; the unavailable path cannot be exercised");
             return;
         }
         let mut fixture = media_fixture();
