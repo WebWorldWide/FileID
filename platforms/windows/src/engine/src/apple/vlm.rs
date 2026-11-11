@@ -152,6 +152,11 @@ pub fn huggingface_root() -> PathBuf {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").map(PathBuf::from).filter(|path| path.is_absolute()) {
         return root;
     }
+    // Tests never fall back to the owner's models: loading one rewrites its
+    // install markers. Without an explicit root nothing counts as installed.
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("fileid-test-no-hf-root-{}", std::process::id()));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     home.join("Documents").join("huggingface")
 }
@@ -589,6 +594,14 @@ mod tests {
         assert!(error.to_string().contains("No file"), "{error:#}");
     }
 
+    #[test]
+    fn tests_without_a_root_never_see_the_owners_models() {
+        if std::env::var_os("FILEID_HF_CACHE_ROOT").is_none() {
+            assert!(!huggingface_root().ends_with("Documents/huggingface"));
+            assert!(!installed("qwen3_vl_2b"));
+        }
+    }
+
     #[tokio::test]
     async fn loading_a_missing_model_fails_without_a_download() {
         let root = std::env::temp_dir().join(format!("fileid-mlx-missing-{}", std::process::id()));
@@ -614,6 +627,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "loads a real MLX model"]
     async fn real_model_answers_loads_parks_and_cancels() {
+        let root = std::env::var_os("FILEID_HF_CACHE_ROOT").map(PathBuf::from).expect("set FILEID_HF_CACHE_ROOT to a scratch copy of the model");
+        assert!(root.is_absolute() && !root.ends_with("Documents/huggingface"), "FILEID_HF_CACHE_ROOT must be a scratch copy, not a live model folder");
         let kind = std::env::var("FILEID_TEST_MLX_KIND").unwrap_or_else(|_| "qwen3_vl_2b".into());
         assert!(installed(&kind), "copy {kind} under FILEID_HF_CACHE_ROOT first");
         let cancel = Arc::new(AtomicBool::new(false));

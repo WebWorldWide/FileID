@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench_model_load import Engine  # noqa: E402
 from bench_vlm import engine_env, scan  # noqa: E402
-from eval_common import EVAL_ROOT  # noqa: E402
+from eval_common import EVAL_ROOT, LIVE_HF_MODELS  # noqa: E402
 
 
 def ask(engine, model, text, ids):
@@ -50,6 +50,9 @@ def main():
     parser.add_argument("--model", default="qwen3_vl_2b")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
+    live = LIVE_HF_MODELS.parent.resolve()
+    if args.hf_root.resolve() == live or live in args.hf_root.resolve().parents or args.hf_root.resolve() in live.parents:
+        parser.error("--hf-root must be a scratch copy of the model, not the live folder")
     root = EVAL_ROOT / "selection"
     labels = json.loads((root / "labels.json").read_text())["questions"]
     state = args.scratch.resolve() / f"selection-{args.flavor}-{int(time.time())}"
