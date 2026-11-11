@@ -119,6 +119,12 @@ Landed and proved headlessly; notarization and the on-screen dogfood run need th
 - **Measured (M1 Pro, debug builds, load 36–54).** `ready` 0.043–0.099 s warm (6 runs; first cold start 0.97 s) vs Swift 0.13–0.15 s; exit after stdin EOF 0.06 s. Conformance: adapters build 60 pass + trash known divergence (same as the plain Rust build); cross-engine 10/10 with the adapters build as peer; a third macOS CI run added. A Swift-scanned scratch catalog (66 tables, 106 rows) opened, answered `listRoots`/`healthCheck` and closed under Rust with schema and every table unchanged.
 - **Left in Stage 0.** Notarization of app + `fileidd` + FileIDAppleKit + ORT; an official ORT dylib to bundle (none on this Mac; Homebrew's is refused); the on-screen dogfood run; the bookmark lease is not yet used by `startScan` (`rootBookmark` is still ignored; needed for the sandbox in Stage 10).
 
+### Stage 5 status (2026-11-11, `agent/converge-5`)
+
+- **Landed.** Scan entry points in `src/apple/ffi.rs` (image decode + EXIF, video keyframe, dHash, RGB, Vision primary pass, text read, PDF OCR, OCR warm-up, document text, MLX CLIP and RAM++ load/run), safe wrappers in `src/apple/scan.rs`, and FileIDAppleKit `Scan*.swift` over symlinked Swift engine sources (`ScanShared/`). `pipeline/tagging_mac.rs` stores rows as `Tagging.processFile` does and stores faces as Vision boxes for the Mac face pipeline. Mac-hosted file times are rounded as Foundation rounds them. New conformance case `scan-mac-adapters-store-what-the-swift-scan-stores`.
+- **Measured** (see STATE 2026-11-11): 300 Adlon copies identical on every stored field, CLIP cosine ≥ 0.999995. A Rust-scanned catalog reopens and clusters in Swift exactly as Swift's own does. Release scans: Rust 4.52 s vs Swift 4.64 s (median), peak 2.3 vs 2.6–2.8 GB.
+- **Left.** RAM++ tag parity with RAM++ installed; an app-launched scan with `engine.backend rust` on screen.
+
 Stages 1–4 can overlap once Stage 0 lands; Stages 5–8 depend on the adapter skeleton and Stage 0's memory governance. Total about 25–38 engineer-weeks plus 1–2 for retirement.
 
 ## 4. Retiring the Swift engine

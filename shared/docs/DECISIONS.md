@@ -4633,3 +4633,10 @@ Percentages compare with the baseline reps run in the same rounds (Latin-only ra
 
 **Decision.** Automatic detection stays the default. The setting turns on Latin-only careful reads (`FILEID_CAREFUL_READ=latin`, set by the app at engine spawn like `FILEID_RESTRUCTURE_GRANULARITY`, so no IPC change), because the fallback variant is not fast enough to be worth a setting and the setting's label already tells the user non-Latin text is not read. The env var is engine process configuration, not a command or event, so the IPC schema is unchanged. Camera libraries gain little either way: only 6–12% of photos take a careful read.
 
+## 2026-11-11 — Convergence Stage 5: what the Mac-hosted Rust scan stores, and how it rounds file times
+
+**Faces.** On the Mac path the Rust scan stores Vision face boxes, quality and the clustering hold with no vectors, as the Swift scan does. The Mac face pipeline then extracts vectors in `macos-landmark-overlap-v3-orientation` and records the file revision itself. Rust does not write `catalog_revisions` for these files: a portable revision would mark them stale. The alternative, YuNet + SFace in Rust, would put the faces in `rust-align112-v1` and force a library-wide refresh (Stage 6 decides that).
+
+**File times.** Swift compares a catalog `modified_at` exactly with Foundation's `Date.timeIntervalSince1970`. Foundation builds that as `(sec − 978307200 + 1e-9·nsec) + 978307200`, which differs from Rust's `Duration::as_secs_f64` in the last bit for about a fifth of files (64 of 300 copied Adlon files). With the Rust value, Swift kept 26 of 127 faces "source changed" after reopening. The `apple-adapters` build now stores Foundation's rounding (`util::catalog_unix_seconds`). Other builds keep `as_secs_f64`, so existing Windows/Linux face revisions (`to_bits` of the mtime) stay current. Rust's own comparisons already allow 1 µs.
+
+**dHash order.** The adapters take the dHash after Vision and CLIP have read the image, as `Tagging.processImage` does. A JPEG-backed `CGImage` keeps the decode its first draw needed, so drawing the 9×8 dHash first gave CLIP a coarse decode.
