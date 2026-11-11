@@ -66,7 +66,7 @@ pub(super) fn search(
         };
         let sql = format!("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),NULL,NULL,NULL FROM {from} WHERE {filters}{predicate} AND ?1 IS NOT NULL ORDER BY {order} LIMIT 100");
         hits.extend(
-            conn.prepare(&sql)?
+            conn.prepare_cached(&sql)?
                 .query_map(params![quoted, kinds, people, events, time, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
@@ -90,7 +90,7 @@ pub(super) fn search(
         };
         let sql = format!("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE {filters}{predicate}{temporal_people} AND ?1 IS NOT NULL AND (c.stale=0 OR p.stale=0) AND (?5 IS NULL OR ((c.start_seconds<=?5 AND c.end_seconds>=?5) OR ABS(c.start_seconds-?5)<=15 OR (p.start_seconds<=?5 AND COALESCE(p.end_seconds,p.start_seconds)>=?5) OR ABS(p.start_seconds-?5)<=15)) ORDER BY {order} LIMIT 100");
         hits.extend(
-            conn.prepare(&sql)?
+            conn.prepare_cached(&sql)?
                 .query_map(params![quoted, kinds, people, events, time, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
@@ -98,7 +98,7 @@ pub(super) fn search(
     if people.is_some() || time.is_some() {
         let sql = "SELECT f.id,f.path_text,f.kind,'Person: ' || COALESCE(NULLIF(trim(COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || COALESCE(p.last_name,'') || ' ' || COALESCE(p.suffix,'')),''),p.name,'Person') || CASE WHEN o.user_edited=1 THEN ' · user-confirmed appearance' ELSE ' · unverified appearance' END,'observation:' || o.id,o.start_seconds,NULL FROM catalog_observations o JOIN persons p ON p.id=o.person_id JOIN files f ON f.id=o.file_id WHERE f.failed=0 AND f.kind='video' AND (?4 IS NULL OR f.kind IN (SELECT value FROM json_each(?4))) AND o.stale=0 AND o.start_seconds IS NOT NULL AND (?1 IS NULL OR o.person_id IN (SELECT value FROM json_each(?1))) AND (?2 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?2)))) AND (?3 IS NULL OR ((o.start_seconds<=?3 AND COALESCE(o.end_seconds,o.start_seconds)>=?3) OR ABS(o.start_seconds-?3)<=15)) AND {} ORDER BY f.id,o.start_seconds,o.id LIMIT 100";
         hits.extend(
-            conn.prepare(&sql.replace("{}", &super::roots::clause("f.path_text", "?5")))?
+            conn.prepare_cached(&sql.replace("{}", &super::roots::clause("f.path_text", "?5")))?
                 .query_map(params![people, events, time, kinds, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
@@ -114,7 +114,7 @@ pub(super) fn search(
                 "SELECT f.id,f.path_text,{kind},snippet({table},0,'','','…',16),{kind} || ':' || f.id,NULL,NULL FROM {table} JOIN files f ON f.id={table}.rowid WHERE {filters} AND {table} MATCH ?1 ORDER BY bm25({table}) LIMIT 100"
             );
             hits.extend(
-                conn.prepare(&sql)?
+                conn.prepare_cached(&sql)?
                     .query_map(params![quoted, kinds, people, events, time, root], hit)?
                     .collect::<rusqlite::Result<Vec<_>>>()?,
             );
@@ -154,7 +154,7 @@ fn tag_hits(
         let sql = format!("SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone()), Box::new(None::<f64>), Box::new(root.map(str::to_owned))];
         args.extend(forms.iter().map(|form| Box::new(format!("% {form}%")) as Box<dyn rusqlite::ToSql>));
-        let mut statement = conn.prepare(&sql)?;
+        let mut statement = conn.prepare_cached(&sql)?;
         for id in statement.query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| row.get::<_, i64>(0))? {
             *scores.entry(id?).or_default() += 1;
         }
@@ -165,7 +165,7 @@ fn tag_hits(
     ids.truncate(100);
     let sql = "SELECT f.id,f.path_text,f.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL FROM files f WHERE f.id IN (SELECT value FROM json_each(?1)) ORDER BY f.id DESC";
     Ok(conn
-        .prepare(sql)?
+        .prepare_cached(sql)?
         .query_map([serde_json::to_string(&ids)?], hit)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
