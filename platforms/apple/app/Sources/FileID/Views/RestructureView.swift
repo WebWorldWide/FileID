@@ -319,6 +319,19 @@ struct RestructureView: View {
                 loading = false
                 status = "FileID couldn't work out a plan. Try again."
                 statusIsError = true
+            // The shared engine (engine.backend rust) names its plan failures.
+            case "plan_restructure_root":
+                loading = false
+                status = "This folder isn't available. Reconnect it, then try again."
+                statusIsError = true
+            case "plan_restructure_cancelled":
+                loading = false
+                status = "Stopped working out the plan."
+                statusIsError = false
+            case let other where other.hasPrefix("plan_restructure_"):
+                loading = false
+                status = "FileID couldn't work out a plan. Try again."
+                statusIsError = true
             case "ipc_frame_too_large":
                 loading = false
                 status = "This folder has too many files to show a plan. Try a smaller folder."

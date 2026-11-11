@@ -563,7 +563,7 @@ impl DbWriter {
                                 face.quality as f64,
                                 face.excluded as i64,
                                 model,
-                                model.map(|_| "rust-align112-v1"),
+                                model.map(|_| crate::commands::face_refresh::PORTABLE_PROCESSING),
                                 model.map(|_| source_revision.as_str()),
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
