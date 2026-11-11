@@ -18,6 +18,8 @@ pub(crate) mod scan;
 pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
+pub(crate) mod journal_import;
+pub(crate) mod path_moves;
 pub(crate) mod wipe;
 
 pub mod catalog;
