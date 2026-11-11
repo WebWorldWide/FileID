@@ -335,6 +335,255 @@ pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Conne
     }
 }
 
+// MARK: - Best Takes (VisionTakeFaceAnalyzer, TakeMediaAnalysis.signals)
+
+/// Which decode of a photo Best Takes reads (`fileid_apple_take_decode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeDecode {
+    /// `decodeBoundedImage`, fitted into sRGB at most the given long side.
+    Analysis = 0,
+    /// `decodeScanImage` drawn unscaled (Face Mesh's detail image).
+    Detail = 1,
+    /// `decodeBoundedImage` drawn unscaled (the tile source).
+    Wide = 2,
+}
+
+/// Packed sRGB RGB8 of a photo and the file's long side.
+pub struct TakeImage {
+    pub rgb: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub source_long_side: u32,
+}
+
+pub fn take_decode(path: &Path, kind: TakeDecode, long_side: u32) -> Option<TakeImage> {
+    let path = c_path(path).ok()?;
+    let (mut pointer, mut length, mut width, mut height, mut source) = (std::ptr::null_mut::<u8>(), 0usize, 0u32, 0u32, 0u32);
+    // SAFETY: `path` is NUL-terminated; the out-pointers point at locals.
+    let ok = unsafe {
+        ffi::fileid_apple_take_decode(path.as_ptr(), kind as u32, long_side, &raw mut pointer, &raw mut length, &raw mut width, &raw mut height, &raw mut source)
+    };
+    let rgb = take_bytes(pointer, length)?;
+    (ok && rgb.len() == width as usize * height as usize * 3).then_some(TakeImage { rgb, width, height, source_long_side: source })
+}
+
+#[derive(Deserialize)]
+struct MeshJson {
+    bits: [u32; 10],
+}
+
+#[derive(Deserialize)]
+struct TakeFaceJson {
+    #[serde(rename = "box")]
+    bounds: [u64; 4],
+    #[serde(rename = "minSide")]
+    min_side: u64,
+    quality: Option<u64>,
+    eyes: Option<u64>,
+    mesh: MeshJson,
+}
+
+#[derive(Deserialize)]
+struct TakePersonJson {
+    #[serde(rename = "box")]
+    bounds: [u64; 4],
+}
+
+#[derive(Deserialize)]
+struct TakeAnalysisJson {
+    complete: bool,
+    faces: Vec<TakeFaceJson>,
+    people: Option<Vec<TakePersonJson>>,
+}
+
+/// Faces Vision found, kept in the adapter for Face Mesh inputs at another size.
+struct KeptFaces(u64);
+
+impl KeptFaces {
+    fn mesh(&self, width: u32, height: u32) -> Option<Vec<MeshJson>> {
+        // SAFETY: the id came from fileid_apple_take_faces and is still kept.
+        let json = take_string(unsafe { ffi::fileid_apple_take_mesh(self.0, width, height) })?;
+        serde_json::from_slice(&json).ok()
+    }
+}
+
+impl Drop for KeptFaces {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: released once; unknown ids are ignored by the adapter.
+            unsafe { ffi::fileid_apple_take_release(self.0) };
+        }
+    }
+}
+
+fn take_faces(rgb: &[u8], width: u32, height: u32, people: bool) -> Option<(TakeAnalysisJson, KeptFaces)> {
+    if width == 0 || height == 0 || rgb.len() != width as usize * height as usize * 3 {
+        return None;
+    }
+    let mut kept = 0u64;
+    // SAFETY: `rgb` holds width·height·3 bytes; `kept` is a local.
+    let json = unsafe { ffi::fileid_apple_take_faces(rgb.as_ptr(), width, height, people, &raw mut kept) };
+    let kept = KeptFaces(kept);
+    let analysis = serde_json::from_slice(&take_string(json)?).ok()?;
+    Some((analysis, kept))
+}
+
+fn mesh_detection(mesh: &MeshJson) -> crate::models::face_geometry::Detection {
+    let v = mesh.bits.map(f32::from_bits);
+    crate::models::face_geometry::Detection {
+        bbox: [v[0], v[1], v[2], v[3]],
+        landmarks: [[v[4], v[5]], [v[6], v[7]], [v[8], v[9]], [v[8], v[9]], [v[8], v[9]]],
+        score: 0.0,
+    }
+}
+
+/// The Mac `TakeFaceAnalyzer` (`VisionTakeFaceAnalyzer`): Vision faces with
+/// capture quality and people; eye openness from Face Mesh when its model is
+/// installed, else from Vision's eye contours.
+pub struct VisionFaces {
+    mesh: Option<crate::models::face_mesh::FaceMesh>,
+}
+
+impl VisionFaces {
+    pub fn load() -> Self {
+        let mesh = crate::models::face_mesh::default_weights_path()
+            .ok()
+            .filter(|path| path.is_file())
+            .and_then(|path| crate::models::face_mesh::FaceMesh::load(path).map_err(|error| tracing::warn!(?error, "face_mesh_model_load_failed")).ok());
+        Self { mesh }
+    }
+
+    /// `VisionTakeFaceAnalyzer.faces(_:qualities:mesh:image:detail:)`.
+    fn run(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        people: bool,
+        detail: Option<&mut crate::commands::catalog_take_auto::Detail>,
+    ) -> Option<(Vec<crate::pipeline::take_scoring::Face>, Option<Vec<crate::pipeline::take_scoring::Box2>>)> {
+        use crate::pipeline::take_scoring::{self, Box2, Face};
+        let (analysis, kept) = take_faces(rgb, width, height, people)?;
+        if !analysis.complete {
+            return None;
+        }
+        let mut eyes: Vec<Option<f64>> = analysis.faces.iter().map(|face| face.eyes.map(f64::from_bits)).collect();
+        if let Some(mesh) = self.mesh.as_mut() {
+            let judged: Vec<bool> = analysis.faces.iter().map(|face| f64::from_bits(face.min_side) >= take_scoring::MIN_FACE_PIXELS).collect();
+            if judged.contains(&true) {
+                let larger = detail.map(|detail| detail.pixels()).filter(|(_, w, _)| *w > width);
+                let (pixels, pw, ph, inputs) = match larger {
+                    Some((pixels, w, h)) => (pixels, w, h, kept.mesh(w, h)?),
+                    None => (rgb, width, height, analysis.faces.iter().map(|face| MeshJson { bits: face.mesh.bits }).collect()),
+                };
+                for (index, judge) in judged.iter().enumerate() {
+                    if !judge {
+                        eyes[index] = None;
+                        continue;
+                    }
+                    let detection = mesh_detection(inputs.get(index)?);
+                    match mesh.eyes_open(pixels, pw, ph, &detection) {
+                        Ok(open) => eyes[index] = open,
+                        Err(error) => {
+                            tracing::warn!(?error, "face_mesh_failed");
+                            return None;
+                        }
+                    }
+                }
+            } else {
+                eyes.iter_mut().for_each(|eye| *eye = None);
+            }
+        }
+        let faces = analysis
+            .faces
+            .iter()
+            .zip(eyes)
+            .map(|(face, eyes)| {
+                let [x, y, w, h] = face.bounds.map(f64::from_bits);
+                Face {
+                    x: take_scoring::round4(x),
+                    y: take_scoring::round4(y),
+                    width: take_scoring::round4(w),
+                    height: take_scoring::round4(h),
+                    quality: face.quality.map(|q| take_scoring::round4(f64::from_bits(q))),
+                    eyes_open: eyes.map(take_scoring::round4),
+                }
+            })
+            .collect();
+        let people = analysis.people.map(|people| {
+            people
+                .iter()
+                .map(|person| {
+                    let [x, y, w, h] = person.bounds.map(f64::from_bits);
+                    Box2 { x: take_scoring::round4(x), y: take_scoring::round4(y), width: take_scoring::round4(w), height: take_scoring::round4(h) }
+                })
+                .collect()
+        });
+        Some((faces, people))
+    }
+}
+
+impl crate::commands::catalog_take_auto::TakeFaceAnalyzer for VisionFaces {
+    fn id(&self) -> &str {
+        if self.mesh.is_some() { "vision-mesh-humans-v1" } else { "vision-landmarks-humans-v1" }
+    }
+
+    fn faces(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        detail: Option<&mut crate::commands::catalog_take_auto::Detail>,
+    ) -> Option<Vec<crate::pipeline::take_scoring::Face>> {
+        self.run(rgb, width, height, false, detail).map(|(faces, _)| faces)
+    }
+
+    fn analyze(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        detail: Option<&mut crate::commands::catalog_take_auto::Detail>,
+    ) -> Option<(Vec<crate::pipeline::take_scoring::Face>, Option<Vec<crate::pipeline::take_scoring::Box2>>)> {
+        self.run(rgb, width, height, true, detail)
+    }
+}
+
+/// `TakeMediaAnalysis.signals` for a photo: the analysis decode (1024 px),
+/// the detail decode for Face Mesh and wide frames, 2×2 tiles of a 2048 px
+/// decode when small faces may hide, all through the adapter's decoders.
+pub fn take_image_signals(
+    path: &Path,
+    faces: &mut dyn crate::commands::catalog_take_auto::TakeFaceAnalyzer,
+) -> Option<(crate::pipeline::take_scoring::Signals, bool)> {
+    use crate::commands::catalog_take_auto::{first_pass, tiled_faces, Detail};
+    use crate::pipeline::take_scoring::{self, Luma};
+    let fitted = take_decode(path, TakeDecode::Analysis, take_scoring::ANALYSIS_LONG_SIDE)?;
+    let (w, h) = (fitted.width, fitted.height);
+    let luma = Luma::from_rgb(&fitted.rgb, w as usize, h as usize);
+    let long_side = fitted.source_long_side;
+    let detail = (long_side > take_scoring::ANALYSIS_LONG_SIDE).then(|| take_decode(path, TakeDecode::Detail, take_scoring::TILE_LONG_SIDE)).flatten();
+    let mut view = detail.as_ref().map(|d| Detail::new(&d.rgb, d.width, d.height));
+    let Some((found, people)) = first_pass(faces, &fitted.rgb, w, h, view.as_mut()) else {
+        return Some((take_scoring::signals(&luma, vec![], None), false));
+    };
+    if !faces.detects() || !take_scoring::wants_tiles(long_side, w as usize, h as usize, &found, people.as_deref()) {
+        return Some((take_scoring::signals(&luma, found, people), true));
+    }
+    let reuse = detail.filter(|d| d.width.max(d.height) >= long_side.min(take_scoring::TILE_LONG_SIDE));
+    let Some(wide) = reuse.or_else(|| take_decode(path, TakeDecode::Wide, take_scoring::TILE_LONG_SIDE)) else {
+        return Some((take_scoring::signals(&luma, found, people), true));
+    };
+    if wide.width.max(wide.height) * 2 < take_scoring::ANALYSIS_LONG_SIDE * 3 {
+        return Some((take_scoring::signals(&luma, found, people), true));
+    }
+    let Some(tiled) = tiled_faces(faces, &wide.rgb, wide.width, wide.height) else {
+        return Some((take_scoring::signals(&luma, found, people), false));
+    };
+    let merged = take_scoring::merge_faces(&found, &tiled);
+    Some((take_scoring::signals_at(&luma, merged, people, Some(wide.width.max(wide.height) as usize)), true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +635,24 @@ mod tests {
         assert!(jpeg.is_some_and(|bytes| bytes.starts_with(&[0xFF, 0xD8])));
         assert!(image.crop_112([0, 0, 4, 4]).is_none());
         assert!(FaceImage::open(&dir.path().join("missing.jpg"), 300, false).is_none());
+    }
+
+    #[test]
+    fn take_signals_decode_like_swift_and_tile_a_wide_frame_without_faces() {
+        use crate::commands::catalog_take_auto::TakeFaceAnalyzer;
+        let dir = Scratch::new();
+        let path = write_gradient_jpeg(dir.path(), 3000, 2000);
+        let fitted = take_decode(&path, TakeDecode::Analysis, 1024).expect("analysis decode");
+        assert_eq!((fitted.width, fitted.height, fitted.source_long_side), (1024, 683, 3000));
+        let wide = take_decode(&path, TakeDecode::Wide, 2048).expect("wide decode");
+        assert_eq!((wide.width, wide.height), (2048, 1365));
+        let mut faces = VisionFaces { mesh: None };
+        assert_eq!(faces.id(), "vision-landmarks-humans-v1");
+        let (signals, complete) = take_image_signals(&path, &mut faces).expect("signals");
+        assert!(complete);
+        assert!(signals.faces.is_empty());
+        assert_eq!(signals.face_long_side, Some(2048), "a large frame without faces is tiled");
+        assert!(take_image_signals(&dir.path().join("missing.jpg"), &mut faces).is_none());
     }
 
     #[test]
