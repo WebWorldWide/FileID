@@ -320,7 +320,12 @@ pub(crate) fn open_windows_directory_lock(path: &std::path::Path) -> anyhow::Res
 #[cfg(target_os = "linux")]
 type PlatformRestoreTarget = crate::shell::trash::RestoreTarget;
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(not(windows), not(target_os = "linux"), not(feature = "apple-adapters")))]
+struct PlatformRestoreTarget;
+
+/// macOS moves the item back by path; `handle_restore_from_trash` has already
+/// checked the destination is inside an authorized library root.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 struct PlatformRestoreTarget;
 
 #[cfg(target_os = "linux")]
@@ -341,7 +346,16 @@ fn prepare_restore_target(
     PlatformRestoreTarget::prepare(original, authorized_roots)
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn prepare_restore_target(
+    original: &std::path::Path,
+    _authorized_roots: &[std::path::PathBuf],
+) -> anyhow::Result<PlatformRestoreTarget> {
+    crate::util::read_only::require_source_mutation(original)?;
+    Ok(PlatformRestoreTarget)
+}
+
+#[cfg(all(not(windows), not(target_os = "linux"), not(feature = "apple-adapters")))]
 fn prepare_restore_target(
     _original: &std::path::Path,
     _authorized_roots: &[std::path::PathBuf],
@@ -359,6 +373,8 @@ struct PreparedRestore {
     #[cfg(windows)]
     recycle_physical: Option<std::path::PathBuf>,
     source_identity: Option<crate::platform::FileIdentity>,
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    item: trash_log::TrashLogItem,
 }
 
 fn already_restored_outcome(
@@ -385,6 +401,9 @@ fn reconcile_restored_catalog(
     let metadata = std::fs::symlink_metadata(path)?;
     if crate::platform::file_identity(path) != Some(identity) {
         anyhow::bail!("restored path identity changed before catalog reconciliation");
+    }
+    if trash_log::restore_snapshot(tx, item.file_id, &item.original_path, &item.rows)? {
+        return Ok(());
     }
     let size = i64::try_from(metadata.len()).context("restored file is too large for the catalog")?;
     let extension = path
@@ -549,6 +568,8 @@ pub(crate) async fn handle_restore_from_trash(
                                 .as_deref()
                                 .map(std::path::PathBuf::from),
                             source_identity: item.source_identity,
+                            #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+                            item: item.clone(),
                         }),
                         Err(error) => {
                             outcomes[index] = Some(if original.symlink_metadata().is_ok() {
@@ -1020,7 +1041,19 @@ fn restore_batch_from_recycle_bin(prepared: &[PreparedRestore]) -> Vec<RestoreOu
         .collect()
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn restore_batch_from_recycle_bin(prepared: &[PreparedRestore]) -> Vec<RestoreOutcome> {
+    prepared
+        .iter()
+        .map(|item| match crate::shell::trash::restore(&item.item, &item.original) {
+            Ok(identity) => RestoreOutcome::Restored(identity, None),
+            Err(_) if item.original.symlink_metadata().is_ok() => RestoreOutcome::Conflict,
+            Err(error) => RestoreOutcome::Failed(error.to_string()),
+        })
+        .collect()
+}
+
+#[cfg(all(not(windows), not(target_os = "linux"), not(feature = "apple-adapters")))]
 fn restore_batch_from_recycle_bin(prepared: &[PreparedRestore]) -> Vec<RestoreOutcome> {
     prepared
         .iter()
@@ -1492,6 +1525,7 @@ mod tests {
             recycle_bin_id: Some(claim.to_string_lossy().into_owned()),
             recycle_physical_path: Some(physical.to_string_lossy().into_owned()),
             source_identity: expected,
+            ..Default::default()
         };
         let cleanup = match already_restored_outcome(&retry, &original) {
             Some(RestoreOutcome::Restored(identity, Some(cleanup))) => {
@@ -1526,6 +1560,7 @@ mod tests {
             recycle_bin_id: None,
             recycle_physical_path: Some(r"C:\$Recycle.Bin\$Rreceipt.bin".into()),
             source_identity: Some(identity),
+            ..Default::default()
         };
         match already_restored_outcome(&item, &path) {
             Some(RestoreOutcome::Restored(recovered, Some(cleanup))) => {

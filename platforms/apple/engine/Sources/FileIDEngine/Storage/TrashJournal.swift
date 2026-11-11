@@ -212,7 +212,8 @@ enum TrashJournal {
     /// items that cannot be restored stay in the journal for a later retry.
     static func restore(batchID: String, database: Database, journal: URL = defaultURL,
                         move: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }) async -> BulkActionResult {
-        guard let batch = find(batchID, at: journal) else {
+        // A batch the Rust engine made, after a switch back to this engine.
+        guard let batch = find(batchID, at: journal) ?? RustTrashLog.find(batchID, beside: journal) else {
             return BulkActionResult(action: "restoreFromTrash", succeeded: 0, failed: 1,
                                     messages: [BulkActionItem(ok: false, message: "Nothing to put back: this Trash batch is unknown or already restored.")])
         }

@@ -266,6 +266,11 @@ pdf-analyze = ["dep:pdfium-render"]
 # `LIBRARY_PATH=<swift build dir> cargo build --features apple-adapters`.
 # macOS only; CLI and TUI never enable it.
 apple-adapters = []
+# Test builds only, never shipped (`assemble_app.sh` refuses the binary):
+# the app-hosted engine moves trashed files into `$FILEID_TEST_TRASH_ROOT`
+# instead of the user's Trash, and only with a scratch catalog. Lets the
+# conformance suite and the crash harness run the Trash round trip.
+test-trash-root = ["apple-adapters"]
 
 [dev-dependencies]
 # Property-based tests for pure-function invariants (path safety, dHash

@@ -19,7 +19,15 @@ use crate::ipc::{CatalogJob, CatalogRequest, CatalogResponse, EventPayload, Face
 
 pub const JOB_ID: &str = "face-refresh";
 pub const JOB_KIND: &str = "faceRefresh";
-pub const PROCESSING: &str = "rust-align112-v1";
+/// What this engine's own face pipeline produces (YuNet landmarks, 112 px alignment).
+pub const PORTABLE_PROCESSING: &str = "rust-align112-v1";
+/// The macOS namespaces (Vision landmarks and the Swift alignment), as
+/// `FaceCacheProvenance.processingVersion` names them.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub const MAC_PROCESSING: &str = "macos-landmark-overlap-v3-orientation";
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub const MAC_BBOX_PROCESSING: &str = "macos-bbox-crop-v3-orientation";
+const REPORT_ONLY: &str = "Updating faces needs the Mac face pipeline, which this engine doesn't run yet. People and names don't change.";
 const BATCH: usize = 64;
 const NO_MODEL: &str = "Install the face recognition model in Settings, then update faces again.";
 const MODEL_CHANGED: &str = "The face model changed. Start the face update again.";
@@ -46,6 +54,26 @@ const OUTDATED: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id LEFT
      WHERE f.failed=0 AND (length(COALESCE(fp.arcface_embedding,X''))<>512 OR fp.embedding_model IS NULL OR fp.embedding_model<>?1 \
        OR fp.processing_version IS NULL OR fp.processing_version<>?2 OR fp.source_revision IS NULL OR r.revision IS NULL \
        OR fp.source_revision<>r.revision)";
+
+/// The face space this platform keeps People in. The engine the Mac app hosts
+/// keeps the Swift engine's namespace, so a Swift catalog shows no refresh
+/// backlog; elsewhere it is the portable pipeline's.
+pub(crate) fn processing() -> &'static str {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        if std::env::var("FILEID_FACE_ALIGN").as_deref() == Ok("0") { MAC_BBOX_PROCESSING } else { MAC_PROCESSING }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        PORTABLE_PROCESSING
+    }
+}
+
+/// Whether this engine can compute vectors in `processing()`. The Mac namespace
+/// needs Vision landmarks, so the app-hosted engine only reports the backlog.
+pub(crate) fn refresh_supported() -> bool {
+    processing() == PORTABLE_PROCESSING
+}
 
 /// The installed SFace weights' identity, cached by path, size and mtime.
 pub(crate) fn current_model() -> Option<String> {
@@ -116,7 +144,7 @@ pub(crate) fn status(conn: &Connection, model: Option<&str>, processing: &str) -
 }
 
 pub(crate) fn status_page(conn: &Connection, request: &str) -> rusqlite::Result<FaceReviewPage> {
-    let refresh = status(conn, current_model().as_deref(), PROCESSING)?;
+    let refresh = status(conn, current_model().as_deref(), processing())?;
     Ok(FaceReviewPage {
         total: refresh.pending,
         queue: Some("refresh".into()),
@@ -189,7 +217,10 @@ pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) ->
 
 pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest, model: Option<&str>) -> Result<CatalogResponse> {
     let Some(model) = model else { bail!(NO_MODEL) };
-    seed(conn, model, PROCESSING, now())?;
+    if !refresh_supported() {
+        bail!(REPORT_ONLY);
+    }
+    seed(conn, model, processing(), now())?;
     let mut response = super::catalog::response(
         &request.request_id,
         "ok",
@@ -544,6 +575,12 @@ struct OnnxBackend {
 
 impl OnnxBackend {
     fn load() -> Result<Self> {
+        if !refresh_supported() {
+            if current_model().is_none() {
+                bail!(NO_MODEL);
+            }
+            bail!(REPORT_ONLY);
+        }
         let yunet = crate::models::yunet::default_weights_path().and_then(crate::models::yunet::YuNet::load);
         let sface = crate::models::sface::default_weights_path().and_then(crate::models::sface::SFace::load);
         match (yunet, sface) {
