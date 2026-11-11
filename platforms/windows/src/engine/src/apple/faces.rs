@@ -504,7 +504,7 @@ impl VisionFaces {
         if let Some(mesh) = self.mesh.as_mut() {
             let judged: Vec<bool> = analysis.faces.iter().map(|face| f64::from_bits(face.min_side) >= take_scoring::MIN_FACE_PIXELS).collect();
             if judged.contains(&true) {
-                let larger = detail.map(|detail| detail.pixels()).filter(|(_, w, _)| *w > width);
+                let larger = detail.and_then(|detail| detail.load()).filter(|(_, w, _)| *w > width);
                 let (pixels, pw, ph, inputs) = match larger {
                     Some((pixels, w, h)) => (pixels, w, h, kept.mesh(w, h)?),
                     None => (rgb, width, height, analysis.faces.iter().map(|face| MeshJson { bits: face.mesh.bits }).collect()),
@@ -561,10 +561,6 @@ impl crate::commands::catalog_take_auto::TakeFaceAnalyzer for VisionFaces {
         if self.mesh.is_some() { "vision-mesh-humans-v1" } else { "vision-landmarks-humans-v1" }
     }
 
-    fn reads_detail(&self) -> bool {
-        self.mesh.is_some()
-    }
-
     fn faces(
         &mut self,
         rgb: &[u8],
@@ -599,20 +595,21 @@ pub fn take_image_signals(
     let (w, h) = (fitted.width, fitted.height);
     let luma = Luma::from_rgb(&fitted.rgb, w as usize, h as usize);
     let long_side = fitted.source_long_side;
-    // Swift decodes the detail image lazily: for Face Mesh, or as the tile source.
+    // As Swift's `TakeDetailImage`: decoded only when Face Mesh reads it, or as the tile source.
     let large = long_side > take_scoring::ANALYSIS_LONG_SIDE;
     let detail_decode = || take_decode(path, TakeDecode::Detail, take_scoring::TILE_LONG_SIDE);
-    let mut detail = (large && faces.reads_detail()).then(detail_decode).flatten();
-    let mut view = detail.as_ref().map(|d| Detail::new(&d.rgb, d.width, d.height));
+    let mut view = large.then(|| Detail::deferred(move || detail_decode().map(|d| (d.rgb, d.width, d.height))));
     let Some((found, people)) = first_pass(faces, &fitted.rgb, w, h, view.as_mut()) else {
         return Some((take_scoring::signals(&luma, vec![], None), false));
     };
     if !faces.detects() || !take_scoring::wants_tiles(long_side, w as usize, h as usize, &found, people.as_deref()) {
         return Some((take_scoring::signals(&luma, found, people), true));
     }
-    if detail.is_none() && large {
-        detail = detail_decode();
-    }
+    let detail = match view.and_then(Detail::into_loaded) {
+        Some((rgb, width, height)) => Some(TakeImage { rgb, width, height, source_long_side: long_side }),
+        None if large => detail_decode(),
+        None => None,
+    };
     let reuse = detail.filter(|d| d.width.max(d.height) >= long_side.min(take_scoring::TILE_LONG_SIDE));
     let Some(wide) = reuse.or_else(|| take_decode(path, TakeDecode::Wide, take_scoring::TILE_LONG_SIDE)) else {
         return Some((take_scoring::signals(&luma, found, people), true));
