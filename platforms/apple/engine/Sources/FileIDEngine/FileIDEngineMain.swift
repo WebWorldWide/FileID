@@ -1481,6 +1481,7 @@ struct FileIDEngineMain {
         let uniqueIDs = orderedUniqueFileIDs(fileIDs)
         var messages: [BulkActionItem] = []
         var journal: [TrashJournal.Item] = []
+        var identities: [Int64: RustTrashLog.Identity] = [:]
         let batchID = UUID().uuidString.lowercased(), createdAt = Date().timeIntervalSince1970
         var journaled = false
         var dirty = false
@@ -1533,6 +1534,7 @@ struct FileIDEngineMain {
                 // O(batch), so past the first files it is capped at ~4/s to keep thousands-file
                 // batches linear (Finder Put Back covers that gap).
                 journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: "", rows: rows))
+                identities[id] = RustTrashLog.identity(of: url)
                 dirty = true
                 if journal.count <= 64 || Date().timeIntervalSince(lastJournalWrite) >= 0.25 { writeJournal() }
                 let landed: URL?
@@ -1555,6 +1557,11 @@ struct FileIDEngineMain {
             }
         }
         writeJournal()
+        if journaled {
+            let batch = TrashJournal.Batch(id: batchID, createdAt: createdAt, items: journal)
+            try? RustTrashLog.append(RustTrashLog.entry(for: batch, identities: identities),
+                                     to: RustTrashLog.url(beside: journalURL))
+        }
         let action = journaled ? "trashFiles:" + batchID : "trashFiles"
         return BulkActionResult(action: action, succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }

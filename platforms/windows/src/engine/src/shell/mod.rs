@@ -31,8 +31,8 @@
 //   heic    → `sips` (ImageIO) → temp PNG → `image` decode
 //   video   → FileID's vetted FFmpeg runtime, as on Linux
 //   ocr     → unavailable: empty text, one notice per process
-//   trash / tags → refuse with a message naming the macOS app; the Rust
-//             engine has no Finder Trash or Finder-tag writer
+//   trash / tags → refuse with a message naming the macOS app, except in
+//             the engine the app hosts (`apple-adapters`): `macos.rs`
 
 #[cfg(windows)] pub mod tags;
 #[cfg(windows)] pub mod thumbnail;
@@ -40,6 +40,8 @@
 #[cfg(windows)] pub mod ocr;
 #[cfg(windows)] pub mod video;
 #[cfg(windows)] pub mod heic;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))] mod macos;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))] pub use macos::{tags, trash};
 
 // ────────────────────────────────────────────────────────────────────
 // Linux shared helpers (path → URI, temp files, silent subprocess).
@@ -631,7 +633,7 @@ pub mod tags {
     }
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(not(windows), not(target_os = "linux"), not(feature = "apple-adapters")))]
 pub mod tags {
     use anyhow::Result;
     use std::path::Path;
@@ -2013,7 +2015,7 @@ pub mod trash {
     }
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(all(not(windows), not(target_os = "linux"), not(feature = "apple-adapters")))]
 pub mod trash {
     use std::path::{Path, PathBuf};
 
