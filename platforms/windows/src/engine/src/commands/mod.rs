@@ -41,6 +41,9 @@ pub mod models;
 pub mod roots;
 pub mod benchmark;
 pub mod timeline;
+mod timeline_media;
+// The Mac app's engine exports and analyses video with AVFoundation instead.
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) mod video_export;
 mod media_recipes;
 

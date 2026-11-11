@@ -39,23 +39,27 @@ struct MediaRecipe: Sendable {
 enum MediaExport {
     static let commonKinds: Set<String> = ["trim", "remux", "audio", "proxy", "rotate"]
 
-    /// Polls the caller's flag while AVAssetExportSession runs.
+    /// Polls the caller's flag while AVAssetExportSession runs; cancelling the
+    /// export task stops the session.
     private static func run(_ exporter: AVAssetExportSession, to output: URL, as type: AVFileType, cancel: CancelFlag) async throws {
+        let cancelled = MediaFailure("Export cancelled before publication")
+        if cancel.isSet { throw cancelled }
         let session = SendableExporter(exporter)
+        let export = Task { try await session.value.export(to: output, as: type) }
         let watcher = Task.detached {
             while !Task.isCancelled {
-                if cancel.isSet { session.value.cancelExport(); return }
+                if cancel.isSet { export.cancel(); return }
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
         defer { watcher.cancel() }
         do {
-            try await exporter.export(to: output, as: type)
+            try await export.value
         } catch {
-            if cancel.isSet { throw MediaFailure("Export cancelled before publication") }
+            if cancel.isSet { throw cancelled }
             throw error
         }
-        if cancel.isSet { throw MediaFailure("Export cancelled before publication") }
+        if cancel.isSet { throw cancelled }
     }
 
     private struct SendableExporter: @unchecked Sendable {
