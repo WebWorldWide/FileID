@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-11 — Convergence Stage 6: the shared engine runs the Mac face pipeline (`agent/converge-6`)
+
+- **Rust engine, app-hosted build** (agent): face alignment and the landmark match ported bit for bit (`face-alignment.json`); FileIDAppleKit face and Best Takes adapters; `runFaceClustering` extracts pending faces in the Mac namespace first, like Swift (vectors, backoff, crops); the face refresh job runs on the same pipeline instead of reporting only; SFace runs in Rust ORT on the CoreML EP; Best Takes judges faces, eyes and people with Vision (and Face Mesh when installed). Details in CONVERGENCE "Stage 6 status".
+- **Measured** (M1 Pro, release builds, isolated copies, pip ORT 1.30 with telemetry off and network denied). People set, the stored Swift scan re-embedded from scratch: Rust vectors bit-identical to Swift's on 943/943 faces, People metrics identical (held-out pairwise precision 0.718, recall 0.424; 52 persons). Extraction plus clustering, back to back: Swift 28.3–45.5 s, Rust 36.9–60 s across load 6–37 (about 1.0–1.4× at similar load). Best Takes on 80 Sony originals: faces and eyes identical on the 62 untiled photos, closed-eye calls agree 111/111; Rust 116–124 ms per photo against Swift's 37–44 ms (open).
+- **Checks:** see the branch report.
+
 ## 2026-11-10 — Face Mesh reads higher-resolution faces in both engines
 
 - **Both engines** (agent, coordinator decision): faces are still found on the 1024 px analysis image, but the eyelid mesh now reads finer pixels, only for photos where a face of 24 px or more was found. Rust already holds the full decode, so it resizes only a square of 3× the face around each face to the 2048 px scale (4.9 ms median per face; resizing the whole 33 MP frame to 2048 costs 226–275 ms). The Mac can't decode a region, so it decodes once more: a camera JPEG's stored preview (Sony 1616 px), else 2048 px; the same decode is reused for small-face tiles. Threshold stays 0.175. Rust cache id `yunet-mesh-v1` → `yunet-mesh-v2`.

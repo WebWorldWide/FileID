@@ -182,10 +182,10 @@ pub struct MacSFace {
     provider: &'static str,
 }
 
-/// Sessions in the pool (measured in DECISIONS 2026-11-11); `FILEID_SFACE_SESSIONS`
-/// (1–4) overrides it.
+/// Sessions in the pool: one, like `ArcFaceService`; `FILEID_SFACE_SESSIONS`
+/// (1–4) adds more (no gain measured on the People set, DECISIONS 2026-11-11).
 fn sface_sessions() -> usize {
-    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
+    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 4))
 }
 
 impl MacSFace {
