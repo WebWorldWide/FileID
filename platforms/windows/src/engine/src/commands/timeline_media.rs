@@ -106,7 +106,7 @@ pub(crate) fn whole_seconds(pool: &Pool) -> Vec<(f64, Vec<u8>)> {
             continue;
         }
         match picked.last() {
-            Some((last, _)) if last.round() == second => {}
+            Some((last, _)) if last.round() as i64 == second as i64 => {}
             _ => picked.push((*seconds, signature.clone())),
         }
     }

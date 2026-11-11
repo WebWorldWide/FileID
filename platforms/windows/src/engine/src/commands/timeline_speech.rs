@@ -47,6 +47,7 @@ impl Recognizer for AppleSpeech {
     }
 }
 
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(clippy::unused_async))]
 pub(super) async fn transcribe(
     id: &str,
     job: &Job,
@@ -219,7 +220,7 @@ mod tests {
             {
                 database.lock().execute("UPDATE catalog_jobs SET state='paused' WHERE id=?1", [id])?;
             }
-            let index = speech_passages::chunks(100.0).iter().position(|c| c.extract_start == start).unwrap();
+            let index = speech_passages::chunks(100.0).iter().position(|c| (c.extract_start - start).abs() < 1e-9).unwrap();
             self.chunks.lock()[index].clone().ok_or_else(|| anyhow::anyhow!("no speech"))
         }
     }
