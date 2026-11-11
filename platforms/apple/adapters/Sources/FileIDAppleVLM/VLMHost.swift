@@ -121,6 +121,8 @@ public final class VLMHost: @unchecked Sendable {
             return await status()
         case "load":
             guard let spec = request.model else { throw VLMFailure(message: "No model to load.") }
+            // Without its Metal library MLX crashes on the first kernel instead of failing.
+            guard metallibPresent() else { throw VLMFailure(message: "mlx.metallib is missing next to FileIDAppleKit, so local AI models can't run on this build.") }
             VLMModelRegistry.shared.register(spec)
             try await analyzer.ensureLoaded(kind: AIModelKind(rawValue: spec.kind)) { fraction, message, done, total in
                 let body: [String: Any] = ["fraction": fraction, "message": message, "bytesDone": done, "totalBytes": total]
@@ -214,6 +216,17 @@ public final class VLMHost: @unchecked Sendable {
         }
     }
 
+    /// MLX loads `mlx.metallib` from the folder of the binary that contains
+    /// it (this library), as `DeepAnalyzeCapability.metallibPresent` checks
+    /// for the Swift engine.
+    static func metallibPresent() -> Bool {
+        var info = Dl_info()
+        guard dladdr(#dsohandle, &info) != 0, let name = info.dli_fname else { return false }
+        let folder = URL(fileURLWithPath: String(cString: name)).deletingLastPathComponent()
+        return ["mlx.metallib", "default.metallib", "Resources/mlx.metallib", "Resources/default.metallib"]
+            .contains { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }
+    }
+
     static func status() async -> [String: Any] {
         let analyzer = DeepAnalyze.shared
         var reply: [String: Any] = [
@@ -225,6 +238,7 @@ public final class VLMHost: @unchecked Sendable {
             "retainedMB": await ResourceScheduler.shared.retainedMB,
             "parked": await analyzer.isParked,
             "analyzing": await analyzer.isAnalyzing,
+            "metallib": metallibPresent(),
         ]
         if let kind = await analyzer.loadedModelKind { reply["loaded"] = kind.rawValue }
         return reply

@@ -106,6 +106,13 @@ if [ "${FILEID_WITH_RUST_ENGINE:-0}" = "1" ]; then
     cp "$RUST_ENGINE" "$CONTENTS/MacOS/fileidd"
     chmod +x "$CONTENTS/MacOS/fileidd"
     cp "$APPLE_KIT" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"
+    # MLX looks for mlx.metallib beside the binary that contains it, which for
+    # fileidd is libFileIDAppleKit.dylib (Stage 7 VLM sessions).
+    if [ -f "$METALLIB_CACHE" ]; then
+        cp "$METALLIB_CACHE" "$CONTENTS/Frameworks/mlx.metallib"
+    else
+        echo "⚠️  $METALLIB_CACHE missing — fileidd's MLX models will fail at runtime."
+    fi
     if ! otool -l "$CONTENTS/MacOS/fileidd" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
         install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/fileidd"
     fi

@@ -596,7 +596,8 @@ mod tests {
         spec["huggingFaceRoot"] = json!(root);
         let never = AtomicBool::new(false);
         let error = request(&json!({"op": "load", "model": spec}), &never, |_| {}).await.unwrap_err();
-        assert!(error.to_string().contains("isn't installed"), "{error:#}");
+        let message = error.to_string();
+        assert!(message.contains("isn't installed") || message.contains("mlx.metallib is missing"), "{error:#}");
         assert!(!root.exists(), "a failed load must not create the model folder");
     }
 

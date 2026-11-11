@@ -150,10 +150,11 @@ SIGNED_APP="$SIGN_TMP/$APP"
 find "$SIGN_TMP/$APP" -exec xattr -c {} \; 2>/dev/null || true
 
 # Nested code first (inside-out, no --deep): the metallibs live in
-# Contents/MacOS (MLX loads them colocated with the engine binary), so
+# Contents/MacOS and, for fileidd's FileIDAppleKit, Contents/Frameworks (MLX
+# loads them colocated with the binary that links it), so
 # codesign treats them as nested code that must carry its own signature
 # before the bundle seal. They sign as Format=generic.
-for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib; do
+for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib "$SIGN_TMP/$APP/Contents/Frameworks/"*.metallib; do
     [ -f "$lib" ] || continue
     codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
 done

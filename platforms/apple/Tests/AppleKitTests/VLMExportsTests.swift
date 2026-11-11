@@ -82,7 +82,8 @@ struct VLMExportsTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDAppleVLM-\(UUID().uuidString)")
         let (event, reply) = try submit(["op": "load", "model": spec(root: root)])
         #expect(event == 4)
-        #expect((reply["message"] as? String)?.contains("isn't installed") == true)
+        let message = reply["message"] as? String ?? ""
+        #expect(message.contains("isn't installed") || message.contains("mlx.metallib is missing"))
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
