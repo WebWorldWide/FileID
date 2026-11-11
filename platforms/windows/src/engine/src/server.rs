@@ -282,7 +282,7 @@ async fn async_main() -> Result<()> {
     if let Some(db) = db_conn.as_ref() {
         pipeline::restructure_apply::reconcile_pending_path_updates(db);
     }
-    let reclaimed = commands::trash_log::recover_stranded_claims();
+    let reclaimed = commands::trash_log::recover_at_startup(db_conn.as_ref());
     if reclaimed > 0 {
         tracing::warn!(reclaimed, "put back files a killed trashFiles left under a claim name");
     }

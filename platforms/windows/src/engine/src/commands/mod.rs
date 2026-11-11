@@ -7,6 +7,7 @@ pub(crate) mod deep_analyze;
 pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;
+pub(crate) mod face_clustering_mac;
 pub(crate) mod face_queues;
 pub(crate) mod face_refresh;
 pub(crate) mod face_review;
@@ -17,6 +18,8 @@ pub(crate) mod scan;
 pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
+pub(crate) mod journal_import;
+pub(crate) mod path_moves;
 pub(crate) mod wipe;
 
 pub mod catalog;

@@ -80,7 +80,7 @@
     "description": "trashFiles moves the file to the platform Trash, drops its row and returns the undo batch id; restoreFromTrash with that id puts the file back byte for byte and re-catalogs it.",
     "knownDivergences": [
       {"engine": "swift", "run": false, "reason": "trashFiles and restoreFromTrash use the real user Trash (FileManager.trashItem), which the fixture cannot confine to its state directory"},
-      {"engine": "rust", "os": ["darwin"], "reason": "the Rust engine has no macOS Trash backend, so trashFiles refuses and moves nothing"},
+      {"engine": "rust", "os": ["darwin"], "run": false, "liftedByTestTrashRoot": true, "reason": "without --test-trash-root the app-hosted build would use the user's real Trash (and the CLI/TUI build has no macOS Trash backend), so the case runs only against a test-trash-root build, whose Trash is a folder in the case directory"},
       {"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}
     ],
     "tree": [
@@ -92,7 +92,7 @@
     ],
     "steps": [
       {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0, "messages": [{"fileID": 1, "ok": true}]}},
-      {"label": "trashed", "fs": {"absent": ["docs/trash me.txt"], "exists": ["docs/stay.txt"]}},
+      {"label": "trashed", "fs": {"absent": ["docs/trash me.txt"], "exists": ["docs/stay.txt"], "inTestTrash": ["trash me.txt"]}},
       {"label": "row dropped", "db": "SELECT id FROM files ORDER BY id", "expect": [[2]]},
       {"label": "restore", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
       {"label": "restored", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}},

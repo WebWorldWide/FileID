@@ -205,8 +205,26 @@ fn enqueue_needs_a_face_model() {
     let library = library();
     let request: CatalogRequest = serde_json::from_value(serde_json::json!({"requestID": "r", "action": "enqueueFaceRefresh"})).unwrap();
     assert_eq!(enqueue(&library.conn, &request, None).unwrap_err().to_string(), NO_MODEL);
+    if !refresh_supported() {
+        assert_eq!(enqueue(&library.conn, &request, Some("m")).unwrap_err().to_string(), REPORT_ONLY);
+        return;
+    }
     let response = enqueue(&library.conn, &request, Some("m")).unwrap();
     assert_eq!(response.jobs.len(), 1);
+}
+
+#[test]
+fn the_platform_names_the_face_space() {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        assert_eq!(processing(), MAC_PROCESSING);
+        assert!(!refresh_supported());
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        assert_eq!(processing(), PORTABLE_PROCESSING);
+        assert!(refresh_supported());
+    }
 }
 
 #[test]
@@ -237,5 +255,5 @@ fn status_page_reads_the_backlog() {
     let library = library();
     let page = status_page(&library.conn, "r").unwrap();
     assert_eq!((page.status.as_str(), page.queue.as_deref()), ("ok", Some("refresh")));
-    assert_eq!(page.refresh.unwrap().processing, PROCESSING);
+    assert_eq!(page.refresh.unwrap().processing, processing());
 }

@@ -139,9 +139,35 @@ where
 /// same-physical-file pairs; semantic Restructure uses the unconstrained wrapper.
 pub fn cluster_with_cannot_links<F>(
     embeddings: &[Vec<f32>],
+    searcher: F,
+    params: Hyperparameters,
+    cannot_links: &[(usize, usize)],
+) -> ClusterResult
+where
+    F: FnMut(usize) -> Vec<Neighbor>,
+{
+    // MUTUAL-kNN is the DEFAULT here (label-validated 2026-07-05): an edge i—j is
+    // kept only when EACH face is in the other's above-threshold neighbourhood,
+    // which breaks the single "bridge" face that would otherwise chain two
+    // identities into one mega-cluster. Set FILEID_FACE_MUTUAL_KNN=0 to fall back
+    // to plain single-linkage (union i with every kNN hit above the threshold —
+    // simpler, zero extra allocation, but chains through bridge faces). Both fail
+    // toward over-split (UI-mergeable, the safe direction); Pass 3's 2-means split
+    // is unchanged either way.
+    let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
+        .ok()
+        .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
+    cluster_with_options(embeddings, searcher, params, cannot_links, mutual_knn)
+}
+
+/// `cluster_with_cannot_links` with the mutual-kNN gate chosen by the caller.
+pub fn cluster_with_options<F>(
+    embeddings: &[Vec<f32>],
     mut searcher: F,
     params: Hyperparameters,
     cannot_links: &[(usize, usize)],
+    mutual_knn: bool,
 ) -> ClusterResult
 where
     F: FnMut(usize) -> Vec<Neighbor>,
@@ -178,18 +204,6 @@ where
     }
 
     // ── Pass 1: connected components above pass1_cosine ───────────
-    // MUTUAL-kNN is now the DEFAULT (label-validated 2026-07-05): an edge i—j is
-    // kept only when EACH face is in the other's above-threshold neighbourhood,
-    // which breaks the single "bridge" face that would otherwise chain two
-    // identities into one mega-cluster. Set FILEID_FACE_MUTUAL_KNN=0 to fall back
-    // to plain single-linkage (union i with every kNN hit above the threshold —
-    // simpler, zero extra allocation, but chains through bridge faces). Both fail
-    // toward over-split (UI-mergeable, the safe direction); Pass 3's 2-means split
-    // is unchanged either way.
-    let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
-        .ok()
-        .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
-        .unwrap_or(true);
     let mut cannot_neighbors = vec![HashSet::new(); n];
     for &(a, b) in cannot_links {
         if a >= n || b >= n || a == b {
