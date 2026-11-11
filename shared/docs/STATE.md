@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-10 — Convergence Stage 3: Restructure under the Rust engine on the Mac
+
+- **What landed** (agent `converge-3`; details in `CONVERGENCE.md` "Stage 3 status"): one restructure undo journal format for both engines (Swift writes the Rust header and source identity, reads both; Rust on macOS reads Swift's older headerless journals inside the requested root), so a run applied by one engine is undone by the other. A refused Rust apply or undo now ends with `restructureApplyResult` like Swift; the Mac app treats the Rust plan errors as terminal; feedback never upgrades Ask moves in either engine. Rust plan kNN computed once in parallel; journal entries use `F_BARRIERFSYNC` on macOS.
+- **Measured** (release builds, scratch copies, load 21–108): Adlon/Camera stand-ins (6,031 files, original names, sizes, times, EXIF headers): both engines 0 moves, 30 folders kept, identical plans. Messy folder (42 Adlon JPEGs from three events): 42/42 into the three events in both engines, identical; Rust apply + undo restore every byte. Plan Swift 1.66–2.04 s, Rust 0.23–0.38 s (was 1.75–7.68 s). 3,000-move apply Swift 7.9–9.4 s, Rust 5.0–5.2 s (was 22–30 s).
+- **Conformance:** 7 new restructure cases (cross-engine apply/undo both ways, unreadable and foreign journals, destination outside the root, shortcut mode with a Swift known divergence, a documents Downloads dump). RESULTS_PLACEHOLDER
+- Digest refreshes: `commands/restructure.rs`, `pipeline/restructure_apply.rs` (no network code). Adlon read only; live state and `~/Documents/huggingface` untouched.
+
 ## 2026-11-10 — Private People and timeline eval sets rebuilt in ~/FileIDDev/Eval; MPF previews measured on People
 
 - **Rebuilt** (agent; copies from the Adlon drive, read-only; nothing in the repo): People 499 photos in 48 events 2010–2026 with 1,227 labelled boxes (733 identity faces, 126 anonymous ids, 42 small faces, 468 `unsure`, 26 `nonface`; 16 ids in both halves). Timeline 23 videos in 16 events with 145 intervals (35 fast actions, 22 quiet spans) and 23 cuts (8 tune, 15 held-out). The scripts now default to `~/FileIDDev/Eval` (`FILEID_EVAL_ROOT`), run engines in an isolated home with model copies, check `~/Documents/huggingface` as well as the live state, and `people_eval.py --split` clusters one half alone. Not comparable with the 2026-11-07 set.

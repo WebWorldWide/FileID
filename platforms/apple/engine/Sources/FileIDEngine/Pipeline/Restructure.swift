@@ -1042,8 +1042,9 @@ public enum Restructure {
         let totalMoves: Int
         /// Full-plan confidence tallies, computed once at plan time and reused by
         /// `applyStoredPlan` so its auto-tier filter doesn't need a second pass
-        /// over the spool just to know the eligible count.
-        let confidenceCounts: RestructureConfidenceCounts
+        /// over the spool just to know the eligible count. Absent in spools the shared
+        /// engine writes; `applyStoredPlan` then counts the Auto rows itself.
+        let confidenceCounts: RestructureConfidenceCounts?
     }
 
     private final class NDJSONLineReader {
@@ -1234,6 +1235,18 @@ public enum Restructure {
               pathsEqual(header.libraryRoot, expectedRoot) else {
             throw CocoaError(.fileReadCorruptFile)
         }
+        let eligibleAuto: Int
+        if let counts = header.confidenceCounts {
+            eligibleAuto = counts.auto
+        } else {
+            let counter = try NDJSONLineReader(url: url)
+            _ = try counter.nextLine()
+            var auto = 0
+            while let line = try counter.nextLine() {
+                if try decoder.decode(RestructureMove.self, from: line).confidence.lowercased() == "auto" { auto += 1 }
+            }
+            eligibleAuto = auto
+        }
         // Only the "auto" confidence tier is safe to apply from a stored/
         // truncated plan: most of its rows were never shown to the user (the UI
         // only renders the first `storedPlanPreviewCap` moves before falling
@@ -1246,7 +1259,7 @@ public enum Restructure {
         var heldAsk = 0
         var heldUnknown = 0
         let result = try await applyStream(
-            total: header.confidenceCounts.auto,
+            total: eligibleAuto,
             nextProposal: {
                 while true {
                     guard let line = try reader.nextLine() else { return nil }
@@ -1269,7 +1282,7 @@ public enum Restructure {
             undoJournal: nil,
             recordUndo: true)
         JSONLog.shared.info(ev: "restructure_apply_stored_plan_tier_filter",
-                            extra: ["eligibleAuto": AnyCodable(header.confidenceCounts.auto),
+                            extra: ["eligibleAuto": AnyCodable(eligibleAuto),
                                     "heldReview": AnyCodable(heldReview),
                                     "heldAsk": AnyCodable(heldAsk),
                                     "heldUnknown": AnyCodable(heldUnknown)])

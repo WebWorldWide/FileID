@@ -7,7 +7,7 @@ pub fn require_writable(path: &Path) -> std::io::Result<()> {
     // per restructure move; its resolution never changes while the engine runs.
     static RESOLVED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     match RESOLVED.get_or_init(|| resolved(Path::new(READ_ONLY_ROOT)).ok()) {
-        Some(root) => check_under(path, &[PathBuf::from(READ_ONLY_ROOT)], &[root.clone()]),
+        Some(root) => check_under(path, &[PathBuf::from(READ_ONLY_ROOT)], std::slice::from_ref(root)),
         None => require_writable_under(path, &[PathBuf::from(READ_ONLY_ROOT)]),
     }
 }

@@ -978,6 +978,46 @@ struct RestructureApplyTests {
     /// apply only the "auto" tier — exactly like the Rust engine's
     /// `auto_tier_only` gate — and hold Review/Ask/unknown-confidence rows
     /// back rather than moving them sight-unseen.
+    @Test("applyStoredPlan reads a spool written by the shared engine (no confidenceCounts in the header)")
+    func applyStoredPlanReadsRustSpool() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDStoredPlanRust-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("in"), withIntermediateDirectories: true)
+        let autoSrc = root.appendingPathComponent("in/a.jpg")
+        let reviewSrc = root.appendingPathComponent("in/b.jpg")
+        try Data("a".utf8).write(to: autoSrc)
+        try Data("b".utf8).write(to: reviewSrc)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: autoSrc.path)
+        try await insertRow(db, id: 2, path: reviewSrc.path)
+        let planDir = tmp.appendingPathComponent("plans")
+        try FileManager.default.createDirectory(at: planDir, withIntermediateDirectories: true)
+        let planID = UUID().uuidString.lowercased()
+        let lines: [[String: Any]] = [
+            ["version": 2, "libraryRoot": root.path, "totalMoves": 2],
+            ["fileID": 1, "source": autoSrc.path, "destination": root.appendingPathComponent("Photos/a.jpg").path,
+             "category": "photo", "confidence": "auto"],
+            ["fileID": 2, "source": reviewSrc.path, "destination": root.appendingPathComponent("Photos/b.jpg").path,
+             "category": "photo", "confidence": "review"],
+        ]
+        var spool = Data()
+        for line in lines {
+            spool.append(try JSONSerialization.data(withJSONObject: line))
+            spool.append(0x0A)
+        }
+        try spool.write(to: planDir.appendingPathComponent("\(planID).ndjson"))
+
+        let result = try await Restructure.applyStoredPlan(
+            planID: planID, expectedRoot: root.path, database: db, libraryRoot: root, directory: planDir)
+        #expect(result.moved == 1)
+        #expect(result.failed == 0)
+        #expect(result.heldReview == 1)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("Photos/a.jpg").path))
+        #expect(FileManager.default.fileExists(atPath: reviewSrc.path))
+    }
+
     @Test("applyStoredPlan applies only the Auto tier; Review/Ask/unknown stay put")
     func applyStoredPlanFiltersToAutoTier() async throws {
         let tmp = FileManager.default.temporaryDirectory
