@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -662,6 +663,27 @@ class RuntimeEgressTests(unittest.TestCase):
             rogue.write_text("fn go() { reqwest::Client::new(); }\n", encoding="utf-8")
             self.assertTrue(any(
                 "platforms/windows/src/engine/rogue.rs" in failure and "raw network API" in failure
+                for failure in source_boundary_violations(root)
+            ))
+
+    def test_symlinked_sources_are_checked_at_their_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = self.source_tree(directory)
+            target = root / "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift"
+            shared = root / "platforms/apple/adapters/Sources/FileIDAppleVLM/Engine/DeepAnalyze.swift"
+            shared.parent.mkdir(parents=True)
+            shared.symlink_to(os.path.relpath(target, shared.parent))
+            self.assertEqual(source_boundary_violations(root), [])
+            target.write_text(target.read_text(encoding="utf-8") + "\n// altered\n", encoding="utf-8")
+            failures = source_boundary_violations(root)
+            self.assertTrue(any("FileIDEngine/Pipeline/DeepAnalyze.swift" in failure and "digest changed" in failure for failure in failures))
+            self.assertFalse(any("FileIDAppleVLM" in failure for failure in failures))
+            rogue = Path(outside) / "Beacon.swift"
+            rogue.write_text("func go() { _ = URLSession(configuration: .default) }\n", encoding="utf-8")
+            linked = root / "platforms/apple/adapters/Sources/FileIDAppleVLM/Beacon.swift"
+            linked.symlink_to(rogue)
+            self.assertTrue(any(
+                "FileIDAppleVLM/Beacon.swift" in failure and "raw network API" in failure
                 for failure in source_boundary_violations(root)
             ))
 

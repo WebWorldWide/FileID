@@ -27,7 +27,7 @@ let package = Package(
         .executable(name: "FileIDEngine", targets: ["FileIDEngine"]),
         // Swift adapters the shared Rust engine (`Contents/MacOS/fileidd`)
         // links through the C interface in adapters/include/fileid_apple.h.
-        // Shipped in Contents/Frameworks. No package dependencies.
+        // Shipped in Contents/Frameworks. Links MLX for the VLM sessions.
         .library(name: "FileIDAppleKit", type: .dynamic, targets: ["FileIDAppleKit"])
     ],
     dependencies: [
@@ -114,17 +114,35 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
-        // Apple-framework adapters for the Rust engine (IOPM, bookmarks so
-        // far). Exports @_cdecl functions only; see adapters/include.
+        // MLX sessions for the Rust engine: compiles the Swift engine's
+        // DeepAnalyze.swift and its VLM helpers (symlinks under Engine/) with
+        // host shims in place of the engine's scheduler, log, downloader and
+        // catalog. No FileIDShared: no GRDB, ONNX Runtime or download code.
+        .target(
+            name: "FileIDAppleVLM",
+            dependencies: [
+                .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
+                .product(name: "MLXVLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXLLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace",       package: "mlx-swift-lm"),
+                .product(name: "Tokenizers",           package: "swift-transformers")
+            ],
+            path: "adapters/Sources/FileIDAppleVLM",
+            swiftSettings: [.swiftLanguageMode(.v6), .define("FILEID_APPLE_ADAPTER")]
+        ),
+
+        // Apple-framework adapters for the Rust engine (IOPM, bookmarks, MLX
+        // VLM sessions). Exports @_cdecl functions only; see adapters/include.
         .target(
             name: "FileIDAppleKit",
+            dependencies: ["FileIDAppleVLM"],
             path: "adapters/Sources/FileIDAppleKit",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
         .testTarget(
             name: "AppleKitTests",
-            dependencies: ["FileIDAppleKit"],
+            dependencies: ["FileIDAppleKit", "FileIDAppleVLM"],
             path: "Tests/AppleKitTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

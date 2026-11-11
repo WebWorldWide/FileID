@@ -39,6 +39,13 @@ pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
         let event = BenchmarkProgress { request_id: request_id.clone(), model_kind: model_kind.clone(), phase: phase.into(), completed: completed as u32, total: total as u32 };
         let _ = progress_sink.try_send(IpcEvent::now(EventPayload::BenchmarkProgress(Wrap::new(event))));
     };
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    let outcome = if crate::apple::vlm::model_spec(&payload.model_kind).is_ok() {
+        super::mlx_models::benchmark(&payload.model_kind, cancel.clone(), progress).await
+    } else {
+        crate::models::benchmark::run(&payload.model_kind, payload.tune, cancel.clone(), progress).await
+    };
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     let outcome = crate::models::benchmark::run(&payload.model_kind, payload.tune, cancel.clone(), progress).await;
     *running().lock() = None;
     match outcome {

@@ -20,7 +20,7 @@ use crate::pipeline::deep_analyze::{analyze_file, analyze_file_scoped, analyze_f
 /// single-space separators. The CLI emits one stdout line per `on_token`
 /// call with variable whitespace; trim + join with one space produces
 /// clean English-prose output regardless of the model's whitespace habit.
-fn same_people(lhs: &[String], rhs: &[String]) -> bool {
+pub(super) fn same_people(lhs: &[String], rhs: &[String]) -> bool {
     let a: std::collections::BTreeSet<&String> = lhs.iter().collect();
     let b: std::collections::BTreeSet<&String> = rhs.iter().collect();
     a == b
@@ -43,7 +43,7 @@ pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
 /// (total - completed) / rolling_fps, or None until there's a positive rate or
 /// when nothing remains. Keeps the Deep Analyze progress UI's ETA consistent
 /// with the scan sidebar.
-fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
+pub(super) fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
     let remaining = total.saturating_sub(completed);
     if rolling_fps > 0.01 && remaining > 0 {
         Some(remaining as f64 / rolling_fps)
@@ -56,7 +56,7 @@ fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64
 /// `is_unknown` (explicitly opted out). Feeds the Deep Analyze prompt + the
 /// deterministic filename prefix so renames carry the people you've named.
 /// Byte-faithful with the macOS engine's `fetchFaceNames`. (item 3)
-fn fetch_face_names(conn: &rusqlite::Connection, file_id: i64) -> Vec<String> {
+pub(super) fn fetch_face_names(conn: &rusqlite::Connection, file_id: i64) -> Vec<String> {
     let mut stmt = match conn.prepare(
         "SELECT DISTINCT persons.title, persons.first_name, persons.name \
          FROM persons \
@@ -162,6 +162,9 @@ pub(crate) async fn handle_deep_analyze_file(
     payload: ipc::DeepAnalyzeFilePayload,
     cancel: Arc<AtomicBool>,
 ) {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    return super::deep_analyze_mlx::run_batch(sink, db, &payload.model_kind, vec![payload.file_id], cancel, false, false, true, None).await;
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(unreachable_code))]
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
         DeepAnalyzeStarting {
             model_kind: payload.model_kind.clone(),
@@ -409,11 +412,17 @@ pub(crate) async fn handle_deep_analyze_all(
 /// failures. `failed = 0` excludes rows a prior GPU death marked
 /// failed, parity with the macOS reference.
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
-    #[cfg(feature = "pdf-analyze")]
+    // The Mac app's engine runs the Swift engine's MLX analysis, which also
+    // reads documents, audio and 3D models (`DeepAnalyzeRunner.resolveTargets`).
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        "kind IN ('image','pdf','video','doc','audio','model') AND failed = 0"
+    }
+    #[cfg(all(feature = "pdf-analyze", not(all(target_os = "macos", feature = "apple-adapters"))))]
     {
         "kind IN ('image','video','pdf') AND failed = 0"
     }
-    #[cfg(not(feature = "pdf-analyze"))]
+    #[cfg(all(not(feature = "pdf-analyze"), not(all(target_os = "macos", feature = "apple-adapters"))))]
     {
         "kind IN ('image','video') AND failed = 0"
     }
@@ -518,7 +527,7 @@ fn collect_scoped_file_ids_cancelable(
     Ok(ids)
 }
 
-fn scoped_catalog_path(
+pub(super) fn scoped_catalog_path(
     db: &Arc<Mutex<rusqlite::Connection>>,
     scope: &DeepScope,
     id: i64,
@@ -530,7 +539,7 @@ fn scoped_catalog_path(
     Ok(scope.source_path(id, std::path::Path::new(&path))?.ok_or(ScopeError::ExcludedTarget)?)
 }
 
-async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message: String) {
+pub(super) async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message: String) {
     sink.send(EngineError::new(
         "deep_analyze_failed",
         message,
@@ -586,6 +595,9 @@ async fn run_deep_analyze_batch(
     propose_renames: bool,
     scope: Option<DeepScope>,
 ) {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    return super::deep_analyze_mlx::run_batch(sink, db, model_kind, file_ids, cancel, skip_existing, tags_only, propose_renames, scope).await;
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(unreachable_code))]
     if file_ids.is_empty() {
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(DeepAnalyzeComplete {
             processed: 0, failed: 0, total_seconds: 0.0,

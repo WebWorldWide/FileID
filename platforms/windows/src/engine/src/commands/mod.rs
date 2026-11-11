@@ -4,6 +4,10 @@
 
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) mod deep_analyze_mlx;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) mod mlx_models;
 pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;

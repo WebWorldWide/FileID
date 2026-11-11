@@ -20,6 +20,7 @@
 
 pub mod bge_text;
 pub mod catalog;
+pub(crate) mod resident_model;
 pub mod launch_tuning;
 pub mod license;
 pub mod manifest;

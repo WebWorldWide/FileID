@@ -28,8 +28,8 @@ extern "C" {
 /* Interface version the library implements. */
 uint32_t fileid_apple_abi_version(void);
 
-/* Release adapter-owned state (sleep assertions, bookmark leases) before the
- * engine's hard exit. Idempotent. */
+/* Release adapter-owned state (sleep assertions, bookmark leases) and cancel
+ * VLM requests before the engine's hard exit. Idempotent. */
 void fileid_apple_shutdown(void);
 
 /* Free memory the adapter allocated for the caller. NULL is ignored. */
@@ -115,6 +115,34 @@ char *fileid_apple_speech_model_version(void);
 char *fileid_apple_speech_transcribe(const char *path, double start, double end,
                                      const bool *cancel);
 /* --- end Stage 8 --- */
+
+/* --- Stage 7: MLX vision-language models --- */
+
+/* Events a VLM request reports through its callback. */
+#define FILEID_APPLE_VLM_TOKEN 1    /* payload: UTF-8 text chunk */
+#define FILEID_APPLE_VLM_PROGRESS 2 /* payload: JSON object */
+#define FILEID_APPLE_VLM_DONE 3     /* payload: JSON reply; terminal */
+#define FILEID_APPLE_VLM_FAILED 4   /* payload: {"message","cancelled"}; terminal */
+
+/* Called from any thread. The payload is valid only during the call. Exactly
+ * one terminal event (DONE or FAILED) ends every accepted request; the
+ * callback is never called for it again. */
+typedef void (*fileid_apple_vlm_callback)(void *context, uint32_t event,
+                                          const uint8_t *payload, size_t length);
+
+/* Start a VLM request: a UTF-8 JSON object with an "op" (status, load, unload,
+ * prefetch, analyze, generate, chat, transcribe, sequence, benchmark) and its
+ * fields. Models load only from the local folder the request names; nothing
+ * is downloaded. Returns a handle, 0 when the request was refused (then the
+ * callback is never called). */
+uint64_t fileid_apple_vlm_submit(const uint8_t *request, size_t length,
+                                 fileid_apple_vlm_callback callback, void *context);
+
+/* Cancel a running request; it still reports its terminal event. Unknown
+ * handles are ignored. */
+void fileid_apple_vlm_cancel(uint64_t handle);
+
+/* --- end Stage 7 --- */
 
 #ifdef __cplusplus
 }

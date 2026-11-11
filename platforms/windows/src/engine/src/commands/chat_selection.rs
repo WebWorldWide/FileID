@@ -341,6 +341,10 @@ pub(crate) fn confirm_prompts(criteria: &str, small: bool) -> Vec<String> {
 /// Whether a model gets the main-subject confirmation: catalog models under
 /// `SMALL_MODEL_GB` resident.
 pub(crate) fn is_small(model: &str) -> bool {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if crate::apple::vlm::model_spec(model).is_ok() {
+        return crate::apple::vlm::is_small(model);
+    }
     crate::models::catalog::find(model).is_some_and(|entry| entry.estimated_resident_gb < SMALL_MODEL_GB)
 }
 
@@ -586,6 +590,10 @@ where
     F: FnMut(Vec<(Ranked, Verdict, String)>, usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if crate::apple::vlm::model_spec(model).is_ok() {
+        return check_mlx(model, prepared, cancel, progress).await;
+    }
     let lease = match crate::models::resident_service::ResidentService::shared().acquire(model, cancel.clone()).await {
         Ok(lease) => lease,
         Err(error) => {
@@ -647,10 +655,74 @@ where
     (results, true)
 }
 
+/// `check` on the Swift engine's MLX model: the original file is decoded the
+/// Swift way (672 px bound, a video's middle frame) and asked with
+/// `benchmarkPass`, as `ChatSelection.check` does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+async fn check_mlx<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, mut progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
+where
+    F: FnMut(Vec<(Ranked, Verdict, String)>, usize) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use crate::apple::vlm::{Image, Resident};
+    let mut lease = match Resident::shared().acquire(model, &cancel, |_| {}).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            tracing::warn!(?error, "selection check model did not start");
+            return (vec![], false);
+        }
+    };
+    let prompt = check_prompt(&prepared.criteria);
+    let confirm = confirm_prompts(&prepared.criteria, is_small(model));
+    let mut results = Vec::new();
+    for ranked in prepared.ranked.iter().take(VERIFY_LIMIT) {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        let path = PathBuf::from(&ranked.path);
+        let image = Image::File(&path, Some(CHECK_SIDE));
+        let (verdict, reason) = match lease.generate(&prompt, image.clone(), CHECK_TOKENS, CHECK_SIDE, &cancel).await {
+            Ok(reply) => {
+                let first = parse_verdict(&reply);
+                let mut confirmations = Vec::new();
+                for item in &confirm {
+                    if combine(first.clone(), &confirmations).0 != Verdict::Yes || cancel.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let answer = match lease.generate(item, image.clone(), CHECK_TOKENS, CHECK_SIDE, &cancel).await {
+                        Ok(reply) => parse_verdict(&reply).0,
+                        Err(error) => {
+                            tracing::warn!(?error, "selection confirmation failed");
+                            Verdict::Unsure
+                        }
+                    };
+                    confirmations.push(answer);
+                }
+                combine(first, &confirmations)
+            }
+            Err(error) if error.to_string().contains("couldn't be read") => (Verdict::Unsure, "This file couldn't be read.".to_owned()),
+            Err(error) => {
+                tracing::warn!(?error, "selection check failed");
+                (Verdict::Unsure, "The model couldn't check this one.".to_owned())
+            }
+        };
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        results.push((ranked.clone(), verdict, reason));
+        progress(results.clone(), results.len()).await;
+    }
+    (results, true)
+}
+
 /// Selection checks prefer an installed small Qwen3-VL (on the Mac, 2B with the
 /// main-subject confirmation was more precise and about twice as fast as 4B on
 /// held-out questions), then the larger ones; resident sizes from the catalog.
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b_instruct_gguf_q8_0", 3.22), ("qwen3_vl_8b", 7.71), ("qwen3_vl_4b", 4.43)];
+/// The Mac app's engine runs the Swift engine's MLX models, with its budgets.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b", 3.0), ("qwen3_vl_8b", 8.5), ("qwen3_vl_4b", 5.0)];
 
 /// The model a selection check uses: the first installed model of the ladder
 /// that fits the memory free now, else the requested or preferred one.
@@ -865,10 +937,11 @@ mod tests {
 
     #[test]
     fn check_model_prefers_an_installed_small_qwen_then_the_largest_that_fits() {
-        let all = |kind: &str| ["qwen3_vl_2b_instruct_gguf_q8_0", "qwen3_vl_4b", "qwen3_vl_8b"].contains(&kind);
+        let small = CHECK_LADDER[0].0;
+        let all = |kind: &str| [small, "qwen3_vl_4b", "qwen3_vl_8b"].contains(&kind);
         let large = |kind: &str| kind == "qwen3_vl_4b" || kind == "qwen3_vl_8b";
-        assert_eq!(check_model(16.0, all, None).as_deref(), Some("qwen3_vl_2b_instruct_gguf_q8_0"));
-        assert_eq!(check_model(3.0, all, Some("gemma_3_4b".into())).as_deref(), Some("gemma_3_4b"));
+        assert_eq!(check_model(16.0, all, None).as_deref(), Some(small));
+        assert_eq!(check_model(2.0, all, Some("gemma_3_4b".into())).as_deref(), Some("gemma_3_4b"));
         assert_eq!(check_model(16.0, large, None).as_deref(), Some("qwen3_vl_8b"));
         assert_eq!(check_model(6.0, large, None).as_deref(), Some("qwen3_vl_4b"));
         assert_eq!(check_model(16.0, |_| false, None), None);

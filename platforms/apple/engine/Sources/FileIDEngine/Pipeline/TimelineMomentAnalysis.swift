@@ -1,7 +1,9 @@
 import Foundation
 import CoreImage
 import MLXLMCommon
+#if !FILEID_APPLE_ADAPTER
 import FileIDShared
+#endif
 
 enum TimelineMomentAnalysis {
     struct Window: Sendable, Equatable {

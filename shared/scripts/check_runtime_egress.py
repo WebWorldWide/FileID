@@ -178,7 +178,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
   "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
-  "platforms/windows/src/engine/src/apple/ffi.rs": "3e1642ed6a5c1107b7c647e2f124bf5a00b328aeccb074ab3161bb963a5c8137",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "8278b7342b1be50d7ddabd33d3afc31786037c75e217c6879d68b35b92784c1b",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
@@ -418,6 +418,11 @@ def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
         if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts) or path.stem.endswith(("_test", "_tests")):
             continue
         files.append(path)
+    # A symlink to another production source in the tree (the Swift engine's
+    # MLX code compiled into FileIDAppleVLM) is checked once, at its target's
+    # path, where reviewed digests apply. Any other symlink is checked as a file.
+    real = {path.resolve() for path in files if not path.is_symlink()}
+    files = [path for path in files if not (path.is_symlink() and path.resolve() in real)]
     return sorted(set(files)), []
 
 
