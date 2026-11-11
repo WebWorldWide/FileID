@@ -8,8 +8,15 @@
 //! Mac face space later; this path never writes `rust-align112-v1` faces.
 //! `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
 
-use super::*;
+use super::{
+    composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
+    record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, Arc, DiscoveredFile, Duration,
+    FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering, PreDecoded, TaggedFile, VisionFace,
+    STATS_CLIP_US, STATS_DECODED_FILES, STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US,
+    STATS_VISION_US,
+};
 use crate::apple::scan;
+use crate::pipeline::audio_meta::AudioTags;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -31,7 +38,7 @@ pub(super) fn enabled() -> bool {
 /// What the decoder thread hands the worker besides the shared fields.
 pub(crate) struct Frame {
     image: Option<Arc<scan::Image>>,
-    audio: crate::pipeline::audio_meta::AudioTags,
+    audio: AudioTags,
     large_pdf: bool,
 }
 
@@ -106,7 +113,7 @@ fn stored_text(text: Option<String>) -> Option<String> {
 pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
-    let mut frame = Frame { image: None, audio: Default::default(), large_pdf: false };
+    let mut frame = Frame { image: None, audio: AudioTags::default(), large_pdf: false };
     let mut decoded = None;
     let mut doc_text = None;
     if !file.online_only {
@@ -259,7 +266,7 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
 pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) -> TaggedFile {
     let started = Instant::now();
     let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, mac, .. } = predecoded;
-    let frame = mac.unwrap_or(Frame { image: None, audio: Default::default(), large_pdf: false });
+    let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
     let mut row = base_row(&file);
     // A cloud placeholder is catalogued from its metadata only (reading it
     // would download it), as the portable pipeline does.
@@ -416,7 +423,7 @@ async fn image_row(
     row.image_height = info.height;
     row.phash = Some(dhash);
     row.aesthetic = Some(aesthetic(info.width, info.height, file.size_bytes));
-    row.camera_model = info.camera_model.clone();
+    row.camera_model.clone_from(&info.camera_model);
     row.location_lat = info.lat;
     row.location_lon = info.lon;
     row.has_faces = pass.face_count > 0;

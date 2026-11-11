@@ -50,7 +50,9 @@ mod catalog_time_tests {
     fn foundation_rounding_matches_the_swift_engine_values() {
         // Values the Swift engine stored for copied Sony files whose plain
         // `as_secs_f64` differs in the last bit.
-        assert_eq!(foundation_unix_seconds(Duration::new(1_794_374_740, 262_792_743)), 1794374740.2627926);
-        assert_ne!(Duration::new(1_794_374_740, 262_792_743).as_secs_f64(), 1794374740.2627926);
+        let swift = 1_794_374_740.262_792_6_f64.to_bits();
+        let time = Duration::new(1_794_374_740, 262_792_743);
+        assert_eq!(foundation_unix_seconds(time).to_bits(), swift);
+        assert_ne!(time.as_secs_f64().to_bits(), swift);
     }
 }
