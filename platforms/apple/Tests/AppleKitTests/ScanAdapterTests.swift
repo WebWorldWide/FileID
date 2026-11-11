@@ -45,7 +45,7 @@ struct ScanAdapterTests {
         #expect(image != 0)
         #expect(info["width"] as? Int == 1536)
         #expect(info["height"] as? Int == 1024)
-        #expect(info["dhash"] as? String == "1212696624")
+        #expect(info["dhash"] == nil)
         #expect(info["cameraModel"] as? String == "ILCE-7M3")
         #expect(info["lat"] as? Double == 52.52)
         #expect(info["lon"] as? Double == -13.41)
@@ -58,6 +58,7 @@ struct ScanAdapterTests {
         #expect(fileid_apple_image_rgb(image, &pixels, &length, &width, &height))
         #expect(length == Int(width) * Int(height) * 3)
         fileid_apple_free(pixels)
+        #expect(fileid_apple_image_dhash(image) == 1_212_696_624)
         let before = ScanImages.shared.count
         fileid_apple_image_release(image)
         #expect(ScanImages.shared.count == before - 1)
