@@ -753,6 +753,7 @@ def main():
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
             reason = (f"needs {', '.join(sorted(missing))} engine" if missing
+                      else "needs the Mac app's engine" if unhosted
                       else "needs a test-trash-root Rust build (--test-trash-root)" if needs_trash_root
                       else "needs the Mac app's engine" if unhosted
                       else "not applicable here")
