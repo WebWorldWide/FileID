@@ -101,6 +101,52 @@ pub(crate) fn pool(_: &Path, _: f64, _: &Path, _: &AtomicBool) -> Result<Pool> {
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const POOL_MAX_SIDE: u32 = 448;
 
+/// The CLIP image tower for pool frames: MLX through FileIDAppleKit in the Mac
+/// app's engine (the Swift engine's `CLIPVisionMLX`, on the GPU), ONNX Runtime
+/// elsewhere. `None` when neither can load; callers fall back to luma.
+enum ClipEncoder {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    Mlx,
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
+    Ort(Box<crate::models::mobileclip::MobileClipImage>),
+}
+
+impl ClipEncoder {
+    fn load() -> Option<Self> {
+        let weights = crate::models::mobileclip::default_weights_path().ok().filter(|path| path.is_file())?;
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        {
+            // Loaded once per process, after the manifest check the scan uses.
+            static MLX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let ready = *MLX.get_or_init(|| {
+                crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
+                    if crate::apple::scan::load_clip(&weights) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
+                })
+                .map_err(|error| tracing::warn!(%error, "timeline: MLX CLIP image tower not loaded"))
+                .is_ok()
+            });
+            if ready {
+                return Some(Self::Mlx);
+            }
+        }
+        crate::models::mobileclip::MobileClipImage::load(weights).ok().map(|clip| Self::Ort(Box::new(clip)))
+    }
+
+    fn embed(&mut self, path: &Path) -> Option<Vec<f32>> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+            Self::Mlx => {
+                let size = std::fs::metadata(path).ok()?.len();
+                crate::apple::scan::decode_image(path, size)?.clip_embedding()
+            }
+            Self::Ort(clip) => {
+                let image = image::open(path).ok()?.resize_exact(224, 224, image::imageops::FilterType::Triangle).to_rgb8();
+                clip.embed(image.as_raw()).ok()
+            }
+        }
+    }
+}
+
 /// The Swift engine's `TimelineAnalysis.poolFrames`: a CLIP vector for every
 /// pool frame when the image encoder is installed, else the frame's luma
 /// signature minus its mean; `change` is the luma change from the previous
@@ -108,20 +154,14 @@ pub(crate) const POOL_MAX_SIDE: u32 = 448;
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn scene_frames(pool: &Pool) -> Vec<crate::pipeline::video_scene_selection::Frame> {
     use crate::pipeline::video_scene_selection::{luma_change, Frame};
-    let mut clip = crate::models::mobileclip::default_weights_path()
-        .ok()
-        .filter(|path| path.is_file())
-        .and_then(|path| crate::models::mobileclip::MobileClipImage::load(path).ok());
+    let mut clip = ClipEncoder::load();
     let mut previous: Option<&[u8]> = None;
     pool.frames
         .iter()
         .map(|(seconds, signature, path)| {
             let embedding = clip
                 .as_mut()
-                .and_then(|clip| {
-                    let image = image::open(path).ok()?.resize_exact(224, 224, image::imageops::FilterType::Triangle).to_rgb8();
-                    clip.embed(image.as_raw()).ok()
-                })
+                .and_then(|clip| clip.embed(path))
                 .unwrap_or_else(|| {
                     let mean = signature.iter().map(|&value| f32::from(value)).sum::<f32>() / signature.len().max(1) as f32;
                     signature.iter().map(|&value| f32::from(value) - mean).collect()
