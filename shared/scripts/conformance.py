@@ -11,7 +11,9 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "set", "value": [..]}  same elements in any order
   {"$tol": "count", "value": N}   a list of N elements
   {"$tol": "present"}             any non-null value
-  {"$engine": {"swift": A, "rust": B}}  per-engine expectation
+  {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
+      "rustHosted" applies to the Rust engine the Mac app hosts (the
+      apple-adapters build, events on stderr) instead of "rust"
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
@@ -311,6 +313,7 @@ class Context:
     def __init__(self, case, flavor, os_name, directory):
         self.case = case
         self.flavor = flavor
+        self.hosted = False
         self.os = os_name
         self.state = directory / "state"
         self.root = (directory / "tree")
@@ -378,6 +381,8 @@ class Context:
             return self.lookup(expected["$var"])
         if isinstance(expected, dict) and set(expected) == {"$engine"}:
             options = expected["$engine"]
+            if self.flavor == "rust" and self.hosted and "rustHosted" in options:
+                return self.select(options["rustHosted"])
             return self.select(options.get(self.flavor, options.get("default")))
         if isinstance(expected, dict) and set(expected) == {"$os"}:
             options = expected["$os"]
@@ -635,6 +640,7 @@ def start(binaries, flavor, ctx):
     engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
+    ctx.hosted = engine.stream.get("ready") == "stderr"
     return engine
 
 
