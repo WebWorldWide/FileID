@@ -35,4 +35,28 @@ unsafe extern "C" {
     ) -> u64;
     /// Stop accessing a leased bookmark.
     pub fn fileid_apple_bookmark_close(lease: u64);
+
+    // --- Stage 7: MLX vision-language models ---
+    /// Start a VLM request (UTF-8 JSON with an `op`). Returns a handle, 0 when
+    /// refused (the callback is then never called). The callback runs on any
+    /// thread and gets exactly one terminal event (`DONE` or `FAILED`).
+    pub fn fileid_apple_vlm_submit(
+        request: *const u8,
+        length: usize,
+        callback: VlmCallback,
+        context: *mut c_void,
+    ) -> u64;
+    /// Cancel a running request; it still reports its terminal event.
+    pub fn fileid_apple_vlm_cancel(handle: u64);
+    // --- end Stage 7 ---
 }
+
+// --- Stage 7: MLX vision-language models ---
+/// Event callback for `fileid_apple_vlm_submit`; the payload is valid only
+/// during the call.
+pub type VlmCallback = unsafe extern "C" fn(context: *mut c_void, event: u32, payload: *const u8, length: usize);
+pub const VLM_TOKEN: u32 = 1;
+pub const VLM_PROGRESS: u32 = 2;
+pub const VLM_DONE: u32 = 3;
+pub const VLM_FAILED: u32 = 4;
+// --- end Stage 7 ---

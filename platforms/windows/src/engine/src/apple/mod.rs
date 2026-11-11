@@ -6,6 +6,7 @@
 //! writes, job policy and ranking stay in Rust.
 
 mod ffi;
+pub mod vlm;
 
 use std::ffi::{CStr, CString, OsString, c_char};
 use std::os::unix::ffi::OsStringExt;

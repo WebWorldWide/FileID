@@ -103,6 +103,8 @@ public final class VLMHost: @unchecked Sendable {
         do {
             let request = try JSONDecoder().decode(VLMRequest.self, from: data)
             let reply = try await perform(request, emit: emit)
+            // MLX ends a generation stream quietly when its task is cancelled.
+            try Task.checkCancellation()
             emit(.done, try JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys]))
         } catch {
             let cancelled = error is CancellationError || Task.isCancelled
