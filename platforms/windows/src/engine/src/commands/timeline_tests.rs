@@ -42,6 +42,13 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let recipe: Recipe = serde_json::from_str(&recipe).unwrap();
     assert_eq!(recipe.model_kind, "qwen3_vl_4b");
     assert_eq!(recipe.timeline_mode.as_deref(), Some("moments"));
+    // The Mac app's engine shares the Swift engine's scene-pool coverage ids.
+    if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
+        assert!(recipe.model_version.starts_with("timeline-scene-v1/qwen3_vl_4b@"), "{}", recipe.model_version);
+        assert!(!recipe.model_version.ends_with("@unversioned"));
+    } else {
+        assert_eq!(recipe.model_version, "timeline-frame-v2/qwen3_vl_4b@portable");
+    }
 
     let photo = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[2]}));
     assert!(enqueue(&mut conn, &photo, Some("qwen3_vl_4b"), true).is_err());

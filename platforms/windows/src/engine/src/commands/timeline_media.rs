@@ -96,6 +96,38 @@ pub(crate) fn pool(_: &Path, _: f64, _: &Path, _: &AtomicBool) -> Result<Pool> {
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const POOL_MAX_SIDE: u32 = 448;
 
+/// The Swift engine's `TimelineAnalysis.poolFrames`: a CLIP vector for every
+/// pool frame when the image encoder is installed, else the frame's luma
+/// signature minus its mean; `change` is the luma change from the previous
+/// pool frame. Scenes cut on these vectors; activity windows read `change`.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) fn scene_frames(pool: &Pool) -> Vec<crate::pipeline::video_scene_selection::Frame> {
+    use crate::pipeline::video_scene_selection::{luma_change, Frame};
+    let mut clip = crate::models::mobileclip::default_weights_path()
+        .ok()
+        .filter(|path| path.is_file())
+        .and_then(|path| crate::models::mobileclip::MobileClipImage::load(path).ok());
+    let mut previous: Option<&[u8]> = None;
+    pool.frames
+        .iter()
+        .map(|(seconds, signature, path)| {
+            let embedding = clip
+                .as_mut()
+                .and_then(|clip| {
+                    let image = image::open(path).ok()?.resize_exact(224, 224, image::imageops::FilterType::Triangle).to_rgb8();
+                    clip.embed(image.as_raw()).ok()
+                })
+                .unwrap_or_else(|| {
+                    let mean = signature.iter().map(|&value| f32::from(value)).sum::<f32>() / signature.len().max(1) as f32;
+                    signature.iter().map(|&value| f32::from(value) - mean).collect()
+                });
+            let change = previous.map_or(0.0, |before| luma_change(before, signature));
+            previous = Some(signature);
+            Frame { seconds: *seconds, embedding, change }
+        })
+        .collect()
+}
+
 /// The pool frames nearest each whole second: the 1 fps signal sequence the
 /// chunked decoder produces.
 pub(crate) fn whole_seconds(pool: &Pool) -> Vec<(f64, Vec<u8>)> {
@@ -129,5 +161,19 @@ mod tests {
         assert_eq!(picked, [0.0, 1.02, 2.0]);
         assert_eq!(pool.nearest(1.3), Some(std::path::Path::new("1.5.jpg")));
         assert_eq!(pool.nearest(0.2), Some(std::path::Path::new("0.jpg")));
+    }
+
+    // Without the CLIP image encoder (tests install none), scene vectors are
+    // the luma signatures minus their mean, as in the Swift engine.
+    #[test]
+    fn scene_frames_fall_back_to_centred_luma_with_luma_change() {
+        let missing = std::path::PathBuf::from("/nonexistent/frame.jpg");
+        let pool = Pool { frames: vec![(0.0, vec![10, 30], missing.clone()), (0.5, vec![10, 30], missing.clone()), (1.0, vec![255, 0], missing)] };
+        let frames = scene_frames(&pool);
+        assert_eq!(frames.iter().map(|f| f.seconds).collect::<Vec<_>>(), [0.0, 0.5, 1.0]);
+        assert_eq!(frames[0].embedding, [-10.0, 10.0]);
+        assert_eq!(frames[2].embedding, [127.5, -127.5]);
+        assert!(frames[0].change.abs() < 1e-12 && frames[1].change.abs() < 1e-12);
+        assert!((frames[2].change - (245.0 + 30.0) / (2.0 * 255.0)).abs() < 1e-12);
     }
 }

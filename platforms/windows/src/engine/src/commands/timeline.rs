@@ -241,6 +241,24 @@ pub(crate) fn is_timeline_job(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Validates and records a new timeline job; returns its id for scheduling.
+/// The Mac app's engine runs the Swift engine's scene-pool timeline (one
+/// caption per CLIP scene, versioned with the pinned model revision), so either
+/// engine resumes the other's coverage; other builds sample a frame every
+/// interval.
+const SCENE_PREFIX: &str = "timeline-scene-v1/";
+
+fn frame_model_version(model: &str) -> String {
+    if timeline_media::FRAME_POOL {
+        let revision = crate::models::manifest::manifest()
+            .vlm_repos
+            .iter()
+            .find(|repo| repo.kind == model && repo.platforms.iter().any(|platform| platform == "macos"))
+            .map_or("unversioned", |repo| repo.revision.as_str());
+        return format!("{SCENE_PREFIX}{model}@{revision}");
+    }
+    format!("timeline-frame-v2/{model}@portable")
+}
+
 pub(crate) fn enqueue(
     conn: &mut Connection,
     request: &CatalogRequest,
@@ -280,7 +298,7 @@ pub(crate) fn enqueue(
     let job_id = uuid::Uuid::new_v4().to_string();
     let recipe = Recipe {
         model_kind: model.to_owned(),
-        model_version: format!("timeline-frame-v2/{model}@portable"),
+        model_version: frame_model_version(model),
         interval_seconds: INTERVAL_SECONDS,
         timeline_mode: mode.map(str::to_owned),
     };
@@ -668,6 +686,7 @@ async fn process<M: FrameModel>(
 ) -> Result<()> {
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
+    let mut next_pool: Option<(i64, PoolTask)> = None;
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
         let source = running_source(database, id, file_id).await?;
         let probe = {
@@ -688,14 +707,37 @@ async fn process<M: FrameModel>(
 
         let pool_folder = frames.join(format!("pool-{file_id}"));
         let scan = if timeline_media::FRAME_POOL {
-            pool_signals(id, file_id, &source, duration, &pool_folder, cancel, database).await?
+            let prefetched = match next_pool.take() {
+                Some((next, task)) if next == file_id => Some(task),
+                Some((_, stale)) => {
+                    stale.abort();
+                    None
+                }
+                None => None,
+            };
+            let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
+            if let Some(&next) = job.ids.get(index + 1)
+                && let Ok(next_source) = running_source(database, id, next).await
+            {
+                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
+            }
+            scan
         } else {
             scan_signals(id, file_id, &source, duration, cancel, database).await?
         };
         let signals = scan.signals;
         let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
         let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
-        for seconds in analysis::sample_times(duration, job.recipe.interval_seconds, &signals) {
+        let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
+        if let Some(pool) = &scene_pool {
+            scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
+        }
+        let frame_times = if scene_pool.is_some() {
+            Vec::new()
+        } else {
+            analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
+        };
+        for seconds in frame_times {
             let evidence = format!(
                 "frame:{file_id}:{}:{version}:{}",
                 source.revision,
@@ -798,6 +840,75 @@ async fn process<M: FrameModel>(
     Ok(())
 }
 
+/// The Swift engine's `analyzeScenes` captions: CLIP scenes over the frame
+/// pool, one caption of each scene's representative frame covering the whole
+/// scene, with the Swift evidence ids so either engine skips the other's.
+#[allow(clippy::too_many_arguments)]
+async fn scene_captions<M: FrameModel>(
+    id: &str,
+    file_id: i64,
+    source: &Source,
+    duration: f64,
+    pool: &Arc<timeline_media::Pool>,
+    version: &str,
+    model: &M,
+    prompt: &str,
+    cancel: &Arc<AtomicBool>,
+    database: &Arc<Mutex<Connection>>,
+) -> Result<()> {
+    let frames = {
+        let pool = pool.clone();
+        blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
+    };
+    let scenes = crate::pipeline::video_scene_selection::scenes(&frames, duration);
+    for scene in scenes {
+        let evidence = format!("scene:{file_id}:{}:{version}:{}", source.revision, analysis::millis(scene.start));
+        let (lookup, revision) = (evidence.clone(), source.revision.clone());
+        let exists: bool = while_running(database, id, move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
+                params![lookup, revision],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
+        if exists {
+            continue;
+        }
+        let frame = &pool.frames.get(scene.representative).context("Missing scene frame")?.2;
+        let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
+        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
+        let caption = caption.trim();
+        if caption.is_empty() {
+            return Err(unreadable());
+        }
+        let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
+        while_running(database, id, move |conn| {
+            checked.verify(conn, file_id)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                params![evidence, file_id, scene.start, scene.end, caption, checked.revision, model_version],
+            )?;
+            upsert_coverage(conn, &evidence, file_id, scene.start, scene.end, "sampled", &checked.revision, &model_version)
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// A frame pool decoding in the background for the job's next video, so its
+/// hardware decode overlaps this video's captions (the Swift engine's `nextPool`).
+type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
+
+fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
+    let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
+    tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_dir_all(&directory);
+        // The duration is only the worker's time limit here (Swift: one hour).
+        timeline_media::pool(&path, 3_600.0, &directory, &flag)
+    })
+}
+
 struct SignalScan {
     signals: Vec<analysis::Signal>,
     /// The 1 fps grayscale signatures the signals came from.
@@ -817,16 +928,12 @@ async fn pool_signals(
     source: &Source,
     duration: f64,
     folder: &Path,
+    prefetched: Option<PoolTask>,
     cancel: &Arc<AtomicBool>,
     database: &Arc<Mutex<Connection>>,
 ) -> Result<SignalScan> {
-    let mut chunks = Vec::new();
-    let mut start = 0.0;
-    while start < duration {
-        let end = duration.min(start + SIGNAL_CHUNK_SECONDS);
-        chunks.push((format!("visual-change:{file_id}:{}:signal-v1:{}", source.revision, analysis::millis(start)), start, end));
-        start = end;
-    }
+    // One row for the whole video, as the Swift engine's pool path records.
+    let chunks = vec![(format!("visual-change:{file_id}:{}:signal-v1:0", source.revision), 0.0, duration)];
     let (pending, revision) = (chunks.clone(), source.revision.clone());
     while_running(database, id, move |conn| {
         for (coverage, start, end) in &pending {
@@ -835,9 +942,15 @@ async fn pool_signals(
         Ok(())
     })
     .await?;
-    let _ = std::fs::remove_dir_all(folder);
-    let (path, directory, flag) = (source.path.clone(), folder.to_owned(), cancel.clone());
-    let pool = match blocking(move || timeline_media::pool(&path, duration, &directory, &flag)).await {
+    let decoded = match prefetched {
+        Some(task) => task.await.map_err(|error| anyhow!(error)).and_then(|pool| pool),
+        None => {
+            let _ = std::fs::remove_dir_all(folder);
+            let (path, directory, flag) = (source.path.clone(), folder.to_owned(), cancel.clone());
+            blocking(move || timeline_media::pool(&path, duration, &directory, &flag)).await
+        }
+    };
+    let pool = match decoded {
         Ok(pool) => pool,
         Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
         Err(_) => return Ok(SignalScan { signals: Vec::new(), signatures: Vec::new(), complete: false, pool: None }),
