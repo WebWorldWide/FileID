@@ -2495,8 +2495,9 @@ impl RestructureApply {
         let total = scan.spans.len();
         let recorded_root = match scan.library_root {
             Some(root) => root,
-            None => headerless_journal_root(&self.library_root)
-                .context("refusing automatic recovery")?,
+            None => headerless_journal_root(&self.library_root).context(
+                "undo journal predates exact library-root ownership; refusing automatic recovery",
+            )?,
         };
         let canonical_root = canonicalize_safely(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
