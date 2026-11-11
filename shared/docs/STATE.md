@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-11 — Convergence Stage 8 (part): video tools, frame pool and Apple Speech under the Rust engine the Mac app hosts
+
+- **Rust engine, `apple-adapters` build** (agent, `agent/converge-8`): trim/remux/audio/proxy/rotate and video export (fit/pad, follow people, stabilization, conventional upscale) run with AVFoundation through new FileIDAppleKit `Media*.swift` exports. They report available on darwin, with the Swift engine's rules, names, notes and wording. Timeline frames and the 0.5 s frame pool decode in worker processes: the engine re-runs its own binary with the Swift engine's worker flags. Apple Speech fills timeline transcripts with the Swift engine's coverage and passage rows, so either engine resumes the other's chunks. Plain Rust builds are unchanged (FFmpeg path).
+- **Measured** (release, M1 Pro, 6 copied private clips totalling 234.7 s, back to back, load 11–21): frame pool Swift 14.8 vs Rust 14.9 s of video per second with identical manifests, peak 19–32 MB on both. Exports on a 33 s clip take the same time on both engines; fit, remux and exact trim outputs are byte-identical. Timeline eval and video quick/full s/s still need the VLM (Stage 7's lease).
+- **Conformance:** new `video-tools.json` (8 cases: app-hosted capabilities and preview notes; video fit, stabilized video, remux, rotate, audio and trim across engines both ways) on a 19 KB synthetic clip; `$engine.rustHosted`; `media-tools` expects the AVFoundation runtime on the hosted build.
+- Checks: see the branch report. Digest refreshes: `models/native_process.rs` (self re-exec with fixed worker flags) and `apple/ffi.rs` (Stage 8 declarations); no URL, socket, HTTP client or other program.
+
 ## 2026-11-10 — Face Mesh reads higher-resolution faces in both engines
 
 - **Both engines** (agent, coordinator decision): faces are still found on the 1024 px analysis image, but the eyelid mesh now reads finer pixels, only for photos where a face of 24 px or more was found. Rust already holds the full decode, so it resizes only a square of 3× the face around each face to the 2048 px scale (4.9 ms median per face; resizing the whole 33 MP frame to 2048 costs 226–275 ms). The Mac can't decode a region, so it decodes once more: a camera JPEG's stored preview (Sony 1616 px), else 2048 px; the same decode is reused for small-face tiles. Threshold stays 0.175. Rust cache id `yunet-mesh-v1` → `yunet-mesh-v2`.

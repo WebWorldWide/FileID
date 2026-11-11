@@ -151,8 +151,26 @@ struct MediaAdapterTests {
         #expect(String(cString: version).hasPrefix("apple-speech-ondevice-v1/"))
     }
 
+    /// Transcription refuses bad intervals before touching the file and never
+    /// asks for permission; unauthorised hosts (a bare test binary) get an
+    /// error reply rather than a prompt or a crash.
+    @Test func speechTranscribeRefusesWithoutAsking() throws {
+        func reply(_ start: Double, _ end: Double) throws -> [String: Any] {
+            let text = try #require("/nonexistent/clip.mov".withCString { fileid_apple_speech_transcribe($0, start, end, nil) })
+            defer { fileid_apple_free(text) }
+            return try #require(try JSONSerialization.jsonObject(with: Data(String(cString: text).utf8)) as? [String: Any])
+        }
+        for (start, end) in [(5.0, 5.0), (-1.0, 2.0), (0.0, 601.0), (0.0, Double.nan)] {
+            #expect(try reply(start, end)["error"] as? String == "Invalid speech interval.")
+        }
+        #expect(try reply(0, 2)["error"] is String, "a missing file is refused whether or not speech is authorised")
+        let invalid = try #require(fileid_apple_speech_transcribe(nil, 0, 2, nil))
+        defer { fileid_apple_free(invalid) }
+        #expect(String(cString: invalid).contains("Invalid media path"))
+    }
+
     /// Writes the shared synthetic clip the Rust tests and conformance use
-    /// (`shared/test-corpus/media/`): FILEID_WRITE_MEDIA_FIXTURE=<path.mov>.
+    /// (`shared/test-corpus/conformance-media/`): FILEID_WRITE_MEDIA_FIXTURE=<path.mov>.
     @Test func writesSharedFixtureOnRequest() async throws {
         guard let path = ProcessInfo.processInfo.environment["FILEID_WRITE_MEDIA_FIXTURE"] else { return }
         try? FileManager.default.removeItem(atPath: path)
