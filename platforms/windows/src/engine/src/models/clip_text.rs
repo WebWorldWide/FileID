@@ -154,6 +154,7 @@ impl ClipText {
 #[cfg(target_os = "macos")]
 fn session(path: &Path) -> Result<(Session, String)> {
     use ort::session::builder::GraphOptimizationLevel;
+    crate::ort_runtime::commit_environment().context("ORT environment")?;
     let session = Session::builder()
         .context("ORT session builder")?
         .with_log_level(ort::logging::LogLevel::Error)

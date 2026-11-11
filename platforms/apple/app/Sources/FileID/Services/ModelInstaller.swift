@@ -1,5 +1,5 @@
 // User-initiated downloads of the single-directory ONNX models (RAM++, BGE,
-// SFace) from their Hugging Face repos. Weights are never redistributed in-app,
+// SFace, Face Mesh) from their Hugging Face repos. Weights are never redistributed in-app,
 // and every file is SHA-256 verified against ModelManifest.
 import Foundation
 import FileIDShared
@@ -96,6 +96,15 @@ final class ModelInstaller: ModelInstalling {
         approxBytes: FaceEmbedderKind.sface.approxBytes,
         downloads: [
             .init(artifact: "sface_embedder", file: FaceEmbedderKind.sface.modelFileName, parts: 12),
+        ]))
+
+    static let faceMesh = ModelInstaller(Spec(
+        activity: "Install eye model",
+        directory: AppSupportPath.models.appendingPathComponent("face_mesh", isDirectory: true),
+        ownsDirectory: true,
+        approxBytes: ModelManifest.artifact(id: "face_mesh_landmarks")?.approxBytes ?? 0,
+        downloads: [
+            .init(artifact: "face_mesh_landmarks", file: "face_landmarks.onnx"),
         ]))
 
     let spec: Spec

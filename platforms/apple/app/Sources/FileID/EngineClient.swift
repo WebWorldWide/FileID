@@ -432,6 +432,7 @@ public final class EngineClient {
         // "Install all" clicks. Its escape hatch (HubApi.swift:822).
         var env = ProcessInfo.processInfo.environment
         env["CI_DISABLE_NETWORK_MONITOR"] = "1"
+        env[ORTPrivacy.disableTelemetryVariable] = "1"
         // Restructure folder-granularity (Settings ▸ Restructure). The engine reads
         // FILEID_RESTRUCTURE_GRANULARITY at plan time; pass the user's saved choice
         // through at spawn so it applies on the next engine start. "normal"/unset is the
@@ -440,6 +441,9 @@ public final class EngineClient {
            g != AppSettings.restructureGranularityDefault,
            AppSettings.restructureGranularityValues.contains(g) {
             env["FILEID_RESTRUCTURE_GRANULARITY"] = g
+        }
+        if UserDefaults.standard.bool(forKey: AppSettings.fastTextReadingKey) {
+            env["FILEID_CAREFUL_READ"] = AppSettings.fastTextReadingEngineValue
         }
         proc.environment = env
         let inPipe = Pipe()

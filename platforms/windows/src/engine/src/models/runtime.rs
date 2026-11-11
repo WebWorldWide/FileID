@@ -470,6 +470,7 @@ pub fn commit_chain_session(
     let probe = RuntimeProbe::shared();
     let chain = bind_chain(probe);
     let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+    crate::ort_runtime::commit_environment().context("ORT environment")?;
     let builder = ort::session::Session::builder().context("ORT session builder")?;
     let mut builder =
         configure_session_builder(builder).with_context(|| format!("configure session ({label})"))?;

@@ -64,6 +64,13 @@ public enum ModelManifest {
             approxBytes: 38_696_353,
             license: "Apache-2.0"),
         ModelArtifact(
+            id: "face_mesh_landmarks",
+            kind: "face_mesh",
+            url: "https://huggingface.co/naklitechie/face-landmarks-onnx/resolve/575c33816c840c5b156398adb485e4f8d138adc2/face_landmarks.onnx",
+            sha256: "f38c3321ceffbc9e95103480ad38cc3f52e7e1bde2bcee7cd9355d0b9138ac0c",
+            approxBytes: 4_920_995,
+            license: "Apache-2.0"),
+        ModelArtifact(
             id: "clip_vitb32_image",
             kind: "mobileclip_s2",
             url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/6b7c523703ae26e39be4b03774966f8571c7f523/onnx/vision_model.onnx",

@@ -4556,6 +4556,83 @@ The owner delegated every open decision on 2026-11-10. Each is recorded here so 
   6. The Swift engine ships beside Rust for one release after the flip, selectable through `engine.backend`.
   7. The Swift-host / Rust-static-library topology stays rejected.
 - **Contact sheets and collages:** decided by the rebuilt people eval (see that entry when it lands), not by guess.
+
+## 2026-11-10 — The Mac judges eye openness with Face Mesh when it is installed
+
+Owner decision: the Mac uses MediaPipe Face Mesh V2 too, opt-in, with the shared engine's pinned file, hash and threshold, and Vision as the fallback.
+
+- **Where it runs.** `VisionTakeFaceAnalyzer` keeps Vision for faces, capture quality and people; when `Models/face_mesh/face_landmarks.onnx` is present and matches the manifest SHA-256, `FaceMeshService` replaces only the eye score. Vision has no YuNet, so its box and the centres of its left-eye, right-eye and nose landmark regions take the place of YuNet's box, eyes and nose in the first crop; a face without landmarks gets the box-only guesses of the Rust eval. Everything after that (1.5× square crop levelled on the eyes, second pass refitted to the mesh's own points, eye ratio, openness = (ratio − 0.14) / 0.10, faces under 24 px skipped, presence logit below 0 gives no judgement) is a line-by-line port, pinned in both engines by `shared/test-corpus/face-mesh-geometry.json`. A mesh error makes the photo's result one-off (not cached), as a Vision timeout already does. The cache id becomes `vision-mesh-humans-v1`. Eye openness already lives in the take-signal JSON (`take_quality.signals_json`), so neither the IPC nor the catalog schema changes.
+- **CPU, not the Neural Engine, by default.** The scan is already Neural-Engine-bound (2026-11-10 entry) and the mesh is small; `FILEID_FACE_EP=coreml` binds the CoreML provider for experiments. Release, 1,211 faces, both passes: 12.7–15.1 ms median per face on CPU under load 20–50 from other agents, against 16.2–27.0 ms for the Rust release build on the same faces.
+- **Measured** on a new private label set (`~/FileIDDev/Eval/eyes`: 668 copied Adlon photos, group shots and portraits from 14 events; 1,211 Vision faces of 48 px or more at 2048 px, labelled from crops: 537 open, 81 closed, 593 unsure; split by event, 38 closed in tune and 43 in held-out). Closed-eye precision/recall at threshold 0.175, scored with `shared/scripts/eval/eye_eval.py`:
+
+| 2048 px images | Tune | Held-out |
+|---|---|---|
+| Vision eye contours (current Mac) | 0.70 / 0.37 | 0.68 / 0.44 |
+| Mac mesh, first crop from Vision's face | 0.74 / 0.68 | 0.65 / 0.79 |
+| Mac mesh, labelled box | 0.76 / 0.74 | 0.63 / 0.77 |
+| Rust mesh, labelled box | 0.78 / 0.74 | 0.62 / 0.77 |
+
+  Mac and Rust ratios on the same boxes differ by 0.0013 median (p99 0.016, from JPEG decoding and colour handling) and agree on 1,157 of 1,170 closed calls. The best-F1 threshold on tune is 0.165–0.17, so 0.175 stays.
+- **Not solved: the 1024 px analysis size.** Take scoring finds faces on a 1024 px image, and both engines feed the mesh that image. There, on the same faces, precision falls for both checks: held-out Vision 0.48 / 0.47, mesh 0.45 / 0.84 (tune 0.40 / 0.45 and 0.48 / 0.76). Faces 40 px and larger at 1024 drop from 0.77 to 0.50 precision on tune between 2048 and 1024 px input. The mesh still finds far more closed eyes at about Vision's precision, so it ships as is. Feeding it a 2048 px decode or lowering the threshold to 0.13 at 1024 (held-out 0.60 / 0.67) are open options for both engines (NEXT).
+- **End to end** (debug engine, isolated catalog and home, 80 copied photos: 40 with a labelled closed eye, 40 with only open eyes): eyes-closed flags on the first group 24 → 31, on the second 12 → 15; all 80 cache rows moved to the new id after one re-score (4 were left uncached on the first pass by Vision timeouts at load 37, then refreshed).
+
+## 2026-11-10 — Face Mesh reads faces above the 1024 px analysis size
+
+Coordinator decision (owner-delegated): fix the 1024 px precision drop with higher-resolution face input in both engines rather than a lower threshold, keep 0.175, and fall back to threshold 0.13 at 1024 only if the extra cost passed 25% of Best Takes time.
+
+- **Rust: face regions, not a second frame.** `image_signals` already decodes the full image. `Detail::face` copies a square of three face-widths around each face from it and resizes only that square to the scale of a 2048 px frame. The mesh then runs there with the face's coordinates mapped across. On 1,170 faces its ratios differ from a mesh run on whole 2048 px images by 0.0035 median (p99 0.037), with the same call on 1,140, and precision/recall match: held-out 0.62 / 0.77 both ways. It costs 4.9 ms median per face (p90 25, load 25–40). Resizing the whole 33 MP frame to 2048 px instead costs 226–275 ms per photo, about half again the photo's decode-and-resize time. Tiles still resize the whole frame as before. Cache id `yunet-mesh-v2`.
+- **Mac: camera preview, else 2048 px.** ImageIO has no cheap region decode, so the Mac decodes once more, lazily (`TakeDetailImage`) and only when a judged face exists. It uses `decodeScanImage` at 2048 px: the camera's stored MPF preview when a JPEG has one (Sony 1616 px, about 20× cheaper than a full decode), else a bounded 2048 px decode. Small-face tiling reuses the decode when it is full size. Best Takes on 80 Sony photos with faces (release, 5 reps, load 2.6–5.4): 41.7 → 49.4 ms per photo (+18%). The full 2048 px decode measured 59.3 ms (+42%), over budget, so it is not used.
+- **Accuracy at the shipped inputs** (faces found at 1024 px; closed-eye precision / recall, held-out then tune):
+
+| Mesh input | Held-out | Tune |
+|---|---|---|
+| 1024 px image (before) | 0.45 / 0.84 | 0.48 / 0.76 |
+| Mac: preview or 2048 px (shipped) | 0.57 / 0.79 | 0.72 / 0.68 |
+| Mac: full 2048 px decode (not shipped, +42%) | 0.64 / 0.79 | 0.73 / 0.71 |
+| Rust: face regions at 2048 px scale (shipped) | 0.62 / 0.77 | 0.73 / 0.71 |
+| Threshold 0.13 at 1024 px (fallback, not shipped) | 0.60 / 0.67 | 0.67 / 0.68 |
+
+  The Mac's preview path gives up some held-out precision against a full 2048 decode (the Sony preview is 1616 px). It still beats the 0.13 fallback on F1 in both splits (0.66 vs 0.63 held-out, 0.70 vs 0.67 tune). End to end on the 80 photos, false eyes-closed flags on photos with only open eyes fell from 16 to 7, and flags on photos with a closed eye went from 31 to 30. Rust per-photo cost was measured with the eval example only, because YuNet isn't installed on this Mac. The Windows hardware check (NEXT) should confirm it with real YuNet boxes.
+## 2026-11-10 — ONNX Runtime telemetry is turned off by environment variable, not only by API
+
+**Measured** (scratch HOME, sandbox denying network, scan of 6 photos with CLIP + SFace; pip `onnxruntime` 1.30.0 dylib):
+
+| Setup | Telemetry folder | Queued events | Outbound attempts (unified log) |
+|---|---|---|---|
+| CreateEnv only | created | 9 (process, session, model, EP events) | 4 TLS connection attempts in 75 s |
+| CreateEnv + `DisableTelemetryEvents` | created | 3 (ProcessInfo, RegisterEpLibrary start/end) | not measured separately |
+| `ORT_DISABLE_TELEMETRY=1` | none | 0 | 0 |
+| Rust engine before the fix (`with_telemetry(false)`), start + shutdown, no models | created | 3 | — |
+| Rust engine before the fix, scan + text query + clustering | created | 3 | 11 log lines |
+| Rust engine after the fix, same runs | none | 0 | 0 |
+| Swift engine before / after (xcframework 1.24.2) | none | 0 | 0 |
+| Homebrew 1.31.1, either engine | none | 0 | 0 |
+
+**Decision.** `ORT_DISABLE_TELEMETRY=1` is set at the top of every FileID `main` that can load ORT. ORT reads it once, when its platform `Env` is built inside the first `CreateEnv`, and then latches telemetry off for the process. A plain `dlopen` creates nothing. The API call stays as a second layer (Windows ETW ignores the variable). Swift calls the C API through a small C target (`FileIDORTC`) rather than `dlsym`, which the egress gate rightly treats as a raw dynamic-loading API. In Rust, `commit_environment` runs before every `Session::builder()`: if eager init failed, `ort`'s lazy default would otherwise call `EnableTelemetryEvents`.
+
+**Gate markers.** `mobile.events.data.microsoft.com`, `OneCollector` and `Microsoft/DeveloperTools/.onnxruntime` appear only in builds with the uploader. "telemetry flush" (`inference_session.cc`) and "DeviceId:" (`OrtDevice` printing) are in every ORT build, including pyke's and Homebrew's, so they are not used. Shipping a 1.29+ official runtime fails the gate even though the variable disables it. A shipped binary must not contain an uploader at all.
+
+**Windows left open.** Microsoft's DirectML NuGet and GPU zip 1.22.0 are built with `--use_telemetry`. In that version the ETW enable callback sets `enabled_` from the listening session, which overrides `DisableTelemetryEvents`, and `ProcessInfo` is logged inside `CreateEnv`. Only a build without `--use_telemetry` removes it (NEXT).
+## 2026-11-10 — Mac careful text reads: automatic detection stays the default; Latin-only is an opt-in setting
+
+Owner rule: careful reads try fixed Latin languages first with an automatic fall back to language detection; that becomes the default only if non-Latin text is still read, otherwise a "Faster text reading (Latin scripts only)" setting, off by default.
+
+**Measurement set** (private, `~/FileIDDev/Eval/text`): 237 screenshots, 319 sign/document photos and 399 mixed camera JPEG/HEIC copied from Adlon; 17 Adlon notes and signs found by name (one real Chinese sticky note); 10,172 more Adlon images screened with the automatic read for real non-Latin text (one more found: a Devanagari video title on a laptop screen; almost every other non-Latin output of the automatic read is a misread of handwriting or math); 54 synthetic images (CoreText; Chinese simplified and traditional, Japanese, Korean, Russian, Ukrainian, Arabic; plain, sign and photo backgrounds, some with an English line). Reference = today's careful read (accurate, automatic detection), identical across runs.
+
+**Fallback signals tried** (on the careful-read subset): Latin read empty; fast-read lines not covered by the Latin read; text rectangles (`DetectTextRectanglesRequest`, ~3–8 ms) not covered by a trusted (confidence ≥ 0.5) Latin line; low-confidence Latin lines (the Latin model scores what it invents over Chinese or Arabic at 0.3); NLLanguageRecognizer plus a vocabulary check on the Latin text (no separation: real non-Latin produced too few or plausible words). Best: uncovered text rectangles at least 2% of the image high, plus unsure Latin lines, re-read with detection on one widened crop; at 3% the owner's sticky note is lost. Glyph-shape features (character-box aspect, count) overlapped too much between CJK and distant Latin print.
+
+**Results** (release engines, isolated catalogs, back-to-back reps, load 17–44 from other agents):
+
+| | screenshots files/s | signs files/s | camera files/s | synthetic CJK/Arabic lines | sticky note / Devanagari |
+|---|---|---|---|---|---|
+| automatic (default) | 17.9 (6 reps) | 25.5 (5) | 53.7 (3) | 52/53 | read / read |
+| Latin first + fallback | 20.0 (+12%) | 27.7 (+9%) | 55.8 | 50/53 | read / lost |
+| Latin only | 22.9 (+32%, 4) | 36.8 (+42%, 3) | 53.8 | 0/53 | lost / lost |
+
+Percentages compare with the baseline reps run in the same rounds (Latin-only ran in the first two rounds, where screenshots averaged 17.4 and signs 25.9). The fallback fired on 30% (screenshots), 35% (signs) and 42% (camera) of careful reads, re-reading a crop that averaged a quarter of the image, which gave back most of the gain; it also missed text the detector does not box (two Arabic lines on a plain page, the laptop screen). Cyrillic is read by the Latin model (15/15). Latin-only words against the reference: 0.996 / 0.970 / 0.979; lost words are misreads (0, 7 and 0 dictionary words lost, 8, 13 and 3 gained); hits for 13 search words unchanged except "months" 8 → 7.
+
+**Decision.** Automatic detection stays the default. The setting turns on Latin-only careful reads (`FILEID_CAREFUL_READ=latin`, set by the app at engine spawn like `FILEID_RESTRUCTURE_GRANULARITY`, so no IPC change), because the fallback variant is not fast enough to be worth a setting and the setting's label already tells the user non-Latin text is not read. The env var is engine process configuration, not a command or event, so the IPC schema is unchanged. Camera libraries gain little either way: only 6–12% of photos take a careful read.
+
 ## 2026-11-10 — Convergence Stage 4: interactive requests at user-initiated QoS, one cached read connection, CLIP text with ORT's default threads, a new search-strength set
 
 - **Interactive requests run at user-initiated QoS on macOS.** The 2026-10-01 keyword gap (Rust 238 ms vs Swift 113 ms p95 on 100k files) was not slower SQL: medians matched, and Rust's p95 swung from below Swift to 2–3× above it with the load of other processes. The Swift engine's GRDB pool and IPC writer run at `.userInitiated`; Rust's tokio threads ran at the default QoS and lost the CPU on a busy Mac. Catalog actions, chat sends and CLIP text embeds now set user-initiated QoS on their blocking thread for the request and restore it afterwards (`util/qos.rs`, `libc` already in the lock file, no-op off macOS). Background work (scans, jobs) keeps its QoS. Measured back to back at load 22–50: p95 Swift 64–72 ms, Rust before 56–82 ms (one trial 130 ms), Rust after 51–54 ms.
