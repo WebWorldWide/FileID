@@ -10,6 +10,7 @@ Two binaries, newline-delimited JSON over stdin/stdout:
 - `app/Sources/FileID/` — SwiftUI app. UI state in `EngineClient` (`@MainActor @Observable`); spawns the engine, auto-respawns with backoff on crash.
 - `engine/Sources/FileIDEngine/` — Swift CLI child. Owns the DB, scan pipeline, ANE/GPU model loading.
 - `shared/Sources/FileIDShared/` — `IPCProtocol.swift` (`IPCCommand`/`IPCEvent`), DB row types, the AI model registry (`AIModels.swift`), mirrored against `../../shared/ipc-schema/ipc.schema.json`.
+- `shared/Sources/FileIDImaging/` — decode (ImageIO, HEIF, JPEG previews), Vision primary pass and text reads, and the MLX CLIP/RAM++ image graphs. The Swift engine and `FileIDAppleKit` both depend on it, so the two engines run the same code; declarations are `package`-visible.
 - `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (convergence Stage 0; C interface in `adapters/include/fileid_apple.h`). The app starts `fileidd` only with `defaults write com.fileid.app engine.backend rust`; bundle it with `FILEID_WITH_RUST_ENGINE=1 scripts/assemble_app.sh`.
 - `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
 

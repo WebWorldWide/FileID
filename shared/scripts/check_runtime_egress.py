@@ -133,9 +133,9 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "82573f40be15c75c087190ecfa95ceae627b40c854767de6a2f03ccea844fa96",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "5ea71c5cdb780ee61ab6fb865887be963dc8c2e8b24d1eaf0583e4d792e6b0e8",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "2acb357c84a8e751973a7d70a36220b5f3180f73059cfaa67df6b017c7157168",
+  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "bdd8604b92da837691b3281ccd2d20f3040c0948280eda3acf4a4502a4b8076a",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "f7809c1d0ad7d98de0314d4c0645dd8e0dd697cc43554a541bdd9ef4e5c6b8eb",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "95a00e11c73b4a8a33270e3487ef806ff9ee02efe5628532151f1bc1508aec05",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "59d2fdaa2f53f55ddca503e585d16411ceac7cec376d0d74d236fa25cd9dbd28",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "1e18c99a52e9e4caefe6cd17431f573c99d1a81c00cb2a963d2f1eb4ee69e761",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "00fecf9ed22732df4b5410313007970bb655849f0d6c8bd3910f92f0c0aedf2a",
@@ -178,7 +178,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
   "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
-  "platforms/windows/src/engine/src/apple/ffi.rs": "8278b7342b1be50d7ddabd33d3afc31786037c75e217c6879d68b35b92784c1b",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "56df8f3f5e95b412bde16065b2722a4c5d52c6e97794aab5b6c08c0c7428f31c",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",

@@ -7,8 +7,8 @@ import MLX
 /// existing CLIP space. The ONNX graph is built from dynamic-shape primitives
 /// the CoreML provider cannot compile, which left CLIP on the CPU at ~190 ms
 /// per image under scan load.
-final class CLIPVisionMLX: @unchecked Sendable {
-    static let inputSize = 224
+package final class CLIPVisionMLX: @unchecked Sendable {
+    package static let inputSize = 224
     private static let patch = 32
     private static let width = 768
     private static let heads = 12
@@ -16,7 +16,7 @@ final class CLIPVisionMLX: @unchecked Sendable {
     private static let eps: Float = 1e-5
 
     private struct Layer {
-        let ln1w, ln1b, qw, qb, kw, kb, vw, vb, ow, ob, ln2w, ln2b, fc1w, fc1b, fc2w, fc2b: MLXArray
+        package let ln1w, ln1b, qw, qb, kw, kb, vw, vb, ow, ob, ln2w, ln2b, fc1w, fc1b, fc2w, fc2b: MLXArray
     }
 
     private let patchWeight: MLXArray
@@ -26,11 +26,11 @@ final class CLIPVisionMLX: @unchecked Sendable {
     private let blocks: [Layer]
     private let lock = NSLock()
 
-    enum LoadError: Error { case unreadable, malformed, missing(String) }
+    package enum LoadError: Error { case unreadable, malformed, missing(String) }
 
     private let dtype: DType
 
-    init(onnxURL: URL, dtype: DType = .float16) throws {
+    package init(onnxURL: URL, dtype: DType = .float16) throws {
         self.dtype = dtype
         let weights = try ONNXInitializerReader.visionWeights(at: onnxURL)
         func w(_ name: String) throws -> MLXArray {
@@ -61,7 +61,7 @@ final class CLIPVisionMLX: @unchecked Sendable {
 
     /// `pixels` holds `count` normalized CHW 224×224 images back to back.
     /// Returns `count` unnormalized 512-d embeddings.
-    func embed(pixels: [Float], count: Int) -> [[Float]] {
+    package func embed(pixels: [Float], count: Int) -> [[Float]] {
         let side = Self.inputSize, grid = side / Self.patch, dim = Self.width, headDim = dim / Self.heads
         lock.lock(); defer { lock.unlock() }
         let input = MLXArray(pixels, [count, 3, grid, Self.patch, grid, Self.patch]).asType(dtype)
@@ -92,12 +92,12 @@ final class CLIPVisionMLX: @unchecked Sendable {
 /// Minimal protobuf walk over an ONNX model: float initializers by name,
 /// with the exporter's anonymous MatMul weights renamed through the graph
 /// (each one feeds a named `.bias` Add, or produces `image_embeds`).
-enum ONNXInitializerReader {
-    static func visionWeights(at url: URL) throws -> [String: MLXArray] {
+package enum ONNXInitializerReader {
+    package static func visionWeights(at url: URL) throws -> [String: MLXArray] {
         try withMappedModel(at: url) { try parse($0) }
     }
 
-    static func withMappedModel<R>(at url: URL, _ body: (UnsafeRawBufferPointer) throws -> R) throws -> R {
+    package static func withMappedModel<R>(at url: URL, _ body: (UnsafeRawBufferPointer) throws -> R) throws -> R {
         let fd = open(url.path, O_RDONLY)
         guard fd >= 0 else { throw CLIPVisionMLX.LoadError.unreadable }
         defer { close(fd) }
@@ -109,11 +109,11 @@ enum ONNXInitializerReader {
         return try body(UnsafeRawBufferPointer(start: base, count: size))
     }
 
-    struct Tensor { var dims: [Int] = []; var type = 0; var name = ""; var raw: Range<Int>? }
-    struct Node { var inputs: [String] = []; var outputs: [String] = []; var op = ""; var name = "" }
+    package struct Tensor { var dims: [Int] = []; var type = 0; var name = ""; var raw: Range<Int>? }
+    package struct Node { var inputs: [String] = []; var outputs: [String] = []; var op = ""; var name = "" }
 
     /// float32 and float16 initializers keep their stored type.
-    static func array(_ t: Tensor, in b: UnsafeRawBufferPointer) -> MLXArray? {
+    package static func array(_ t: Tensor, in b: UnsafeRawBufferPointer) -> MLXArray? {
         guard let raw = t.raw else { return nil }
         let count = t.dims.reduce(1, *)
         let bytes = UnsafeRawBufferPointer(rebasing: b[raw])
@@ -124,7 +124,7 @@ enum ONNXInitializerReader {
         }
     }
 
-    static func parse(_ b: UnsafeRawBufferPointer) throws -> [String: MLXArray] {
+    package static func parse(_ b: UnsafeRawBufferPointer) throws -> [String: MLXArray] {
         let (tensors, nodes) = try graph(b)
         var rename: [String: String] = [:]
         var producer: [String: Node] = [:]
@@ -148,7 +148,7 @@ enum ONNXInitializerReader {
         return out
     }
 
-    static func graph(_ b: UnsafeRawBufferPointer) throws -> (tensors: [Tensor], nodes: [Node]) {
+    package static func graph(_ b: UnsafeRawBufferPointer) throws -> (tensors: [Tensor], nodes: [Node]) {
         var tensors: [Tensor] = []
         var nodes: [Node] = []
         try fields(b, 0..<b.count) { field, wire, value, span in
@@ -224,25 +224,25 @@ enum ONNXInitializerReader {
 
 /// Collects concurrent single-image requests from scan workers and runs them
 /// as one GPU batch: 21 ms for one image, 3.3 ms per image in a batch of 16.
-final class CLIPGPUBatcher: @unchecked Sendable {
+package final class CLIPGPUBatcher: @unchecked Sendable {
     private let batcher: GPURequestBatcher
 
-    init(encoder: CLIPVisionMLX, maxBatch: Int = 16, gather: DispatchTimeInterval = .milliseconds(3)) {
+    package init(encoder: CLIPVisionMLX, maxBatch: Int = 16, gather: DispatchTimeInterval = .milliseconds(3)) {
         batcher = GPURequestBatcher(label: "fileid.clip.gpu", maxBatch: maxBatch, gather: gather) {
             encoder.embed(pixels: $0, count: $1)
         }
     }
 
-    func embed(_ tensor: [Float]) -> [Float]? { batcher.submit(tensor) }
+    package func embed(_ tensor: [Float]) -> [Float]? { batcher.submit(tensor) }
 }
 
 /// Runs each model's batches on its own queue and MLX stream, so a long
 /// RAM++ batch does not hold CLIP requests behind it.
-final class GPURequestBatcher: @unchecked Sendable {
-    typealias Run = @Sendable (_ pixels: [Float], _ count: Int) -> [[Float]]
+package final class GPURequestBatcher: @unchecked Sendable {
+    package typealias Run = @Sendable (_ pixels: [Float], _ count: Int) -> [[Float]]
     private final class Slot: @unchecked Sendable {
-        let done = DispatchSemaphore(value: 0)
-        var result: [Float]?
+        package let done = DispatchSemaphore(value: 0)
+        package var result: [Float]?
     }
     private let run: Run
     private let maxBatch: Int
@@ -252,7 +252,7 @@ final class GPURequestBatcher: @unchecked Sendable {
     private var draining = false
     private let queue: DispatchQueue
 
-    init(label: String, maxBatch: Int, gather: DispatchTimeInterval, run: @escaping Run) {
+    package init(label: String, maxBatch: Int, gather: DispatchTimeInterval, run: @escaping Run) {
         self.run = run
         self.maxBatch = maxBatch
         self.gather = gather
@@ -263,12 +263,12 @@ final class GPURequestBatcher: @unchecked Sendable {
     /// Varying batch sizes leave freed buffers MLX cannot reuse; uncapped, a
     /// 300-file scan with RAM++ reached a 12.8 GB footprint on a 16 GB Mac.
     /// Only lowers the limit, so a tighter Deep Analyze cap stays in place.
-    static func capCache(environment: [String: String] = ProcessInfo.processInfo.environment) {
+    package static func capCache(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let mb = environment["FILEID_MLX_CACHE_MB"].flatMap { Int($0) }.map { max(0, $0) } ?? 256
         if Memory.cacheLimit > mb * 1_048_576 { Memory.cacheLimit = mb * 1_048_576 }
     }
 
-    func submit(_ tensor: [Float]) -> [Float]? {
+    package func submit(_ tensor: [Float]) -> [Float]? {
         let slot = Slot()
         lock.lock()
         pending.append((tensor, slot))

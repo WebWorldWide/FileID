@@ -227,11 +227,7 @@ pub(crate) async fn handle_start_scan(
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let load_result = wait_for_blocking(
         tokio::task::spawn_blocking(move || {
-            if runtime_available {
-                ModelStack::load_default(models_worker_count)
-            } else {
-                ModelStack::empty()
-            }
+            ModelStack::load_for_scan(models_worker_count, runtime_available)
         }),
         Duration::from_secs(120),
     )
@@ -317,11 +313,12 @@ pub(crate) async fn handle_start_scan(
     // re-processes them once the model loads.
     if runtime_available {
         let mut failed_to_load: Vec<&str> = Vec::new();
-        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") {
+        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") && !models.apple_scan {
             failed_to_load.push("face detection + recognition");
         }
         if models.mobileclip_pool.is_none()
             && models.mobileclip_batch.is_none()
+            && !models.apple_clip
             && !missing_models.contains(&"mobileclip_s2")
         {
             failed_to_load.push("image embedding");

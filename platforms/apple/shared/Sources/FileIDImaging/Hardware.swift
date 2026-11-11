@@ -19,7 +19,7 @@ public enum Hardware {
     /// True when the kernel exposes Apple Silicon's P/E split (hw.perflevelN.*).
     /// False on Intel Macs, where we derive a physical core count and lean on
     /// the logical-core clamp instead.
-    static let hasPerformanceLevels: Bool = {
+    package static let hasPerformanceLevels: Bool = {
         var size: size_t = MemoryLayout<Int32>.size
         var value: Int32 = 0
         return sysctlbyname("hw.perflevel0.physicalcpu", &value, &size, nil, 0) == 0
@@ -86,7 +86,7 @@ public enum Hardware {
     /// levels) the counts are generic, so the pool is clamped to logical
     /// threads, mirroring the Windows `CpuTopology::worker_cap` clamp so a
     /// fallback mis-count can never oversubscribe SMT.
-    static func computeWorkerCap(performanceCores: Int, efficiencyCores: Int,
+    package static func computeWorkerCap(performanceCores: Int, efficiencyCores: Int,
                                  logicalCores: Int, hasPerformanceLevels: Bool) -> Int {
         let p = max(1, performanceCores)
         let e = max(0, efficiencyCores)

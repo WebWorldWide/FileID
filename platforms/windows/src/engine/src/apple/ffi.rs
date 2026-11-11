@@ -91,6 +91,46 @@ unsafe extern "C" {
     /// Cancel a running request; it still reports its terminal event.
     pub fn fileid_apple_vlm_cancel(handle: u64);
     // --- end Stage 7 ---
+
+    // --- Stage 5: scan decode and per-file ML ---
+    /// The scan's working image; `out_image` receives its handle. JSON info.
+    pub fn fileid_apple_image_decode(path: *const c_char, size_bytes: i64, max_pixel_size: u32, out_image: *mut u64) -> *mut c_char;
+    /// AVFoundation keyframe at a quarter of the duration. JSON info.
+    pub fn fileid_apple_video_keyframe(path: *const c_char, max_pixel_size: u32, timeout_ms: u32, out_image: *mut u64) -> *mut c_char;
+    /// The Swift scan's dHash; after Vision and CLIP have read the image.
+    pub fn fileid_apple_image_dhash(image: u64) -> u64;
+    /// Packed sRGB RGB8 of an image; free `out_pixels` with `fileid_apple_free`.
+    pub fn fileid_apple_image_rgb(
+        image: u64,
+        out_pixels: *mut *mut u8,
+        out_length: *mut usize,
+        out_width: *mut u32,
+        out_height: *mut u32,
+    ) -> bool;
+    /// Release an image handle.
+    pub fn fileid_apple_image_release(image: u64);
+    /// Vision primary pass. JSON.
+    pub fn fileid_apple_vision_primary(image: u64) -> *mut c_char;
+    /// The scan's text read; `request` is JSON. JSON.
+    pub fn fileid_apple_text_read(image: u64, request: *const c_char) -> *mut c_char;
+    /// OCR of an image-only PDF's first pages. JSON.
+    pub fn fileid_apple_pdf_ocr(path: *const c_char) -> *mut c_char;
+    /// Compile the accurate text tier once, asynchronously.
+    pub fn fileid_apple_ocr_warmup();
+    /// Whether the accurate text tier is compiled.
+    pub fn fileid_apple_ocr_ready() -> bool;
+    /// Document text as the Swift engine extracts it; `out_handled` false for
+    /// types the caller extracts itself.
+    pub fn fileid_apple_document_text(path: *const c_char, max_chars: usize, out_handled: *mut bool) -> *mut c_char;
+    /// Load the MLX CLIP image tower from a verified ONNX file.
+    pub fn fileid_apple_clip_load(onnx_path: *const c_char) -> bool;
+    /// L2-normalized 512-d CLIP embedding into `out`.
+    pub fn fileid_apple_clip_embed(image: u64, out: *mut f32, capacity: usize) -> bool;
+    /// Load MLX RAM++ from its model folder.
+    pub fn fileid_apple_ramplus_load(directory: *const c_char) -> bool;
+    /// RAM++ tags agreed with the primary pass. JSON `[[tag, score], ...]`.
+    pub fn fileid_apple_ramplus_tag(image: u64, vision_confidences: *const c_char, face_count: usize) -> *mut c_char;
+    // --- end Stage 5 ---
 }
 
 // --- Stage 7: MLX vision-language models ---

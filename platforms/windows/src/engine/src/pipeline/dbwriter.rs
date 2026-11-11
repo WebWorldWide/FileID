@@ -347,6 +347,9 @@ impl DbWriter {
             let mut face_stmt = tx
                 .prepare_cached(INSERT_FACE_SQL)
                 .context("preparing face insert")?;
+            let mut vision_face_stmt = tx
+                .prepare_cached("INSERT INTO face_prints (file_id, print_data, bbox, face_quality, excluded) VALUES (?1, X'', ?2, ?3, ?4)")
+                .context("preparing Vision face insert")?;
             let mut tag_delete = tx
                 .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto'")
                 .context("preparing tag delete")?;
@@ -359,7 +362,7 @@ impl DbWriter {
             // AFTER DELETE trigger only when recursive triggers are enabled,
             // which would strand the old text's FTS postings.
             let mut ocr_text_stmt = tx
-                .prepare_cached("INSERT INTO ocr_text (file_id, text) SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
+                .prepare_cached("INSERT INTO ocr_text (file_id, text, handwritten) SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
                 .context("preparing ocr_text insert")?;
             let mut ocr_text_delete = tx
                 .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1 AND source = 'ocr'")
@@ -526,7 +529,11 @@ impl DbWriter {
                         .collect::<rusqlite::Result<Vec<_>>>()
                         .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                    // The Mac face pipeline records its own file revision when it
+                    // extracts Vision faces; a portable one here would mark them stale.
+                    if f.vision_faces.is_none() {
                     tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
+                    }
                     for (face_index, face) in f.faces.iter().enumerate() {
                         let mut bbox = serde_json::json!({
                             "x": face.bbox[0],
@@ -569,6 +576,14 @@ impl DbWriter {
                             });
                         }
                     }
+                    // Vision faces (the Mac adapters scan): the Swift engine's
+                    // scan-time rows, with no vector or namespace until the
+                    // Mac face pipeline extracts them.
+                    for face in f.vision_faces.iter().flatten() {
+                        vision_face_stmt
+                            .execute(params![file_id, face.bbox, face.quality, face.excluded])
+                            .with_context(|| format!("Vision face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                    }
                     // New AUTOINCREMENT ids never collide with the deleted ones,
                     // so every captured id is now orphaned. Defer the file delete
                     // until after commit (below) so a rollback can't orphan crops.
@@ -590,7 +605,7 @@ impl DbWriter {
                     if let Some(text) = &f.ocr_text
                         && !text.trim().is_empty() {
                             ocr_text_stmt
-                                .execute(params![file_id, text])
+                                .execute(params![file_id, text, f.ocr_handwritten])
                                 .with_context(|| format!("ocr_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                 }
@@ -1103,8 +1118,10 @@ mod tests {
             scanned_unix: 1_700_000_100.0,
             has_faces: false,
             faces: vec![],
+            vision_faces: None,
             has_text: false,
             ocr_text: None,
+            ocr_handwritten: false,
             phash: None,
             aesthetic: None,
             image_width: 0,
@@ -2056,6 +2073,44 @@ mod tests {
     fn nfc_path_search_is_identity_on_ascii() {
         let p = r"C:\Users\me\Pictures\vacation_2024.jpg";
         assert_eq!(nfc_path_search(p), p, "ASCII paths must not be altered");
+    }
+
+    #[test]
+    fn vision_faces_and_text_reads_are_stored_as_the_swift_scan_stores_them() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut file = fixture("/internal/vision-faces.jpg");
+        file.faces_evaluated = true;
+        file.has_faces = true;
+        file.vision_faces = Some(vec![
+            crate::pipeline::tagging::VisionFace { bbox: "0.1000,0.2000,0.3000,0.4000".into(), quality: Some(0.5), excluded: false },
+            crate::pipeline::tagging::VisionFace { bbox: "0.6000,0.6000,0.0100,0.0100".into(), quality: None, excluded: true },
+        ]);
+        file.ocr_stage_ran = true;
+        file.has_text = true;
+        file.ocr_text = Some("Meeting notes".into());
+        file.ocr_handwritten = true;
+        let mut buffer = vec![file];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let faces: Vec<(Vec<u8>, String, Option<f64>, i64, Option<String>, Option<String>)> = db
+            .prepare("SELECT print_data,bbox,face_quality,excluded,embedding_model,processing_version FROM face_prints ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            faces,
+            vec![
+                (vec![], "0.1000,0.2000,0.3000,0.4000".to_owned(), Some(0.5), 0, None, None),
+                (vec![], "0.6000,0.6000,0.0100,0.0100".to_owned(), None, 1, None, None),
+            ]
+        );
+        let revisions: i64 = db.query_row("SELECT COUNT(*) FROM catalog_revisions", [], |row| row.get(0)).unwrap();
+        assert_eq!(revisions, 0, "the Mac face pipeline records its own file revision");
+        let text: (String, String, i64) = db.query_row("SELECT text,source,handwritten FROM ocr_text", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(text, ("Meeting notes".to_owned(), "ocr".to_owned(), 1));
     }
 
     #[test]

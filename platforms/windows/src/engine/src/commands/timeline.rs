@@ -719,7 +719,7 @@ async fn process<M: FrameModel>(
             if let Some(&next) = job.ids.get(index + 1)
                 && let Ok(next_source) = running_source(database, id, next).await
             {
-                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
+                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), version.starts_with(SCENE_PREFIX), cancel)));
             }
             scan
         } else {
@@ -856,9 +856,12 @@ async fn scene_captions<M: FrameModel>(
     cancel: &Arc<AtomicBool>,
     database: &Arc<Mutex<Connection>>,
 ) -> Result<()> {
-    let frames = {
-        let pool = pool.clone();
-        blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
+    let frames = match &pool.scene {
+        Some(frames) => frames.clone(),
+        None => {
+            let pool = pool.clone();
+            blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
+        }
     };
     let scenes = crate::pipeline::video_scene_selection::scenes(&frames, duration);
     for scene in scenes {
@@ -900,12 +903,18 @@ async fn scene_captions<M: FrameModel>(
 /// hardware decode overlaps this video's captions (the Swift engine's `nextPool`).
 type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
 
-fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
+/// With `scenes`, the pool's CLIP vectors are computed here too, so the CPU
+/// embedding also overlaps the current video's captions.
+fn spawn_pool(source: &Path, folder: &Path, scenes: bool, cancel: &Arc<AtomicBool>) -> PoolTask {
     let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
     tokio::task::spawn_blocking(move || {
         let _ = std::fs::remove_dir_all(&directory);
         // The duration is only the worker's time limit here (Swift: one hour).
-        timeline_media::pool(&path, 3_600.0, &directory, &flag)
+        let mut pool = timeline_media::pool(&path, 3_600.0, &directory, &flag)?;
+        if scenes && !flag.load(Ordering::Acquire) {
+            pool.scene = Some(timeline_media::scene_frames(&pool));
+        }
+        Ok(pool)
     })
 }
 

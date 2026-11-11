@@ -23,14 +23,14 @@ import UniformTypeIdentifiers
 /// was previously protecting against.) Was hardcoded 14 (= M1 Pro's workerCap);
 /// hardcoding silently throttled Vision/ANE on higher-core Macs (M-Ultra
 /// workerCap 32) — feeding the bigger ANE only 14-wide. Now it scales.
-let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
+package let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
 
 /// Per-call hard wall-clock timeout for any `handler.perform` invocation.
 /// If Vision hasn't returned by `visionPerformTimeoutSeconds`, we abandon
 /// the call and free the worker. The orphaned background thread keeps
 /// running until Vision's internal queue eventually unblocks (or the
 /// engine exits). Bounded leak, unbounded responsiveness.
-let visionPerformTimeoutSeconds: Double = {
+package let visionPerformTimeoutSeconds: Double = {
     #if DEBUG
     if let raw = ProcessInfo.processInfo.environment["FILEID_TEST_VISION_TIMEOUT"], let value = Double(raw), value > 0 { return value }
     #endif
@@ -41,7 +41,7 @@ let visionPerformTimeoutSeconds: Double = {
 /// each loaded the model and took 70 s wall (M1 Pro, every one past the 10 s
 /// timeout). Through `RecognizeTextRequest` a warm scan finishes accurate reads
 /// at about the same rate with four, six or eight in flight.
-let accurateOCRGate = DispatchSemaphore(value: 4)
+package let accurateOCRGate = DispatchSemaphore(value: 4)
 
 /// Run `body` on a background queue with a wall-clock timeout. Returns
 /// true if body completed before the deadline, false on timeout. On
@@ -54,13 +54,13 @@ let accurateOCRGate = DispatchSemaphore(value: 4)
 /// construction (one box per call, only one thread touches it at a time
 /// — the dispatcher OR the caller, never both), so the unchecked-Sendable
 /// hop is safe in practice even though the compiler can't prove it.
-final class _VisionUncheckedBox<T>: @unchecked Sendable {
-    let value: T
-    init(_ v: T) { self.value = v }
+package final class _VisionUncheckedBox<T>: @unchecked Sendable {
+    package let value: T
+    package init(_ v: T) { self.value = v }
 }
 
 @inline(__always)
-func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
+package func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
     let sem = DispatchSemaphore(value: 0)
     let box = _VisionUncheckedBox(body)
     DispatchQueue.global(qos: .userInitiated).async {
@@ -293,10 +293,10 @@ public final class VisionWorker: @unchecked Sendable {
     /// in parallel (25/s at four), with the same revision and the same text on
     /// printed pages. The fast tier stays on `VNRecognizeTextRequest`, whose Swift
     /// counterpart reads far less.
-    static func recognizeAccurately(_ cgImage: CGImage, completed: inout Bool) -> String {
+    package static func recognizeAccurately(_ cgImage: CGImage, completed: inout Bool) -> String {
         accurateOCRGate.wait()
         visionConcurrencyGate.wait()
-        let box = Tagging.ScanSideResult<String?>()
+        let box = ScanSideResult<String?>()
         let didReturn = runVisionWithTimeout {
             defer {
                 visionConcurrencyGate.signal()
@@ -310,9 +310,9 @@ public final class VisionWorker: @unchecked Sendable {
     }
 
     /// Blocks the calling thread (never a Swift concurrency thread) until the read ends.
-    static func performAccurateRead(_ cgImage: CGImage,
+    package static func performAccurateRead(_ cgImage: CGImage,
                                     languages: CarefulTextRead.Languages = CarefulTextRead.configured) -> String? {
-        let box = Tagging.ScanSideResult<String>()
+        let box = ScanSideResult<String>()
         let done = DispatchSemaphore(value: 0)
         Task.detached(priority: .userInitiated) {
             if let text = await CarefulTextRead.read(cgImage, languages: languages) { box.set(text) }
@@ -327,13 +327,13 @@ public final class VisionWorker: @unchecked Sendable {
 /// model for the Neural Engine: 92 s measured on an M1 Pro (later processes:
 /// ~0.4 s cold, ~0.23 s warm). Run that once at engine launch, off the scan path
 /// and with no timeout; until it finishes the scan keeps its fast reads.
-final class AccurateOCRWarmup: @unchecked Sendable {
-    static let shared = AccurateOCRWarmup()
+package final class AccurateOCRWarmup: @unchecked Sendable {
+    package static let shared = AccurateOCRWarmup()
     private let lock = NSLock()
     private var started = false
     private var ready = false
 
-    var isReady: Bool {
+    package var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
         return ready
     }
@@ -342,17 +342,17 @@ final class AccurateOCRWarmup: @unchecked Sendable {
     /// audio-only scan of 323 files took 115 s with the warmup running and 3.2 s without it.
     /// So wait a moment, and keep waiting while a scan is queued or running; a scan that starts
     /// first simply keeps its fast reads, and the warmup runs when the engine is idle.
-    func startWhenIdle(after delay: Duration = .seconds(3)) {
+    package func startWhenIdle(after delay: Duration = .seconds(3), busy: @escaping @Sendable () async -> Bool) {
         Task.detached(priority: .utility) {
             try? await Task.sleep(for: delay)
-            while await JobQueue.shared.hasActive(category: .scan) {
+            while await busy() {
                 try? await Task.sleep(for: .seconds(1))
             }
             Self.shared.start()
         }
     }
 
-    func start() {
+    package func start() {
         lock.lock()
         guard !started else { lock.unlock(); return }
         started = true
@@ -373,8 +373,7 @@ final class AccurateOCRWarmup: @unchecked Sendable {
                 }
             }
             self.lock.lock(); self.ready = true; self.lock.unlock()
-            JSONLog.shared.info(ev: "ocr_accurate_prewarmed",
-                                extra: ["ms": AnyCodable((CFAbsoluteTimeGetCurrent() - began) * 1000)])
+            ImagingLog.info("ocr_accurate_prewarmed", metrics: ["ms": (CFAbsoluteTimeGetCurrent() - began) * 1000])
         }
     }
 
@@ -399,15 +398,15 @@ final class AccurateOCRWarmup: @unchecked Sendable {
 /// every candidate image would otherwise pay a failed model load or a 10 s
 /// timeout. The fast read still stands, and Describe Files can transcribe what
 /// it missed. After the pause one more attempt runs; another failure re-trips.
-final class AccurateOCRBreaker: @unchecked Sendable {
-    static let shared = AccurateOCRBreaker()
-    static let failureLimit = 3
-    static let pauseSeconds: CFAbsoluteTime = 600
+package final class AccurateOCRBreaker: @unchecked Sendable {
+    package static let shared = AccurateOCRBreaker()
+    package static let failureLimit = 3
+    package static let pauseSeconds: CFAbsoluteTime = 600
     private let lock = NSLock()
     private var consecutiveFailures = 0
     private var trippedAt: CFAbsoluteTime = 0
 
-    var allowed: Bool {
+    package var allowed: Bool {
         lock.lock(); defer { lock.unlock() }
         if consecutiveFailures < Self.failureLimit { return true }
         guard CFAbsoluteTimeGetCurrent() - trippedAt >= Self.pauseSeconds else { return false }
@@ -415,15 +414,15 @@ final class AccurateOCRBreaker: @unchecked Sendable {
         return true
     }
 
-    func record(success: Bool) {
+    package func record(success: Bool) {
         lock.lock()
         consecutiveFailures = success ? 0 : consecutiveFailures + 1
         let tripped = consecutiveFailures == Self.failureLimit
         if tripped { trippedAt = CFAbsoluteTimeGetCurrent() }
         lock.unlock()
         if tripped {
-            JSONLog.shared.warn(ev: "ocr_accurate_disabled",
-                                error: "accurate text recognition failed \(Self.failureLimit) times in a row")
+            ImagingLog.warn("ocr_accurate_disabled",
+                            error: "accurate text recognition failed \(Self.failureLimit) times in a row")
         }
     }
 }

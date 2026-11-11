@@ -3,9 +3,11 @@ import PackageDescription
 
 // FileID — workspace package.
 //
-// Two products + a shared module:
+// Two products + shared modules:
 // - FileIDShared: Codable DTOs, the IPC protocol and the few read-only
 //                 catalog/model routines both the engine and the app run.
+// - FileIDImaging: decode, Vision and MLX image code the Swift engine and
+//                 FileIDAppleKit (the Rust engine's adapters) both run.
 // - FileIDEngine: CLI binary — owns the scan pipeline, the SQLite DB,
 //                 and ML inference. Reads commands from stdin
 //                 (newline-delimited JSON), writes events to stdout (same).
@@ -27,7 +29,7 @@ let package = Package(
         .executable(name: "FileIDEngine", targets: ["FileIDEngine"]),
         // Swift adapters the shared Rust engine (`Contents/MacOS/fileidd`)
         // links through the C interface in adapters/include/fileid_apple.h.
-        // Shipped in Contents/Frameworks. Links MLX for the VLM sessions.
+        // Shipped in Contents/Frameworks. Links MLX for CLIP, RAM++ and the VLM sessions.
         .library(name: "FileIDAppleKit", type: .dynamic, targets: ["FileIDAppleKit"])
     ],
     dependencies: [
@@ -70,6 +72,18 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
+        // Decode, Vision, text-read and MLX image code both engines run: the
+        // Swift engine links it directly, FileIDAppleKit exposes it to the
+        // Rust engine. No package dependency beyond the MLX the two already link.
+        .target(
+            name: "FileIDImaging",
+            dependencies: [
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
+            path: "shared/Sources/FileIDImaging",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
         // Engine CLI. Single binary, owns the scan pipeline + Deep Analyze
         // (VLM inference via MLX). MLXVLM brings the Qwen / Gemma /
         // PaliGemma model factory; downloaded weights are cached in
@@ -81,6 +95,7 @@ let package = Package(
             name: "FileIDEngine",
             dependencies: [
                 "FileIDShared",
+                "FileIDImaging",
                 .product(name: "AsyncAlgorithms",      package: "swift-async-algorithms"),
                 .product(name: "GRDB",                 package: "GRDB.swift"),
                 .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
@@ -121,6 +136,7 @@ let package = Package(
         .target(
             name: "FileIDAppleVLM",
             dependencies: [
+                "FileIDImaging",
                 .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
                 .product(name: "MLXVLM",               package: "mlx-swift-lm"),
                 .product(name: "MLXLLM",               package: "mlx-swift-lm"),
@@ -131,11 +147,17 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6), .define("FILEID_APPLE_ADAPTER")]
         ),
 
-        // Apple-framework adapters for the Rust engine (IOPM, bookmarks, MLX
-        // VLM sessions). Exports @_cdecl functions only; see adapters/include.
+        // Apple-framework adapters for the Rust engine. Exports @_cdecl
+        // functions only; see adapters/include. Scan work runs FileIDImaging,
+        // the same decode, Vision and MLX code the Swift engine runs; VLM
+        // sessions run FileIDAppleVLM.
         .target(
             name: "FileIDAppleKit",
-            dependencies: ["FileIDAppleVLM"],
+            dependencies: [
+                "FileIDImaging",
+                "FileIDAppleVLM",
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
             path: "adapters/Sources/FileIDAppleKit",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

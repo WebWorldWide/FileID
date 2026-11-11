@@ -6,6 +6,7 @@ import AsyncAlgorithms
 import Testing
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 @Suite("Handwriting text reading")
 struct TextReadingTests {

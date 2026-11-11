@@ -12,6 +12,7 @@ import Foundation
 import CoreGraphics
 import FileIDShared
 import OnnxRuntimeBindings
+import FileIDImaging
 
 public final class MobileCLIPService: @unchecked Sendable {
     public static let shared = MobileCLIPService()

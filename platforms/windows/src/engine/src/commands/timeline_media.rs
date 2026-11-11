@@ -61,6 +61,8 @@ pub(crate) const FRAME_POOL: bool = false;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pool {
     pub(crate) frames: Vec<(f64, Vec<u8>, std::path::PathBuf)>,
+    /// `scene_frames`, when a background prefetch already computed them.
+    pub(crate) scene: Option<Vec<crate::pipeline::video_scene_selection::Frame>>,
 }
 
 impl Pool {
@@ -84,7 +86,10 @@ pub(crate) fn pool(source: &Path, duration: f64, directory: &Path, cancel: &Atom
         duration,
         cancel,
     )?;
-    Ok(Pool { frames: manifest.frames.into_iter().map(|frame| (frame.seconds, frame.signature, directory.join(frame.file))).collect() })
+    Ok(Pool {
+        frames: manifest.frames.into_iter().map(|frame| (frame.seconds, frame.signature, directory.join(frame.file))).collect(),
+        scene: None,
+    })
 }
 
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
@@ -156,6 +161,7 @@ mod tests {
                 .iter()
                 .map(|&s| (s, vec![s as u8], std::path::PathBuf::from(format!("{s}.jpg"))))
                 .collect(),
+            scene: None,
         };
         let picked: Vec<f64> = whole_seconds(&pool).into_iter().map(|(s, _)| s).collect();
         assert_eq!(picked, [0.0, 1.02, 2.0]);
@@ -168,7 +174,7 @@ mod tests {
     #[test]
     fn scene_frames_fall_back_to_centred_luma_with_luma_change() {
         let missing = std::path::PathBuf::from("/nonexistent/frame.jpg");
-        let pool = Pool { frames: vec![(0.0, vec![10, 30], missing.clone()), (0.5, vec![10, 30], missing.clone()), (1.0, vec![255, 0], missing)] };
+        let pool = Pool { frames: vec![(0.0, vec![10, 30], missing.clone()), (0.5, vec![10, 30], missing.clone()), (1.0, vec![255, 0], missing)], scene: None };
         let frames = scene_frames(&pool);
         assert_eq!(frames.iter().map(|f| f.seconds).collect::<Vec<_>>(), [0.0, 0.5, 1.0]);
         assert_eq!(frames[0].embedding, [-10.0, 10.0]);
