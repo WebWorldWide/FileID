@@ -37,7 +37,7 @@ pub async fn handle(
     let action = request.action.clone();
     let job_id = request.job_id.clone();
     let scheduler = database.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         if request.action == "scoreTakes" {
             let Some(database) = database else {
                 bail!("The catalog database is unavailable")
@@ -53,7 +53,7 @@ pub async fn handle(
             return Ok((response, Some(id)));
         }
         execute_with_index(database, index, request).map(|response| (response, None))
-    })
+    }))
     .await;
     let response = match result {
         Ok(Ok((response, queued))) => {
@@ -290,23 +290,20 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         }
         "jobs" => result.jobs = jobs(conn)?,
         "pauseJob" | "resumeJob" | "cancelJob" => {
-            let id = request
-                .job_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Job required"))?;
+            let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
+            // Only jobs with a worker in this engine can change state (Swift `FileIDEngineMain`).
+            if !super::timeline::is_timeline_job(&tx, id)?
+                && !super::take_grouping::is_job(&tx, id)?
+                && !super::face_refresh::is_job(&tx, id)?
+            {
+                bail!("This job has no supported worker in this engine.")
+            }
             let current: String = tx.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get(0))?;
             if !["queued", "running", "paused"].contains(&current.as_str())
                 || (request.action == "resumeJob" && current != "paused")
             {
                 bail!("This job cannot make that transition")
-            }
-            if request.action == "resumeJob"
-                && !super::timeline::is_timeline_job(&tx, id)?
-                && !super::take_grouping::is_job(&tx, id)?
-                && !super::face_refresh::is_job(&tx, id)?
-            {
-                bail!("This engine cannot resume that job")
             }
             let target = match request.action.as_str() {
                 "pauseJob" => "paused",

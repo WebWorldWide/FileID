@@ -83,7 +83,9 @@ public enum RestructureFeedback {
 
         let note = "you've filed files like this here before"
         return zip(proposals, scores).map { p, score in
-            guard score >= autoWeight, p.confidence != "auto" else { return p }
+            // Ask means "leave it unless the user consents per file"; feedback must not
+            // turn it into a bulk-applied Auto move (lockstep with the Rust engine).
+            guard score >= autoWeight, p.confidence != "auto", p.confidence != "ask" else { return p }
             let reason: String
             if let r = p.reason, !r.isEmpty {
                 reason = "\(r); \(note)"

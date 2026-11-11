@@ -50,5 +50,137 @@
       {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "expect": {"applied": 0, "failed": 8}},
       {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "absent": ["Photos"]}}
     ]
+  },
+  {
+    "name": "cross-restructure-swift-apply-rust-undo",
+    "description": "One catalog and one undo journal pass Swift → Rust: Swift plans and applies the respect-stage moves, Rust reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Rust plans the same moves again.",
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
+    "start": "swift",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "swift plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "swift applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
+      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
+      {"restart": "rust"},
+      {"label": "rust undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
+      {"label": "rust second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
+      {"label": "rust plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
+    ]
+  },
+  {
+    "name": "cross-restructure-rust-apply-swift-undo",
+    "description": "One catalog and one undo journal pass Rust → Swift: Rust plans and applies the respect-stage moves, Swift reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Swift plans the same moves again.",
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
+    "start": "rust",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "rust plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "rust applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
+      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
+      {"restart": "swift"},
+      {"label": "swift undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
+      {"label": "swift second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
+      {"label": "swift plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
+    ]
+  },
+  {
+    "name": "restructure-undo-of-an-unreadable-journal-ends-with-a-result",
+    "description": "Undo over a corrupt journal moves nothing and still ends with a restructureApplyResult (0 applied, 1 failed), so a client waiting on the result releases; the journal is kept.",
+    "tree": [
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}},
+      {"path": "DCIM/100MSDCF/DSC00002.JPG", "content": "dsc2", "row": {"id": 2, "kind": "image", "created_at": 1791108600}},
+      {"path": "{state}/FileID/restructure_undo.ndjson", "content": "{not json}\n"}
+    ],
+    "steps": [
+      {"label": "undo", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "{state}/FileID/restructure_undo.ndjson"]}}
+    ]
+  },
+  {
+    "name": "restructure-undo-refuses-another-librarys-journal",
+    "description": "A journal whose header names another library root is not replayed against this one: nothing moves and the reply is 0 applied, 1 failed.",
+    "extends": "restructure-undo-of-an-unreadable-journal-ends-with-a-result",
+    "tree": [
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}},
+      {"path": "DCIM/100MSDCF/DSC00002.JPG", "content": "dsc2", "row": {"id": 2, "kind": "image", "created_at": 1791108600}},
+      {"path": "{state}/FileID/restructure_undo.ndjson", "content": "{\"library_root\":\"/nonexistent/other-library\",\"version\":3}\n{\"file_id\":1,\"from\":\"/nonexistent/other-library/DSC00001.JPG\",\"to\":\"/nonexistent/other-library/old/DSC00001.JPG\"}\n"}
+    ],
+    "steps": [
+      {"label": "undo", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00002.JPG"]}}
+    ]
+  },
+  {
+    "name": "restructure-apply-refuses-a-destination-outside-the-root",
+    "description": "A move whose destination lies outside the library root is refused: the file stays, nothing is written outside, and the reply is 0 applied, 1 failed.",
+    "extends": "restructure-respect-stage",
+    "steps": [
+      {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "useSymlinks": false, "moves": [{"fileID": 1, "source": "{path:DCIM/100MSDCF/DSC00001.JPG}", "destination": "{state}/escape/DSC00001.JPG", "category": "escape"}]}}, "await": "restructureApplyResult", "timeout": 60, "expect": {"applied": 0, "failed": 1}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG"], "absent": ["{state}/escape"]}},
+      {"label": "row unchanged", "db": "SELECT path_text FROM files WHERE id=1", "expect": [["{path:DCIM/100MSDCF/DSC00001.JPG}"]]}
+    ]
+  },
+  {
+    "name": "restructure-shortcut-apply-and-undo",
+    "description": "Shortcut mode (useSymlinks) links each planned destination to its file and leaves the originals and rows in place; undo with the run's token removes exactly those links.",
+    "extends": "restructure-respect-stage",
+    "knownDivergences": [{"engine": "swift", "reason": "The Swift engine has no shortcut mode and refuses useSymlinks: true (DECISIONS 2026-06-14); the Mac app never sends it. The Rust engine keeps it for Windows and Linux and on the Mac it is checked here."}],
+    "steps": [
+      {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "apply as shortcuts", "save": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": true}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0, "shortcutUndoToken": {"$tol": "present"}}},
+      {"label": "links beside originals", "fs": {"symlinks": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "contents": {"Photos/2026/2026-10-04/DSC00001.JPG": "dsc1"}}},
+      {"label": "rows unchanged", "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"]]},
+      {"label": "undo the shortcuts", "command": {"undoRestructure": {"libraryRoot": "{root}", "shortcutUndoToken": {"$var": "apply.shortcutUndoToken"}}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "links gone, originals kept", "fs": {"absent": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1"}}}
+    ]
+  },
+  {
+    "name": "restructure-messy-downloads-of-documents",
+    "description": "A Downloads dump of documents and audio with no embeddings is grouped by the filename bag-of-words pass into named folders; the existing Invoices folder stays put. Pins the default plan (respect stage on) for non-photo content.",
+    "tree": [
+      {"path": "Downloads/acme_invoice_0.pdf", "content": "acme_invoice 0", "row": {"id": 1, "kind": "doc", "created_at": 1780259200}},
+      {"path": "Downloads/acme_invoice_1.pdf", "content": "acme_invoice 1", "row": {"id": 2, "kind": "doc", "created_at": 1780518400}},
+      {"path": "Downloads/acme_invoice_2.pdf", "content": "acme_invoice 2", "row": {"id": 3, "kind": "doc", "created_at": 1780777600}},
+      {"path": "Downloads/acme_invoice_3.pdf", "content": "acme_invoice 3", "row": {"id": 4, "kind": "doc", "created_at": 1781036800}},
+      {"path": "Downloads/acme_invoice_4.pdf", "content": "acme_invoice 4", "row": {"id": 5, "kind": "doc", "created_at": 1781296000}},
+      {"path": "Downloads/hawaii_trip_itinerary_0.pdf", "content": "hawaii_trip_itinerary 0", "row": {"id": 6, "kind": "doc", "created_at": 1781555200}},
+      {"path": "Downloads/hawaii_trip_itinerary_1.pdf", "content": "hawaii_trip_itinerary 1", "row": {"id": 7, "kind": "doc", "created_at": 1781814400}},
+      {"path": "Downloads/hawaii_trip_itinerary_2.pdf", "content": "hawaii_trip_itinerary 2", "row": {"id": 8, "kind": "doc", "created_at": 1782073600}},
+      {"path": "Downloads/hawaii_trip_itinerary_3.pdf", "content": "hawaii_trip_itinerary 3", "row": {"id": 9, "kind": "doc", "created_at": 1782332800}},
+      {"path": "Downloads/hawaii_trip_itinerary_4.pdf", "content": "hawaii_trip_itinerary 4", "row": {"id": 10, "kind": "doc", "created_at": 1782592000}},
+      {"path": "Downloads/tax_return_2025_0.pdf", "content": "tax_return_2025 0", "row": {"id": 11, "kind": "doc", "created_at": 1782851200}},
+      {"path": "Downloads/tax_return_2025_1.pdf", "content": "tax_return_2025 1", "row": {"id": 12, "kind": "doc", "created_at": 1783110400}},
+      {"path": "Downloads/tax_return_2025_2.pdf", "content": "tax_return_2025 2", "row": {"id": 13, "kind": "doc", "created_at": 1783369600}},
+      {"path": "Downloads/tax_return_2025_3.pdf", "content": "tax_return_2025 3", "row": {"id": 14, "kind": "doc", "created_at": 1783628800}},
+      {"path": "Downloads/tax_return_2025_4.pdf", "content": "tax_return_2025 4", "row": {"id": 15, "kind": "doc", "created_at": 1783888000}},
+      {"path": "Downloads/meeting_notes_project_apollo_0.txt", "content": "meeting_notes_project_apollo 0", "row": {"id": 16, "kind": "doc", "created_at": 1784147200}},
+      {"path": "Downloads/meeting_notes_project_apollo_1.txt", "content": "meeting_notes_project_apollo 1", "row": {"id": 17, "kind": "doc", "created_at": 1784406400}},
+      {"path": "Downloads/meeting_notes_project_apollo_2.txt", "content": "meeting_notes_project_apollo 2", "row": {"id": 18, "kind": "doc", "created_at": 1784665600}},
+      {"path": "Downloads/meeting_notes_project_apollo_3.txt", "content": "meeting_notes_project_apollo 3", "row": {"id": 19, "kind": "doc", "created_at": 1784924800}},
+      {"path": "Downloads/meeting_notes_project_apollo_4.txt", "content": "meeting_notes_project_apollo 4", "row": {"id": 20, "kind": "doc", "created_at": 1785184000}},
+      {"path": "Downloads/guitar_lesson_0.mp3", "content": "guitar_lesson 0", "row": {"id": 21, "kind": "audio", "created_at": 1785443200}},
+      {"path": "Downloads/guitar_lesson_1.mp3", "content": "guitar_lesson 1", "row": {"id": 22, "kind": "audio", "created_at": 1785702400}},
+      {"path": "Downloads/guitar_lesson_2.mp3", "content": "guitar_lesson 2", "row": {"id": 23, "kind": "audio", "created_at": 1785961600}},
+      {"path": "Downloads/guitar_lesson_3.mp3", "content": "guitar_lesson 3", "row": {"id": 24, "kind": "audio", "created_at": 1786220800}},
+      {"path": "Downloads/guitar_lesson_4.mp3", "content": "guitar_lesson 4", "row": {"id": 25, "kind": "audio", "created_at": 1786480000}},
+      {"path": "Downloads/recipe_lasagna_0.txt", "content": "recipe_lasagna 0", "row": {"id": 26, "kind": "doc", "created_at": 1786739200}},
+      {"path": "Downloads/recipe_lasagna_1.txt", "content": "recipe_lasagna 1", "row": {"id": 27, "kind": "doc", "created_at": 1786998400}},
+      {"path": "Downloads/recipe_lasagna_2.txt", "content": "recipe_lasagna 2", "row": {"id": 28, "kind": "doc", "created_at": 1787257600}},
+      {"path": "Downloads/recipe_lasagna_3.txt", "content": "recipe_lasagna 3", "row": {"id": 29, "kind": "doc", "created_at": 1787516800}},
+      {"path": "Downloads/recipe_lasagna_4.txt", "content": "recipe_lasagna 4", "row": {"id": 30, "kind": "doc", "created_at": 1787776000}},
+      {"path": "Documents/Invoices/acme_invoice_old.pdf", "content": "old", "row": {"id": 100, "kind": "doc", "created_at": 1770000000}},
+      {"path": "Documents/Invoices/acme_invoice_older.pdf", "content": "older", "row": {"id": 101, "kind": "doc", "created_at": 1769000000}}
+    ],
+    "steps": [
+      {"label": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "set", "value": [{"fileID": 1, "source": "{path:Downloads/acme_invoice_0.pdf}", "destination": "{path:Acme Invoice/acme_invoice_0.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 2, "source": "{path:Downloads/acme_invoice_1.pdf}", "destination": "{path:Acme Invoice/acme_invoice_1.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 3, "source": "{path:Downloads/acme_invoice_2.pdf}", "destination": "{path:Acme Invoice/acme_invoice_2.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 4, "source": "{path:Downloads/acme_invoice_3.pdf}", "destination": "{path:Acme Invoice/acme_invoice_3.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 5, "source": "{path:Downloads/acme_invoice_4.pdf}", "destination": "{path:Acme Invoice/acme_invoice_4.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 6, "source": "{path:Downloads/hawaii_trip_itinerary_0.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_0.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 7, "source": "{path:Downloads/hawaii_trip_itinerary_1.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_1.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 8, "source": "{path:Downloads/hawaii_trip_itinerary_2.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_2.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 9, "source": "{path:Downloads/hawaii_trip_itinerary_3.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_3.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 10, "source": "{path:Downloads/hawaii_trip_itinerary_4.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_4.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 11, "source": "{path:Downloads/tax_return_2025_0.pdf}", "destination": "{path:Return Tax/tax_return_2025_0.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 12, "source": "{path:Downloads/tax_return_2025_1.pdf}", "destination": "{path:Return Tax/tax_return_2025_1.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 13, "source": "{path:Downloads/tax_return_2025_2.pdf}", "destination": "{path:Return Tax/tax_return_2025_2.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 14, "source": "{path:Downloads/tax_return_2025_3.pdf}", "destination": "{path:Return Tax/tax_return_2025_3.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 15, "source": "{path:Downloads/tax_return_2025_4.pdf}", "destination": "{path:Return Tax/tax_return_2025_4.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 16, "source": "{path:Downloads/meeting_notes_project_apollo_0.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_0.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 17, "source": "{path:Downloads/meeting_notes_project_apollo_1.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_1.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 18, "source": "{path:Downloads/meeting_notes_project_apollo_2.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_2.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 19, "source": "{path:Downloads/meeting_notes_project_apollo_3.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_3.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 20, "source": "{path:Downloads/meeting_notes_project_apollo_4.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_4.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 21, "source": "{path:Downloads/guitar_lesson_0.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_0.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 22, "source": "{path:Downloads/guitar_lesson_1.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_1.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 23, "source": "{path:Downloads/guitar_lesson_2.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_2.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 24, "source": "{path:Downloads/guitar_lesson_3.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_3.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 25, "source": "{path:Downloads/guitar_lesson_4.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_4.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 26, "source": "{path:Downloads/recipe_lasagna_0.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_0.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 27, "source": "{path:Downloads/recipe_lasagna_1.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_1.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 28, "source": "{path:Downloads/recipe_lasagna_2.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_2.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 29, "source": "{path:Downloads/recipe_lasagna_3.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_3.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 30, "source": "{path:Downloads/recipe_lasagna_4.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_4.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}]}, "folderClassifications": {"anchorFolders": 1, "mixedFolders": 0, "junkFolders": 1}}}
+    ]
   }
 ]

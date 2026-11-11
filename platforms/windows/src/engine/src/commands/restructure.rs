@@ -358,6 +358,21 @@ fn inspect_stored_plan(
     Ok(Some(tiers))
 }
 
+/// The terminal reply for an apply or undo that stopped before moving anything, sent
+/// ahead of its error so clients waiting on a result (the Mac app's Restructure tab)
+/// release, as the Swift engine does for an unreadable journal or a refused move.
+fn refused_apply_result(failed: usize) -> ipc::RestructureApplyResult {
+    ipc::RestructureApplyResult {
+        applied: 0,
+        failed: u32::try_from(failed.max(1)).unwrap_or(u32::MAX),
+        privilege_error: None,
+        cancelled: false,
+        planned: None,
+        remaining: None,
+        shortcut_undo_token: None,
+    }
+}
+
 fn cancelled_apply_result() -> ipc::RestructureApplyResult {
     ipc::RestructureApplyResult {
         applied: 0,
@@ -1588,6 +1603,10 @@ pub(crate) async fn handle_undo_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
+                refused_apply_result(1),
+            ))))
+            .await;
             sink.send(EngineError::event(
                 "undo_restructure",
                 format!("Undo failed: {err}"),
@@ -1596,6 +1615,10 @@ pub(crate) async fn handle_undo_restructure(
         }
         Err(err) => {
             tracing::warn!(?err, "undoRestructure spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
+                refused_apply_result(1),
+            ))))
+            .await;
             sink.send(EngineError::event(
                 "undo_restructure",
                 format!("Undo did not complete: {err}"),
@@ -1611,6 +1634,7 @@ pub(crate) async fn handle_apply_restructure(
     payload: ipc::ApplyRestructurePayload,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let requested = payload.moves.len();
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<ipc::RestructureApplyResult> {
             // F-C6-013 wiring: inject the operation token the CancelRestructure
@@ -1675,6 +1699,10 @@ pub(crate) async fn handle_apply_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
+                refused_apply_result(requested),
+            ))))
+            .await;
             sink.send(EngineError::event(
                 "apply_restructure",
                 format!("Apply failed: {err}"),
@@ -1687,6 +1715,10 @@ pub(crate) async fn handle_apply_restructure(
             // instead of hanging forever (ApplyRestructureAsync has no app-side
             // timeout; mirrors the face_clustering PAR-111 JoinError handling).
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
+                refused_apply_result(requested),
+            ))))
+            .await;
             sink.send(EngineError::event(
                 "apply_restructure",
                 format!("Apply did not complete: {err}"),
