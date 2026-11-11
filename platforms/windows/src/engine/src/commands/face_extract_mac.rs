@@ -284,7 +284,7 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
                             let result = extract_one(rows, extractor);
                             results.lock().push(result);
                         }
-                    })
+                    });
                 });
             }
         });

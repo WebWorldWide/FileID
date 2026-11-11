@@ -523,7 +523,7 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
                     let Some((id, row)) = next else { break };
                     let value = measure(row, faces);
                     measured.lock().push((id, value));
-                })
+                });
             });
         }
     });
