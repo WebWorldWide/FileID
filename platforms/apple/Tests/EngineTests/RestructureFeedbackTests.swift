@@ -43,6 +43,23 @@ struct RestructureFeedbackTests {
         #expect(boosted[0].reason?.contains("filed files like this") == true)
     }
 
+    @Test("boost never upgrades an Ask move")
+    func boostNeverUpgradesAsk() async throws {
+        let (db, dir) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let applied: [(source: String, destination: String)] = (0..<3).map { i in
+            (source: "/in/acme_invoice_\(i).pdf", destination: "/lib/Invoices/acme_invoice_\(i).pdf")
+        }
+        await RestructureFeedback.record(database: db, moves: applied, now: 0)
+        let move = RestructureProposal(
+            fileID: 99, oldPath: "/in/acme_invoice_new.pdf",
+            newPath: "/lib/Invoices/acme_invoice_new.pdf",
+            bucket: "Invoices", confidence: "ask", reason: nil)
+        let boosted = await RestructureFeedback.boost(database: db, proposals: [move])
+        #expect(boosted[0].confidence == "ask")
+        #expect(boosted[0].reason == nil)
+    }
+
     // A move to a DIFFERENT folder with no feedback stays Review.
     @Test("boost leaves an unrelated move alone")
     func boostLeavesUnrelatedAlone() async throws {
