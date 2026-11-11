@@ -86,7 +86,7 @@ public final class CLIPTextEncoder: @unchecked Sendable {
                 guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else { return nil }
                 // Slow work — NO `lock` held, so isReady/embedText stay responsive.
                 lock.lock(); let existingEnv = self.env; lock.unlock()
-                let env = try existingEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+                let env = try existingEnv ?? ORTPrivacy.makeEnv(loggingLevel: ORTLoggingLevel.warning)
                 // CPU only: the CoreML provider splits this graph into ~110
                 // partitions, which took ~3.5 s to compile on every launch, left
                 // each compilation in the temporary folder and ran no faster.

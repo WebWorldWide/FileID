@@ -11,7 +11,10 @@ struct FileIDApp: App {
     @State private var engine = EngineClient()
     @State private var toolsSession = ToolsSession()
 
-    init() { BrandFonts.register() }
+    init() {
+        ORTPrivacy.disableTelemetryBeforeLoad()
+        BrandFonts.register()
+    }
     @State private var engineStarted = false
     @State private var showWelcome = false
     @AppStorage("welcomeSheetSeen") private var welcomeSheetSeen: Bool = false

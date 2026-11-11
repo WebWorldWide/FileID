@@ -29,7 +29,7 @@ struct CLIPModelInstallerTests {
 
     @Test("model installer downloads resolve through the model manifest")
     func installerDownloadsResolveThroughManifest() {
-        for installer in [ModelInstaller.ramPlus, ModelInstaller.bge, ModelInstaller.face] {
+        for installer in [ModelInstaller.ramPlus, ModelInstaller.bge, ModelInstaller.face, ModelInstaller.faceMesh] {
             #expect(!installer.spec.downloads.isEmpty)
             #expect(installer.spec.downloads.allSatisfy { $0.manifest != nil })
             #expect(installer.spec.approxBytes > 0)
