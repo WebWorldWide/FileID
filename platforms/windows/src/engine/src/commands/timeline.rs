@@ -171,8 +171,14 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
+/// Frames in flight for this engine's catalog. Scoped by the state root so an
+/// engine opening another catalog (the app's engine beside a CLI run, or two
+/// test engines) sweeps only its own frames at start, never a running job's.
 fn frames_root() -> PathBuf {
-    std::env::temp_dir().join("fileid-timeline-frames")
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    crate::paths::root().ok().hash(&mut hasher);
+    std::env::temp_dir().join("fileid-timeline-frames").join(format!("{:016x}", hasher.finish()))
 }
 
 /// The visual model for timelines: a curated model when installed, otherwise
