@@ -98,6 +98,11 @@ if [ "${FILEID_WITH_RUST_ENGINE:-0}" = "1" ]; then
     [ -x "$RUST_ENGINE" ] || { echo "❌ Rust engine missing: $RUST_ENGINE"; exit 1; }
     otool -L "$RUST_ENGINE" | grep -F '@rpath/libFileIDAppleKit.dylib' >/dev/null || {
         echo "❌ $RUST_ENGINE was not built with --features apple-adapters"; exit 1; }
+    # The test-trash-root feature (conformance and crash-harness builds) moves
+    # trashed files into a scratch folder instead of the Trash; never ship it.
+    if grep -aqF 'FILEID_TEST_TRASH_ROOT' "$RUST_ENGINE"; then
+        echo "❌ $RUST_ENGINE is a test build (test-trash-root feature)"; exit 1
+    fi
     # ort-sys links a pkg-config ONNX Runtime (e.g. Homebrew's) when it finds
     # one; the engine must load the bundled runtime at run time instead.
     if otool -L "$RUST_ENGINE" | tail -n +2 | grep -F 'libonnxruntime' >/dev/null; then

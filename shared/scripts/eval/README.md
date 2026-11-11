@@ -101,3 +101,12 @@ aborts if the engine starts a model download, and turns speech off because a bar
 binary has no speech-recognition usage description. Both report interval recall at IoU 0.3,
 cut timestamp error, proposal precision, the share of proposals inside quiet spans, and fast
 actions that were never examined or never proposed.
+
+`search_eval.py` scores text search strength on `<eval root>/search/labels.json` (photo list,
+queries with `split`, `present`, `matches` and `ambiguous` photos). It copies a scanned catalog
+(`--catalog`, CLIP image vectors stored), sends every query as the Mac Library does (hybrid, the
+query words plus a client CLIP text vector from `--vector-engine`, default the engine under test)
+and also semantic-only, and scores the files the reply calls good matches: macro precision and
+recall over present queries, the share of present queries with a good match, and absent queries
+answered with none. Pass the Swift engine as `--vector-engine` to compare engines with identical
+client vectors; each engine still embeds its own prompt when CLIP text is installed in the home.

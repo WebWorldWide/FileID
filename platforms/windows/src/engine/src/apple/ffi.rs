@@ -35,6 +35,26 @@ unsafe extern "C" {
     ) -> u64;
     /// Stop accessing a leased bookmark.
     pub fn fileid_apple_bookmark_close(lease: u64);
+    /// Move the item at `path` to the Trash (FileManager.trashItem). 0 on
+    /// success, with `out_landed` its path in the Trash (may stay null);
+    /// otherwise nonzero with `out_error` a message. Free both with
+    /// `fileid_apple_free`.
+    pub fn fileid_apple_trash_item(
+        path: *const c_char,
+        out_landed: *mut *mut c_char,
+        out_error: *mut *mut c_char,
+    ) -> i32;
+    /// The item's Finder tags as a JSON array of strings, or null with
+    /// `out_error` set. Free the result with `fileid_apple_free`.
+    pub fn fileid_apple_tags_read(path: *const c_char, out_error: *mut *mut c_char) -> *mut c_char;
+    /// Replace the item's Finder tags with `tags[0..count]`. 0 on success,
+    /// otherwise nonzero with `out_error` set.
+    pub fn fileid_apple_tags_write(
+        path: *const c_char,
+        tags: *const *const c_char,
+        count: usize,
+        out_error: *mut *mut c_char,
+    ) -> i32;
 
     // --- Stage 7: MLX vision-language models ---
     /// Start a VLM request (UTF-8 JSON with an `op`). Returns a handle, 0 when
