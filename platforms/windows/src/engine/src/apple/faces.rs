@@ -473,16 +473,22 @@ pub struct VisionFaces {
 impl VisionFaces {
     /// One analyzer per take worker (at most four, as `CatalogTakeAuto`); each
     /// holds its own Face Mesh session when the model is installed.
+    /// The workers' Face Mesh sessions share the cores between them.
     pub fn load_workers() -> Vec<Self> {
-        let workers = std::thread::available_parallelism().map_or(1, usize::from).clamp(1, 4);
-        (0..workers).map(|_| Self::load()).collect()
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let workers = cores.clamp(1, 4);
+        (0..workers).map(|_| Self::with_mesh(|path| crate::models::face_mesh::FaceMesh::load_cpu(path, (cores / workers).max(1)))).collect()
     }
 
     pub fn load() -> Self {
+        Self::with_mesh(crate::models::face_mesh::FaceMesh::load)
+    }
+
+    fn with_mesh(load: impl FnOnce(PathBuf) -> Result<crate::models::face_mesh::FaceMesh>) -> Self {
         let mesh = crate::models::face_mesh::default_weights_path()
             .ok()
             .filter(|path| path.is_file())
-            .and_then(|path| crate::models::face_mesh::FaceMesh::load(path).map_err(|error| tracing::warn!(?error, "face_mesh_model_load_failed")).ok());
+            .and_then(|path| load(path).map_err(|error| tracing::warn!(?error, "face_mesh_model_load_failed")).ok());
         Self { mesh }
     }
 
