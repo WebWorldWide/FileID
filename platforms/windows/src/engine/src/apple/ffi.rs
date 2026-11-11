@@ -106,6 +106,22 @@ unsafe extern "C" {
     pub fn fileid_apple_take_mesh(observations: u64, width: u32, height: u32) -> *mut c_char;
     /// Release kept faces.
     pub fn fileid_apple_take_release(observations: u64);
+    /// Best Takes' tile source kept as decoded (detail or bounded decode); 0 on failure.
+    pub fn fileid_apple_take_tiles_open(path: *const c_char, long_side: u32, out_width: *mut u32, out_height: *mut u32) -> u64;
+    /// `fileid_apple_take_faces` (no people) on a rect of a tile source, as JSON
+    /// (free it); with `out_rgb`, the crop's packed sRGB RGB8 for Face Mesh.
+    pub fn fileid_apple_take_tile_faces(
+        tiles: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        out_rgb: *mut *mut u8,
+        out_length: *mut usize,
+        out_observations: *mut u64,
+    ) -> *mut c_char;
+    /// Release a tile source.
+    pub fn fileid_apple_take_tiles_close(tiles: u64);
     // --- end Stage 6 ---
 
     // --- Stage 5: scan decode and per-file ML ---

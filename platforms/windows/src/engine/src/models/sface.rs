@@ -48,8 +48,8 @@ impl SFace {
         let model_version = format!("sface128-sha256:{}", hex::encode(digest));
         let (session, input_name) = match provider {
             Provider::Chain => commit_chain_session("SFace", path)?,
-            Provider::Cpu => plain_session(path, None)?,
-            Provider::CoreMl { cache_dir } => plain_session(path, Some(cache_dir))?,
+            Provider::Cpu => plain_session(path, None, None)?,
+            Provider::CoreMl { cache_dir, intra_threads } => plain_session(path, Some(cache_dir), Some(intra_threads))?,
         };
         let after = std::fs::metadata(path)?;
         anyhow::ensure!(before.len() == after.len() && before.modified()? == after.modified()?, "SFace weights changed during load");
@@ -138,15 +138,18 @@ pub enum Provider {
     Cpu,
     /// The CoreML execution provider as an ML program, also on subgraphs, with
     /// all compute units and its compiled model cached in `cache_dir`; ORT's
-    /// CPU provider takes what CoreML declines.
-    CoreMl { cache_dir: PathBuf },
+    /// CPU provider takes what CoreML declines, on `intra_threads` threads.
+    CoreMl { cache_dir: PathBuf, intra_threads: usize },
 }
 
 /// A session with ORT's default options, as the Swift engine builds its
 /// `ORTSession`s, plus the CoreML EP when a cache folder is given.
-fn plain_session(path: &Path, coreml_cache: Option<PathBuf>) -> Result<(Session, String)> {
+fn plain_session(path: &Path, coreml_cache: Option<PathBuf>, intra_threads: Option<usize>) -> Result<(Session, String)> {
     crate::ort_runtime::commit_environment().context("ORT environment")?;
     let mut builder = Session::builder().context("ORT session builder")?;
+    if let Some(threads) = intra_threads {
+        builder = builder.with_intra_threads(threads.max(1))?;
+    }
     if let Some(cache) = coreml_cache {
         use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat};
         std::fs::create_dir_all(&cache).with_context(|| format!("CoreML cache folder {}", cache.display()))?;

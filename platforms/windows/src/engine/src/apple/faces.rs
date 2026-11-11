@@ -86,11 +86,13 @@ impl FaceImage {
     }
 
     /// The image as tightly packed device-RGB RGBA8 (`FaceAlign.pixels`).
-    pub fn pixels(&self) -> Option<Vec<u8>> {
+    /// Read in place and freed on drop: the whole image is too large to copy
+    /// once more per photo.
+    pub fn pixels(&self) -> Option<AdapterBytes> {
         let (mut pointer, mut length, mut width, mut height) = (std::ptr::null_mut::<u8>(), 0usize, 0u32, 0u32);
         // SAFETY: the handle is live; the out-pointers point at locals.
         let ok = unsafe { ffi::fileid_apple_faces_pixels(self.handle, &raw mut pointer, &raw mut length, &raw mut width, &raw mut height) };
-        let bytes = take_bytes(pointer, length)?;
+        let bytes = AdapterBytes::new(pointer, length)?;
         (ok && width == self.width && height == self.height && bytes.len() == width as usize * height as usize * 4).then_some(bytes)
     }
 
@@ -115,6 +117,33 @@ impl Drop for FaceImage {
 }
 
 /// Takes ownership of an adapter-allocated buffer.
+/// Bytes the adapter allocated, released with its allocator on drop.
+pub struct AdapterBytes {
+    pointer: *mut u8,
+    length: usize,
+}
+
+impl AdapterBytes {
+    fn new(pointer: *mut u8, length: usize) -> Option<Self> {
+        (!pointer.is_null()).then_some(Self { pointer, length })
+    }
+}
+
+impl std::ops::Deref for AdapterBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: the adapter allocated `length` bytes at `pointer`, freed only on drop.
+        unsafe { std::slice::from_raw_parts(self.pointer, self.length) }
+    }
+}
+
+impl Drop for AdapterBytes {
+    fn drop(&mut self) {
+        // SAFETY: released exactly once, with the adapter's allocator.
+        unsafe { ffi::fileid_apple_free(self.pointer.cast()) };
+    }
+}
+
 fn take_bytes(pointer: *mut u8, length: usize) -> Option<Vec<u8>> {
     if pointer.is_null() {
         return None;
@@ -182,10 +211,18 @@ pub struct MacSFace {
     provider: &'static str,
 }
 
-/// Sessions in the pool: one, like `ArcFaceService`; `FILEID_SFACE_SESSIONS`
-/// (1–4) adds more (no gain measured on the People set, DECISIONS 2026-11-11).
+/// Sessions in the pool: two, so the four extraction workers rarely wait on
+/// one (`ArcFaceService` runs up to four calls on one thread-safe session);
+/// `FILEID_SFACE_SESSIONS` (1–4) overrides it. DECISIONS 2026-11-11.
 fn sface_sessions() -> usize {
-    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 4))
+    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
+}
+
+/// ORT CPU threads per session: the cores split between the sessions, never
+/// fewer than two (one thread changes the CPU partition's sums in the last bit,
+/// two or more give Swift's vectors exactly).
+fn sface_threads(sessions: usize) -> usize {
+    (std::thread::available_parallelism().map_or(2, usize::from) / sessions.max(1)).clamp(2, 4)
 }
 
 impl MacSFace {
@@ -200,9 +237,11 @@ impl MacSFace {
         let digest = crate::commands::face_refresh::current_model().context("SFace weights unreadable")?;
         let cpu_only = std::env::var("FILEID_FACE_EP").is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
         let cache = if cpu_only { None } else { Some(coreml_cache_dir(&digest)?) };
+        let intra_threads = sface_threads(sface_sessions());
+        let coreml = |cache_dir: PathBuf| Provider::CoreMl { cache_dir, intra_threads };
         let first = cache
             .clone()
-            .and_then(|cache_dir| SFace::load_with(&path, Provider::CoreMl { cache_dir }).map_err(|error| tracing::warn!(?error, "arcface_coreml_ep_unavailable")).ok());
+            .and_then(|cache_dir| SFace::load_with(&path, coreml(cache_dir)).map_err(|error| tracing::warn!(?error, "arcface_coreml_ep_unavailable")).ok());
         let (first, provider) = match first {
             Some(model) => (model, "coreml"),
             None => (SFace::load_with(&path, Provider::Cpu)?, "cpu"),
@@ -211,7 +250,7 @@ impl MacSFace {
         let mut sessions = vec![Mutex::new(first)];
         while sessions.len() < sface_sessions() {
             let provider = match (&cache, provider) {
-                (Some(cache_dir), "coreml") => Provider::CoreMl { cache_dir: cache_dir.clone() },
+                (Some(cache_dir), "coreml") => coreml(cache_dir.clone()),
                 _ => Provider::Cpu,
             };
             let model = SFace::load_with(&path, provider)?;
@@ -442,6 +481,48 @@ impl Drop for KeptFaces {
     }
 }
 
+/// Best Takes' tile source held by the adapter as decoded.
+pub struct TakeTiles {
+    handle: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl TakeTiles {
+    pub fn open(path: &Path, long_side: u32) -> Option<Self> {
+        let path = c_path(path).ok()?;
+        let (mut width, mut height) = (0u32, 0u32);
+        // SAFETY: `path` is NUL-terminated; the out-pointers point at locals.
+        let handle = unsafe { ffi::fileid_apple_take_tiles_open(path.as_ptr(), long_side, &raw mut width, &raw mut height) };
+        (handle != 0).then_some(Self { handle, width, height })
+    }
+
+    /// Vision's analysis of `tile` cropped from the source, the kept faces and,
+    /// when `pixels`, the crop's RGB8.
+    fn faces(&self, tile: &crate::pipeline::take_scoring::Tile, pixels: bool) -> Option<(TakeAnalysisJson, KeptFaces, Option<AdapterBytes>)> {
+        let (mut rgb, mut length, mut kept) = (std::ptr::null_mut::<u8>(), 0usize, 0u64);
+        let out_rgb = if pixels { &raw mut rgb } else { std::ptr::null_mut() };
+        // SAFETY: the handle is live; the out-pointers point at locals or are null.
+        let json = unsafe {
+            ffi::fileid_apple_take_tile_faces(self.handle, tile.x as u32, tile.y as u32, tile.width as u32, tile.height as u32, out_rgb, &raw mut length, &raw mut kept)
+        };
+        let kept = KeptFaces(kept);
+        let rgb = AdapterBytes::new(rgb, length);
+        let analysis = serde_json::from_slice(&take_string(json)?).ok()?;
+        if pixels && rgb.as_ref().is_none_or(|rgb| rgb.len() != tile.width * tile.height * 3) {
+            return None;
+        }
+        Some((analysis, kept, rgb))
+    }
+}
+
+impl Drop for TakeTiles {
+    fn drop(&mut self) {
+        // SAFETY: released once; unknown handles are ignored by the adapter.
+        unsafe { ffi::fileid_apple_take_tiles_close(self.handle) };
+    }
+}
+
 fn take_faces(rgb: &[u8], width: u32, height: u32, people: bool) -> Option<(TakeAnalysisJson, KeptFaces)> {
     if width == 0 || height == 0 || rgb.len() != width as usize * height as usize * 3 {
         return None;
@@ -501,8 +582,22 @@ impl VisionFaces {
         people: bool,
         detail: Option<&mut crate::commands::catalog_take_auto::Detail>,
     ) -> Option<(Vec<crate::pipeline::take_scoring::Face>, Option<Vec<crate::pipeline::take_scoring::Box2>>)> {
-        use crate::pipeline::take_scoring::{self, Box2, Face};
         let (analysis, kept) = take_faces(rgb, width, height, people)?;
+        self.finish(analysis, &kept, rgb, width, height, detail)
+    }
+
+    /// Faces and people from one Vision analysis of a `width` × `height` image
+    /// whose pixels (`rgb`) Face Mesh reads unless `detail` is larger.
+    fn finish(
+        &mut self,
+        analysis: TakeAnalysisJson,
+        kept: &KeptFaces,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        detail: Option<&mut crate::commands::catalog_take_auto::Detail>,
+    ) -> Option<(Vec<crate::pipeline::take_scoring::Face>, Option<Vec<crate::pipeline::take_scoring::Box2>>)> {
+        use crate::pipeline::take_scoring::{self, Box2, Face};
         if !analysis.complete {
             return None;
         }
@@ -586,6 +681,12 @@ impl crate::commands::catalog_take_auto::TakeFaceAnalyzer for VisionFaces {
     ) -> Option<(Vec<crate::pipeline::take_scoring::Face>, Option<Vec<crate::pipeline::take_scoring::Box2>>)> {
         self.run(rgb, width, height, true, detail)
     }
+
+    fn tile_faces(&mut self, tiles: &TakeTiles, tile: &crate::pipeline::take_scoring::Tile) -> Option<Vec<crate::pipeline::take_scoring::Face>> {
+        let (analysis, kept, rgb) = tiles.faces(tile, self.mesh.is_some())?;
+        let rgb: &[u8] = rgb.as_deref().unwrap_or(&[]);
+        self.finish(analysis, &kept, rgb, tile.width as u32, tile.height as u32, None).map(|(faces, _)| faces)
+    }
 }
 
 /// `TakeMediaAnalysis.signals` for a photo: the analysis decode (1024 px),
@@ -595,7 +696,7 @@ pub fn take_image_signals(
     path: &Path,
     faces: &mut dyn crate::commands::catalog_take_auto::TakeFaceAnalyzer,
 ) -> Option<(crate::pipeline::take_scoring::Signals, bool)> {
-    use crate::commands::catalog_take_auto::{first_pass, tiled_faces, Detail};
+    use crate::commands::catalog_take_auto::{first_pass, Detail};
     use crate::pipeline::take_scoring::{self, Luma};
     let fitted = take_decode(path, TakeDecode::Analysis, take_scoring::ANALYSIS_LONG_SIDE)?;
     let (w, h) = (fitted.width, fitted.height);
@@ -611,23 +712,23 @@ pub fn take_image_signals(
     if !faces.detects() || !take_scoring::wants_tiles(long_side, w as usize, h as usize, &found, people.as_deref()) {
         return Some((take_scoring::signals(&luma, found, people), true));
     }
-    let detail = match view.and_then(Detail::into_loaded) {
-        Some((rgb, width, height)) => Some(TakeImage { rgb, width, height, source_long_side: long_side }),
-        None if large => detail_decode(),
-        None => None,
-    };
-    let reuse = detail.filter(|d| d.width.max(d.height) >= long_side.min(take_scoring::TILE_LONG_SIDE));
-    let Some(wide) = reuse.or_else(|| take_decode(path, TakeDecode::Wide, take_scoring::TILE_LONG_SIDE)) else {
+    drop(view);
+    let Some(wide) = TakeTiles::open(path, take_scoring::TILE_LONG_SIDE) else {
         return Some((take_scoring::signals(&luma, found, people), true));
     };
-    if wide.width.max(wide.height) * 2 < take_scoring::ANALYSIS_LONG_SIDE * 3 {
+    let wide_side = wide.width.max(wide.height);
+    if wide_side * 2 < take_scoring::ANALYSIS_LONG_SIDE * 3 {
         return Some((take_scoring::signals(&luma, found, people), true));
     }
-    let Some(tiled) = tiled_faces(faces, &wide.rgb, wide.width, wide.height) else {
-        return Some((take_scoring::signals(&luma, found, people), false));
-    };
+    let mut tiled = Vec::new();
+    for tile in take_scoring::tiles(wide.width as usize, wide.height as usize) {
+        let Some(in_tile) = faces.tile_faces(&wide, &tile) else {
+            return Some((take_scoring::signals(&luma, found, people), false));
+        };
+        tiled.extend(in_tile.iter().map(|face| take_scoring::placing(face, &tile, wide.width as usize, wide.height as usize)));
+    }
     let merged = take_scoring::merge_faces(&found, &tiled);
-    Some((take_scoring::signals_at(&luma, merged, people, Some(wide.width.max(wide.height) as usize)), true))
+    Some((take_scoring::signals_at(&luma, merged, people, Some(wide_side as usize)), true))
 }
 
 #[cfg(test)]

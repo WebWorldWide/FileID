@@ -124,6 +124,23 @@ char *fileid_apple_take_mesh(uint64_t observations, uint32_t width, uint32_t hei
 /* Release kept faces. Unknown ids are ignored. */
 void fileid_apple_take_release(uint64_t observations);
 
+/* Best Takes' tile source (TakeMediaAnalysis.signals): the detail decode when
+ * its long side reaches min(source long side, long_side), else the bounded
+ * decode at long_side, kept as decoded. Returns a handle (0 on failure) and its
+ * size. */
+uint64_t fileid_apple_take_tiles_open(const char *path, uint32_t long_side, uint32_t *out_width,
+                                      uint32_t *out_height);
+
+/* fileid_apple_take_faces (people false) over the top-left pixel rect of a
+ * tile source, cropped as decoded. With out_rgb, also the crop as packed sRGB
+ * RGB8 for Face Mesh (free it). */
+char *fileid_apple_take_tile_faces(uint64_t tiles, uint32_t x, uint32_t y, uint32_t width,
+                                   uint32_t height, uint8_t **out_rgb, size_t *out_length,
+                                   uint64_t *out_observations);
+
+/* Release a tile source. Unknown handles are ignored. */
+void fileid_apple_take_tiles_close(uint64_t tiles);
+
 /* --- end Stage 6 --- */
 
 /* --- Stage 5: scan decode and per-file ML --- */

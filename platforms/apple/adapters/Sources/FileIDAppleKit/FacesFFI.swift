@@ -143,3 +143,51 @@ public func fileid_apple_take_mesh(_ observations: UInt64, _ width: UInt32, _ he
 public func fileid_apple_take_release(_ observations: UInt64) {
     FacesObservations.shared.release(observations)
 }
+
+@_cdecl("fileid_apple_take_tiles_open")
+public func fileid_apple_take_tiles_open(
+    _ path: UnsafePointer<CChar>?,
+    _ longSide: UInt32,
+    _ outWidth: UnsafeMutablePointer<UInt32>?,
+    _ outHeight: UnsafeMutablePointer<UInt32>?
+) -> UInt64 {
+    guard let path, longSide > 0 else { return 0 }
+    return autoreleasepool {
+        guard let image = FacesTake.tileSource(path: String(cString: path), longSide: Int(longSide)) else { return 0 }
+        outWidth?.pointee = UInt32(image.width)
+        outHeight?.pointee = UInt32(image.height)
+        return FacesTileSources.shared.insert(image)
+    }
+}
+
+@_cdecl("fileid_apple_take_tile_faces")
+public func fileid_apple_take_tile_faces(
+    _ tiles: UInt64,
+    _ x: UInt32,
+    _ y: UInt32,
+    _ width: UInt32,
+    _ height: UInt32,
+    _ outRGB: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>?,
+    _ outLength: UnsafeMutablePointer<Int>?,
+    _ outObservations: UnsafeMutablePointer<UInt64>?
+) -> UnsafeMutablePointer<CChar>? {
+    outRGB?.pointee = nil
+    outLength?.pointee = 0
+    outObservations?.pointee = 0
+    guard width > 0, height > 0, let source = FacesTileSources.shared.image(tiles) else { return nil }
+    return autoreleasepool {
+        guard let crop = source.cropping(to: CGRect(x: Int(x), y: Int(y), width: Int(width), height: Int(height))) else { return nil }
+        if outRGB != nil {
+            guard let rgb = FacesTake.meshPixels(crop), facesCopyOut(rgb, outRGB, outLength) else { return nil }
+        }
+        let (analysis, kept) = FacesTake.analyze(crop, people: false)
+        guard let json = facesJSON(analysis) else { return nil }
+        if !kept.isEmpty { outObservations?.pointee = FacesObservations.shared.insert(kept) }
+        return json
+    }
+}
+
+@_cdecl("fileid_apple_take_tiles_close")
+public func fileid_apple_take_tiles_close(_ tiles: UInt64) {
+    FacesTileSources.shared.release(tiles)
+}

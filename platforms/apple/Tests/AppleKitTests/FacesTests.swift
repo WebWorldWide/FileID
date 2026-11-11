@@ -135,6 +135,35 @@ struct FacesTests {
         fileid_apple_take_release(12345)
     }
 
+    @Test func tileSourcesAreKeptAsDecodedAndAnalysedByRect() throws {
+        let url = try writeJPEG(width: 3000, height: 2000)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var width: UInt32 = 0, height: UInt32 = 0
+        let tiles = url.path.withCString { fileid_apple_take_tiles_open($0, 2048, &width, &height) }
+        #expect(tiles != 0)
+        #expect([width, height] == [2048, 1365])
+        #expect(FacesTileSources.shared.image(tiles) != nil)
+        var rgb: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        var kept: UInt64 = 99
+        let json = fileid_apple_take_tile_faces(tiles, 100, 50, 640, 480, &rgb, &length, &kept)
+        let text = try #require(json.map { String(cString: $0) })
+        fileid_apple_free(json)
+        fileid_apple_free(rgb)
+        let analysis = try JSONDecoder().decode(Analysis.self, from: Data(text.utf8))
+        #expect(analysis.complete && analysis.faces.isEmpty && analysis.people == nil)
+        #expect(length == 640 * 480 * 3 && kept == 0)
+        let bare = fileid_apple_take_tile_faces(tiles, 0, 0, 64, 64, nil, nil, nil)
+        #expect(bare != nil)
+        fileid_apple_free(bare)
+        #expect(fileid_apple_take_tile_faces(tiles, 0, 0, 0, 10, nil, nil, nil) == nil)
+        fileid_apple_take_tiles_close(tiles)
+        #expect(FacesTileSources.shared.image(tiles) == nil)
+        #expect(fileid_apple_take_tile_faces(tiles, 0, 0, 64, 64, nil, nil, nil) == nil)
+        #expect(fileid_apple_take_tiles_open(nil, 2048, nil, nil) == 0)
+        fileid_apple_take_tiles_close(987_654)
+    }
+
     @Test func keptObservationsGiveMeshInputsForAnotherSize() throws {
         let face = VNFaceObservation(boundingBox: CGRect(x: 0.25, y: 0.5, width: 0.2, height: 0.3))
         let id = FacesObservations.shared.insert([face])

@@ -41,6 +41,34 @@ enum FacesTake {
         return (rgb, w, h, sourceLongSide(source))
     }
 
+    /// `TakeMediaAnalysis.signals`' tile source: the detail decode
+    /// (`decodeScanImage`) when its long side reaches the smaller of the
+    /// source's and `longSide`, else `decodeBoundedImage` at `longSide`. Vision
+    /// reads crops of this image as decoded, as in Swift.
+    static func tileSource(path: String, longSide: Int) -> CGImage? {
+        let url = URL(fileURLWithPath: path)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let sourceSide = sourceLongSide(source)
+        if let detail = decodeScanImage(source, path: path, maxPixelSize: longSide),
+           max(detail.width, detail.height) >= min(sourceSide, longSide) {
+            return detail
+        }
+        return decodeBoundedImage(source, path: path, maxPixelSize: longSide)
+    }
+
+    /// `FaceMesh.Pixels` of `image`: packed sRGB RGB8 drawn unscaled.
+    static func meshPixels(_ image: CGImage) -> [UInt8]? {
+        let (w, h) = (image.width, image.height)
+        guard let rgbx = draw(image, width: w, height: h, interpolate: false) else { return nil }
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            rgb[i * 3] = rgbx[i * 4]
+            rgb[i * 3 + 1] = rgbx[i * 4 + 1]
+            rgb[i * 3 + 2] = rgbx[i * 4 + 2]
+        }
+        return rgb
+    }
+
     static func sourceLongSide(_ source: CGImageSource) -> Int {
         guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return 0 }
         return max(properties[kCGImagePropertyPixelWidth] as? Int ?? 0, properties[kCGImagePropertyPixelHeight] as? Int ?? 0)
@@ -181,6 +209,35 @@ enum FacesTake {
         guard !ratios.isEmpty else { return nil }
         let ratio = ratios.reduce(0, +) / Double(ratios.count)
         return min(1, max(0, (ratio - closedRatio) / (openRatio - closedRatio)))
+    }
+}
+
+/// Tile sources kept for `fileid_apple_take_tile_faces` until closed.
+final class FacesTileSources: @unchecked Sendable {
+    static let shared = FacesTileSources()
+    private let lock = NSLock()
+    private var images: [UInt64: CGImage] = [:]
+    private var next: UInt64 = 1
+
+    func insert(_ image: CGImage) -> UInt64 {
+        lock.withLock {
+            let id = next
+            next += 1
+            images[id] = image
+            return id
+        }
+    }
+
+    func image(_ id: UInt64) -> CGImage? {
+        lock.withLock { images[id] }
+    }
+
+    func release(_ id: UInt64) {
+        lock.withLock { images[id] = nil }
+    }
+
+    var count: Int {
+        lock.withLock { images.count }
     }
 }
 

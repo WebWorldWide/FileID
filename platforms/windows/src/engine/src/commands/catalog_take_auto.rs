@@ -286,6 +286,12 @@ pub trait TakeFaceAnalyzer {
     fn detects(&self) -> bool {
         true
     }
+    /// Faces in `tile` of the Mac's tile source, cropped as decoded (Swift hands
+    /// Vision those crops). `None` when the analyzer could not run.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    fn tile_faces(&mut self, _tiles: &crate::apple::faces::TakeTiles, _tile: &take_scoring::Tile) -> Option<Vec<Face>> {
+        None
+    }
 }
 
 /// The full decode of a photo whose faces were found on a smaller copy. Face Mesh
@@ -329,7 +335,7 @@ impl<'a> Detail<'a> {
     }
 
     /// A deferred decode, if it was made.
-    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    #[cfg(test)]
     pub fn into_loaded(self) -> Option<Decoded> {
         self.deferred.and_then(|deferred| deferred.loaded.into_inner().flatten())
     }
