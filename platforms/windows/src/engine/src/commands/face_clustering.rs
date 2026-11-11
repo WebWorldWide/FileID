@@ -532,7 +532,7 @@ fn release_active_before_terminal(active: &AtomicBool) {
 /// Refuses to recluster unless every face cache shares one current model and
 /// processing space with valid unit vectors, so incompatible embeddings never
 /// reshape existing People.
-fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<Option<(String, String)>> {
+pub(crate) fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT fp.arcface_embedding, fp.embedding_model, fp.processing_version, fp.source_revision, r.revision \
          FROM face_prints fp LEFT JOIN catalog_revisions r ON r.file_id=fp.file_id \
@@ -575,6 +575,28 @@ pub(crate) async fn handle_run_face_clustering(
     active: Arc<AtomicBool>,
 ) {
     let _sleep = SleepGuard::acquire();
+    let mac_db = db.clone();
+    let mac = tokio::task::spawn_blocking(move || {
+        let space = super::face_clustering_mac::selected_space(&mac_db.lock())?;
+        Some(super::face_clustering_mac::run(&mac_db, &space))
+    })
+    .await;
+    match mac {
+        Ok(None) => {}
+        Ok(Some(outcome)) => {
+            release_active_before_terminal(&active);
+            if let Some((kind, message)) = outcome.error {
+                sink.send(EngineError::event(kind, message)).await;
+            }
+            sink.send(IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(outcome.result)))).await;
+            return;
+        }
+        Err(err) => {
+            release_active_before_terminal(&active);
+            sink.send(EngineError::event("face_clustering_failed", format!("Face clustering task did not complete: {err}"))).await;
+            return;
+        }
+    }
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
         let count: u64 = db.lock().query_row("SELECT COUNT(*) FROM face_prints WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded,0)=0", [], |row| row.get(0))?;
