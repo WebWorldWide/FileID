@@ -117,14 +117,29 @@ public func fileid_apple_take_faces(
     _ width: UInt32,
     _ height: UInt32,
     _ people: Bool,
-    _ detailWidth: UInt32,
-    _ detailHeight: UInt32
+    _ outObservations: UnsafeMutablePointer<UInt64>?
 ) -> UnsafeMutablePointer<CChar>? {
+    outObservations?.pointee = 0
     guard let rgb, width > 0, height > 0 else { return nil }
     return autoreleasepool {
         let buffer = UnsafeBufferPointer(start: rgb, count: Int(width) * Int(height) * 3)
         guard let image = FacesTake.image(rgb: buffer, width: Int(width), height: Int(height)) else { return nil }
-        let detail = detailWidth > 0 && detailHeight > 0 ? (Int(detailWidth), Int(detailHeight)) : nil
-        return facesJSON(FacesTake.analyze(image, people: people, detailSize: detail))
+        let (analysis, kept) = FacesTake.analyze(image, people: people)
+        guard let json = facesJSON(analysis) else { return nil }
+        if !kept.isEmpty { outObservations?.pointee = FacesObservations.shared.insert(kept) }
+        return json
     }
+}
+
+@_cdecl("fileid_apple_take_mesh")
+public func fileid_apple_take_mesh(_ observations: UInt64, _ width: UInt32, _ height: UInt32) -> UnsafeMutablePointer<CChar>? {
+    guard width > 0, height > 0, let faces = FacesObservations.shared.faces(observations) else { return nil }
+    return autoreleasepool {
+        facesJSON(faces.map { FacesTake.mesh($0, width: Float(width), height: Float(height)) })
+    }
+}
+
+@_cdecl("fileid_apple_take_release")
+public func fileid_apple_take_release(_ observations: UInt64) {
+    FacesObservations.shared.release(observations)
 }

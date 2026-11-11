@@ -109,13 +109,20 @@ bool fileid_apple_take_decode(const char *path, uint32_t kind, uint32_t long_sid
                               uint32_t *out_height, uint32_t *out_source_long_side);
 
 /* VisionTakeFaceAnalyzer over packed sRGB RGB8: face landmarks and capture
- * quality, human rectangles when people is true. Face Mesh inputs are given
- * for this image and, when detail_width is nonzero, for the detail image.
- * JSON (free with fileid_apple_free): {"complete","faces":[{"box","minSide",
- * "quality","eyes","mesh":{"bits","boxOnly"},"meshDetail"}],"people":[{"box"}]},
- * numbers as IEEE-754 bit patterns. */
+ * quality, human rectangles when people is true, with Face Mesh inputs for this
+ * image. JSON (free with fileid_apple_free): {"complete","faces":[{"box",
+ * "minSide","quality","eyes","mesh":{"bits","boxOnly"}}],"people":[{"box"}]},
+ * numbers as IEEE-754 bit patterns. When faces were found, *out_observations
+ * keeps them for fileid_apple_take_mesh until fileid_apple_take_release. */
 char *fileid_apple_take_faces(const uint8_t *rgb, uint32_t width, uint32_t height, bool people,
-                              uint32_t detail_width, uint32_t detail_height);
+                              uint64_t *out_observations);
+
+/* Face Mesh inputs of kept faces for a width x height decode of the same
+ * photo, as a JSON array of {"bits","boxOnly"} (free with fileid_apple_free). */
+char *fileid_apple_take_mesh(uint64_t observations, uint32_t width, uint32_t height);
+
+/* Release kept faces. Unknown ids are ignored. */
+void fileid_apple_take_release(uint64_t observations);
 
 /* --- end Stage 6 --- */
 

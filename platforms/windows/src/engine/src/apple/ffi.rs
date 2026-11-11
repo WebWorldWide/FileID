@@ -99,7 +99,12 @@ unsafe extern "C" {
         out_source_long_side: *mut u32,
     ) -> bool;
     /// Vision faces (landmarks, capture quality, Face Mesh inputs) and, with
-    /// `people`, human rectangles over packed sRGB RGB8, as JSON (free it).
-    pub fn fileid_apple_take_faces(rgb: *const u8, width: u32, height: u32, people: bool, detail_width: u32, detail_height: u32) -> *mut c_char;
+    /// `people`, human rectangles over packed sRGB RGB8, as JSON (free it);
+    /// `out_observations` keeps found faces for `fileid_apple_take_mesh`.
+    pub fn fileid_apple_take_faces(rgb: *const u8, width: u32, height: u32, people: bool, out_observations: *mut u64) -> *mut c_char;
+    /// Face Mesh inputs of kept faces for another decode size, as JSON (free it).
+    pub fn fileid_apple_take_mesh(observations: u64, width: u32, height: u32) -> *mut c_char;
+    /// Release kept faces.
+    pub fn fileid_apple_take_release(observations: u64);
     // --- end Stage 6 ---
 }

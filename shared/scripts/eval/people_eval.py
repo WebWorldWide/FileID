@@ -20,6 +20,7 @@ cluster again with the given environment overrides.
   people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
   people_eval.py ... --incremental
   people_eval.py --engine <fileid-engine> --flavor rust --scan-flavor swift   # Rust clusters the Swift scan
+  people_eval.py ... --scan-flavor swift --reembed   # ... after embedding every face itself
 
 --split tune clusters only the photos of that half (the other half's faces are
 removed from the scratch copy before clustering), so thresholds and suggestion
@@ -123,7 +124,7 @@ def tables_of(connection):
     return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def fresh_copy(snapshot, state):
+def fresh_copy(snapshot, state, reembed=False):
     if state.exists():
         shutil.rmtree(state)
     database = database_path(state)
@@ -132,6 +133,11 @@ def fresh_copy(snapshot, state):
     connection = sqlite3.connect(database)
     tables = tables_of(connection)
     connection.execute("UPDATE face_prints SET person_id=NULL")
+    if reembed:
+        connection.execute("UPDATE face_prints SET arcface_embedding=NULL,embedding_model=NULL,"
+                           "processing_version=NULL,source_revision=NULL")
+        if "face_refresh_failures" in tables:
+            connection.execute("DELETE FROM face_refresh_failures")
     for table in PEOPLE_TABLES:
         if table in tables:
             connection.execute(f"DELETE FROM {table}")
@@ -150,8 +156,9 @@ def cluster_once(binary, state, env, timeout, home=None):
         engine.close()
 
 
-def recluster(binary, snapshot, state, env, timeout, home=None, drop_hashes=frozenset(), hash_cache=None):
-    _, connection = fresh_copy(snapshot, state)
+def recluster(binary, snapshot, state, env, timeout, home=None, drop_hashes=frozenset(), hash_cache=None,
+              reembed=False):
+    _, connection = fresh_copy(snapshot, state, reembed)
     if drop_hashes:
         hashes = file_hashes(connection, {} if hash_cache is None else hash_cache)
         dropped = [file_id for file_id, digest in hashes.items() if digest in drop_hashes]
@@ -484,6 +491,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=3600)
     parser.add_argument("--incremental", action="store_true", help="hold back the later half of each event, then add it as new faces")
     parser.add_argument("--split", help="cluster and score only this half of the labels (e.g. tune)")
+    parser.add_argument("--reembed", action="store_true",
+                        help="clear the scan's face vectors first, so the clustering engine embeds every face itself")
     args = parser.parse_args()
 
     images = require_internal(args.images, "images")
@@ -507,7 +516,8 @@ def main():
     snapshot = scan_state / "snapshot.sqlite"
 
     before = live_state_snapshot()
-    meta = {"name": args.name, "flavor": args.flavor, "scanFlavor": scan_flavor, "env": env, "split": args.split}
+    meta = {"name": args.name, "flavor": args.flavor, "scanFlavor": scan_flavor, "env": env, "split": args.split,
+            "reembed": args.reembed}
     if scan_flavor != args.flavor and (args.rescan or not snapshot.exists()):
         raise SystemExit(f"no stored {scan_flavor} scan in {scan_state}; run that flavor first")
     if args.rescan or not snapshot.exists():
@@ -524,7 +534,8 @@ def main():
         meta["clusterRun"] = {key: incremental[key] for key in ("first", "second", "heldFiles", "heldFaces",
                                                                  "earlierFacesWhoseGroupChanged", "newFacesAssigned")}
     else:
-        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout, home, drop_hashes, hash_cache)
+        meta["clusterRun"] = recluster(args.engine, snapshot, state, env, args.timeout, home, drop_hashes, hash_cache,
+                                       args.reembed)
     changes = diff_snapshots(before, live_state_snapshot())
     if changes:
         print("WARNING: the live FileID state changed during the run:", *changes, sep="\n  ", file=sys.stderr)

@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Testing
+import Vision
 @testable import FileIDAppleKit
 
 @Suite("FileIDAppleKit faces (Stage 6)", .serialized)
@@ -116,17 +117,37 @@ struct FacesTests {
             #expect(length == Int(width) * Int(height) * 3 && source == 3000)
             sizes.append([width, height])
             if kind == 0, let rgb {
-                let json = fileid_apple_take_faces(rgb, width, height, true, 2048, 1365)
+                var kept: UInt64 = 99
+                let json = fileid_apple_take_faces(rgb, width, height, true, &kept)
                 let text = try #require(json.map { String(cString: $0) })
                 fileid_apple_free(json)
                 let analysis = try JSONDecoder().decode(Analysis.self, from: Data(text.utf8))
                 #expect(analysis.complete && analysis.faces.isEmpty && analysis.people != nil)
+                #expect(kept == 0, "no faces, nothing kept")
             }
             fileid_apple_free(rgb)
         }
         #expect(sizes[0] == [1024, 683])
         #expect(sizes[2] == [2048, 1365])
         #expect(!url.path.withCString { fileid_apple_take_decode($0, 9, 1024, nil, nil, nil, nil, nil) })
-        #expect(fileid_apple_take_faces(nil, 10, 10, false, 0, 0) == nil)
+        #expect(fileid_apple_take_faces(nil, 10, 10, false, nil) == nil)
+        #expect(fileid_apple_take_mesh(12345, 100, 100) == nil)
+        fileid_apple_take_release(12345)
+    }
+
+    @Test func keptObservationsGiveMeshInputsForAnotherSize() throws {
+        let face = VNFaceObservation(boundingBox: CGRect(x: 0.25, y: 0.5, width: 0.2, height: 0.3))
+        let id = FacesObservations.shared.insert([face])
+        let json = fileid_apple_take_mesh(id, 1000, 500)
+        let text = try #require(json.map { String(cString: $0) })
+        fileid_apple_free(json)
+        struct Mesh: Decodable { let bits: [UInt32]; let boxOnly: Bool }
+        let meshes = try JSONDecoder().decode([Mesh].self, from: Data(text.utf8))
+        #expect(meshes.count == 1 && meshes[0].boxOnly)
+        let values = meshes[0].bits.map(Float.init(bitPattern:))
+        #expect(values[0] == 250 && values[2] == 450)
+        #expect(abs(values[1] - 100) < 1e-3 && abs(values[3] - 250) < 1e-3)
+        fileid_apple_take_release(id)
+        #expect(FacesObservations.shared.faces(id) == nil)
     }
 }

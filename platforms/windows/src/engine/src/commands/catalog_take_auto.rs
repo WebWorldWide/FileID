@@ -277,6 +277,11 @@ pub trait TakeFaceAnalyzer {
     fn id(&self) -> &str;
     /// `detail` is a larger decode of the same photo for per-face models.
     fn faces(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<Vec<Face>>;
+    /// The first pass over the analysis image: its faces and, where the
+    /// platform has a person detector, the people in it.
+    fn analyze(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<(Vec<Face>, Option<Vec<Box2>>)> {
+        self.faces(rgb, width, height, detail).map(|faces| (faces, None))
+    }
     /// False when no detector is installed, so wide frames are not tiled for nothing.
     fn detects(&self) -> bool {
         true
@@ -296,6 +301,11 @@ pub struct Detail<'a> {
 impl<'a> Detail<'a> {
     pub fn new(source: &'a [u8], width: u32, height: u32) -> Self {
         Self { source, width, height }
+    }
+
+    /// The whole decode as packed RGB8 and its size.
+    pub fn pixels(&self) -> (&'a [u8], u32, u32) {
+        (self.source, self.width, self.height)
     }
 
     /// The pixels around `face` (found on a `width` × `height` copy) as they appear in
@@ -468,7 +478,7 @@ pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
         let measured = if row.kind == "video" {
             video_signals(Path::new(&row.path)).map(|s| (s, true))
         } else {
-            image_signals(Path::new(&row.path), faces)
+            photo_signals(Path::new(&row.path), faces)
         };
         if let Some((value, complete)) = measured {
             if complete
@@ -505,29 +515,62 @@ pub fn store(conn: &Connection, scored: &Scored) -> Result<()> {
     Ok(())
 }
 
+/// A photo's take signals: on the Mac the Swift engine's decodes and Vision
+/// (`apple::faces::take_image_signals`), elsewhere the shared decoder.
+fn photo_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        crate::apple::faces::take_image_signals(path, faces)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        image_signals(path, faces)
+    }
+}
+
+/// The first pass's faces and people; `None` when the analyzer could not run
+/// (the result is then used once, not cached).
+pub(crate) fn first_pass(
+    faces: &mut dyn TakeFaceAnalyzer,
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    detail: Option<&mut Detail>,
+) -> Option<(Vec<Face>, Option<Vec<Box2>>)> {
+    faces.analyze(rgb, width, height, detail)
+}
+
+/// The tiles of a wide frame (`take_scoring::tiles` of the `ww` × `wh` decode),
+/// placed back on the frame; `None` when the analyzer could not run on one.
+pub(crate) fn tiled_faces(faces: &mut dyn TakeFaceAnalyzer, wide: &[u8], ww: u32, wh: u32) -> Option<Vec<Face>> {
+    let mut tiled = Vec::new();
+    for tile in take_scoring::tiles(ww as usize, wh as usize) {
+        let crop = crop_rgb(wide, ww as usize, &tile);
+        let found_in_tile = faces.faces(&crop, tile.width as u32, tile.height as u32, None)?;
+        tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
+    }
+    Some(tiled)
+}
+
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 fn image_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
     let (source, sw, sh) = crate::pipeline::tagging::decode_image_sync(path, None).ok()?;
     let (rgb, w, h) = fit_from(&source, sw, sh, take_scoring::ANALYSIS_LONG_SIDE);
     let luma = Luma::from_rgb(&rgb, w as usize, h as usize);
     let mut detail = (sw.max(sh) > take_scoring::ANALYSIS_LONG_SIDE).then(|| Detail::new(&source, sw, sh));
-    let Some(found) = faces.faces(&rgb, w, h, detail.as_mut()) else {
+    let Some((found, people)) = first_pass(faces, &rgb, w, h, detail.as_mut()) else {
         return Some((take_scoring::signals(&luma, vec![], None::<Vec<Box2>>), false));
     };
-    if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, None) {
-        return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), true));
+    if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, people.as_deref()) {
+        return Some((take_scoring::signals(&luma, found, people), true));
     }
     let (wide, ww, wh) = fit_from(&source, sw, sh, take_scoring::TILE_LONG_SIDE);
     drop(source);
-    let mut tiled = Vec::new();
-    for tile in take_scoring::tiles(ww as usize, wh as usize) {
-        let crop = crop_rgb(&wide, ww as usize, &tile);
-        let Some(found_in_tile) = faces.faces(&crop, tile.width as u32, tile.height as u32, None) else {
-            return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), false));
-        };
-        tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
-    }
+    let Some(tiled) = tiled_faces(faces, &wide, ww, wh) else {
+        return Some((take_scoring::signals(&luma, found, people), false));
+    };
     let merged = take_scoring::merge_faces(&found, &tiled);
-    Some((take_scoring::signals_at(&luma, merged, None::<Vec<Box2>>, Some(ww.max(wh) as usize)), true))
+    Some((take_scoring::signals_at(&luma, merged, people, Some(ww.max(wh) as usize)), true))
 }
 
 fn fit_from(rgb: &[u8], w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
@@ -539,7 +582,7 @@ fn fit_from(rgb: &[u8], w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
     (crate::pipeline::tagging::resize_rgb_quality(rgb, w as usize, h as usize, nw as usize, nh as usize), nw, nh)
 }
 
-fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> Vec<u8> {
+pub(crate) fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> Vec<u8> {
     let mut out = Vec::with_capacity(tile.width * tile.height * 3);
     for row in tile.y..tile.y + tile.height {
         let start = (row * width + tile.x) * 3;

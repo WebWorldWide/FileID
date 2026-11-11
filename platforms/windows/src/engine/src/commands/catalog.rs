@@ -125,12 +125,15 @@ fn execute_with_index(
 /// Scores outside the database lock: the lock is held only to read the files
 /// and their cached signals, and again to store new signals.
 fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
-    use super::catalog_take_auto::{compute, prepare, store, TakeFaceAnalyzer, YuNetFaces};
+    use super::catalog_take_auto::{compute, prepare, store, TakeFaceAnalyzer};
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
         bail!("Invalid catalog request")
     }
     let ids = request.file_ids.as_deref().ok_or_else(|| anyhow::anyhow!("File IDs required"))?;
-    let mut faces = YuNetFaces::load();
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    let mut faces = crate::apple::faces::VisionFaces::load();
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    let mut faces = super::catalog_take_auto::YuNetFaces::load();
     let job = prepare(&database.lock(), ids, faces.id())?;
     let scored = compute(job, &mut faces);
     if let Err(error) = store(&database.lock(), &scored) {

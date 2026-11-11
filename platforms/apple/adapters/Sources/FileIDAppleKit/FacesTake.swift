@@ -94,7 +94,6 @@ enum FacesTake {
         let quality: UInt64?
         let eyes: UInt64?
         let mesh: Mesh
-        let meshDetail: Mesh?
     }
 
     struct Person: Encodable {
@@ -110,8 +109,9 @@ enum FacesTake {
     static let closedRatio = 0.12
     static let openRatio = 0.26
 
-    /// `VisionTakeFaceAnalyzer.analyze` (with `people`) or `.faces(in:)`.
-    static func analyze(_ image: CGImage, people withPeople: Bool, detailSize: (Int, Int)?) -> Analysis {
+    /// `VisionTakeFaceAnalyzer.analyze` (with `people`) or `.faces(in:)`, and
+    /// the kept face observations for Face Mesh inputs on a larger decode.
+    static func analyze(_ image: CGImage, people withPeople: Bool) -> (Analysis, [VNFaceObservation]) {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         let landmarks = VNDetectFaceLandmarksRequest()
         let quality = VNDetectFaceCaptureQualityRequest()
@@ -128,7 +128,7 @@ enum FacesTake {
                 }
             } catch {}
         }
-        guard finished else { return Analysis(complete: false, faces: [], people: nil) }
+        guard finished else { return (Analysis(complete: false, faces: [], people: nil), []) }
         let people = withPeople ? (humans.results ?? []).prefix(16).map { h in
             Person(box: [h.boundingBox.minX, 1 - h.boundingBox.maxY, h.boundingBox.width, h.boundingBox.height].map { Double($0).bitPattern })
         } : nil
@@ -139,13 +139,12 @@ enum FacesTake {
         let faces = kept.enumerated().map { index, face -> Face in
             let r = face.boundingBox
             let q = index < qualities.count ? qualities[index].faceCaptureQuality.map(Double.init) : nil
-            let detail = detailSize.map { mesh(face, width: Float($0.0), height: Float($0.1)) }
             return Face(box: [r.minX, 1 - r.maxY, r.width, r.height].map { Double($0).bitPattern },
                         minSide: min(r.width * w, r.height * h).bitPattern,
                         quality: q?.bitPattern, eyes: eyesOpen(face)?.bitPattern,
-                        mesh: mesh(face, width: Float(image.width), height: Float(image.height)), meshDetail: detail)
+                        mesh: mesh(face, width: Float(image.width), height: Float(image.height)))
         }
-        return Analysis(complete: true, faces: faces, people: people)
+        return (Analysis(complete: true, faces: faces, people: people), kept)
     }
 
     static func mesh(_ face: VNFaceObservation, width: Float, height: Float) -> Mesh {
@@ -180,6 +179,35 @@ enum FacesTake {
         guard !ratios.isEmpty else { return nil }
         let ratio = ratios.reduce(0, +) / Double(ratios.count)
         return min(1, max(0, (ratio - closedRatio) / (openRatio - closedRatio)))
+    }
+}
+
+/// Face observations kept for `fileid_apple_take_mesh` until released.
+final class FacesObservations: @unchecked Sendable {
+    static let shared = FacesObservations()
+    private let lock = NSLock()
+    private var kept: [UInt64: [VNFaceObservation]] = [:]
+    private var next: UInt64 = 1
+
+    func insert(_ faces: [VNFaceObservation]) -> UInt64 {
+        lock.withLock {
+            let id = next
+            next += 1
+            kept[id] = faces
+            return id
+        }
+    }
+
+    func faces(_ id: UInt64) -> [VNFaceObservation]? {
+        lock.withLock { kept[id] }
+    }
+
+    func release(_ id: UInt64) {
+        lock.withLock { kept[id] = nil }
+    }
+
+    var count: Int {
+        lock.withLock { kept.count }
     }
 }
 

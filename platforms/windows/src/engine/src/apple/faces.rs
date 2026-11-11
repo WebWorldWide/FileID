@@ -263,6 +263,78 @@ pub fn extract_file(path: &Path, boxes: &[String], sface: &MacSFace) -> (Vec<Opt
     (out, aligned)
 }
 
+impl crate::commands::face_extract_mac::Extractor for MacSFace {
+    fn model(&self) -> &str {
+        &self.version
+    }
+
+    fn extract(&self, path: &Path, boxes: &[String]) -> Vec<Option<crate::commands::face_extract_mac::Embedded>> {
+        let (faces, aligned) = extract_file(path, boxes, self);
+        tracing::debug!(faces = boxes.len(), aligned, bbox_fallback = boxes.len() - aligned, "face_align_applied");
+        faces
+            .into_iter()
+            .map(|face| face.map(|face| crate::commands::face_extract_mac::Embedded { embedding: face.embedding, jpeg: face.jpeg }))
+            .collect()
+    }
+}
+
+/// The process's SFace, loaded once (as `ArcFaceService.shared`) and again
+/// when the installed weights change. `None` when no weights are installed.
+pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
+    static SHARED: Mutex<Option<std::sync::Arc<MacSFace>>> = Mutex::new(None);
+    let installed = crate::commands::face_refresh::current_model()?;
+    let mut shared = SHARED.lock();
+    if let Some(model) = shared.as_ref()
+        && model.model_version() == installed
+    {
+        return Some(Ok(model.clone()));
+    }
+    let started = std::time::Instant::now();
+    Some(MacSFace::load().map(|model| {
+        tracing::info!(ep = model.provider(), ms = started.elapsed().as_millis() as u64, "arcface_model_loaded");
+        let model = std::sync::Arc::new(model);
+        *shared = Some(model.clone());
+        model
+    }))
+}
+
+/// Phase 1 of the Swift engine's `runClustering`: embed every pending face in
+/// the Mac face space with the installed SFace, leaving out faces of people
+/// marked Unknown. Without weights nothing runs (the clustering pass then works
+/// over the vectors the catalog has).
+pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>) {
+    let processing = crate::commands::face_refresh::processing();
+    if !processing.starts_with(crate::commands::face_clustering_mac::MAC_PREFIX) {
+        return;
+    }
+    let sface = match shared_sface() {
+        None => return,
+        Some(Err(error)) => {
+            tracing::warn!(?error, "face_cluster_embedder_load_failed");
+            return;
+        }
+        Some(Ok(sface)) => sface,
+    };
+    let unknown: std::collections::HashSet<i64> = {
+        let conn = database.lock();
+        let found: rusqlite::Result<std::collections::HashSet<i64>> = conn
+            .prepare("SELECT fp.id FROM face_prints fp JOIN persons p ON p.id=fp.person_id WHERE COALESCE(p.is_unknown,0)<>0")
+            .and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect());
+        match found {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(?error, "face_print_pending_query_failed");
+                return;
+            }
+        }
+    };
+    let crops = crate::paths::faces_dir().ok();
+    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false) {
+        Ok(summary) => tracing::info!(?summary, "face_print_extract_finished"),
+        Err(error) => tracing::error!(?error, "face_print_persist_failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

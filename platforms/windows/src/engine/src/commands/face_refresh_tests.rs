@@ -218,7 +218,7 @@ fn the_platform_names_the_face_space() {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         assert_eq!(processing(), MAC_PROCESSING);
-        assert!(!refresh_supported());
+        assert!(refresh_supported(), "the Vision adapters compute the Mac face space");
     }
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
