@@ -72,6 +72,58 @@ pub(crate) trait FrameModel: Sync {
         tokens: u32,
         cancel: Arc<AtomicBool>,
     ) -> impl Future<Output = Result<String>> + Send;
+    /// A moment window: `sequence` with the frames' times, which the Swift
+    /// engine's MLX path needs to label the frames itself.
+    fn moment(
+        &self,
+        images: &[&Path],
+        _times: &[f64],
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send {
+        self.sequence(images, prompt, tokens, cancel)
+    }
+}
+
+/// The Mac app's engine: the Swift engine's MLX scene captions
+/// (`DeepAnalyze.analyze(sceneCaption:)`) and moment sequences
+/// (`analyzeMomentSequence`), which build their own prompts.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) struct MlxFrames(tokio::sync::Mutex<crate::apple::vlm::MlxLease>);
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl FrameModel for MlxFrames {
+    fn caption(&self, image: &Path, _prompt: &str, _tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let request = crate::apple::vlm::AnalyzeRequest {
+            path: image.to_path_buf(),
+            media_kind: "video".into(),
+            scene_caption: true,
+            ..Default::default()
+        };
+        async move {
+            let reply = self.0.lock().await.analyze(&request, &cancel, |_| {}).await?;
+            if reply.description_failed() {
+                bail!(reply.description)
+            }
+            Ok(reply.description)
+        }
+    }
+    fn sequence(&self, images: &[&Path], _prompt: &str, _tokens: u32, _cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let count = images.len();
+        async move { bail!("MLX sequences need frame times ({count} frames)") }
+    }
+    fn moment(&self, images: &[&Path], times: &[f64], _prompt: &str, _tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let frames: Vec<PathBuf> = images.iter().map(|path| path.to_path_buf()).collect();
+        let times = times.to_vec();
+        async move {
+            let reply = self.0.lock().await.sequence(&frames, &times, None, &cancel).await?;
+            if reply.starts_with("Inference failed") || reply == "Model not loaded." {
+                bail!(reply)
+            }
+            Ok(reply)
+        }
+    }
 }
 
 impl FrameModel for ResidentLease {
@@ -128,8 +180,13 @@ fn frames_root() -> PathBuf {
 pub(crate) fn installed_model() -> Option<&'static str> {
     VLM_PREFERENCE
         .into_iter()
-        .find(|kind| crate::models::vlm::find_weights(kind).is_some())
+        .find(|kind| crate::models::resident_model::installed(kind))
         .or_else(|| {
+            if crate::models::resident_model::MLX {
+                return ["qwen3_vl_2b", "qwen3_5_2b", "gemma_3_12b", "paligemma_3b"]
+                    .into_iter()
+                    .find(|kind| crate::models::resident_model::installed(kind));
+            }
             let mut installed: Vec<&'static crate::models::catalog::CatalogEntry> = crate::models::catalog::entries()
                 .iter()
                 .filter(|e| {
@@ -321,6 +378,13 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             return Ok(());
         };
         publish(id, sink, database).await;
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        if crate::apple::vlm::model_spec(&job.recipe.model_kind).is_ok() {
+            // Speech on the Mac is Apple Speech (Stage 8), not the GGUF ASR model.
+            let lease = crate::apple::vlm::Resident::shared().acquire(&job.recipe.model_kind, &cancel, |_| {}).await?;
+            let model = MlxFrames(tokio::sync::Mutex::new(lease));
+            return process(id, &job, &model, &frames, &cancel, sink, database, 1.0).await;
+        }
         let speech = installed_speech_model();
         let visual_share = if speech.is_some() { 0.8 } else { 1.0 };
         let lease = ResidentService::shared()
@@ -1032,7 +1096,7 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
             }
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             let raw = model
-                .sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())
+                .moment(&refs, &kept, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())
                 .await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;

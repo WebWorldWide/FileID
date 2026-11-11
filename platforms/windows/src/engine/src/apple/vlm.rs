@@ -552,8 +552,13 @@ impl MlxLease {
     /// the `ModelBenchmark` JSON object. It reloads the model cold.
     pub async fn benchmark(&mut self, cancel: &Arc<AtomicBool>, progress: impl FnMut(Event)) -> Result<Value> {
         let spec = model_spec(&self.kind)?;
-        let reply = request(&json!({"op": "benchmark", "model": spec}), cancel, progress).await?;
-        Ok(reply["benchmark"].clone())
+        let reply = request(&json!({"op": "benchmark", "model": spec}), cancel, progress).await;
+        // The benchmark unloads and reloads the model; keep the memory lease only if it stayed.
+        if !status().await.is_ok_and(|current| current.resident() && current.loaded.as_deref() == Some(&self.kind)) {
+            self.state.memory = None;
+            self.state.kind = None;
+        }
+        Ok(reply?["benchmark"].clone())
     }
 }
 
