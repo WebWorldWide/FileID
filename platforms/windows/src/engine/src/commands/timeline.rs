@@ -719,7 +719,7 @@ async fn process<M: FrameModel>(
             if let Some(&next) = job.ids.get(index + 1)
                 && let Ok(next_source) = running_source(database, id, next).await
             {
-                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), version.starts_with(SCENE_PREFIX), cancel)));
+                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
             }
             scan
         } else {
@@ -840,6 +840,15 @@ async fn process<M: FrameModel>(
     Ok(())
 }
 
+/// Logs the scene pass's timing however it ends.
+struct TimingOnDrop<F: FnMut(u64)>(F, std::time::Instant);
+
+impl<F: FnMut(u64)> Drop for TimingOnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)(self.1.elapsed().as_millis() as u64);
+    }
+}
+
 /// The Swift engine's `analyzeScenes` captions: CLIP scenes over the frame
 /// pool, one caption of each scene's representative frame covering the whole
 /// scene, with the Swift evidence ids so either engine skips the other's.
@@ -856,14 +865,17 @@ async fn scene_captions<M: FrameModel>(
     cancel: &Arc<AtomicBool>,
     database: &Arc<Mutex<Connection>>,
 ) -> Result<()> {
-    let frames = match &pool.scene {
-        Some(frames) => frames.clone(),
-        None => {
-            let pool = pool.clone();
-            blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
-        }
+    let started = std::time::Instant::now();
+    let frames = {
+        let pool = pool.clone();
+        blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
     };
+    let embed_ms = started.elapsed().as_millis() as u64;
     let scenes = crate::pipeline::video_scene_selection::scenes(&frames, duration);
+    let (scene_count, frame_count) = (scenes.len(), frames.len());
+    let _timing = TimingOnDrop(move |total: u64| {
+        tracing::info!(file_id, frames = frame_count, scenes = scene_count, embed_ms, total_ms = total, "timeline_scene_timing");
+    }, started);
     for scene in scenes {
         let evidence = format!("scene:{file_id}:{}:{version}:{}", source.revision, analysis::millis(scene.start));
         let (lookup, revision) = (evidence.clone(), source.revision.clone());
@@ -903,18 +915,14 @@ async fn scene_captions<M: FrameModel>(
 /// hardware decode overlaps this video's captions (the Swift engine's `nextPool`).
 type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
 
-/// With `scenes`, the pool's CLIP vectors are computed here too, so the CPU
-/// embedding also overlaps the current video's captions.
-fn spawn_pool(source: &Path, folder: &Path, scenes: bool, cancel: &Arc<AtomicBool>) -> PoolTask {
+fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
     let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
     tokio::task::spawn_blocking(move || {
         let _ = std::fs::remove_dir_all(&directory);
         // The duration is only the worker's time limit here (Swift: one hour).
-        let mut pool = timeline_media::pool(&path, 3_600.0, &directory, &flag)?;
-        if scenes && !flag.load(Ordering::Acquire) {
-            pool.scene = Some(timeline_media::scene_frames(&pool));
-        }
-        Ok(pool)
+        // CLIP vectors are not computed here: on the GPU they would compete
+        // with this video's captions (the Swift engine embeds per video too).
+        timeline_media::pool(&path, 3_600.0, &directory, &flag)
     })
 }
 
@@ -951,6 +959,8 @@ async fn pool_signals(
         Ok(())
     })
     .await?;
+    let waited = std::time::Instant::now();
+    let was_prefetched = prefetched.is_some();
     let decoded = match prefetched {
         Some(task) => task.await.map_err(|error| anyhow!(error)).and_then(|pool| pool),
         None => {
@@ -959,6 +969,7 @@ async fn pool_signals(
             blocking(move || timeline_media::pool(&path, duration, &directory, &flag)).await
         }
     };
+    tracing::info!(file_id, prefetched = was_prefetched, wait_ms = waited.elapsed().as_millis() as u64, "timeline_pool_timing");
     let pool = match decoded {
         Ok(pool) => pool,
         Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
