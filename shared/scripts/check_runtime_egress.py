@@ -127,7 +127,7 @@ RAW_NETWORK_FILES = {
 REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/client.rs": "7fd2ec8192f167c89322230f17a3e304802a7133f445c5b8bc2ec0985e8a08f4",
   "platforms/windows/src/engine/src/shell/thumbnail.rs": "b45ae1e8953defb4d2dbc73687f61fb942d77758666824f3493cc5c7fcff6b4f",
-  "platforms/windows/src/engine/src/models/native_process.rs": "495e360aab90eb0c42c78de1bdd87e0ecf87c35b5deaac01522a1a2c6a9674c7",
+  "platforms/windows/src/engine/src/models/native_process.rs": "3ad2cf599df1884712dd6630c53347ce219ecad0c6c68fe5636d472cc2f7e98d",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "fa983d18f910b15e830adc64f18040039f49d06301607c622fc0f61c38ae51f7",
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
@@ -178,7 +178,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
   "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
-  "platforms/windows/src/engine/src/apple/ffi.rs": "6ed36654cd4483c57e1012aec6fb76b409f3b99848ea2940b6e34fbad944bc5f",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "3e1642ed6a5c1107b7c647e2f124bf5a00b328aeccb074ab3161bb963a5c8137",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
