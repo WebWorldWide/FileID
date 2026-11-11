@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-10 — Convergence Stage 3: Restructure under the Rust engine on the Mac
+
+- **What landed** (agent `converge-3`; details in `CONVERGENCE.md` "Stage 3 status"): one restructure undo journal format for both engines (Swift writes the Rust header and source identity, reads both; Rust on macOS reads Swift's older headerless journals inside the requested root), so a run applied by one engine is undone by the other. A refused Rust apply or undo now ends with `restructureApplyResult` like Swift; the Mac app treats the Rust plan errors as terminal; feedback never upgrades Ask moves in either engine. Rust plan kNN computed once in parallel; journal entries use `F_BARRIERFSYNC` on macOS.
+- **Measured** (release builds, scratch copies, load 21–108): Adlon/Camera stand-ins (6,031 files, original names, sizes, times, EXIF headers): both engines 0 moves, 30 folders kept, identical plans. Messy folder (42 Adlon JPEGs from three events): 42/42 into the three events in both engines, identical; Rust apply + undo restore every byte. Plan Swift 1.66–2.04 s, Rust 0.23–0.38 s (was 1.75–7.68 s). 3,000-move apply Swift 7.9–9.4 s, Rust 5.0–5.2 s (was 22–30 s).
+- **Conformance:** 7 new restructure cases (cross-engine apply/undo both ways, unreadable and foreign journals, destination outside the root, shortcut mode with a Swift known divergence, a documents Downloads dump). Swift 74 pass + 2 known (trash, shortcut mode) with the Rust and with the adapters build as peer; plain Rust and adapters build 65 pass + 1 known (trash). After merging main: Rust 1,251 tests, strict Clippy for both feature sets; Swift 974 tests.
+- Digest refreshes: `commands/restructure.rs`, `pipeline/restructure_apply.rs` (no network code). Adlon read only; live state and `~/Documents/huggingface` untouched.
+
 ## 2026-11-10 — Face Mesh reads higher-resolution faces in both engines
 
 - **Both engines** (agent, coordinator decision): faces are still found on the 1024 px analysis image, but the eyelid mesh now reads finer pixels, only for photos where a face of 24 px or more was found. Rust already holds the full decode, so it resizes only a square of 3× the face around each face to the 2048 px scale (4.9 ms median per face; resizing the whole 33 MP frame to 2048 costs 226–275 ms). The Mac can't decode a region, so it decodes once more: a camera JPEG's stored preview (Sony 1616 px), else 2048 px; the same decode is reused for small-face tiles. Threshold stays 0.175. Rust cache id `yunet-mesh-v1` → `yunet-mesh-v2`.

@@ -556,7 +556,7 @@ impl UndoJournal {
         self.file
             .write_all(line.as_bytes())
             .context("appending undo journal entry")?;
-        self.file.sync_data().context("syncing undo journal entry")?;
+        sync_ahead_of_move(&self.file).context("syncing undo journal entry")?;
         self.len = prev + line.len() as u64;
         Ok(prev)
     }
@@ -572,6 +572,23 @@ impl UndoJournal {
         let _ = self.file.sync_data();
         self.len = prev;
     }
+}
+
+/// Makes a write-ahead entry durable before the move it describes. On macOS
+/// `sync_data` is `F_FULLFSYNC`, a drive-cache flush per moved file that made an
+/// apply about 4x slower than the Swift engine (which uses `fsync`);
+/// `F_BARRIERFSYNC` still guarantees the entry reaches storage before the rename
+/// that follows, which is the ordering the journal relies on.
+fn sync_ahead_of_move(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: fcntl on a descriptor this File owns; F_BARRIERFSYNC takes no argument.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+    }
+    file.sync_data()
 }
 
 fn prior_undo_journal_backups(path: &Path) -> Result<Vec<PathBuf>> {
@@ -613,14 +630,30 @@ fn prior_undo_journal_backups(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(backups)
 }
 
+/// The root a journal without a header belongs to. The macOS Swift engine wrote
+/// headerless journals before it adopted this format (convergence Stage 3); on macOS
+/// such a journal is read as the requested library's, and undo still refuses any entry
+/// outside that root. Elsewhere a headerless journal is an old Rust one and is refused.
+fn headerless_journal_root(library_root: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(library_root.to_path_buf())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = library_root;
+        anyhow::bail!("undo journal predates exact library-root ownership")
+    }
+}
+
 fn validate_owned_undo_scan(scan: &UndoJournalScan, library_root: &Path) -> Result<()> {
-    let recorded_root = scan
-        .library_root
-        .as_ref()
-        .context("undo journal predates exact library-root ownership")?;
+    let recorded_root = match scan.library_root.clone() {
+        Some(root) => root,
+        None => headerless_journal_root(library_root)?,
+    };
     let canonical_root = canonicalize_safely(library_root)
         .with_context(|| format!("library root {}", library_root.display()))?;
-    let canonical_recorded = canonicalize_safely(recorded_root)
+    let canonical_recorded = canonicalize_safely(&recorded_root)
         .with_context(|| format!("recorded library root {}", recorded_root.display()))?;
     anyhow::ensure!(
         paths_equal(
@@ -2460,9 +2493,11 @@ impl RestructureApply {
             });
         };
         let total = scan.spans.len();
-        let recorded_root = scan.library_root.context(
-            "undo journal predates exact library-root ownership; refusing automatic recovery",
-        )?;
+        let recorded_root = match scan.library_root {
+            Some(root) => root,
+            None => headerless_journal_root(&self.library_root)
+                .context("refusing automatic recovery")?,
+        };
         let canonical_root = canonicalize_safely(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
         let canonical_recorded_root = canonicalize_safely(&recorded_root)
@@ -5240,6 +5275,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn undo_rejects_a_legacy_rootless_journal() {
         let root = undo_fixture_root("undo-owner-legacy");
@@ -5268,6 +5304,47 @@ mod tests {
         assert!(err.to_string().contains("predates exact library-root ownership"));
         assert!(dst.exists());
         assert!(journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn undo_reads_a_headerless_swift_journal_inside_the_root_only() {
+        let root = undo_fixture_root("undo-owner-swift-legacy");
+        let src = root.join("photo.jpg");
+        let dst = root.join("Photos").join("photo.jpg");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::write(&dst, b"JPEG").unwrap();
+
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &dst.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let line = |to: &Path| {
+            let mut entry = serde_json::json!({
+                "file_id": 1,
+                "from": dst.to_string_lossy(),
+                "to": to.to_string_lossy()
+            })
+            .to_string();
+            entry.push('\n');
+            entry
+        };
+
+        let outside = std::env::temp_dir().join(format!("fileid-outside-{}.jpg", uuid::Uuid::new_v4()));
+        std::fs::write(&journal, line(&outside)).unwrap();
+        let apply = RestructureApply::new(Arc::clone(&db), root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+        let err = apply.undo_last().unwrap_err();
+        assert!(err.to_string().contains("different library root"));
+        assert!(dst.exists());
+
+        std::fs::write(&journal, line(&src)).unwrap();
+        let result = apply.undo_last().unwrap();
+        assert_eq!((result.applied, result.failed), (1, 0));
+        assert!(src.exists());
+        assert!(!dst.exists());
+        assert!(!journal.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
