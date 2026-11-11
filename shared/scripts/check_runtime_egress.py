@@ -418,6 +418,11 @@ def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
         if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts) or path.stem.endswith(("_test", "_tests")):
             continue
         files.append(path)
+    # A symlink to another production source in the tree (the Swift engine's
+    # MLX code compiled into FileIDAppleVLM) is checked once, at its target's
+    # path, where reviewed digests apply. Any other symlink is checked as a file.
+    real = {path.resolve() for path in files if not path.is_symlink()}
+    files = [path for path in files if not (path.is_symlink() and path.resolve() in real)]
     return sorted(set(files)), []
 
 

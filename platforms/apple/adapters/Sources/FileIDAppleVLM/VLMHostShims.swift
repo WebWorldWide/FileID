@@ -315,9 +315,15 @@ final class VLMDownloader: Sendable {
         return names.contains { $0.hasSuffix(".safetensors") }
     }
 
+    static func read(_ url: URL) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.readToEnd()
+    }
+
     static func verified(modelDir: URL, revision: String) -> Bool {
         let sentinel = modelDir.appendingPathComponent(".fileid-verified-\(revision)")
-        guard let data = try? Data(contentsOf: sentinel),
+        guard let data = read(sentinel),
               let manifest = try? JSONDecoder().decode(VerifiedSentinel.self, from: data),
               manifest.version == 1,
               manifest.revision == revision,
@@ -325,7 +331,7 @@ final class VLMDownloader: Sendable {
         let paths = manifest.files.map(\.path)
         let identityURL = modelDir.appendingPathComponent(sentinel.lastPathComponent + "-v2")
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        if let recorded = try? Data(contentsOf: identityURL),
+        if let recorded = read(identityURL),
            let record = try? JSONDecoder().decode(IdentitySentinel.self, from: recorded),
            record.version == 2, record.revision == revision, record.manifestSHA256 == digest,
            identities(paths, modelDir: modelDir) == record.files {

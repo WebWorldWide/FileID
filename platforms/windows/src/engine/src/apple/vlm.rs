@@ -45,19 +45,8 @@ enum Message {
     Failed { message: String, cancelled: bool },
 }
 
-struct Channel(mpsc::UnboundedSender<Message>);
-
-unsafe extern "C" fn deliver(context: *mut c_void, event: u32, payload: *const u8, length: usize) {
-    if context.is_null() {
-        return;
-    }
-    let bytes: &[u8] = if payload.is_null() || length == 0 {
-        &[]
-    } else {
-        // SAFETY: the adapter passes `length` readable bytes, valid during this call.
-        unsafe { std::slice::from_raw_parts(payload, length) }
-    };
-    let message = match event {
+fn message(event: u32, bytes: &[u8]) -> Message {
+    match event {
         ffi::VLM_TOKEN => Message::Event(Event::Token(String::from_utf8_lossy(bytes).into_owned())),
         ffi::VLM_PROGRESS => Message::Event(Event::Progress(serde_json::from_slice(bytes).unwrap_or(Value::Null))),
         ffi::VLM_DONE => match serde_json::from_slice(bytes) {
@@ -72,14 +61,6 @@ unsafe extern "C" fn deliver(context: *mut c_void, event: u32, payload: *const u
             }
         }
         other => Message::Event(Event::Progress(json!({"unknownEvent": other}))),
-    };
-    let terminal = matches!(message, Message::Done(_) | Message::Failed { .. });
-    // SAFETY: `context` is the `Channel` boxed by `request`; it stays alive until
-    // the single terminal event, which takes it back below.
-    let _ = unsafe { &*context.cast::<Channel>() }.0.send(message);
-    if terminal {
-        // SAFETY: the adapter calls the callback exactly once with a terminal event.
-        drop(unsafe { Box::from_raw(context.cast::<Channel>()) });
     }
 }
 
@@ -103,13 +84,16 @@ impl Drop for Submitted {
 pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> Result<Value> {
     let bytes = serde_json::to_vec(body)?;
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let context = Box::into_raw(Box::new(Channel(sender))).cast::<c_void>();
+    let forward = ffi::VlmReceiver(Box::new(move |event, bytes| {
+        let _ = sender.send(message(event, bytes));
+    }));
+    let context = Box::into_raw(Box::new(forward)).cast::<c_void>();
     // SAFETY: `bytes` is valid for the call; `context` stays owned by the adapter
-    // until its terminal callback.
-    let handle = unsafe { ffi::fileid_apple_vlm_submit(bytes.as_ptr(), bytes.len(), deliver, context) };
+    // until its terminal callback, which frees it.
+    let handle = unsafe { ffi::fileid_apple_vlm_submit(bytes.as_ptr(), bytes.len(), ffi::vlm_callback, context) };
     if handle == 0 {
         // SAFETY: a refused request never calls back, so the box is still ours.
-        drop(unsafe { Box::from_raw(context.cast::<Channel>()) });
+        drop(unsafe { Box::from_raw(context.cast::<ffi::VlmReceiver>()) });
         bail!("The model adapter refused the request");
     }
     let mut submitted = Submitted { handle, finished: false };

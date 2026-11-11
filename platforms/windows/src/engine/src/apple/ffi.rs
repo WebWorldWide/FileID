@@ -3,7 +3,7 @@
 //! FileIDAppleKit dynamic library in `FileID.app/Contents/Frameworks`.
 //! Reviewed surface (shared/scripts/check_runtime_egress.py): no adapter opens
 //! a URL, socket or HTTP client or launches a process. Keep this file to
-//! declarations; safe wrappers live in `super`.
+//! declarations and the one callback trampoline; safe wrappers live in `super`.
 //!
 //! Conventions: plain C types; strings are NUL-terminated UTF-8; memory the
 //! adapter returns is released with `fileid_apple_free`; handles are nonzero,
@@ -55,6 +55,35 @@ unsafe extern "C" {
 /// Event callback for `fileid_apple_vlm_submit`; the payload is valid only
 /// during the call.
 pub type VlmCallback = unsafe extern "C" fn(context: *mut c_void, event: u32, payload: *const u8, length: usize);
+
+/// What a request's events go to: boxed as the callback context by
+/// `super::vlm::request`, called once per event.
+pub struct VlmReceiver(pub Box<dyn Fn(u32, &[u8]) + Send + Sync>);
+
+/// The callback every VLM request passes: forwards each event to its
+/// [`VlmReceiver`] and frees the receiver after the terminal event.
+///
+/// # Safety
+/// `context` must be a `Box<VlmReceiver>` leaked for this request, and the
+/// adapter must call back exactly once with `VLM_DONE` or `VLM_FAILED`.
+pub unsafe extern "C" fn vlm_callback(context: *mut c_void, event: u32, payload: *const u8, length: usize) {
+    if context.is_null() {
+        return;
+    }
+    let bytes: &[u8] = if payload.is_null() || length == 0 {
+        &[]
+    } else {
+        // SAFETY: the adapter passes `length` readable bytes, valid during this call.
+        unsafe { std::slice::from_raw_parts(payload, length) }
+    };
+    // SAFETY: `context` is the receiver boxed for this request (see above).
+    unsafe { &*context.cast::<VlmReceiver>() }.0(event, bytes);
+    if matches!(event, VLM_DONE | VLM_FAILED) {
+        // SAFETY: the terminal event is the last call for this request.
+        drop(unsafe { Box::from_raw(context.cast::<VlmReceiver>()) });
+    }
+}
+
 pub const VLM_TOKEN: u32 = 1;
 pub const VLM_PROGRESS: u32 = 2;
 pub const VLM_DONE: u32 = 3;
