@@ -42,6 +42,14 @@ Parity (Best Takes pages, Moments lanes, springs audits and the Models page fold
 
 Models: keep about 10-15 curated defaults (2-3 per hardware tier); the Windows and Linux Describe pickers list the portable catalog filtered by RAM/VRAM, curated first (2026-11-05; Linux filters by RAM only); build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
 
+## Tagging accuracy and scan speed (2026-11-12)
+
+- [ ] **Windows GPU timing** of the two decode changes: `iterate.ps1` on a camera-JPEG corpus with duplicates, with `FILEID_TWIN_REUSE=0` and `FILEID_JPEG_MPF_PREVIEW=0` as controls; confirm `[STATS] twin_reused` / `mpf_previews` climb and People looks the same.
+- [ ] **People check of the MPF path on the Rust engine:** `people_eval.py --flavor rust` before/after on the 2026 camera events (the Mac engine measured faces 384 → 385 on its own path).
+- [ ] **Mac engine:** port identical-image reuse (`Tagging.swift` hashes in parallel with inference today; hash first, then skip the Vision/CLIP/RAM++ work and copy rows in `DBWriter.swift`).
+- [ ] **Owner's call on recall:** capping RAM++'s per-class thresholds at 0.75 raises held-out subject recall 0.420 → 0.442 and F1 0.548 → 0.558 but costs precision 0.789 → 0.757 (DECISIONS 2026-11-12). Not applied; the owner has asked for cleaner tags twice.
+- [ ] Extend `tag_eval.py` labels beyond the 72 search subjects before tuning thresholds per class; the current set is too small for per-class work.
+
 ## ONNX Runtime telemetry (2026-11-10, release blocker for Windows)
 
 - [x] Both engines set `ORT_DISABLE_TELEMETRY=1` before ORT loads and create every environment with telemetry events off; the privacy gate rejects ORT's 1DS uploader and can load a runtime to prove it writes nothing (`--ort-runtime`).

@@ -519,9 +519,14 @@ impl ScanSession {
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
         let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
+        let known_twins = {
+            let conn = self.db_conn.lock();
+            crate::pipeline::twin_reuse::known_image_hashes(&conn).unwrap_or_default()
+        };
         let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
-            .with_legacy_hashes(writer.rename_heal_enabled());
+            .with_legacy_hashes(writer.rename_heal_enabled())
+            .with_known_twins(known_twins);
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
             tokio::task::JoinHandle<()>,
