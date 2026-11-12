@@ -177,6 +177,10 @@ if ($integrationFiles.Count -eq 0) {
     throw 'The CUDA Visual Studio integration archive has no MSBuildExtensions folder.'
 }
 $integrationFiles | Copy-Item -Destination $customizations -Force
+# CMake's "cuda=<path>" toolset also looks for them inside the toolkit folder.
+$toolkitIntegration = Join-Path $CudaHome 'extras\visual_studio_integration\MSBuildExtensions'
+New-Item -ItemType Directory -Force -Path $toolkitIntegration | Out-Null
+$integrationFiles | Copy-Item -Destination $toolkitIntegration -Force
 
 foreach ($required in @('bin\nvcc.exe', 'include\cuda_runtime.h', 'include\cublas_v2.h', 'include\cufft.h', 'lib\x64\cudart.lib', 'lib\x64\cublas.lib')) {
     if (-not (Test-Path -LiteralPath (Join-Path $CudaHome $required))) {
@@ -190,7 +194,6 @@ foreach ($required in @('include\cudnn.h', 'lib\x64\cudnn.lib', 'bin\cudnn64_9.d
 }
 $env:CUDA_PATH = $CudaHome
 $env:CUDA_PATH_V12_8 = $CudaHome
-$env:CudaToolkitDir = "$CudaHome\"
 
 New-Item -ItemType Directory -Force -Path $SourceDir | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $SourceDir '.git'))) {
