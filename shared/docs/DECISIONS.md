@@ -4807,3 +4807,7 @@ Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `
 - **Eigen pin swapped to upstream's v1.22.1 fix.** GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin in `cmake/deps.txt` no longer matched. The build script takes upstream's own fix from v1.22.1: the same Eigen commit from the GitHub `eigen-mirror`, with its SHA-1. That is the only `deps.txt` change between the two releases. The script refuses to run if the original line is not there exactly once.
 - **LF line endings for the ORT source.** The source is checked out with `core.autocrlf=false` and `core.eol=lf`, so ORT's patches apply.
 - **GNU patch from Git for Windows.** CMake is pointed at Git for Windows' patch through `Patch_EXECUTABLE`. Hosted runners find Strawberry Perl's patch.exe 2.5.9 first, and it crashes on ORT's arm64 cpuinfo patch.
+
+## 2026-11-12 — Swift reconcile reads the Rust Trash log without rewriting it
+
+After a rollback the Swift engine only drops catalog rows for Rust-batch files provably in the Trash; it neither completes the Rust entries nor touches the log (Rust owns it and imports Swift's journal itself). Restore of such a batch already works through `RustTrashLog.find`.

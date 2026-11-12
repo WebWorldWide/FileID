@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-12 — Swift startup reconcile reads Rust's Trash log (`agent/left-trash-reconcile`)
+
+- `TrashJournal.reconcile` now also walks the valid entries of `trash_log.json` (HMAC-checked with the shared key, never modified) and drops catalog rows of files provably in the Trash (original path gone, Trash entry found by recorded path or inode), the same rules as for its own journal. It no longer returns early when its own journal is empty. `RustTrashLog.verifiedBatches` is shared with `find`.
+- Test `reconcileReadsTheRustLogAfterAKill` (Rust-format log, batch killed midway, forged entry, restart on the same catalog, test Trash folder only).
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
