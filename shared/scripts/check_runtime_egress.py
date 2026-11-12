@@ -145,7 +145,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "8220ffe36dcf6fd60c9afa9ab203e926b7a4e5a8ab2d18e7e0fcc6ce2a4b34ca",
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
   "platforms/cli/src/runtime.rs": "e86dcc98ce5482b51f23a79b59d567319c1a22d72cae535c7eaeca91e73346af",
-  "platforms/linux/src/app/src/engine_client.rs": "ea4a9cc1976ed550b0b3657cfcf332a5dda3cd5690bea5718c5db1d7e201f842",
+  "platforms/linux/src/app/src/engine_client.rs": "9561f30b4bbf700ba5ae2e9c2bae5a492f8bc7f90b85f17423da1a463844da93",
   "platforms/linux/src/app/src/tabs/settings.rs": "e7fe6434a7f5412151cbe1b88005fdbb4ceae4e1290d0eac54551ca617f97fa5",
   "platforms/windows/src/FileID.App/App.xaml.cs": "fec87e4fc50ba035defeb6ff7517859cd3f162e3a1dd7728696637abb487b4c5",
   "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "771e0a1e5a9c776faf8d5237b067c8bc4a8f1ee2b46f1a0db412bd741af2d01e",
