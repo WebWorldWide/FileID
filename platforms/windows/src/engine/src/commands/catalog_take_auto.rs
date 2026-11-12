@@ -277,9 +277,20 @@ pub trait TakeFaceAnalyzer {
     fn id(&self) -> &str;
     /// `detail` is a larger decode of the same photo for per-face models.
     fn faces(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<Vec<Face>>;
+    /// The first pass over the analysis image: its faces and, where the
+    /// platform has a person detector, the people in it.
+    fn analyze(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<(Vec<Face>, Option<Vec<Box2>>)> {
+        self.faces(rgb, width, height, detail).map(|faces| (faces, None))
+    }
     /// False when no detector is installed, so wide frames are not tiled for nothing.
     fn detects(&self) -> bool {
         true
+    }
+    /// Faces in `tile` of the Mac's tile source, cropped as decoded (Swift hands
+    /// Vision those crops). `None` when the analyzer could not run.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    fn tile_faces(&mut self, _tiles: &crate::apple::faces::TakeTiles, _tile: &take_scoring::Tile) -> Option<Vec<Face>> {
+        None
     }
 }
 
@@ -291,11 +302,42 @@ pub struct Detail<'a> {
     source: &'a [u8],
     width: u32,
     height: u32,
+    /// A decode made only when first read (the Mac, as Swift's `TakeDetailImage`).
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    deferred: Option<Deferred<'a>>,
+}
+
+type Decoded = (Vec<u8>, u32, u32);
+
+struct Deferred<'a> {
+    load: Box<dyn FnMut() -> Option<Decoded> + 'a>,
+    loaded: std::cell::OnceCell<Option<Decoded>>,
 }
 
 impl<'a> Detail<'a> {
     pub fn new(source: &'a [u8], width: u32, height: u32) -> Self {
-        Self { source, width, height }
+        Self { source, width, height, deferred: None }
+    }
+
+    /// A detail image decoded by `load` the first time it is read.
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    pub fn deferred(load: impl FnMut() -> Option<Decoded> + 'a) -> Self {
+        Self { source: &[], width: 0, height: 0, deferred: Some(Deferred { load: Box::new(load), loaded: std::cell::OnceCell::new() }) }
+    }
+
+    /// The whole decode as packed RGB8 and its size, decoding a deferred one now.
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    pub fn load(&mut self) -> Option<(&[u8], u32, u32)> {
+        match self.deferred.as_mut() {
+            None => Some((self.source, self.width, self.height)),
+            Some(Deferred { load, loaded }) => loaded.get_or_init(|| load()).as_ref().map(|(rgb, w, h)| (rgb.as_slice(), *w, *h)),
+        }
+    }
+
+    /// A deferred decode, if it was made.
+    #[cfg(test)]
+    pub fn into_loaded(self) -> Option<Decoded> {
+        self.deferred.and_then(|deferred| deferred.loaded.into_inner().flatten())
     }
 
     /// The pixels around `face` (found on a `width` × `height` copy) as they appear in
@@ -458,25 +500,69 @@ pub struct Scored {
 
 /// Decodes and measures every shot without a current cache entry.
 pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
+    let measured = missing(&job).into_iter().map(|(id, row)| (id, measure(row, faces))).collect();
+    finish(job, measured)
+}
+
+/// [`compute`] with one analyzer per worker, a photo each at a time, as the
+/// Swift engine's `CatalogTakeAuto` measures up to four at once.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [A]) -> Scored {
+    let queue = parking_lot::Mutex::new(missing(&job));
+    let measured = parking_lot::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for faces in analyzers.iter_mut() {
+            let (queue, measured) = (&queue, &measured);
+            // User-initiated QoS, as the Swift engine's request tasks: Vision
+            // schedules by the caller's QoS.
+            scope.spawn(move || {
+                crate::util::qos::interactive(|| loop {
+                    // Bound first: a guard in the `while let` scrutinee would be
+                    // held through the body and serialise the workers.
+                    let next = queue.lock().pop();
+                    let Some((id, row)) = next else { break };
+                    let value = measure(row, faces);
+                    measured.lock().push((id, value));
+                });
+            });
+        }
+    });
+    finish(job, measured.into_inner())
+}
+
+/// Primary photos without cached signals, in shot order.
+fn missing(job: &ScoreJob) -> Vec<(i64, &FileRow)> {
+    let mut rows: Vec<(i64, &FileRow)> = job
+        .shots
+        .iter()
+        .filter(|shot| !job.cached.contains_key(&shot.primary_file_id))
+        .filter_map(|shot| job.rows.get(&shot.primary_file_id).map(|row| (shot.primary_file_id, row)))
+        .collect();
+    rows.reverse();
+    rows
+}
+
+fn measure(row: &FileRow, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
+    if row.kind == "video" {
+        video_signals(Path::new(&row.path)).map(|s| (s, true))
+    } else {
+        photo_signals(Path::new(&row.path), faces)
+    }
+}
+
+fn finish(job: ScoreJob, mut measured: Vec<(i64, Option<(Signals, bool)>)>) -> Scored {
+    measured.sort_by_key(|(id, _)| *id);
     let mut signals: HashMap<i64, Signals> = job.cached;
     let mut fresh = Vec::new();
-    for shot in &job.shots {
-        if signals.contains_key(&shot.primary_file_id) {
-            continue;
+    for (id, value) in measured {
+        let Some((value, complete)) = value else { continue };
+        if complete
+            && let Some(row) = job.rows.get(&id)
+            && let Ok(json) = serde_json::to_string(&value)
+        {
+            fresh.push((id, row.revision.clone(), json));
         }
-        let Some(row) = job.rows.get(&shot.primary_file_id) else { continue };
-        let measured = if row.kind == "video" {
-            video_signals(Path::new(&row.path)).map(|s| (s, true))
-        } else {
-            image_signals(Path::new(&row.path), faces)
-        };
-        if let Some((value, complete)) = measured {
-            if complete
-                && let Ok(json) = serde_json::to_string(&value) {
-                    fresh.push((shot.primary_file_id, row.revision.clone(), json));
-                }
-            signals.insert(shot.primary_file_id, value);
-        }
+        signals.insert(id, value);
     }
     let scored = take_scoring::score(
         &job.shots
@@ -505,29 +591,63 @@ pub fn store(conn: &Connection, scored: &Scored) -> Result<()> {
     Ok(())
 }
 
+/// A photo's take signals: on the Mac the Swift engine's decodes and Vision
+/// (`apple::faces::take_image_signals`), elsewhere the shared decoder.
+fn photo_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        crate::apple::faces::take_image_signals(path, faces)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        image_signals(path, faces)
+    }
+}
+
+/// The first pass's faces and people; `None` when the analyzer could not run
+/// (the result is then used once, not cached).
+pub(crate) fn first_pass(
+    faces: &mut dyn TakeFaceAnalyzer,
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    detail: Option<&mut Detail>,
+) -> Option<(Vec<Face>, Option<Vec<Box2>>)> {
+    faces.analyze(rgb, width, height, detail)
+}
+
+/// The tiles of a wide frame (`take_scoring::tiles` of the `ww` × `wh` decode),
+/// placed back on the frame; `None` when the analyzer could not run on one.
+pub(crate) fn tiled_faces(faces: &mut dyn TakeFaceAnalyzer, wide: &[u8], ww: u32, wh: u32) -> Option<Vec<Face>> {
+    let mut tiled = Vec::new();
+    for tile in take_scoring::tiles(ww as usize, wh as usize) {
+        let crop = crop_rgb(wide, ww as usize, &tile);
+        let found_in_tile = faces.faces(&crop, tile.width as u32, tile.height as u32, None)?;
+        tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
+    }
+    Some(tiled)
+}
+
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 fn image_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
     let (source, sw, sh) = crate::pipeline::tagging::decode_image_sync(path, None).ok()?;
     let (rgb, w, h) = fit_from(&source, sw, sh, take_scoring::ANALYSIS_LONG_SIDE);
     let luma = Luma::from_rgb(&rgb, w as usize, h as usize);
     let mut detail = (sw.max(sh) > take_scoring::ANALYSIS_LONG_SIDE).then(|| Detail::new(&source, sw, sh));
-    let Some(found) = faces.faces(&rgb, w, h, detail.as_mut()) else {
+    let Some((found, people)) = first_pass(faces, &rgb, w, h, detail.as_mut()) else {
         return Some((take_scoring::signals(&luma, vec![], None::<Vec<Box2>>), false));
     };
-    if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, None) {
-        return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), true));
+    if !faces.detects() || !take_scoring::wants_tiles(sw.max(sh), w as usize, h as usize, &found, people.as_deref()) {
+        return Some((take_scoring::signals(&luma, found, people), true));
     }
     let (wide, ww, wh) = fit_from(&source, sw, sh, take_scoring::TILE_LONG_SIDE);
+    drop(detail);
     drop(source);
-    let mut tiled = Vec::new();
-    for tile in take_scoring::tiles(ww as usize, wh as usize) {
-        let crop = crop_rgb(&wide, ww as usize, &tile);
-        let Some(found_in_tile) = faces.faces(&crop, tile.width as u32, tile.height as u32, None) else {
-            return Some((take_scoring::signals(&luma, found, None::<Vec<Box2>>), false));
-        };
-        tiled.extend(found_in_tile.iter().map(|face| take_scoring::placing(face, &tile, ww as usize, wh as usize)));
-    }
+    let Some(tiled) = tiled_faces(faces, &wide, ww, wh) else {
+        return Some((take_scoring::signals(&luma, found, people), false));
+    };
     let merged = take_scoring::merge_faces(&found, &tiled);
-    Some((take_scoring::signals_at(&luma, merged, None::<Vec<Box2>>, Some(ww.max(wh) as usize)), true))
+    Some((take_scoring::signals_at(&luma, merged, people, Some(ww.max(wh) as usize)), true))
 }
 
 fn fit_from(rgb: &[u8], w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
@@ -539,7 +659,7 @@ fn fit_from(rgb: &[u8], w: u32, h: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
     (crate::pipeline::tagging::resize_rgb_quality(rgb, w as usize, h as usize, nw as usize, nh as usize), nw, nh)
 }
 
-fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> Vec<u8> {
+pub(crate) fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> Vec<u8> {
     let mut out = Vec::with_capacity(tile.width * tile.height * 3);
     for row in tile.y..tile.y + tile.height {
         let start = (row * width + tile.x) * 3;
@@ -778,6 +898,69 @@ mod tests {
         conn.execute("UPDATE files SET size_bytes=101 WHERE id=1", []).unwrap();
         let job = prepare(&conn, &[1, 2], faces.id()).unwrap();
         assert_eq!(job.cached.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_deferred_detail_decodes_once_and_only_when_read() {
+        let calls = std::cell::Cell::new(0);
+        let unread = Detail::deferred(|| {
+            calls.set(calls.get() + 1);
+            Some((vec![0; 12], 2, 2))
+        });
+        assert!(unread.into_loaded().is_none());
+        assert_eq!(calls.get(), 0, "never read, never decoded");
+        let mut read = Detail::deferred(|| {
+            calls.set(calls.get() + 1);
+            Some((vec![7; 12], 2, 2))
+        });
+        assert_eq!(read.load().map(|(_, w, h)| (w, h)), Some((2, 2)));
+        assert_eq!(read.load().map(|(rgb, _, _)| rgb[0]), Some(7));
+        assert_eq!(calls.get(), 1, "decoded once");
+        assert_eq!(read.into_loaded().map(|(rgb, _, _)| rgb.len()), Some(12), "kept for the tiles");
+        let source = [1u8; 12];
+        assert_eq!(Detail::new(&source, 2, 2).load().map(|(rgb, _, _)| rgb[0]), Some(1));
+    }
+
+    #[test]
+    fn workers_measure_photos_at_the_same_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct Slow {
+            running: Arc<AtomicUsize>,
+            most: Arc<AtomicUsize>,
+        }
+        impl TakeFaceAnalyzer for Slow {
+            fn id(&self) -> &'static str {
+                "slow"
+            }
+            fn faces(&mut self, _: &[u8], _: u32, _: u32, _: Option<&mut Detail>) -> Option<Vec<Face>> {
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                self.running.fetch_sub(1, Ordering::SeqCst);
+                Some(vec![])
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-takes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for id in 1i64..=4 {
+            let path = dir.join(format!("shot{id}.png"));
+            image::GrayImage::from_fn(64, 48, |x, y| image::Luma([((x * 7 + y * 3 + id as u32 * 40) % 255) as u8])).save(&path).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,100,?3,?3,0,'image','png')",
+                params![id, path.to_string_lossy(), id * 1000],
+            )
+            .unwrap();
+        }
+        let (running, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut workers: Vec<Slow> = (0..2).map(|_| Slow { running: running.clone(), most: most.clone() }).collect();
+        let job = prepare(&conn, &[1, 2, 3, 4], "slow").unwrap();
+        let scored = compute_with(job, &mut workers);
+        assert_eq!(scored.qualities.len(), 4);
+        assert_eq!(scored.fresh.len(), 4);
+        assert_eq!(most.load(Ordering::SeqCst), 2, "both workers measure at once");
         std::fs::remove_dir_all(dir).ok();
     }
 }

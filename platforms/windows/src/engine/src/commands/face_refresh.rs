@@ -27,6 +27,7 @@ pub const PORTABLE_PROCESSING: &str = "rust-align112-v1";
 pub const MAC_PROCESSING: &str = "macos-landmark-overlap-v3-orientation";
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub const MAC_BBOX_PROCESSING: &str = "macos-bbox-crop-v3-orientation";
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 const REPORT_ONLY: &str = "Updating faces needs the Mac face pipeline, which this engine doesn't run yet. People and names don't change.";
 const BATCH: usize = 64;
 const NO_MODEL: &str = "Install the face recognition model in Settings, then update faces again.";
@@ -69,10 +70,10 @@ pub(crate) fn processing() -> &'static str {
     }
 }
 
-/// Whether this engine can compute vectors in `processing()`. The Mac namespace
-/// needs Vision landmarks, so the app-hosted engine only reports the backlog.
+/// Whether this engine can compute vectors in `processing()`: the portable
+/// pipeline, or the app-hosted engine with the Vision adapters (`apple::faces`).
 pub(crate) fn refresh_supported() -> bool {
-    processing() == PORTABLE_PROCESSING
+    processing() == PORTABLE_PROCESSING || cfg!(all(target_os = "macos", feature = "apple-adapters"))
 }
 
 /// The installed SFace weights' identity, cached by path, size and mtime.
@@ -270,6 +271,11 @@ pub(crate) fn roots(conn: &Connection) -> rusqlite::Result<Vec<PathBuf>> {
 pub(crate) trait Backend: Send {
     fn model(&self) -> &str;
     fn embed(&mut self, path: &Path, boxes: &[String]) -> Vec<std::result::Result<Vec<f32>, &'static str>>;
+    /// Crop JPEGs (`face_crops/<id>.jpg`) for the boxes of the last `embed`, in
+    /// order, for backends that make them.
+    fn take_crops(&mut self) -> Vec<Option<Vec<u8>>> {
+        Vec::new()
+    }
 }
 
 pub(crate) struct Pending {
@@ -324,7 +330,14 @@ fn stat_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
 }
 
 /// Runs the backend outside the database lock, one photo at a time.
+#[cfg(test)]
 pub(crate) fn embed_batch(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> Vec<(i64, Outcome)> {
+    embed_batch_with_crops(batch, roots, backend).0
+}
+
+/// [`embed_batch`] plus the crop JPEGs the backend made, by face.
+pub(crate) fn embed_batch_with_crops(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> (Vec<(i64, Outcome)>, Vec<(i64, Vec<u8>)>) {
+    let mut crops = Vec::new();
     let mut by_path: BTreeMap<&str, Vec<&Pending>> = BTreeMap::new();
     for item in batch {
         by_path.entry(item.path.as_str()).or_default().push(item);
@@ -346,6 +359,11 @@ pub(crate) fn embed_batch(batch: &[Pending], roots: &[PathBuf], backend: &mut dy
         }
         let boxes: Vec<String> = items.iter().map(|item| item.bbox.clone()).collect();
         let results = backend.embed(path, &boxes);
+        for (item, jpeg) in items.iter().zip(backend.take_crops()) {
+            if let Some(jpeg) = jpeg {
+                crops.push((item.face, jpeg));
+            }
+        }
         for (index, item) in items.iter().enumerate() {
             let outcome = match results.get(index) {
                 Some(Ok(vector)) => Outcome::Embedded(vector.clone()),
@@ -355,7 +373,7 @@ pub(crate) fn embed_batch(batch: &[Pending], roots: &[PathBuf], backend: &mut dy
             out.push((item.face, outcome));
         }
     }
-    out
+    (out, crops)
 }
 
 fn valid(vector: &[f32]) -> bool {
@@ -365,11 +383,30 @@ fn valid(vector: &[f32]) -> bool {
 
 /// Stores one batch's outcomes. A vector is saved only while the face, its box
 /// and its photo's catalog size and time are unchanged.
-pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &[Pending], outcomes: &[(i64, Outcome)], at: f64) -> rusqlite::Result<()> {
+pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &[Pending], outcomes: &[(i64, Outcome)], at: f64) -> rusqlite::Result<Vec<i64>> {
     let tx = conn.unchecked_transaction()?;
+    let mut saved = Vec::new();
     for (face, outcome) in outcomes {
         let Some(item) = batch.iter().find(|item| item.face == *face) else { continue };
         let (state, reason) = match outcome {
+            // The Mac face space saves through `FaceAnalysisCache.persist`, as
+            // the Swift engine's `FaceRefreshJob` does.
+            Outcome::Embedded(vector) if processing.starts_with(super::face_clustering_mac::MAC_PREFIX) => {
+                let input = super::face_extract_mac::Input {
+                    id: item.face,
+                    file_id: item.file,
+                    bbox: item.bbox.clone(),
+                    path: item.path.clone(),
+                    size: item.size,
+                    modified: item.modified,
+                };
+                if processing == self::processing() && super::face_extract_mac::persist(&tx, &input, vector, model, processing, at)? {
+                    saved.push(item.face);
+                    ("done", None)
+                } else {
+                    ("failed", Some("source_changed"))
+                }
+            }
             Outcome::Embedded(vector) if valid(vector) => {
                 let revision: Option<String> = tx
                     .query_row(
@@ -386,6 +423,7 @@ pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &
                             "UPDATE face_prints SET arcface_embedding=?1,embedding_model=?2,processing_version=?3,source_revision=?4 WHERE id=?5 AND file_id=?6 AND bbox=?7",
                             params![blob, model, processing, revision, item.face, item.file, item.bbox],
                         )?;
+                        saved.push(item.face);
                         ("done", None)
                     }
                     None => ("failed", Some("source_changed")),
@@ -409,7 +447,8 @@ pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &
     )?;
     let progress = if total > 0 { (total - pending) as f64 / total as f64 } else { 1.0 };
     tx.execute("UPDATE catalog_jobs SET progress=?1,updated_at=?2 WHERE id=?3 AND state='running'", params![progress, at, JOB_ID])?;
-    tx.commit()
+    tx.commit()?;
+    Ok(saved)
 }
 
 fn require_running(conn: &Connection) -> Result<(String, String)> {
@@ -481,7 +520,7 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     publish(sink, database).await;
     let outcome = async {
         let mut backend: Box<dyn Backend> =
-            tokio::task::spawn_blocking(|| OnnxBackend::load().map(|backend| Box::new(backend) as Box<dyn Backend>))
+            tokio::task::spawn_blocking(load_backend)
                 .await
                 .map_err(|error| anyhow::anyhow!(error))??;
         let mut published = Instant::now();
@@ -498,14 +537,15 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
             if batch.is_empty() {
                 return Ok(());
             }
-            let (outcomes, returned, batch) = tokio::task::spawn_blocking(move || {
-                let outcomes = embed_batch(&batch, &roots, backend.as_mut());
-                (outcomes, backend, batch)
+            let (outcomes, crops, returned, batch) = tokio::task::spawn_blocking(move || {
+                let (outcomes, crops) = embed_batch_with_crops(&batch, &roots, backend.as_mut());
+                (outcomes, crops, backend, batch)
             })
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
             backend = returned;
-            super::timeline::with_db(database, move |conn| Ok(persist(conn, &model, &processing, &batch, &outcomes, now())?)).await?;
+            let saved = super::timeline::with_db(database, move |conn| Ok(persist(conn, &model, &processing, &batch, &outcomes, now())?)).await?;
+            save_crops(&crops, &saved);
             if published.elapsed() >= Duration::from_millis(500) {
                 publish(sink, database).await;
                 published = Instant::now();
@@ -535,7 +575,25 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     publish(sink, database).await;
 }
 
+/// Writes the crop JPEGs of the faces whose vectors were saved.
+fn save_crops(crops: &[(i64, Vec<u8>)], saved: &[i64]) {
+    if crops.is_empty() {
+        return;
+    }
+    let Ok(dir) = crate::paths::faces_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    for (face, jpeg) in crops.iter().filter(|(face, _)| saved.contains(face)) {
+        let temporary = dir.join(format!(".{face}.jpg.tmp"));
+        if std::fs::write(&temporary, jpeg).is_ok() && std::fs::rename(&temporary, dir.join(format!("{face}.jpg"))).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+}
+
 /// Pixel box, top-left origin, on the upright decoded image.
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) fn pixel_box(bbox: &str, width: u32, height: u32) -> std::result::Result<[f32; 4], &'static str> {
     let text = bbox.trim();
     if text.starts_with('{') {
@@ -558,6 +616,7 @@ pub(crate) fn pixel_box(bbox: &str, width: u32, height: u32) -> std::result::Res
     Ok([x * width, (1.0 - y - h) * height, w * width, h * height])
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 fn overlap(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let x1 = a[0].max(b[0]);
     let y1 = a[1].max(b[1]);
@@ -568,12 +627,53 @@ fn overlap(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     if union > 0.0 { inter / union } else { 0.0 }
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 struct OnnxBackend {
     yunet: crate::models::yunet::YuNet,
     sface: crate::models::sface::SFace,
 }
 
+/// The app-hosted engine's backend: the Mac pipeline in `apple::faces`.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+struct MacBackend {
+    sface: Arc<crate::apple::faces::MacSFace>,
+    crops: Vec<Option<Vec<u8>>>,
+}
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl Backend for MacBackend {
+    fn model(&self) -> &str {
+        self.sface.model_version()
+    }
+
+    fn embed(&mut self, path: &Path, boxes: &[String]) -> Vec<std::result::Result<Vec<f32>, &'static str>> {
+        let (faces, _) = crate::apple::faces::extract_file(path, boxes, &self.sface);
+        self.crops = faces.iter().map(|face| face.as_ref().and_then(|face| face.jpeg.clone())).collect();
+        faces.into_iter().map(|face| face.map(|face| face.embedding).ok_or("no_embedding")).collect()
+    }
+
+    fn take_crops(&mut self) -> Vec<Option<Vec<u8>>> {
+        std::mem::take(&mut self.crops)
+    }
+}
+
+fn load_backend() -> Result<Box<dyn Backend>> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        match crate::apple::faces::shared_sface() {
+            None => bail!(NO_MODEL),
+            Some(Err(error)) => Err(error.context("The face recognition model is installed but failed to load.")),
+            Some(Ok(sface)) => Ok(Box::new(MacBackend { sface, crops: Vec::new() })),
+        }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        OnnxBackend::load().map(|backend| Box::new(backend) as Box<dyn Backend>)
+    }
+}
+
 impl OnnxBackend {
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
     fn load() -> Result<Self> {
         if !refresh_supported() {
             if current_model().is_none() {

@@ -40,6 +40,7 @@ pub mod runtime;
 pub mod scene_vocab;
 pub mod search_strength;
 pub mod face_align;
+pub mod face_landmark_match;
 pub mod face_geometry;
 pub mod face_mesh;
 pub mod sface;

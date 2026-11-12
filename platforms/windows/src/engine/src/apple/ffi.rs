@@ -55,6 +55,74 @@ unsafe extern "C" {
         count: usize,
         out_error: *mut *mut c_char,
     ) -> i32;
+    // --- Stage 6: faces ---
+    /// Decode a photo for face extraction (FaceClustering.loadCGImage) and,
+    /// with `landmarks`, run Vision's face landmarks on it. Returns an image
+    /// handle (0 on failure) and `out_json` (free it): width, height,
+    /// orientation, faces [{bounds: 4 f64 bit patterns, points: 10 f32 bit
+    /// patterns}].
+    pub fn fileid_apple_faces_open(path: *const c_char, max_pixel_size: u32, landmarks: bool, out_json: *mut *mut c_char) -> u64;
+    /// The open image as tightly packed device-RGB RGBA8 (free `out_rgba`).
+    pub fn fileid_apple_faces_pixels(
+        image: u64,
+        out_rgba: *mut *mut u8,
+        out_length: *mut usize,
+        out_width: *mut u32,
+        out_height: *mut u32,
+    ) -> bool;
+    /// An integral top-left pixel rect drawn at 112×112 into `out_rgba112`
+    /// (112·112·4 bytes) and its JPEG in `out_jpeg` (free it; may stay null).
+    pub fn fileid_apple_faces_crop(
+        image: u64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+        out_rgba112: *mut u8,
+        out_jpeg: *mut *mut u8,
+        out_jpeg_length: *mut usize,
+    ) -> bool;
+    /// JPEG (quality 0.85) of tightly packed RGBA8; free it; null on failure.
+    pub fn fileid_apple_faces_jpeg(rgba: *const u8, width: u32, height: u32, out_length: *mut usize) -> *mut u8;
+    /// Release an image handle.
+    pub fn fileid_apple_faces_close(image: u64);
+    /// Best Takes' photo as packed sRGB RGB8: kind 0 fitted analysis image,
+    /// 1 detail image, 2 tile source (free `out_rgb`).
+    pub fn fileid_apple_take_decode(
+        path: *const c_char,
+        kind: u32,
+        long_side: u32,
+        out_rgb: *mut *mut u8,
+        out_length: *mut usize,
+        out_width: *mut u32,
+        out_height: *mut u32,
+        out_source_long_side: *mut u32,
+    ) -> bool;
+    /// Vision faces (landmarks, capture quality, Face Mesh inputs) and, with
+    /// `people`, human rectangles over packed sRGB RGB8, as JSON (free it);
+    /// `out_observations` keeps found faces for `fileid_apple_take_mesh`.
+    pub fn fileid_apple_take_faces(rgb: *const u8, width: u32, height: u32, people: bool, out_observations: *mut u64) -> *mut c_char;
+    /// Face Mesh inputs of kept faces for another decode size, as JSON (free it).
+    pub fn fileid_apple_take_mesh(observations: u64, width: u32, height: u32) -> *mut c_char;
+    /// Release kept faces.
+    pub fn fileid_apple_take_release(observations: u64);
+    /// Best Takes' tile source kept as decoded (detail or bounded decode); 0 on failure.
+    pub fn fileid_apple_take_tiles_open(path: *const c_char, long_side: u32, out_width: *mut u32, out_height: *mut u32) -> u64;
+    /// `fileid_apple_take_faces` (no people) on a rect of a tile source, as JSON
+    /// (free it); with `out_rgb`, the crop's packed sRGB RGB8 for Face Mesh.
+    pub fn fileid_apple_take_tile_faces(
+        tiles: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        out_rgb: *mut *mut u8,
+        out_length: *mut usize,
+        out_observations: *mut u64,
+    ) -> *mut c_char;
+    /// Release a tile source.
+    pub fn fileid_apple_take_tiles_close(tiles: u64);
+    // --- end Stage 6 ---
 
     // --- Stage 8: timeline, speech and video tools ---
     // `cancel` points at a caller-owned `AtomicBool` (or is null); replies are
