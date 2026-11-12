@@ -27,6 +27,7 @@ mod restructure_map;
 mod restructure_map_layout;
 mod restructure_model;
 pub mod settings;
+mod settings_panels;
 pub mod takes;
 mod takes_groups;
 mod takes_groups_model;

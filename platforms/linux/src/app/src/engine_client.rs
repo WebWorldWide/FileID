@@ -422,6 +422,46 @@ impl EngineClient {
         }
     }
 
+    /// Settings ▸ Advanced ▸ Stop Engine: close stdin so the engine exits and
+    /// stays down until `restart`.
+    pub fn stop_engine(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.ready = false;
+        self.pending_health = None;
+        self.stdin.take();
+    }
+
+    /// Settings ▸ Advanced ▸ Restart Engine. A running engine is asked to
+    /// exit and the normal respawn path brings it back; a stopped or dead one
+    /// is spawned right away.
+    pub fn restart(this: &Rc<RefCell<Self>>) {
+        let spawn_now = {
+            let mut client = this.borrow_mut();
+            client.shutting_down.store(false, Ordering::Release);
+            client.respawn_budget = RespawnBudget::default();
+            client.ready = false;
+            client.pending_health = None;
+            client.stdin.take();
+            match client.child.as_mut().map(Child::try_wait) {
+                Some(Ok(None)) => false,
+                _ => {
+                    client.child = None;
+                    true
+                }
+            }
+        };
+        if spawn_now {
+            spawn_process(this);
+        }
+    }
+
+    /// Factory reset: stop the engine for good and hand back its process so
+    /// the caller can wait for it to release the database before deleting.
+    pub fn take_engine_for_reset(&mut self) -> Option<Child> {
+        self.stop_engine();
+        self.child.take()
+    }
+
     /// Boot the engine and thumbnail workers and start the main-context
     /// fan-out pump, which also drives health probes and respawns.
     pub fn start(this: &Rc<RefCell<Self>>) {
@@ -664,7 +704,12 @@ fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
             return;
         }
     };
-    match fileid_engine::client::spawn(&exe, &[], Stdio::piped()) {
+    let granularity = crate::app_settings::restructure_granularity();
+    let mut envs: Vec<(&str, &std::ffi::OsStr)> = Vec::new();
+    if granularity != "normal" {
+        envs.push(("FILEID_RESTRUCTURE_GRANULARITY", std::ffi::OsStr::new(&granularity)));
+    }
+    match fileid_engine::client::spawn(&exe, &envs, Stdio::piped()) {
         Ok(mut child) => {
             let stdin = child.stdin.take().expect("piped stdin present");
             let stdout = child.stdout.take().expect("piped stdout present");

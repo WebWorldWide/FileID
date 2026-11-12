@@ -326,7 +326,7 @@ pub(super) fn unavailable(action: &ChatAction, plan: Option<&PlanSummary>, descr
         "describeFiles" if !describe_runtime => Some(
             "Describing needs the llama.cpp runtime, which isn't in this installation.",
         ),
-        "changeSetting" => Some(SETTING_UNAVAILABLE),
+        "changeSetting" if action.setting.as_deref() != Some("backgroundMotion") => Some(SETTING_UNAVAILABLE),
         _ => None,
     }
 }
@@ -706,6 +706,8 @@ mod tests {
         setting.setting = Some("backgroundMotion".into());
         setting.value = Some(false);
         assert!(runnable(&setting));
+        assert_eq!(unavailable(&setting, None, true), None);
+        setting.setting = Some("cleanupAutoTag".into());
         assert_eq!(unavailable(&setting, None, true), Some(SETTING_UNAVAILABLE));
         assert!(unavailable(&action("describeFiles"), None, false).is_some());
         assert_eq!(unavailable(&action("describeFiles"), None, true), None);

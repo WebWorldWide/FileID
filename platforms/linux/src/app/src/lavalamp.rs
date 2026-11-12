@@ -13,7 +13,19 @@
 // frame is trivial GPU/CPU work.
 
 use gtk::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Settings ▸ Appearance ▸ Lava lamp: Full (true) or Off (flat base colour).
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
+
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
 
 /// (colour, speedX, speedY, driftX, driftY, radiusFrac, peakAlpha) for one blob.
 type Blob = ((f64, f64, f64), f64, f64, f64, f64, f64, f64);
@@ -29,6 +41,7 @@ pub fn build() -> gtk::DrawingArea {
     area.set_can_target(false);
     area.set_can_focus(false);
 
+    set_enabled(crate::app_settings::lava_lamp_on());
     let start = Instant::now();
 
     area.set_draw_func(move |_area, cr, width, height| {
@@ -40,6 +53,9 @@ pub fn build() -> gtk::DrawingArea {
         let (br, bg, bb) = crate::theme::rgb::BASE;
         cr.set_source_rgb(br, bg, bb);
         let _ = cr.paint();
+        if !is_enabled() {
+            return;
+        }
 
         // Each blob: (colour, speedX, speedY, driftX, driftY, radiusFrac, peakAlpha).
         // Speeds/drifts/alphas match the macOS + Windows recipe 1:1 (gold 0.40 /
@@ -84,9 +100,13 @@ pub fn build() -> gtk::DrawingArea {
     // Disabled animations (reduce motion) or high contrast leave one static
     // frame; turning animations back on redraws at once.
     let last_draw = std::cell::Cell::new(0i64);
+    let was_enabled = std::cell::Cell::new(is_enabled());
     area.add_tick_callback(move |area, clock| {
         let now = clock.frame_time();
-        if motion_allowed() && now - last_draw.get() >= 33_000 {
+        if was_enabled.replace(is_enabled()) != is_enabled() {
+            area.queue_draw();
+        }
+        if is_enabled() && motion_allowed() && now - last_draw.get() >= 33_000 {
             last_draw.set(now);
             area.queue_draw();
         }
@@ -102,6 +122,11 @@ pub fn build() -> gtk::DrawingArea {
     }
 
     area
+}
+
+/// The system "Reduce Motion" preference (`gtk-enable-animations` off).
+pub fn reduce_motion() -> bool {
+    !gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
 }
 
 fn motion_allowed() -> bool {

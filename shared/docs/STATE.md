@@ -16,6 +16,14 @@
 - **Engine:** a CUDA/OpenVINO pack whose `onnxruntime.dll` joins the group is treated as absent and never pinned (`runtime::pack_runtime_allowed`), so NVIDIA boxes with Microsoft's GPU zip stay on DirectML. `ORT_DISABLE_TELEMETRY=1` and telemetry-off environments were already in place.
 - Checks (Mac): engine fmt, clippy (`-D warnings`) and 1,248 lib tests (2 new) pass; privacy-gate tests 15; workflow pin and permission gates, runtime egress (both modes) pass. Windows cross-check is not possible here (`ring` needs a Windows C toolchain). The source build and packaging changes are untested until Windows CI runs. Digest refreshes: `server.rs`, `models/runtime.rs` (no URL, socket, HTTP client or process launch added).
 - Open (NEXT): first CI build, hardware check (DirectML bound, files/s vs the old DLL, Diagnostic Data Viewer), owner decision on DirectML.dll, a telemetry-free CUDA runtime.
+## 2026-11-12 — GTK Settings parity (agent `parity-gtk-settings`)
+
+- **Settings ▸ Appearance:** lava lamp Full/Off (`lavaMode`), Text size Small/Default/Large/Larger (`textSize`, scales page text only; the title bar and sidebar keep their size), and a live Reduce Motion note that follows `gtk-enable-animations` (the lamp already paused on it). Chat's `backgroundMotion` setting action now works, with Undo.
+- **Organize Folders:** Looser/Balanced/Tighter (`restructureGranularity`); `engine_client.rs` passes `FILEID_RESTRUCTURE_GRANULARITY` at engine spawn when it is not Balanced.
+- **Folders not to describe:** editor card on the existing `deepAnalyzeExcludedFolders` store (`deep_scope.rs` already sends `excludedFolders`).
+- **Advanced:** engine status, Restart and Stop Engine, storage sizes (database, models, thumbnails, face crops, logs), recent scans, open logs folder, Factory Reset & Quit with confirmation (stops the engine, erases the data folder except the Models and runtime folders, then exits).
+- **Photo tags (RAM++):** the shared engine registers `ram_plus` and uses it in tagging with no platform gate, so the card is added like the other model rows.
+- Digest refreshes: GTK `engine_client.rs` and `tabs/settings.rs` (no URL, socket, HTTP client or process launch added). Not run on a Linux display: the layout, the text-size scaling and the logs launcher need a look on Linux.
 
 ## 2026-11-10 — Convergence Stage 3: Restructure under the Rust engine on the Mac
 
