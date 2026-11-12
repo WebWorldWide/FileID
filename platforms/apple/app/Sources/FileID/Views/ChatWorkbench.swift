@@ -10,8 +10,10 @@ struct ChatWorkbench: View {
     @AppStorage("chatConversationID") private var conversationID = ""
     @AppStorage("chatDraft") private var input = ""
     @AppStorage("chatUseModel") private var useModel = true
-    @AppStorage("chatModelKind") private var chatModelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
+    /// Empty means "follow the Describe Files model"; set only when the user picks one in Chat.
+    @AppStorage("chatModelKind") private var chatModelKind = ""
     @State private var modelsPresented = false
+    @State private var confirmClear = false
     @State private var messages: [ChatMessage] = []
     @State private var hits: [CatalogHit] = []
     @State private var actions: [ChatAction] = []
@@ -29,7 +31,10 @@ struct ChatWorkbench: View {
     @State private var scopedRequest = ""
 
     private var isPage: Bool { onClose == nil }
-    private var modelName: String { AIModelKind(rawValue: chatModelKind)?.displayName ?? "Local model" }
+    private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
+    private var followsDescribe: Bool { chatModelKind.isEmpty || chatModelKind == describeKind }
+    private var activeModelKind: String { followsDescribe ? describeKind : chatModelKind }
+    private var modelName: String { AIModelKind(rawValue: activeModelKind)?.displayName ?? "Local model" }
     private static let lookingIn = ["Names", "Tags", "Descriptions", "Chapters", "Text in files"]
 
     var body: some View {
@@ -70,7 +75,13 @@ struct ChatWorkbench: View {
             }
         }
         .sheet(isPresented: $modelsPresented) {
-            ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: chatModelKind)) { chatModelKind = $0.rawValue }
+            ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: activeModelKind)) { chatModelKind = $0.rawValue }
+        }
+        .confirmationDialog("Clear this conversation?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear conversation", role: .destructive) { control("clear") }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The questions and answers here are deleted and can't be brought back. Your files are not touched.")
         }
     }
 
@@ -127,9 +138,9 @@ struct ChatWorkbench: View {
                 .accessibilityLabel("Looking in names, tags, descriptions, chapters and text in files")
             }
             Spacer(minLength: 8)
-            Button("Clear") { control("clear") }
+            Button("Clear") { confirmClear = true }
                 .buttonStyle(.dsGhost)
-                .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted.")
+                .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted, after you confirm.")
                 .disabled(messages.isEmpty && hits.isEmpty)
                 // The ghost style insets its label 6 pt; cancel it so the text meets the page edge.
                 .padding(.trailing, onClose == nil ? -6 : 0)
@@ -232,12 +243,21 @@ struct ChatWorkbench: View {
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
                 Button { modelsPresented = true } label: {
-                    Label(modelName, systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
+                    Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
                 }
                 .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
                 .disabled(!useModel)
-                .help(useModel ? "Choose the local AI model that writes answers" : "Turn on Summarize with local AI to choose a model")
-                .accessibilityLabel("Chat model: \(modelName)")
+                .help(useModel ? "Choose the AI that writes answers. Now using \(modelName)." : "Turn on Summarize with local AI to choose a model")
+                .accessibilityLabel("Choose the AI model for Chat")
+                if useModel {
+                    MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
+                        .help(modelName)
+                    if !followsDescribe {
+                        Button("Use the same one") { chatModelKind = "" }
+                            .buttonStyle(.dsGhost)
+                            .help("Go back to the AI chosen in Describe Files")
+                    }
+                }
                 Spacer(minLength: 0)
             }
             if !busy && !message.isEmpty && message != messages.last(where: { $0.role != "user" })?.text {
@@ -370,7 +390,7 @@ struct ChatWorkbench: View {
             let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
             guard activeRequest == requestID else { return }
             let request = ChatRequest(requestID: requestID, conversationID: conversationID, action: "send", text: text, useModel: useModel,
-                                      modelKind: chatModelKind, context: handoff.context, queryVector: vector,
+                                      modelKind: activeModelKind, context: handoff.context, queryVector: vector,
                                       embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, scopeFileIDs: scope)
             if engine.send(.chatRequest(request: request)) { input = ""; openedSource = nil }
             else { busy = false; message = "FileID is still getting ready. Try again in a moment." }
@@ -418,7 +438,7 @@ private func sourceMeta(_ hit: CatalogHit) -> String {
     var parts: [String] = []
     if let seconds = hit.startSeconds { parts.append(DurationText.clock(seconds)) }
     if let page = hit.page { parts.append("Page \(page)") }
-    if hit.kind == "sampledFrame" { parts.append("Video frame, not checked") }
+    if hit.kind == "sampledFrame" { parts.append("From a video frame (not reviewed)") }
     return parts.joined(separator: " · ")
 }
 

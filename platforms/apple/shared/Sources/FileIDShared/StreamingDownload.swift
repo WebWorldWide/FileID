@@ -204,9 +204,22 @@ public func parallelStreamingDownload(
     guard TLSPinning.allowsExternalRequest(to: remote) else {
         throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
     }
+    // Stage parts in the destination's parent dir so the final concat
+    // file ends up on the same volume as `dest` — the final move is
+    // then an intra-volume rename instead of a multi-GB cross-volume
+    // copy from /tmp.
+    let stagingDir = dest.deletingLastPathComponent()
+        .appendingPathComponent(".fileid-staging", isDirectory: true)
+    let pid = ProcessInfo.processInfo.processIdentifier
+    // A pinned SHA-256 makes finished parts safe to keep after a network
+    // failure: the assembled file is hashed in full before it is trusted.
+    let resumeKey = expectedSHA256.flatMap { ResumableStaging.shared.claim($0) }
+    defer { if let resumeKey { ResumableStaging.shared.release(resumeKey) } }
+    let stagedBytes = resumeKey.map { stagedPartBytes(in: stagingDir, prefix: "\(pid)-\($0)-part-") } ?? 0
     // Parallel staging keeps every part plus the concat'd final on the
     // destination volume → peak transient use is ~2× the file.
-    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2)
+    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2,
+                           alreadyStaged: stagedBytes)
     let probeCapture = RedirectCapture()
     let probeSession = URLSession(configuration: streamingConfig(approxBytes: approxBytes),
                                   delegate: probeCapture, delegateQueue: nil)
@@ -220,6 +233,9 @@ public func parallelStreamingDownload(
         probeSession.invalidateAndCancel()
         if probeCapture.pinningRejected {
             throw StreamingDownloadError.pinningFailed
+        }
+        if probeCapture.connectivity.gaveUp {
+            throw StreamingDownloadError.underlying(URLError(.notConnectedToInternet))
         }
         throw StreamingDownloadError.underlying(error)
     }
@@ -246,7 +262,11 @@ public func parallelStreamingDownload(
         return
     }
 
-    let chunkCount = max(1, parts)
+    // `parts` connections run at once; the file is cut into more, smaller
+    // pieces so a dropped connection costs one piece, not a twelfth of the file.
+    let concurrency = max(1, parts)
+    let pieces = min(maxResumablePieces, (total + resumablePieceBytes - 1) / resumablePieceBytes)
+    let chunkCount = Int(max(1, min(total, max(Int64(concurrency), pieces))))
     let chunkSize = total / Int64(chunkCount)
     var ranges: [(start: Int64, end: Int64)] = []
     for i in 0..<chunkCount {
@@ -257,17 +277,16 @@ public func parallelStreamingDownload(
 
     let tracker = MultiPartProgressTracker(partCount: chunkCount, totalBytes: total)
     // pid prefix lets the next run's sweep prove the owner is dead.
-    let runID = "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)"
-    // Stage parts in the destination's parent dir so the final concat
-    // file ends up on the same volume as `dest` — the final move is
-    // then an intra-volume rename instead of a multi-GB cross-volume
-    // copy from /tmp.
-    let stagingDir = dest.deletingLastPathComponent()
-        .appendingPathComponent(".fileid-staging", isDirectory: true)
+    let runID = "\(pid)-\(UUID().uuidString)"
+    let partPrefix = resumeKey.map { "\(pid)-\($0)" } ?? runID
     try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
     sweepStaleStagingEntries(in: stagingDir)
+    let partSuffix = "-of-\(chunkCount)"
+    if resumeKey != nil {
+        removeStagedParts(in: stagingDir, prefix: "\(partPrefix)-part-", exceptSuffix: partSuffix)
+    }
     let partURLs: [URL] = (0..<chunkCount).map { i in
-        stagingDir.appendingPathComponent("\(runID)-part-\(i)")
+        stagingDir.appendingPathComponent("\(partPrefix)-part-\(i)\(partSuffix)")
     }
 
     func cleanupParts() {
@@ -279,19 +298,36 @@ public func parallelStreamingDownload(
 
     do {
         try await withThrowingTaskGroup(of: Void.self) { group in
-            for i in 0..<chunkCount {
-                let range = ranges[i]
-                let partURL = partURLs[i]
-                group.addTask {
-                    try await downloadRange(
-                        remote: resolvedURL, partURL: partURL,
-                        start: range.start, end: range.end,
-                        partIndex: i, tracker: tracker,
-                        approxBytes: approxBytes, onTick: onTick
-                    )
+            var next = 0
+            var running = 0
+            while next < chunkCount || running > 0 {
+                while running < concurrency, next < chunkCount {
+                    let i = next
+                    next += 1
+                    let range = ranges[i]
+                    let partURL = partURLs[i]
+                    let length = range.end - range.start + 1
+                    if resumeKey != nil, stagedFileSize(partURL) == length {
+                        tracker.update(part: i, written: length, bytesPerSec: 0)
+                        tracker.markComplete(part: i)
+                        continue
+                    }
+                    try? FileManager.default.removeItem(at: partURL)
+                    running += 1
+                    group.addTask {
+                        try await downloadRangeWithRetry(
+                            resolved: resolvedURL, canonical: remote, partURL: partURL,
+                            start: range.start, end: range.end,
+                            partIndex: i, tracker: tracker,
+                            approxBytes: approxBytes, onTick: onTick
+                        )
+                    }
+                }
+                if running > 0 {
+                    _ = try await group.next()
+                    running -= 1
                 }
             }
-            try await group.waitForAll()
         }
     } catch StreamingDownloadError.rangeNotSupported {
         cleanupParts()
@@ -303,7 +339,9 @@ public func parallelStreamingDownload(
                                     expectedSHA256: expectedSHA256, onTick: onTick)
         return
     } catch {
-        cleanupParts()
+        // Finished parts stay for the next attempt in this process only when
+        // the whole file will be re-hashed; a cancel gives the space back.
+        if resumeKey == nil || error is CancellationError || Task.isCancelled { cleanupParts() }
         throw error
     }
 
@@ -383,6 +421,117 @@ public func parallelStreamingDownload(
     onTick(DownloadTick(written: total, total: total,
                          bytesPerSecond: tracker.combinedBytesPerSec(),
                          etaSeconds: 0))
+}
+
+private let resumablePieceBytes: Int64 = 32 * 1024 * 1024
+private let maxResumablePieces: Int64 = 1024
+private let connectivityGraceSeconds: TimeInterval = 15
+
+/// One resumable staging set per pinned hash in this process: a second
+/// concurrent download of the same file gets nil and stages under a unique name.
+private final class ResumableStaging: @unchecked Sendable {
+    static let shared = ResumableStaging()
+    private let lock = NSLock()
+    private var active: Set<String> = []
+
+    func claim(_ sha256: String) -> String? {
+        let hex = sha256.lowercased()
+        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
+        let key = "r\(hex.prefix(24))"
+        lock.lock(); defer { lock.unlock() }
+        return active.insert(key).inserted ? key : nil
+    }
+
+    func release(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        active.remove(key)
+    }
+}
+
+func stagedFileSize(_ url: URL) -> Int64? {
+    ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value
+}
+
+func stagedPartBytes(in stagingDir: URL, prefix: String) -> Int64 {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: stagingDir.path)) ?? []
+    return names.filter { $0.hasPrefix(prefix) }
+        .reduce(0) { $0 + (stagedFileSize(stagingDir.appendingPathComponent($1)) ?? 0) }
+}
+
+func removeStagedParts(in stagingDir: URL, prefix: String, exceptSuffix: String) {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: stagingDir.path)) ?? []
+    for name in names where name.hasPrefix(prefix) && !name.hasSuffix(exceptSuffix) {
+        try? FileManager.default.removeItem(at: stagingDir.appendingPathComponent(name))
+    }
+}
+
+/// A dropped or stalled connection, or a busy server: worth another try.
+/// Offline is not — the connection already waited `connectivityGraceSeconds`.
+func isTransientDownloadFailure(_ error: Error) -> Bool {
+    switch error {
+    case StreamingDownloadError.http(let status):
+        return status == 408 || status == 429 || (500..<600).contains(status)
+    case StreamingDownloadError.underlying(let inner as URLError):
+        return [.networkConnectionLost, .timedOut, .cannotConnectToHost,
+                .cannotFindHost, .dnsLookupFailed].contains(inner.code)
+    default:
+        return false
+    }
+}
+
+private func downloadRangeWithRetry(
+    resolved: URL, canonical: URL, partURL: URL,
+    start: Int64, end: Int64,
+    partIndex: Int,
+    tracker: MultiPartProgressTracker,
+    approxBytes: Int64,
+    onTick: @escaping @Sendable (DownloadTick) -> Void
+) async throws {
+    let backoffSeconds: [UInt64] = [2, 6]
+    var url = resolved
+    var attempt = 0
+    while true {
+        do {
+            try await downloadRange(
+                remote: url, partURL: partURL, start: start, end: end,
+                partIndex: partIndex, tracker: tracker,
+                approxBytes: approxBytes, onTick: onTick)
+            return
+        } catch {
+            // A signed CDN link can expire mid-download; the canonical URL
+            // redirects to a fresh one.
+            var expiredLink = false
+            if case StreamingDownloadError.http(let status) = error {
+                expiredLink = (status == 401 || status == 403) && url != canonical
+            }
+            guard attempt < backoffSeconds.count, expiredLink || isTransientDownloadFailure(error) else { throw error }
+            if expiredLink { url = canonical }
+            try await Task.sleep(nanoseconds: backoffSeconds[attempt] * 1_000_000_000)
+            attempt += 1
+        }
+    }
+}
+
+/// `waitsForConnectivity` would otherwise sit silent for the whole resource
+/// timeout when the Mac is offline; give the connection a short grace period.
+private final class ConnectivityDeadline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var expired = false
+
+    var gaveUp: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return expired
+    }
+
+    func arm(_ task: URLSessionTask) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + connectivityGraceSeconds) {
+            guard task.state == .running, task.response == nil, task.countOfBytesReceived == 0 else { return }
+            self.lock.lock()
+            self.expired = true
+            self.lock.unlock()
+            task.cancel()
+        }
+    }
 }
 
 private func downloadRange(
@@ -496,9 +645,10 @@ func volumeFreeBytes(forItemAt url: URL,
 /// free space is between 1× and 2×. Skipped when `approxBytes <= 0` (size
 /// unknown) or when free space can't be read.
 func preflightDiskSpace(dest: URL, approxBytes: Int64, peakMultiplier: Int64 = 2,
+                        alreadyStaged: Int64 = 0,
                         read: (URL) -> VolumeCapacity = readVolumeCapacity) throws {
     guard approxBytes > 0 else { return }
-    let needed = approxBytes * max(1, peakMultiplier)
+    let needed = max(0, approxBytes * max(1, peakMultiplier) - max(0, alreadyStaged))
     guard let free = volumeFreeBytes(forItemAt: dest, read: read) else { return }
     if free < needed {
         throw StreamingDownloadError.insufficientDiskSpace(needed: needed, available: free)
@@ -596,6 +746,11 @@ private func streamingConfig(approxBytes: Int64 = 0) -> URLSessionConfiguration 
 
 private final class RedirectCapture: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     var finalURL: URL?
+    let connectivity = ConnectivityDeadline()
+
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.arm(task)
+    }
     private(set) var pinningRejected = false
     private(set) var redirectRejected = false
     private var redirectCount = 0
@@ -714,6 +869,11 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
     /// connect to an unpinned/plaintext host.
     private(set) var redirectRejected = false
     private var redirectCount = 0
+    private let connectivity = ConnectivityDeadline()
+
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.arm(task)
+    }
 
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
@@ -854,9 +1014,13 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
         }
         if let error {
             if let urlError = error as? URLError, urlError.code == .cancelled {
-                completion(.failure(pinningRejected
-                    ? StreamingDownloadError.pinningFailed
-                    : CancellationError()))
+                if pinningRejected {
+                    completion(.failure(StreamingDownloadError.pinningFailed))
+                } else if connectivity.gaveUp {
+                    completion(.failure(StreamingDownloadError.underlying(URLError(.notConnectedToInternet))))
+                } else {
+                    completion(.failure(CancellationError()))
+                }
             } else {
                 completion(.failure(StreamingDownloadError.underlying(error)))
             }
@@ -872,42 +1036,63 @@ extension StreamingDownloadError: LocalizedError {
         switch self {
         case .http(let status):
             switch status {
-            case 401, 403: return "Server refused the download (HTTP \(status)). The repo may be gated."
-            case 404:      return "File not found on HuggingFace (HTTP 404)."
-            case 429:      return "HuggingFace rate-limited the download (HTTP 429). Try again in a minute."
-            case 500..<600: return "HuggingFace returned a server error (HTTP \(status)). Try again."
-            default:       return "Download failed (HTTP \(status))."
+            case 401, 403: return "The download site refused this download. Try again later."
+            case 404:      return "This download is no longer available. Update FileID, then try again."
+            case 429:      return "The download site is busy. Try again in a minute."
+            case 500..<600: return "The download site is having problems. Try again in a few minutes."
+            default:       return "The download didn't work. Try again."
             }
         case .missingTempFile:
-            return "Downloaded data couldn't be saved. The destination disk may be full."
+            return "The download couldn't be saved. Your disk may be full."
         case .rangeNotSupported:
-            return "Server didn't honor the range request. Falling back to single-stream."
-        case .checksumMismatch(let expected, let actual):
-            return "Downloaded file failed integrity verification (expected SHA-256 \(expected.prefix(12))…, got \(actual.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with."
+            return "The download didn't work. Try again."
+        case .checksumMismatch:
+            return "The download arrived damaged, so FileID threw it away. Try again. If it keeps happening, try a different network."
         case .pinningFailed:
-            return "Secure connection rejected: the server's certificate chain doesn't match FileID's pinned certificate authorities. Your network may be intercepting TLS — try a trusted connection."
-        case .redirectBlocked(let url):
-            return "Download blocked: the server tried to redirect to an unexpected or insecure location (\(url)). FileID only follows HTTPS redirects within Hugging Face. Your network may be intercepting the connection."
+            return "FileID couldn't make a secure connection to the download site. Something on this network may be getting in the way. Try a different network."
+        case .redirectBlocked:
+            return "The download was sent somewhere FileID doesn't trust, so it was stopped. Something on this network may be getting in the way. Try a different network."
         case .insufficientDiskSpace(let needed, let available):
-            let neededMB = needed / 1_048_576
-            let availMB = available / 1_048_576
-            return "Not enough free disk space: this download needs about \(neededMB) MB but only \(availMB) MB is available. Free up space and try again."
-        case .sizeImplausible(let actual, let expected):
-            return "Download failed integrity check: got \(actual) bytes but expected roughly \(expected). The server likely returned a truncated file or an error page instead of the model — try again."
+            return "Not enough free disk space. This download needs about \(needed.formatted(.byteCount(style: .file))) and only \(available.formatted(.byteCount(style: .file))) is free. Free up space and try again."
+        case .sizeImplausible:
+            return "The download arrived incomplete, so FileID threw it away. Try again."
         case .underlying(let err):
             if let urlError = err as? URLError {
                 switch urlError.code {
                 case .notConnectedToInternet:    return "No internet connection."
-                case .timedOut:                  return "Download timed out — try again on a stronger connection."
-                case .cannotFindHost:            return "Couldn't reach huggingface.co (DNS lookup failed)."
-                case .cannotConnectToHost:       return "Couldn't connect to huggingface.co. Try again."
-                case .networkConnectionLost:     return "Network connection dropped mid-download."
-                case .secureConnectionFailed:    return "Secure connection to HuggingFace failed."
-                case .dataNotAllowed:            return "Cellular data restrictions are blocking the download."
-                default:                         return "Network error: \(urlError.localizedDescription)"
+                case .timedOut:                  return "The download took too long. Try again on a stronger connection."
+                case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost:
+                    return "FileID couldn't reach the download site. Check your internet connection and try again."
+                case .networkConnectionLost:     return "The internet connection dropped during the download. Try again to pick up where it stopped."
+                case .secureConnectionFailed:    return "FileID couldn't make a secure connection to the download site. Try a different network."
+                case .dataNotAllowed:            return "This connection doesn't allow the download. Switch to Wi-Fi and try again."
+                default:                         return "The download didn't work because of a network problem. Try again."
                 }
             }
-            return err.localizedDescription
+            if (err as NSError).domain == NSCocoaErrorDomain { return err.localizedDescription }
+            return "The download couldn't be saved. Check your free disk space and try again."
+        }
+    }
+}
+
+extension StreamingDownloadError: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Printing the error gives the sentence people should see.
+    public var description: String { errorDescription ?? "The download didn't work. Try again." }
+
+    /// The technical detail, for logs (`String(reflecting:)`).
+    public var debugDescription: String {
+        switch self {
+        case .http(let status): return "http(\(status))"
+        case .missingTempFile: return "missingTempFile"
+        case .rangeNotSupported: return "rangeNotSupported"
+        case .checksumMismatch(let expected, let actual): return "checksumMismatch(expected: \(expected.prefix(12)), actual: \(actual.prefix(12)))"
+        case .pinningFailed: return "pinningFailed"
+        case .redirectBlocked: return "redirectBlocked"
+        case .insufficientDiskSpace(let needed, let available): return "insufficientDiskSpace(needed: \(needed), available: \(available))"
+        case .sizeImplausible(let actual, let expected): return "sizeImplausible(actual: \(actual), expected: \(expected))"
+        case .underlying(let error):
+            let ns = error as NSError
+            return "underlying(\(ns.domain) \(ns.code))"
         }
     }
 }

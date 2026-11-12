@@ -88,6 +88,56 @@ private struct LearnedStyleRow: View {
     }
 }
 
+/// The one way a suggested name becomes a file name: proposeNames in the saved
+/// Name style, then `NameStyle.renames` and `CatalogWrites.applyNames`. Preview
+/// names, the suggested-names sheet and "Add tags and rename" all go through it.
+@MainActor
+enum StyledNames {
+    enum Outcome {
+        case rows([NameStyle.Row])
+        case failed(String)
+    }
+
+    static func savedNaming(_ defaults: UserDefaults = .standard) -> CatalogNaming {
+        NameStyle.naming(style: defaults.string(forKey: NameStyle.styleKey) ?? NameStyle.defaultStyle,
+                         maxLength: defaults.object(forKey: NameStyle.maxLengthKey) as? Int ?? NameStyle.defaultMaxLength,
+                         includePeople: defaults.object(forKey: NameStyle.includePeopleKey) as? Bool ?? NameStyle.defaultIncludePeople,
+                         includeEvent: defaults.object(forKey: NameStyle.includeEventKey) as? Bool ?? NameStyle.defaultIncludeEvent,
+                         includeDate: defaults.object(forKey: NameStyle.includeDateKey) as? Bool ?? NameStyle.defaultIncludeDate,
+                         learn: defaults.object(forKey: NameStyle.learnKey) as? Bool ?? NameStyle.defaultLearn)
+    }
+
+    static func rows(engine: EngineClient, fileIDs: [Int64], naming: CatalogNaming, previous: [NameStyle.Row] = []) async -> Outcome {
+        let ids = NameStyle.fileIDs(selection: fileIDs, fallback: [])
+        guard !ids.isEmpty else { return .rows([]) }
+        let request = NameStyle.request(id: "names-" + UUID().uuidString, fileIDs: ids, naming: naming)
+        guard let response = await TakeRequests.send(engine, request, timeout: 30) else {
+            return .failed("FileID didn't answer in time. Try again in a moment.")
+        }
+        guard response.status == "ok" else { return .failed(response.message ?? "FileID couldn't suggest names right now.") }
+        return .rows(NameStyle.rows(from: response.hits, previous: previous))
+    }
+
+    static func learn(engine: EngineClient, shown: [NameStyle.Row], renamed: [ReadStore.RenameOutcome], naming: CatalogNaming) async {
+        guard naming.learn else { return }
+        let edits = NameStyle.edits(shown, renamed: Set(renamed.map(\.fileID)))
+        guard !edits.isEmpty else { return }
+        let request = NameStyle.learnRequest(id: "names-learn-" + UUID().uuidString, edits: edits, naming: naming)
+        if let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" { NameStyle.rememberLearned(edits) }
+    }
+
+    static func renamedSummary(_ result: ReadStore.BulkRenameResult) -> String {
+        "Renamed \(result.renamed.count.formatted()) file\(result.renamed.count == 1 ? "" : "s")"
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" + (result.firstError.map { ": \($0)" } ?? "") : "") + "."
+    }
+
+    static func undoneSummary(_ result: (undone: Int, skipped: Int, failed: Int)) -> String {
+        "Put back \(result.undone.formatted()) name\(result.undone == 1 ? "" : "s")"
+            + (result.skipped > 0 ? " · \(result.skipped.formatted()) skipped because the file moved or changed" : "")
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed back" : "") + "."
+    }
+}
+
 struct SmartNamePreviewSheet: View {
     let engine: EngineClient
     let store: ReadStore
@@ -110,6 +160,7 @@ struct SmartNamePreviewSheet: View {
     @State private var pending: Task<Void, Never>?
     @State private var lastBatch: [ReadStore.RenameOutcome] = []
     @State private var learnedRefresh = 0
+    @State private var confirmRename = false
 
     private var naming: CatalogNaming {
         NameStyle.naming(style: style, maxLength: maxLength, includePeople: includePeople, includeEvent: includeEvent,
@@ -173,9 +224,16 @@ struct SmartNamePreviewSheet: View {
                 Button("Undo") { undo() }.buttonStyle(DSSecondaryButtonStyle(height: 30)).disabled(applying)
             }
             Button("Close") { dismiss() }.buttonStyle(DSSecondaryButtonStyle(height: 30)).keyboardShortcut(.cancelAction)
-            Button("Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")") { apply() }
+            Button("Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")…") { confirmRename = true }
                 .buttonStyle(DSPrimaryButtonStyle(height: 30))
                 .disabled(ready.isEmpty || applying || loading)
+                .confirmationDialog("Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")?",
+                                    isPresented: $confirmRename, titleVisibility: .visible) {
+                    Button("Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")") { apply() }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(BulkRenameSheet.confirmMessage)
+                }
         }
     }
 
@@ -193,13 +251,13 @@ struct SmartNamePreviewSheet: View {
         let mine = generation
         guard !fileIDs.isEmpty else { status = "Choose files in Library first."; return }
         loading = true
-        let request = NameStyle.request(id: "names-" + UUID().uuidString, fileIDs: fileIDs, naming: naming)
-        let response = await TakeRequests.send(engine, request, timeout: 30)
+        let outcome = await StyledNames.rows(engine: engine, fileIDs: fileIDs, naming: naming, previous: rows)
         guard mine == generation else { return }
         loading = false
-        guard let response else { status = "FileID didn't answer in time. Try again in a moment."; return }
-        guard response.status == "ok" else { status = response.message ?? "FileID couldn't suggest names right now."; return }
-        let next = NameStyle.rows(from: response.hits, previous: rows)
+        guard case .rows(let next) = outcome else {
+            if case .failed(let why) = outcome { status = why }
+            return
+        }
         withAnimation(rowSpring) { rows = next }
         if lastBatch.isEmpty { status = nil }
     }
@@ -216,21 +274,12 @@ struct SmartNamePreviewSheet: View {
                 BulkRenameSheet.saveLastBatch(result.renamed)
                 lastBatch = result.renamed
             }
-            await learnFrom(shown, renamed: result.renamed, naming: style)
-            status = "Renamed \(result.renamed.count.formatted()) file\(result.renamed.count == 1 ? "" : "s")"
-                + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" + (result.firstError.map { ": \($0)" } ?? "") : "") + "."
+            await StyledNames.learn(engine: engine, shown: shown, renamed: result.renamed, naming: style)
+            learnedRefresh += 1
+            status = StyledNames.renamedSummary(result)
             applying = false
             await preview()
         }
-    }
-
-    private func learnFrom(_ shown: [NameStyle.Row], renamed: [ReadStore.RenameOutcome], naming: CatalogNaming) async {
-        guard naming.learn else { return }
-        let edits = NameStyle.edits(shown, renamed: Set(renamed.map(\.fileID)))
-        guard !edits.isEmpty else { return }
-        let request = NameStyle.learnRequest(id: "names-learn-" + UUID().uuidString, edits: edits, naming: naming)
-        if let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" { NameStyle.rememberLearned(edits) }
-        learnedRefresh += 1
     }
 
     private func undo() {
@@ -239,12 +288,10 @@ struct SmartNamePreviewSheet: View {
         applying = true
         Task { @MainActor in
             let result = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
-            if result.failed == 0 && result.skipped == 0 { BulkRenameSheet.clearLastBatch() }
+            if result.failed == 0 && result.skipped == 0 { BulkRenameSheet.removeBatch(batch) }
             lastBatch = []
             learnedRefresh += 1
-            status = "Put back \(result.undone.formatted()) name\(result.undone == 1 ? "" : "s")"
-                + (result.skipped > 0 ? " · \(result.skipped.formatted()) skipped because the file moved or changed" : "")
-                + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed back" : "") + "."
+            status = StyledNames.undoneSummary(result)
             applying = false
             await preview()
         }

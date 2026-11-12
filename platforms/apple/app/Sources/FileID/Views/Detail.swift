@@ -77,7 +77,7 @@ struct Detail: View {
     private var tabContent: some View {
         Group {
             switch activeTab {
-            case .library:     LibraryView(engine: engine, store: store)
+            case .library:     LibraryView(engine: engine, store: store, pickedURL: pickedURL, onSwitchTab: onSwitchTab, pickFolder: pickFolder)
             case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
             case .moments:     CatalogWorkbench(engine: engine, store: store, onSwitchTab: onSwitchTab, inline: true)
             case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)

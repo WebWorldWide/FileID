@@ -136,30 +136,6 @@ public final class EngineClient {
     /// doesn't own.
     public private(set) var engineResetSignal: Int = 0
 
-    // MARK: - Auto-pilot ("Organize Everything")
-    //
-    // When the user clicks "Organize Everything" instead of plain
-    // "Start Scan", the engine chains all four stages automatically:
-    //   1. Scan (already runs)
-    //   2. Face clustering (already auto-triggered after scan)
-    //   3. Deep Analyze on every image  ← NEW chain link
-    //   4. UI flips to Restructure tab with auto-loaded proposals  ← NEW
-    //
-    // The flag persists across stage transitions; each event handler
-    // checks it and kicks the next stage. Cleared on autoPilotCancel
-    // or after the final stage finishes.
-    public private(set) var autoPilotActive: Bool = false
-    public private(set) var autoPilotStage: AutoPilotStage = .idle
-
-    public enum AutoPilotStage: Sendable, Equatable {
-        case idle
-        case scanning
-        case grouping       // face clustering
-        case captioning     // deep analyze
-        case proposing      // restructure proposals (handled by UI)
-        case ready          // user can review + apply
-    }
-
     public private(set) var queueState: QueueState = QueueState(
         running: nil, pending: [], totalEtaSeconds: nil
     )
@@ -281,6 +257,8 @@ public final class EngineClient {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
+    nonisolated static let damagedCopyReason = "This copy of FileID is damaged. Reinstall it."
+
     public func start() {
         // A live engine here means this is a restart (Settings ▸ Restart
         // Engine calls start() directly). Terminate + reap it FIRST —
@@ -288,7 +266,8 @@ public final class EngineClient {
         // corruption. Single-flight stop-then-start.
         terminateRunningEngine()
         guard let binURL = Self.locateEngineBinary() else {
-            state = .crashed(reason: "Engine binary not found next to app executable")
+            Self.debug("start: engine binary not found next to app executable")
+            state = .crashed(reason: Self.damagedCopyReason)
             return
         }
         // Refuse to spawn an engine binary that didn't ship with this
@@ -298,7 +277,8 @@ public final class EngineClient {
         // builds (Developer ID), both binaries share a signing
         // identity — we require it to match the app's.
         if let reason = Self.engineIntegrityFailure(binary: binURL) {
-            state = .crashed(reason: reason)
+            Self.debug("start: \(reason)")
+            state = .crashed(reason: Self.damagedCopyReason)
             return
         }
         spawn(binary: binURL)
@@ -337,8 +317,8 @@ public final class EngineClient {
         // latched against a jobless engine, disabling Analyze until relaunch.
         resetStateOnlyADeadEngineCouldClear()
         // A restart is an explicit "start over", so drop the frozen scan
-        // progress too: `SidebarProcessingControl` keys off a non-idle phase and
-        // would otherwise keep rendering a dead Pause/Cancel pair with no
+        // progress too: the sidebar scan card keys off a non-idle phase and
+        // would otherwise keep rendering a dead Pause/Stop pair with no
         // reachable Start. The crash leg deliberately keeps its last progress as
         // forensic context — only this explicit path clears it.
         lastProgress = nil
@@ -494,27 +474,28 @@ public final class EngineClient {
             let lines: [Data] = stderrBuffer.withLock { state in
                 state.data.append(data)
                 var out: [Data] = []
+                // Lines are sliced by offset and the consumed prefix is dropped
+                // once per chunk; removing it per line shifted the whole buffer
+                // for every event in a burst.
+                let base = state.data.startIndex
+                var consumed = 0
+                var searchFrom = state.scanned
                 while true {
-                    let searchStart = state.data.startIndex + state.scanned
-                    guard searchStart < state.data.endIndex else { break }
-                    guard let nl = state.data[searchStart...].firstIndex(of: 0x0A) else {
-                        // No newline in the unscanned tail: the whole buffer is
-                        // newline-free, so the next tick resumes from the end.
-                        state.scanned = state.data.count
-                        break
-                    }
-                    let lineBytes = state.data.distance(from: state.data.startIndex, to: nl)
+                    let searchStart = base + max(searchFrom, consumed)
+                    guard searchStart < state.data.endIndex,
+                          let nl = state.data[searchStart...].firstIndex(of: 0x0A) else { break }
+                    let lineStart = base + consumed
+                    let lineBytes = nl - lineStart
                     if lineBytes > maxFrameBytes {
                         oversizeBytes = max(oversizeBytes ?? 0, lineBytes)
-                        state.data.removeSubrange(state.data.startIndex...nl)
-                        state.scanned = 0
-                        continue
+                    } else if lineBytes > 0 {
+                        out.append(state.data.subdata(in: lineStart..<nl))
                     }
-                    let line = state.data.subdata(in: state.data.startIndex..<nl)
-                    state.data.removeSubrange(state.data.startIndex...nl)
-                    state.scanned = 0
-                    if !line.isEmpty { out.append(line) }
+                    consumed = nl - base + 1
+                    searchFrom = consumed
                 }
+                if consumed > 0 { state.data.removeSubrange(base..<(base + consumed)) }
+                state.scanned = state.data.count
                 // A partial frame past the cap (no newline yet) means the engine
                 // is emitting garbage or a frame larger than the shared limit —
                 // drop it and resync to the next newline rather than buffering
@@ -531,7 +512,7 @@ public final class EngineClient {
                 Task { @MainActor in
                     self?.lastError = EngineError(
                         kind: "ipc_frame_too_large",
-                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. For a Restructure plan this large, restructure a smaller subfolder instead."
+                        message: "That folder plan is too large to show. Try a smaller folder."
                     )
                 }
             }
@@ -560,7 +541,7 @@ public final class EngineClient {
             // domain+code only.
             let ns = error as NSError
             Self.debug("spawn: proc.run() FAILED: \(ns.domain) (\(ns.code))")
-            state = .crashed(reason: "Failed to launch engine: \(error)")
+            state = .crashed(reason: "FileID's helper couldn't start. Quit and reopen FileID. If that doesn't help, reinstall FileID.")
             return
         }
         Self.debug("spawn: engine pid=\(proc.processIdentifier), readabilityHandler armed")
@@ -586,22 +567,38 @@ public final class EngineClient {
 
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
     nonisolated public static func debug(_ msg: String) {
-        let url = AppSupportPath.fileID.appendingPathComponent("logs/app.log")
-        guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                  withIntermediateDirectories: true)
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "\(stamp) \(msg)\n"
-        let payload = Data(line.utf8)
-        if let h = try? FileHandle(forWritingTo: url) {
-            // Discarding errors here is intentional — debug logging
-            // must not crash the app. `_ = try?` silences the unused-
-            // result warning while keeping the no-throw guarantee.
-            _ = try? h.seekToEnd()
-            _ = try? h.write(contentsOf: payload)
-            _ = try? h.close()
-        } else {
-            _ = try? payload.write(to: url)
+        debugLog.withLock { $0.write(msg) }
+    }
+
+    nonisolated private static let debugLog = MutexBox(DebugLog())
+
+    /// One formatter and one open handle for app.log. The handle is dropped
+    /// whenever the file is gone (Start over, Factory Reset and Settings all
+    /// delete it), so a write never lands in an unlinked file.
+    private struct DebugLog {
+        private let formatter = ISO8601DateFormatter()
+        private var handle: FileHandle?
+        private var path: String?
+
+        mutating func write(_ msg: String) {
+            let url = AppSupportPath.fileID.appendingPathComponent("logs/app.log")
+            if handle == nil || path != url.path || !FileManager.default.fileExists(atPath: url.path) {
+                try? handle?.close()
+                handle = nil
+                guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
+                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                          withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+                }
+                handle = try? FileHandle(forWritingTo: url)
+                path = url.path
+            }
+            guard let handle else { return }
+            let line = "\(formatter.string(from: Date())) \(msg)\n"
+            // Logging must never crash the app, so write errors are dropped.
+            _ = try? handle.seekToEnd()
+            _ = try? handle.write(contentsOf: Data(line.utf8))
         }
     }
 
@@ -656,16 +653,6 @@ public final class EngineClient {
             case .completed, .cancelled, .failed: endScanActivity()
             case .idle, .discovering, .tagging, .postScan: break
             }
-            // Auto-pilot: cancel + failed phases must release the
-            // assistant view, otherwise the user is stuck looking at
-            // "Finding people…" or similar with no way forward. The
-            // explicit Cancel button on the assistant view also calls
-            // cancelAutoPilot(), but a phase change from any other
-            // source (e.g. engine-level cancel) needs to land here.
-            if autoPilotActive, p.phase == .cancelled || p.phase == .failed {
-                autoPilotActive = false
-                autoPilotStage = .idle
-            }
         case .phaseChanged:
             break  // phase is encoded in lastProgress.phase
         case .discoveryComplete:
@@ -677,33 +664,6 @@ public final class EngineClient {
         case .scanComplete:
             lastTerminalEventAt = Date()
             endScanActivity()
-            // Auto-pilot: scan ➜ face clustering already auto-fires from
-            // the engine itself, so just update the visible stage.
-            // BUT: if there are no faces in the scanned library, the
-            // engine won't fire clustering at all and we'd hang on
-            // .grouping. Watchdog flips to .ready after 6s if no
-            // clustering activity is seen.
-            if autoPilotActive {
-                autoPilotStage = .grouping
-                let stamp = lastTerminalEventAt
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 6_000_000_000)
-                    guard let self else { return }
-                    // Still in auto-pilot, still on grouping, and no
-                    // clustering even started (no inflight + no result):
-                    // hand control back to the user. Deep Analyze is
-                    // opt-in and waits for a named person, so the
-                    // no-faces path must NOT auto-launch whole-library
-                    // Deep Analyze.
-                    if self.autoPilotActive,
-                       self.autoPilotStage == .grouping,
-                       !self.faceClusteringInFlight,
-                       self.lastFaceClustering == nil,
-                       self.lastTerminalEventAt == stamp {
-                        self.autoPilotStage = .ready
-                    }
-                }
-            }
         case .error(let e):
             queryReplies.deliver(e)
             // Engine startup capability warning: not a real error, just a
@@ -716,8 +676,8 @@ public final class EngineClient {
             // PAR-111 mirror: a busy bounce means a pass IS running — the
             // opposite of a failure. Falling through would match the
             // hasPrefix("face_cluster")/hasPrefix("deep") arms below and
-            // wrongly clear the in-flight flags / abort auto-pilot while
-            // the running pass is still going. Log-only; the running pass
+            // wrongly clear the in-flight flags while the running pass is
+            // still going. Log-only; the running pass
             // emits its own terminal event.
             if e.kind == "face_clustering_busy" || e.kind == "deep_analyze_already_running" {
                 Self.debug("engine bounce (benign): \(e.kind)")
@@ -732,12 +692,6 @@ public final class EngineClient {
             lastError = e
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false
-                // Auto-pilot: a clustering error means we won't get
-                // .faceClusteringComplete. Skip captioning and flip to
-                // ready so the user can still see what was scanned.
-                if autoPilotActive {
-                    autoPilotStage = .ready
-                }
             }
             if e.kind.hasPrefix("deep") {
                 // A deep-analyze error (e.g. unknown model kind → "deep_invalid")
@@ -747,10 +701,6 @@ public final class EngineClient {
                 deepAnalyzeInFlight = false
                 deepAnalyzeProgress = nil
                 endDeepAnalyzeActivity()
-                if autoPilotActive {
-                    // Deep Analyze failure during auto-pilot — same idea.
-                    autoPilotStage = .ready
-                }
             }
         case .log:
             break
@@ -758,13 +708,6 @@ public final class EngineClient {
             lastFaceClustering = summary
             faceClusteringInFlight = false
             lastTerminalEventAt = Date()
-            // Auto-pilot used to chain straight into Deep Analyze here.
-            // That's gone now — Deep Analyze waits until the user has
-            // named at least one person. Auto-pilot just flips to ready
-            // and the user takes over.
-            if autoPilotActive {
-                autoPilotStage = .ready
-            }
         case .deepAnalyzeStarting(let s):
             deepAnalyzeStarting = s
             deepAnalyzeInFlight = true
@@ -791,21 +734,6 @@ public final class EngineClient {
             lastTerminalEventAt = Date()
             deepAnalyzeProgress = nil
             deepAnalyzeStarting = nil
-            // Auto-pilot: captioning ➜ proposing ➜ ready, with a tiny
-            // delay so SwiftUI animates the stage transition. Re-checks
-            // autoPilotActive after the sleep so a Cancel between the
-            // two transitions doesn't snap the user back into the
-            // assistant view post-cancel.
-            if autoPilotActive {
-                autoPilotStage = .proposing
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 600_000_000)
-                    guard let self else { return }
-                    if self.autoPilotActive {
-                        self.autoPilotStage = .ready
-                    }
-                }
-            }
         case .modelDownloadProgress(let p):
             // Clear the bar once the download completes so the model picker
             // doesn't show a stale "Downloading 100%" forever; otherwise track
@@ -907,11 +835,8 @@ public final class EngineClient {
         undoRestructureInFlight = false
         // A crash mid-download leaves a stale sub-1.0 progress that defeats the
         // WelcomeSheet VLM "no response" watchdog and shows a phantom Deep-Analyze
-        // download bar; and auto-pilot would sit at a stale stage. Clear both so the
-        // respawned (jobless) engine starts clean. ( — the comment on the
-        // modelDownloadProgress declaration finally holds true.)
+        // download bar.
         modelDownloadProgress = nil
-        autoPilotActive = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
         // Keep the counters as context, but a scan the dead engine was running
@@ -977,7 +902,7 @@ public final class EngineClient {
 
         let attemptIdx = respawnAttempts.count
         guard attemptIdx < Self.respawnDelays.count else {
-            state = .crashed(reason: "Engine exited \(Self.respawnDelays.count)× within \(Int(Self.respawnWindow))s; auto-respawn budget exhausted. Relaunch the app to retry.")
+            state = .crashed(reason: "FileID's helper keeps stopping. Press Restart, or quit and reopen FileID.")
             Self.debug("respawn: budget exhausted, marking crashed")
             return
         }
@@ -987,7 +912,7 @@ public final class EngineClient {
         state = .starting
         lastError = EngineError(
             kind: "engine_exited",
-            message: "Engine exited unexpectedly. Auto-respawn attempt \(attemptIdx + 1)/\(Self.respawnDelays.count) in \(delay)s…"
+            message: "FileID's helper stopped and is restarting…"
         )
         Self.debug("respawn: scheduling attempt \(attemptIdx + 1)/\(Self.respawnDelays.count) in \(delay)s")
 
@@ -1077,10 +1002,6 @@ public final class EngineClient {
 
     public func clearLastError() { lastError = nil }
 
-    /// Start Scan auto-chains by default — sets `autoPilotActive`
-    /// so faceClusteringComplete kicks off Deep Analyze. Bookmark
-    /// serialization is moved off the main thread; the engine
-    /// receives the startScan command as soon as the bookmark resolves.
     private func restoreSavedFolderAccess() {
         guard let bookmark = UserDefaults.standard.data(
             forKey: SecurityScopedBookmark.pickedFolderDefaultsKey
@@ -1098,7 +1019,7 @@ public final class EngineClient {
     private func setSavedFolderBookmarkError() {
         lastError = EngineError(
             kind: "bookmark_unavailable",
-            message: "FileID couldn't grant the selected folder to its local engine. Choose the folder again."
+            message: "FileID can't open that folder any more. Choose the folder again."
         )
     }
 
@@ -1107,8 +1028,6 @@ public final class EngineClient {
     }
 
     public func startScan(rootURL: URL) {
-        autoPilotActive = true
-        autoPilotStage = .scanning
         isPaused = false
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets
@@ -1152,14 +1071,9 @@ public final class EngineClient {
         }
     }
 
-    /// Cancel any in-flight stage chain. The current stage's data
-    /// stays intact; subsequent stage-complete events won't kick off
-    /// the next stage. The Sidebar's Cancel button calls this in
-    /// addition to engine.cancel().
-    public func cancelAutoPilot() {
-        autoPilotActive = false
-        autoPilotStage = .idle
-    }
+    /// Nothing chains stages any more; kept so Chat's "stop" action still has
+    /// something to call.
+    public func cancelAutoPilot() {}
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }

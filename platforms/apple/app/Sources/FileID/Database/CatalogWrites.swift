@@ -63,19 +63,33 @@ enum CatalogWrites {
     /// Merges each source into `target` (the engine keeps `target` and moves a
     /// source's typed name onto it when `target` has none). Returns the
     /// target's photo count, or nil when nothing merged.
-    static func merge(_ engine: EngineClient, store: ReadStore, target: Int64, sources: [Int64]) async -> Int? {
+    static func merge(_ engine: EngineClient, store: ReadStore, target: Int64, sources: [Int64],
+                      progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int? {
         var seen = Set<Int64>()
         let sources = sources.filter { $0 != target && seen.insert($0).inserted }
-        let merged = await mergeBatch(engine, store: store, plan: [(target: target, sources: sources)])
+        let merged = await mergeBatch(engine, store: store, plan: [(target: target, sources: sources)],
+                                      progress: progress, shouldStop: shouldStop)
         guard merged > 0 else { return nil }
         return await Task.detached(priority: .userInitiated) { store.personFileCount(id: target) }.value ?? 0
     }
 
+    typealias MergeProgress = @MainActor (_ current: Int, _ total: Int) -> Void
+    typealias MergeStop = @MainActor () -> Bool
+
     /// Runs a `ReadStore.mergeBatchPlan`. Returns how many people were merged away.
-    static func mergeBatch(_ engine: EngineClient, store: ReadStore, plan: [(target: Int64, sources: [Int64])]) async -> Int {
-        var merged = 0
+    /// `progress` is told which merge is starting; `shouldStop` is asked
+    /// between merges. Stopping is a flag rather than task cancellation
+    /// because `request` polls with a sleep that cancellation would turn
+    /// into a busy loop.
+    static func mergeBatch(_ engine: EngineClient, store: ReadStore, plan: [(target: Int64, sources: [Int64])],
+                           progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int {
+        let total = plan.reduce(0) { sum, group in sum + group.sources.filter { $0 != group.target }.count }
+        var merged = 0, started = 0
         outer: for group in plan {
             for source in group.sources where source != group.target {
+                if shouldStop?() == true { break outer }
+                started += 1
+                progress?(started, total)
                 let result = await request(engine, .mergeClusters(sourcePersonID: source, destinationPersonID: group.target),
                                            action: "mergeClusters", id: source, timeout: 120)
                 if result.succeeded == 1 { merged += 1 }

@@ -39,6 +39,9 @@ struct TakeWorkbench: View {
     @State private var proposalsLoading = false
     @State private var selectedProposalKey: String?
     @State private var groupingJob: CatalogJob?
+    @State private var confirmDeleteGroup = false
+    @State private var puttingBack = false
+    @AppStorage(TakeRequests.lastTrashBatchKey) private var lastTrashBatch = ""
 
     private var selectedAuto: CatalogTakeAutoGroup? { autoGroups.first { $0.groupKey == selectedAutoKey } }
     private var selectedProposal: CatalogTakeAutoGroup? { proposals.first { $0.groupKey == selectedProposalKey } }
@@ -97,7 +100,7 @@ struct TakeWorkbench: View {
                                 if let recommendation { recommendationRow(recommendation) }
                                 if !takes.isEmpty { takeGrid }
                                 else if selectedEvent == nil {
-                                    DashedNotice(title: "Make a group by hand", subtitle: "1. Search for your clips on the left.  2. Tick two or more tries of the same shot and say what should happen.  3. Save, then score each try against that goal.")
+                                    DashedNotice(title: "Make a group by hand", subtitle: "Hand-made groups work with videos only.  1. Search for your videos on the left.  2. Tick two or more takes of the same moment and say what should happen.  3. Save, then score each take against that goal.")
                                 }
                             }
                             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
@@ -117,6 +120,32 @@ struct TakeWorkbench: View {
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
         .onChange(of: engine.catalogJobs) { _, jobs in refreshGoalJob(); refreshGrouping(jobs) }
         .onDisappear { player?.pause() }
+        .confirmationDialog("Delete this group?", isPresented: $confirmDeleteGroup, titleVisibility: .visible) {
+            Button("Delete group", role: .destructive) {
+                guard let event = selectedEvent else { return }
+                lastDeletedEventID = event.id
+                send("deleteEvent", eventID: event.id)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes the group “\(selectedEvent?.title ?? "")” with its goal and scores. Your videos are not touched. You can undo right after.")
+        }
+    }
+
+    private func putBackLastMove() {
+        let batch = lastTrashBatch
+        guard !batch.isEmpty, !puttingBack else { return }
+        puttingBack = true
+        Task {
+            let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+            puttingBack = false
+            if undone.restored > 0 || undone.message?.contains("unknown or already restored") == true { lastTrashBatch = "" }
+            ToastCenter.shared.show(undone.restored > 0
+                ? "Put back \(undone.restored) file\(undone.restored == 1 ? "" : "s") where \(undone.restored == 1 ? "it was" : "they were")"
+                : (undone.message ?? "Nothing was put back. Check the Trash."))
+            reloadAuto(after: nil)
+            reloadProposals(after: nil)
+        }
     }
 
     // MARK: - Groups pane
@@ -136,11 +165,11 @@ struct TakeWorkbench: View {
                             .disabled(autoLoading)
                     }
                     .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
-                    MetaText("Bursts and repeated clips from your scans. Biggest and newest first.", size: 11.5)
+                    MetaText("Photo bursts and repeated video takes from your scans. Biggest and newest first.", size: 11.5)
                         .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                         .fixedSize(horizontal: false, vertical: true)
                     if autoLoaded && autoGroups.isEmpty {
-                        MetaText("None yet. Scan a folder with photo bursts or several tries of a clip.", size: 12)
+                        MetaText("None yet. Scan a folder with photo bursts or several takes of the same video.", size: 12)
                             .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -153,11 +182,11 @@ struct TakeWorkbench: View {
                         RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil && selectedProposalKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
-                                Text("\(event.fileIDs.count) clips · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
+                                Text("\(event.fileIDs.count) takes · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
                             }
                             .padding(.vertical, 7)
                         }
-                        .accessibilityLabel("\(event.title), \(event.fileIDs.count) clips, goal: \(event.goal)")
+                        .accessibilityLabel("\(event.title), \(event.fileIDs.count) takes, goal: \(event.goal)")
                     }
                     if events.isEmpty {
                         MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
@@ -167,6 +196,18 @@ struct TakeWorkbench: View {
                     manualSection
                 }
                 .padding(.bottom, 10)
+            }
+            if !lastTrashBatch.isEmpty {
+                Hairline()
+                HStack {
+                    Button { putBackLastMove() } label: { Label("Put back last move", systemImage: "arrow.uturn.backward") }
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        .disabled(puttingBack)
+                        .help("Puts the takes Best Takes last moved to Trash back where they were")
+                    if puttingBack { IndeterminateBar().frame(width: 40) }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 8)
             }
             if let lastDeletedEventID {
                 Hairline()
@@ -190,10 +231,10 @@ struct TakeWorkbench: View {
                 send("search", query: clipQuery)
             }
             HStack(spacing: 6) {
-                Button("Find related") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
+                Button("Group these results") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                     .disabled(pool.count < 2)
-                    .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups of clips that look alike and were filmed close together")
+                    .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups among the videos you found: ones that look alike and were filmed close together")
                 Button { startManual(); newGroup() } label: { Label("New group", systemImage: "plus") }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
             }
@@ -220,14 +261,14 @@ struct TakeWorkbench: View {
             if autoLoading && !autoLoaded {
                 VStack(alignment: .leading, spacing: 10) {
                     IndeterminateBar().frame(width: 160)
-                    MetaText("Looking for bursts and repeated clips…", size: 13)
+                    MetaText("Looking for photo bursts and repeated video takes…", size: 13)
                 }
                 .accessibilityElement(children: .combine)
             } else if autoGroups.isEmpty {
-                DashedNotice(title: "No tries to compare yet",
-                             subtitle: "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts, or make a group by hand on the left.")
+                DashedNotice(title: "No takes to compare yet",
+                             subtitle: "After a scan, Best Takes groups photo bursts and repeated video takes here by itself. Scan a folder with photo bursts, or make a group of videos by hand on the left.")
             } else {
-                DashedNotice(title: "Pick a group", subtitle: "Choose a possible group on the left to compare its tries.")
+                DashedNotice(title: "Pick a group", subtitle: "Choose a possible group on the left to compare its takes.")
             }
         }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
@@ -241,12 +282,10 @@ struct TakeWorkbench: View {
             PanelHeader(selectedEvent == nil ? "New group" : "Group") {
                 if pendingID.isEmpty == false { IndeterminateBar().frame(width: 60) }
                 if let event = selectedEvent {
-                    Button("Undo edit") { send("undoEventEdit", eventID: event.id) }.buttonStyle(.dsGhost)
-                    Button("Delete") {
-                        lastDeletedEventID = event.id
-                        send("deleteEvent", eventID: event.id)
-                    }
-                    .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
+                    Button("Undo last save") { send("undoEventEdit", eventID: event.id) }.buttonStyle(.dsGhost)
+                        .help("Puts this group's name, goal and takes back to how they were before you last saved it")
+                    Button("Delete group") { confirmDeleteGroup = true }
+                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                 }
             }
             VStack(alignment: .leading, spacing: 10) {
@@ -257,7 +296,7 @@ struct TakeWorkbench: View {
             if !pool.isEmpty {
                 Hairline()
                 HStack {
-                    SectionLabel("Clips · \(selectedIDs.count) of \(pool.count) chosen")
+                    SectionLabel("Takes · \(selectedIDs.count) of \(pool.count) chosen")
                     Spacer()
                     Button(selectedIDs.count == pool.count ? "Choose none" : "Choose all") {
                         selectedIDs = selectedIDs.count == pool.count ? [] : Set(pool.map(\.fileID))
@@ -286,16 +325,16 @@ struct TakeWorkbench: View {
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
                     .disabled(!canSave)
                     .keyboardShortcut("s", modifiers: .command)
-                    .help(canSave ? "Save (⌘S)" : "Needs a name, a goal and at least two clips")
+                    .help(canSave ? "Save (⌘S)" : "Needs a name, a goal and at least two takes")
                 if let event = selectedEvent {
                     Button("Score takes") { analyzeGoal(event) }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(!canAnalyzeGoal(event))
-                        .help("Check each clip against the goal. Uses the description model from Describe Files.")
+                        .help("Check each take against the goal, using the same AI as Describe Files.")
                     Button("Refresh scores") { load(event.id) }.buttonStyle(.dsGhost)
                 }
                 Spacer(minLength: 8)
-                MetaText(pool.isEmpty ? "Search on the left to add clips." : "Scores are suggestions from a few frames. Your videos are never changed.", size: 11.5)
+                MetaText(pool.isEmpty ? "Search your videos on the left to add takes." : "Scores are suggestions from a few frames. Your videos are never changed.", size: 11.5)
                     .lineLimit(2)
             }
         }
@@ -325,10 +364,17 @@ struct TakeWorkbench: View {
         case "tie": tone = Theme.ai
         default: tone = Theme.text3
         }
+        let verdict: String
+        switch recommendation.status.lowercased() {
+        case "ranked": verdict = "FileID's pick"
+        case "preferred": verdict = "Your pick"
+        case "tie": verdict = "Too close to call"
+        default: verdict = "Not enough to go on yet"
+        }
         return HStack(alignment: .top, spacing: 12) {
             Rectangle().fill(tone).frame(width: 3).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                SectionLabel("Recommendation · \(recommendation.status.capitalized)", color: tone)
+                SectionLabel(verdict, color: tone)
                 Text(recommendation.reason).font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -582,12 +628,12 @@ struct TakeWorkbench: View {
         if action == "search" {
             var seen = Set(candidates.map(\.fileID))
             foundClips = response.hits.filter { FileTypes.isVideo(path: $0.path) && seen.insert($0.fileID).inserted }
-            if foundClips.isEmpty { ToastCenter.shared.show("No videos matched “\(clipQuery)”") }
+            if foundClips.isEmpty { ToastCenter.shared.show("No videos matched “\(clipQuery)”. Hand-made groups work with videos only.") }
             return
         }
         if action == "suggestTakeGroups" {
             withAnimation(Theme.springStandard) { suggestedGroups = response.suggestedTakeGroups ?? [] }
-            if suggestedGroups.isEmpty { ToastCenter.shared.show("No related takes found in these clips") }
+            if suggestedGroups.isEmpty { ToastCenter.shared.show("No similar takes found among these videos") }
         }
         if action == "enqueueTimeline" {
             goalJobID = response.jobs.first { $0.kind == "timelineSample" && Set($0.fileIDs) == goalRequestedIDs && !previousJobIDs.contains($0.id) }?.id
@@ -628,20 +674,21 @@ private struct AutoGroupRow: View {
     let action: () -> Void
 
     var body: some View {
-        let noun = group.kind == "videos" ? "clips" : "photos"
+        let noun = "takes"
+        let media = group.kind == "videos" ? "Videos" : "Photos"
         RailRow(selected: selected, action: action) {
             HStack(spacing: 10) {
                 ShotFan(shots: group.shots)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
                         .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
-                    Text(TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
+                    Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
                         .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
                 }
             }
             .padding(.vertical, 6)
         }
-        .accessibilityLabel("\(group.shots.count) \(noun), \(TakeReview.dateText(group.capturedAt))\(group.status == "skipped" ? ", skipped" : "")")
+        .accessibilityLabel("\(group.shots.count) \(noun), \(media.lowercased()), \(TakeReview.dateText(group.capturedAt))\(group.status == "skipped" ? ", skipped" : "")")
     }
 }
 
@@ -656,8 +703,9 @@ private struct SuggestionRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(names.joined(separator: ", ")).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text1).lineLimit(2)
             HStack(spacing: 8) {
-                Text("\(names.count) clips · \(Int((suggestion.similarity * 100).rounded()))% alike")
+                Text("\(names.count) takes · \(suggestion.similarity >= 0.9 ? "nearly identical" : (suggestion.similarity >= 0.75 ? "very alike" : "somewhat alike"))")
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.ai)
+                    .help("\(Int((suggestion.similarity * 100).rounded()))% alike")
                 Spacer(minLength: 4)
                 Button("Review", action: onReview)
                     .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
@@ -694,9 +742,9 @@ private struct TakeCard: View {
         if take.stale { return ("Needs review: the file changed", Theme.warning) }
         guard let score = take.outcomeScore else {
             if reviewedByUser { return ("Unclear", Theme.text2) }
-            return (isDraft ? "Not enough evidence" : "Not reviewed", Theme.text3)
+            return (isDraft ? "FileID couldn't tell" : "Not scored yet", Theme.text3)
         }
-        let prefix = isDraft ? "Draft · " : ""
+        let prefix = isDraft ? "FileID's guess · " : ""
         return score >= 0.5 ? (prefix + "Goal met", Theme.delight) : (prefix + "Goal missed", Theme.danger)
     }
 
@@ -717,7 +765,7 @@ private struct TakeCard: View {
                 Spacer(minLength: 4)
                 Circle().fill(reviewedByUser ? Theme.gold : (isDraft ? Theme.ai : Theme.text3)).frame(width: 7, height: 7)
                     .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Suggested by FileID from a few frames" : "No score yet"))
-                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "Model draft" : "No score"))
+                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "FileID's guess" : "No score"))
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
             .overlay(alignment: .bottom) { Hairline() }
@@ -753,11 +801,12 @@ private struct TakeCard: View {
                     HStack(spacing: 8) {
                         Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
                         GrainProgressBar(progress: quality, tone: .neutral, height: 4)
-                        Text("\(Int((quality * 100).rounded()))").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3).frame(width: 26, alignment: .trailing)
+                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 44, alignment: .trailing)
                     }
+                    .help("Sharpness \(Int((quality * 100).rounded())) out of 100")
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Sharpness")
-                    .accessibilityValue("\(Int((quality * 100).rounded())) percent")
+                    .accessibilityValue(Self.sharpnessWord(quality))
                 }
             }
             .padding(12)
@@ -787,6 +836,10 @@ private struct TakeCard: View {
             .stroke(recommended ? Theme.gold : Theme.hairlineStrong.opacity(0.8), lineWidth: recommended ? 2 : 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Take \(index), \(url.lastPathComponent)\(recommended ? ", recommended" : "")")
+    }
+
+    static func sharpnessWord(_ quality: Double) -> String {
+        quality >= 0.75 ? "Sharp" : (quality >= 0.5 ? "Good" : (quality >= 0.3 ? "Soft" : "Blurry"))
     }
 
     private func outcomeButton(_ label: String, value: Double?) -> some View {

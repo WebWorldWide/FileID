@@ -65,12 +65,12 @@ struct FileIDApp: App {
             }
             CommandGroup(replacing: .help) {
                 Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
-                Button("Show Welcome Sheet…") { showWelcome = true }
+                Button("Set up AI models…") { showWelcome = true }
                 Divider()
                 Button("Privacy on this Mac") {
                     let alert = NSAlert()
                     alert.messageText = "Everything stays on this Mac"
-                    alert.informativeText = "FileID never sends telemetry. The only network use is a model download you start yourself, fetched from huggingface.co and verified against pinned hashes."
+                    alert.informativeText = "FileID reads your files on this Mac and never sends them, or anything about how you use it, anywhere. The only time it uses the internet is when you choose to download an AI model.\n\nFile names, tags and descriptions also show up in Spotlight (⌘Space) on this Mac. To stop that, turn off “Show results in Spotlight” in Settings."
                     alert.alertStyle = .informational
                     alert.runModal()
                 }
@@ -82,7 +82,7 @@ struct FileIDApp: App {
                     let build = info?["CFBundleVersion"] as? String ?? "local"
                     let alert = NSAlert()
                     alert.messageText = "FileID"
-                    alert.informativeText = "Version \(version) (build \(build))\nOn-device AI file organization for macOS.\n\nv2 split-process architecture."
+                    alert.informativeText = "Version \(version) (build \(build))\nOrganizes your photos, videos and documents with AI that runs on this Mac. Your files never leave it."
                     alert.alertStyle = .informational
                     alert.addButton(withTitle: "OK")
                     alert.runModal()

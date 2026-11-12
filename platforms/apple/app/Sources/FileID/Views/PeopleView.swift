@@ -16,6 +16,7 @@ struct PeopleView: View {
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
     @State private var reloadTask: Task<Void, Never>?
+    @State private var reloadPending: Bool = false
 
     /// Cards become checkboxes; "Merge selected" picks a target.
     @State private var mergeMode: Bool = false
@@ -24,6 +25,10 @@ struct PeopleView: View {
     @State private var unknownMode: Bool = false
     @State private var unknownChecked: Set<Int64> = []
     @State private var mergeStatus: String?
+    @State private var statusOffersShowUnknowns: Bool = false
+    @State private var mergeProgress: String?
+    @State private var mergeStopRequested: Bool = false
+    @State private var faceModelInstalled: Bool?
     /// A card dropped onto another; confirmed before anything is merged.
     @State private var pendingDragMerge: PendingDragMerge?
     private struct PendingDragMerge: Identifiable {
@@ -65,26 +70,21 @@ struct PeopleView: View {
                 headerBlock
                 Divider().opacity(0.15)
             }
-            if let s = mergeStatus {
-                Text(s)
-                    .font(Theme.Font.body(12))
-                    .foregroundStyle(Theme.text3)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-            }
+            if mergeProgress != nil || mergeStatus != nil { statusRow }
             content
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { reload(); refreshReview() }
-        .onChange(of: store.version) { _, _ in reload() }
+        .onAppear { refreshFaceModelInstalled(); reload(); refreshReview() }
+        .onChange(of: store.version) { _, _ in reload(debounced: true) }
+        .onChange(of: ModelInstaller.face.status) { _, _ in refreshFaceModelInstalled() }
         .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload(); refreshReview() }
         .onChange(of: activeSheet) { _, sheet in
             publishSelection(sheet)
             if sheet == nil { refreshReview() }
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
-        .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: reload))
+        .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: { reload() }))
         .confirmationDialog(
             "Merge \"\(pendingDragMerge?.targetName ?? "")\" with the dropped person?",
             isPresented: Binding(get: { pendingDragMerge != nil }, set: { if !$0 { pendingDragMerge = nil } }),
@@ -95,16 +95,16 @@ struct PeopleView: View {
                 pendingDragMerge = nil
                 Task {
                     if let n = await CatalogWrites.merge(engine, store: store, target: merge.target, sources: [merge.source]) {
-                        mergeStatus = "Merged into \(merge.targetName) (\(n) photos)."
+                        setStatus("Merged into \(merge.targetName) (\(n) photos).")
                     } else {
-                        mergeStatus = "The merge didn't go through. Try again in a moment."
+                        setStatus(Self.mergeFailed)
                     }
                     reload()
                 }
             }
             Button("Cancel", role: .cancel) { pendingDragMerge = nil }
         } message: {
-            Text("Their photos become one person. This can't be undone from here.")
+            Text(Self.mergeWarning)
         }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
@@ -121,6 +121,10 @@ struct PeopleView: View {
                     personByID: personByID,
                     store: store,
                     inFlight: mergeInFlight,
+                    status: mergeStatus,
+                    progress: mergeProgress,
+                    stopRequested: mergeStopRequested,
+                    onStop: { mergeStopRequested = true },
                     onAccept: { candidate in
                         guard !mergeInFlight else { return }
                         let a = personByID[candidate.sourcePersonID]
@@ -134,10 +138,10 @@ struct PeopleView: View {
                             Task {
                                 let n = await CatalogWrites.merge(engine, store: store, target: t.id, sources: [s.id])
                                 if let n {
-                                    mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
+                                    setStatus("Merged into \"\(displayName)\" (\(n) photos).")
                                     suggestions.removeAll { $0.id == candidateID }
                                 } else {
-                                    mergeStatus = "Merge failed — see logs."
+                                    setStatus(Self.mergeFailed)
                                 }
                                 mergeInFlight = false
                                 reload()
@@ -171,13 +175,30 @@ struct PeopleView: View {
                         let submitted = pairs
                         Task {
                             let plan = await Task.detached(priority: .userInitiated) { [store] in store.mergeBatchPlan(submitted) }.value
-                            let merged = await CatalogWrites.mergeBatch(engine, store: store, plan: plan)
-                            if merged > 0 {
-                                suggestions.removeAll { batchToRemove.contains($0.id) }
-                                mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
-                            } else {
-                                mergeStatus = "Merge failed — see logs."
+                            let total = plan.reduce(0) { sum, group in sum + group.sources.filter { $0 != group.target }.count }
+                            mergeStopRequested = false
+                            let merged = await CatalogWrites.mergeBatch(
+                                engine, store: store, plan: plan,
+                                progress: { current, total in mergeProgress = "Merging \(current) of \(total)…" },
+                                shouldStop: { mergeStopRequested })
+                            mergeProgress = nil
+                            let alive = await Task.detached(priority: .userInitiated) { [store] in
+                                Set(store.persons(includeUnknown: true).map(\.id))
+                            }.value
+                            suggestions.removeAll {
+                                batchToRemove.contains($0.id)
+                                    && !(alive.contains($0.sourcePersonID) && alive.contains($0.destinationPersonID))
                             }
+                            if merged == 0 {
+                                setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
+                            } else if merged < total {
+                                setStatus(mergeStopRequested
+                                    ? "Stopped after \(merged) of \(total) merges. The rest are still in the list."
+                                    : "Merged \(merged) of \(total). The rest didn't go through and are still in the list.")
+                            } else {
+                                setStatus("Merged \(merged) \(merged == 1 ? "pair" : "pairs") of cards.")
+                            }
+                            mergeStopRequested = false
                             mergeInFlight = false
                             reload()
                         }
@@ -197,16 +218,36 @@ struct PeopleView: View {
                         let sources = mergeChecked.filter { $0 != target.id }.sorted()
                         let displayName = target.displayName
                         let sourceCount = sources.count
+                        guard !mergeInFlight else { return }
                         mergeMode = false
                         mergeChecked.removeAll()
                         activeSheet = nil
+                        mergeInFlight = true
+                        mergeStopRequested = false
                         Task {
-                            let newCount = await CatalogWrites.merge(engine, store: store, target: target.id, sources: sources)
-                            if let newCount {
-                                mergeStatus = "Merged \(sourceCount + 1) clusters into \"\(displayName)\" (\(newCount) photos)."
+                            let before = await Task.detached(priority: .userInitiated) { [store] in
+                                Set(store.persons(includeUnknown: true).map(\.id))
+                            }.value
+                            let newCount = await CatalogWrites.merge(
+                                engine, store: store, target: target.id, sources: sources,
+                                progress: { current, total in mergeProgress = total > 1 ? "Merging \(current) of \(total)…" : "Merging…" },
+                                shouldStop: { mergeStopRequested })
+                            mergeProgress = nil
+                            let after = await Task.detached(priority: .userInitiated) { [store] in
+                                Set(store.persons(includeUnknown: true).map(\.id))
+                            }.value
+                            let merged = sources.filter { before.contains($0) && !after.contains($0) }.count
+                            if let newCount, merged == sourceCount {
+                                setStatus("Combined \(sourceCount + 1) cards into \"\(displayName)\" (\(newCount) photos).")
+                            } else if newCount != nil {
+                                setStatus(mergeStopRequested
+                                    ? "Stopped after \(merged) of \(sourceCount) merges into \"\(displayName)\". The other cards were left as they were."
+                                    : "Merged \(merged) of \(sourceCount) cards into \"\(displayName)\". The rest didn't go through.")
                             } else {
-                                mergeStatus = "Merge failed — see logs."
+                                setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
                             }
+                            mergeStopRequested = false
+                            mergeInFlight = false
                             reload()
                         }
                     },
@@ -214,6 +255,49 @@ struct PeopleView: View {
                 )
             }
         }
+    }
+
+    static let mergeFailed = "The merge didn't go through. Try again in a moment."
+    static let mergeWarning = "Their photos become one person. This can't be undone."
+
+    private func setStatus(_ text: String?, offersShowUnknowns: Bool = false) {
+        mergeStatus = text
+        statusOffersShowUnknowns = offersShowUnknowns
+    }
+
+    private func refreshFaceModelInstalled() {
+        faceModelInstalled = !FaceEmbedderKind.installedKinds().isEmpty
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        HStack(spacing: 10) {
+            if let progress = mergeProgress {
+                ProgressView().controlSize(.small)
+                Text(progress)
+                    .font(Theme.Font.body(12))
+                    .foregroundStyle(Theme.text2)
+                Button(mergeStopRequested ? "Stopping…" : "Stop") { mergeStopRequested = true }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .disabled(mergeStopRequested)
+                    .help("Finish the merge that is running, then stop. Merges already done stay.")
+            } else if let status = mergeStatus {
+                Text(status)
+                    .font(Theme.Font.body(12))
+                    .foregroundStyle(Theme.text3)
+                if statusOffersShowUnknowns, hiddenUnknownCount > 0, !showHiddenUnknowns {
+                    Button("Show them") {
+                        showHiddenUnknowns = true
+                        reload()
+                    }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .help("Show the people you marked as unknown. To bring one back, open the card and untick \"I don't know who this is\".")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Header
@@ -308,7 +392,7 @@ struct PeopleView: View {
                     let reply = await engine.findMergeSuggestions()
                     suggestionsLoading = false
                     guard let result = reply else {
-                        mergeStatus = "Couldn't look for likely merges right now. Try again in a moment."
+                        setStatus("Couldn't look for likely merges right now. Try again in a moment.")
                         return
                     }
                     // The scan is multi-second; don't preempt whatever the
@@ -317,15 +401,17 @@ struct PeopleView: View {
                     // already up, not mid merge/unknown selection.
                     guard activeSheet == nil, !mergeMode, !unknownMode else { return }
                     suggestions = result
+                    setStatus(nil)
                     activeSheet = .suggestedMerges
                 }
             } label: {
-                Label(suggestionsLoading ? "Scanning…" : "Suggest merges",
+                Label(suggestionsLoading ? "Looking for the same person twice…" : "Suggest merges",
                       systemImage: suggestionsLoading ? "hourglass" : "sparkle.magnifyingglass")
             }
             .buttonStyle(.dsPrimary)
             .tint(Theme.gold)
-            .disabled(suggestionsLoading)
+            .disabled(suggestionsLoading || mergeInFlight)
+            .help("Find cards that might show the same person, so you can combine them.")
 
             Button {
                 mergeMode = true; mergeChecked.removeAll()
@@ -395,7 +481,12 @@ struct PeopleView: View {
         unknownChecked.removeAll()
         Task {
             let n = await CatalogWrites.markUnknown(engine, store: store, ids: ids)
-            mergeStatus = "Marked \(n) cluster\(n == 1 ? "" : "s") as unknown."
+            if n > 0 {
+                setStatus("Marked \(n) \(n == 1 ? "person" : "people") as unknown and hid \(n == 1 ? "that card" : "those cards"). To bring one back, show them, open the card and untick \"I don't know who this is\".",
+                          offersShowUnknowns: true)
+            } else {
+                setStatus("Marking as unknown didn't go through. Try again in a moment.")
+            }
             reload()
         }
     }
@@ -432,8 +523,9 @@ struct PeopleView: View {
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
-                let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
-                engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
+                let kind = DeepAnalyzeSettings.shared.activeKind
+                guard ModelLicenseGate.ensureAccepted(for: kind) else { return }
+                engine.deepAnalyzeAll(modelKind: kind.rawValue, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
                 Label("Describe files without names",
@@ -467,8 +559,9 @@ struct PeopleView: View {
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
-                let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
-                engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
+                let kind = DeepAnalyzeSettings.shared.activeKind
+                guard ModelLicenseGate.ensureAccepted(for: kind) else { return }
+                engine.deepAnalyzeAll(modelKind: kind.rawValue, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
                 Label("Describe files", systemImage: "arrow.forward.circle.fill")
@@ -491,7 +584,7 @@ struct PeopleView: View {
 
     @ViewBuilder
     private var content: some View {
-        if FaceEmbedderKind.installedKinds().isEmpty {
+        if !(faceModelInstalled ?? !FaceEmbedderKind.installedKinds().isEmpty) {
             modelMissingBanner
         } else if persons.isEmpty && totalFacePrints == 0 {
             emptyState
@@ -642,10 +735,21 @@ struct PeopleView: View {
         }
     }
 
-    private func reload() {
+    /// `debounced` is for catalog change notifications, which arrive in
+    /// bursts during a scan; each would otherwise re-run the people query.
+    /// A pending debounced reload is left to fire rather than pushed back,
+    /// so a steady stream of changes still refreshes the grid.
+    private func reload(debounced: Bool = false) {
+        if debounced && reloadPending { return }
         let includeUnknown = showHiddenUnknowns
         reloadTask?.cancel()
+        reloadPending = debounced
         reloadTask = Task {
+            if debounced {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                reloadPending = false
+            }
             // Drop emptied clusters: moving every face out of a person leaves a
             // 0-face row whose stale representative_face_id now points at the
             // target's face — a ghost card showing the wrong person. Hide it.
@@ -894,6 +998,11 @@ private struct PersonDetailSheet: View {
     @State private var checked: Set<Int64> = []
     @State private var showMoveTargetPicker: Bool = false
     @State private var moveStatus: String?
+    @State private var pendingTag: PendingTag?
+    private struct PendingTag {
+        let adding: String
+        var removing: String? = nil
+    }
 
     @ViewBuilder
     private var photoGridToolbar: some View {
@@ -1007,6 +1116,8 @@ private struct PersonDetailSheet: View {
                                 if selectMode {
                                     if checked.contains(f.id) { checked.remove(f.id) }
                                     else { checked.insert(f.id) }
+                                } else {
+                                    NSWorkspace.shared.open(f.url)
                                 }
                             }
                     }
@@ -1028,6 +1139,21 @@ private struct PersonDetailSheet: View {
                 }
             )
         }
+        .confirmationDialog(
+            pendingTagTitle,
+            isPresented: Binding(get: { pendingTag != nil }, set: { if !$0 { pendingTag = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button(pendingTag?.removing == nil ? "Add tag" : "Replace tag") {
+                guard let tag = pendingTag else { return }
+                pendingTag = nil
+                if let old = tag.removing { retagAllPhotos(removing: old, adding: tag.adding) }
+                else { applyTagToAllPhotos(tag.adding) }
+            }
+            Button("Cancel", role: .cancel) { pendingTag = nil }
+        } message: {
+            Text(pendingTagMessage)
+        }
         .frame(minWidth: 720, minHeight: 520)
         .onAppear {
             loadFiles()
@@ -1046,16 +1172,39 @@ private struct PersonDetailSheet: View {
         let saved = [person.title, person.firstName ?? person.name, person.middleName, person.lastName, person.suffix]
             .map { ($0 ?? "").trimmingCharacters(in: .whitespaces) }
         guard isUnknown != person.isUnknown || (!isUnknown && fields != saved) else { return }
-        let id = person.id, unknown = isUnknown
+        let id = person.id, unknown = isUnknown, shownName = person.displayName
         Task { [engine, store] in
             if unknown {
-                await CatalogWrites.markUnknown(engine, store: store, ids: [id])
+                if await CatalogWrites.markUnknown(engine, store: store, ids: [id]) == 0 {
+                    ToastCenter.shared.show("Couldn't mark \(shownName) as unknown. Open the card and try again.", duration: 8)
+                }
             } else {
                 let value: (Int) -> String? = { fields[$0].isEmpty ? nil : fields[$0] }
-                await CatalogWrites.renamePerson(engine, store: store, id: id, title: value(0), firstName: value(1),
-                                                 middleName: value(2), lastName: value(3), suffix: value(4))
+                let saved = await CatalogWrites.renamePerson(engine, store: store, id: id, title: value(0), firstName: value(1),
+                                                             middleName: value(2), lastName: value(3), suffix: value(4))
+                if !saved {
+                    ToastCenter.shared.show("The name for \(shownName) wasn't saved. Open the card and type it again.", duration: 8)
+                }
             }
         }
+    }
+
+    private var pendingTagTitle: String {
+        guard let tag = pendingTag else { return "" }
+        let count = files.count
+        let noun = "\(count.formatted()) file\(count == 1 ? "" : "s")"
+        if let old = tag.removing { return "Replace the tag \"\(old)\" with \"\(tag.adding)\" on \(noun)?" }
+        return "Add the tag \"\(tag.adding)\" to \(noun)?"
+    }
+
+    private var pendingTagMessage: String {
+        guard let tag = pendingTag else { return "" }
+        let count = files.count
+        let these = count == 1 ? "this photo" : "all \(count.formatted()) photos of this person"
+        if let old = tag.removing {
+            return "FileID removes the Finder tag \"\(old)\" from \(these) and adds \"\(tag.adding)\". Other tags are kept. You can change tags later in Finder."
+        }
+        return "FileID writes the Finder tag \"\(tag.adding)\" onto \(these). It shows in Finder and Spotlight. Other tags are kept, and you can remove it later in Finder."
     }
 
     @ViewBuilder
@@ -1064,7 +1213,7 @@ private struct PersonDetailSheet: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Button {
-                    applyTagToAllPhotos(tagName)
+                    pendingTag = PendingTag(adding: tagName)
                 } label: {
                     Label(tagBatchInFlight
                           ? "Tagging…"
@@ -1072,7 +1221,7 @@ private struct PersonDetailSheet: View {
                           systemImage: "tag.fill")
                 }
                 .buttonStyle(.dsSecondary)
-                .disabled(tagBatchInFlight || tagName.isEmpty)
+                .disabled(tagBatchInFlight || tagName.isEmpty || files.isEmpty)
                 .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
 
                 // re-tag affordance. Shows only when this person
@@ -1080,13 +1229,13 @@ private struct PersonDetailSheet: View {
                 // renamed "Alex" → "Alex Doe" after a tag pass).
                 if let oldTag = previousTagIfDifferent(currentTag: tagName) {
                     Button {
-                        retagAllPhotos(removing: oldTag, adding: tagName)
+                        pendingTag = PendingTag(adding: tagName, removing: oldTag)
                     } label: {
                         Label("Replace \"\(oldTag)\" with \"\(tagName)\"",
                               systemImage: "arrow.triangle.2.circlepath")
                     }
                     .buttonStyle(.dsSecondary)
-                    .disabled(tagBatchInFlight)
+                    .disabled(tagBatchInFlight || files.isEmpty)
                     .help("Photos were tagged \"\(oldTag)\" earlier. Removes the old tag and adds the new one.")
                 }
             }
@@ -1232,17 +1381,19 @@ private struct PersonFileTile: View {
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .contextMenu {
+            Button("Open") { NSWorkspace.shared.open(file.url) }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([file.url])
             }
         }
+        .help(selectMode ? "Click to select" : "Click to open. Right-click to show it in Finder.")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(file.url.lastPathComponent)
-        .accessibilityAddTraits(selectMode ? [.isButton, isChecked ? .isSelected : []] : [.isImage])
+        .accessibilityAddTraits(selectMode ? [.isButton, isChecked ? .isSelected : []] : [.isImage, .isButton])
         .accessibilityHint(selectMode
             ? (isChecked ? "Selected. Tap to deselect."
                          : "Tap to select for moving to another person.")
-            : "")
+            : "Opens the photo.")
     }
 
     private var tile: some View {
@@ -1267,9 +1418,9 @@ private struct PersonFileTile: View {
 // MARK: - Move-photos target picker
 
 /// Picker shown when the user wants to reassign photos from one
-/// person's cluster to another. Lists every other named person
-/// (skips unknown + self), with their representative thumbnail and
-/// photo count. Tap to commit the move.
+/// person's cluster to another. Lists every other person, named or not
+/// (skips self and people marked unknown), with their representative
+/// thumbnail and photo count. Picking one asks before moving.
 private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
     let engine: EngineClient
@@ -1278,6 +1429,20 @@ private struct MovePhotosTargetPicker: View {
     let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
+    @State private var pendingTarget: ReadStore.PersonRow?
+
+    private func move(to target: ReadStore.PersonRow) {
+        let sourceID = sourcePerson.id
+        let targetID = target.id
+        let ids = fileIDs
+        let targetName = target.displayName
+        let completion = onMoved
+        dismiss()
+        Task { [engine, store] in
+            let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
+            completion(moved, targetName)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1299,18 +1464,7 @@ private struct MovePhotosTargetPicker: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)],
                           spacing: 12) {
                     ForEach(candidates) { p in
-                        Button {
-                            let sourceID = sourcePerson.id
-                            let targetID = p.id
-                            let ids = fileIDs
-                            let targetName = p.displayName
-                            let completion = onMoved
-                            dismiss()
-                            Task { [engine, store] in
-                                let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
-                                completion(moved, targetName)
-                            }
-                        } label: {
+                        Button { pendingTarget = p } label: {
                             PersonCard(person: p, store: store)
                         }
                         .buttonStyle(.plain)
@@ -1320,6 +1474,20 @@ private struct MovePhotosTargetPicker: View {
             }
         }
         .frame(minWidth: 640, minHeight: 480)
+        .confirmationDialog(
+            "Move \(fileIDs.count) photo\(fileIDs.count == 1 ? "" : "s") from \(sourcePerson.displayName) to \(pendingTarget?.displayName ?? "")?",
+            isPresented: Binding(get: { pendingTarget != nil }, set: { if !$0 { pendingTarget = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Move") {
+                guard let target = pendingTarget else { return }
+                pendingTarget = nil
+                move(to: target)
+            }
+            Button("Cancel", role: .cancel) { pendingTarget = nil }
+        } message: {
+            Text("\(sourcePerson.displayName)'s face in \(fileIDs.count == 1 ? "this photo" : "these photos") will count as \(pendingTarget?.displayName ?? "the other person") instead. The files themselves aren't changed. To put them back, move them the same way from the other card.")
+        }
         .onAppear {
             let sourceID = sourcePerson.id
             Task {
@@ -1340,9 +1508,39 @@ private struct SuggestedMergesSheet: View {
     let personByID: [Int64: ReadStore.PersonRow]
     let store: ReadStore
     let inFlight: Bool
+    let status: String?
+    let progress: String?
+    let stopRequested: Bool
+    let onStop: () -> Void
     let onAccept: (MergeSuggestionPair) -> Void
     let onAcceptMany: ([MergeSuggestionPair]) -> Void
     let onDismiss: () -> Void
+
+    @State private var pending: PendingMerge?
+    private struct PendingMerge {
+        let pairs: [MergeSuggestionPair]
+        let single: Bool
+        let title: String
+    }
+
+    private func name(_ id: Int64) -> String { personByID[id]?.displayName ?? "this person" }
+
+    @ViewBuilder
+    private var outcomeRow: some View {
+        if let progress {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text(progress).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+                Button(stopRequested ? "Stopping…" : "Stop", action: onStop)
+                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .disabled(stopRequested)
+                    .help("Finish the merge that is running, then stop. Merges already done stay.")
+                Spacer(minLength: 0)
+            }
+        } else if let status {
+            Text(status).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1371,9 +1569,10 @@ private struct SuggestedMergesSheet: View {
                 // the easy cases without 100 individual Merge clicks.
                 let veryLikely = candidates.filter { $0.similarity >= 0.55 }
                 Button {
-                    onAcceptMany(veryLikely)
+                    pending = PendingMerge(pairs: veryLikely, single: false,
+                                           title: "Merge \(veryLikely.count) \(veryLikely.count == 1 ? "pair" : "pairs") that very likely match?")
                 } label: {
-                    Label("Merge \(veryLikely.count) very-likely-same",
+                    Label("Merge \(veryLikely.count) very likely matches",
                           systemImage: "checkmark.circle.fill")
                         .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
@@ -1384,7 +1583,8 @@ private struct SuggestedMergesSheet: View {
                 .disabled(veryLikely.isEmpty || inFlight)
                 .help("Combine only the pairs FileID is most sure about. The rest stay here for you to check.")
                 Button {
-                    onAcceptMany(candidates)
+                    pending = PendingMerge(pairs: candidates, single: false,
+                                           title: "Merge all \(candidates.count) \(candidates.count == 1 ? "pair" : "pairs")?")
                 } label: {
                     Label("Merge all \(candidates.count)",
                           systemImage: "rectangle.stack.fill")
@@ -1395,17 +1595,17 @@ private struct SuggestedMergesSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(candidates.isEmpty || inFlight)
-                .help("Merge every pair in the list. Use carefully — pairs near the lower end of the borderline band may not actually be the same person.")
+                .help("Merge every pair in the list. Be careful: the pairs marked \"Possibly same\" may be two different people.")
                 Spacer()
             }
-            // Outcome already rendered above the action row, no duplicate here.
+            outcomeRow
             Divider().opacity(0.3)
             if candidates.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 48))
                         .foregroundStyle(Theme.delight)
-                    Text("No borderline pairs found.")
+                    Text("No likely matches found.")
                         .font(Theme.Font.body(13.5, .semibold))
                     Text("Every card is clearly a different person. Check again after adding more photos.")
                         .font(Theme.Font.body(12))
@@ -1431,6 +1631,22 @@ private struct SuggestedMergesSheet: View {
         .frame(minWidth: 560, minHeight: 420)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
+        .confirmationDialog(
+            pending?.title ?? "",
+            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Merge", role: .destructive) {
+                guard let merge = pending else { return }
+                pending = nil
+                if merge.single, let pair = merge.pairs.first { onAccept(pair) } else { onAcceptMany(merge.pairs) }
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        } message: {
+            Text(pending?.single == false
+                 ? "Each pair becomes one person. This can't be undone. You can stop partway; merges already done stay."
+                 : PeopleView.mergeWarning)
+        }
     }
 
     @ViewBuilder
@@ -1449,7 +1665,11 @@ private struct SuggestedMergesSheet: View {
                     Text(similarityLabel(cand.similarity))
                         .font(Theme.Font.body(12, .semibold))
                         .foregroundStyle(similarityColor(cand.similarity))
-                    Button("Merge") { onAccept(cand) }
+                        .help(FaceReviewText.scoreHelp(cand.similarity))
+                    Button("Merge") {
+                        pending = PendingMerge(pairs: [cand], single: true,
+                                               title: "Merge \(name(cand.sourcePersonID)) and \(name(cand.destinationPersonID))?")
+                    }
                         .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .disabled(inFlight)
@@ -1502,6 +1722,7 @@ private struct MergeTargetPickerSheet: View {
     let onPick: (ReadStore.PersonRow) -> Void
     let onCancel: () -> Void
     private let sortedCandidates: [ReadStore.PersonRow]
+    @State private var pendingTarget: ReadStore.PersonRow?
 
     init(checked: [ReadStore.PersonRow], onPick: @escaping (ReadStore.PersonRow) -> Void, onCancel: @escaping () -> Void) {
         self.checked = checked
@@ -1533,7 +1754,7 @@ private struct MergeTargetPickerSheet: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(sortedCandidates) { person in
-                        Button { onPick(person) } label: {
+                        Button { pendingTarget = person } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "person.crop.circle")
                                     .font(Theme.Font.body(20, .semibold))
@@ -1571,6 +1792,20 @@ private struct MergeTargetPickerSheet: View {
         .frame(minWidth: 460, minHeight: 320)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
+        .confirmationDialog(
+            "Combine \(checked.count) cards into \"\(pendingTarget?.displayName ?? "")\"?",
+            isPresented: Binding(get: { pendingTarget != nil }, set: { if !$0 { pendingTarget = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Merge", role: .destructive) {
+                guard let target = pendingTarget else { return }
+                pendingTarget = nil
+                onPick(target)
+            }
+            Button("Cancel", role: .cancel) { pendingTarget = nil }
+        } message: {
+            Text("The other \(checked.count - 1 == 1 ? "card goes" : "\(checked.count - 1) cards go") away and \(checked.count - 1 == 1 ? "its" : "their") photos move to this one. This can't be undone.")
+        }
     }
 }
 
@@ -1596,7 +1831,8 @@ private struct FaceModelInstallPanel: View {
             }
             .padding(14)
             PanelFooter {
-                MetaText("Downloads once from Hugging Face. It runs on this Mac; your photos never leave it.", size: 11)
+                MetaText("Downloads once (\(downloadSize)), then works offline. It runs on this Mac; your photos never leave it.", size: 11)
+                    .help("Face model: \(kind.displayName)")
                 Spacer()
                 actions
             }
@@ -1617,8 +1853,12 @@ private struct FaceModelInstallPanel: View {
         case .installed:
             MetaText("Ready. Press Group faces to see people here.", color: Theme.delight, size: 11)
         default:
-            MetaText("\(kind.displayName) · about \(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file))", size: 11)
+            EmptyView()
         }
+    }
+
+    private var downloadSize: String {
+        "about \(Int((Double(kind.approxBytes) / 1_048_576).rounded())) MB"
     }
 
     @ViewBuilder

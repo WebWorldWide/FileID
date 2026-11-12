@@ -195,7 +195,12 @@ struct Sidebar: View {
         case "discovery_partial": return "Some files were left out"
         case "empty_folder": return "No files to scan"
         case "scan_failed": return "The scan stopped"
-        case "db_unavailable": return "The library couldn't be opened"
+        case "db_unavailable", "db_failed": return "The library couldn't be opened"
+        case "db_newer_than_engine": return "This library needs a newer FileID"
+        case "folder_access_denied": return "FileID can't reach that folder"
+        case "command_decode_failed": return "FileID couldn't do that"
+        case "plan_restructure_failed": return "The folder plan didn't finish"
+        case "orphan_sweep_failed", "purge_excluded_failed": return "Cleaning up the library didn't finish"
         case "model_load_failed": return "An AI model didn't load"
         case "restructure_busy", "restructure_already_running": return "A folder move is already running"
         case "engine_exited": return "FileID's helper stopped"
@@ -206,12 +211,41 @@ struct Sidebar: View {
         }
     }
 
+    /// The sentence under the title. Known kinds get fixed wording; anything
+    /// else shows FileID's own message unless it reads like a log line.
+    static func errorText(kind: String, message: String) -> String {
+        switch kind {
+        case "scan_failed": return "Press Scan again. Files already read are skipped."
+        case "db_unavailable", "db_failed": return "Quit and reopen FileID. If it keeps happening, use Start over in the folder menu."
+        case "db_newer_than_engine": return "This library was made by a newer FileID. Update FileID."
+        case "folder_access_denied", "bookmark_unavailable": return "Choose the folder again so FileID can open it."
+        case "command_decode_failed": return "Try again. If it keeps happening, quit and reopen FileID."
+        case "plan_restructure_failed": return "Open Organize Folders and try again, or pick a smaller folder."
+        case "orphan_sweep_failed", "purge_excluded_failed": return "Nothing was lost. Scan again to finish tidying up."
+        case "model_load_failed", "prewarm_failed", "unknown_model": return "Open Settings and install the model again."
+        case "restructure_busy", "restructure_already_running": return "Wait for it to finish, then try again."
+        case "ipc_frame_too_large": return "That folder plan is too large to show. Try a smaller folder."
+        default: return looksTechnical(message) ? "Try again. If it keeps happening, quit and reopen FileID." : message
+        }
+    }
+
+    static func looksTechnical(_ message: String) -> Bool {
+        if message.isEmpty || message.count > 220 { return true }
+        let lowered = message.lowercased()
+        let markers = ["error domain", "sqlite", "nserror", "errno", "0x", "::", "decodingerror", "codingkeys",
+                       "keynotfound", "typemismatch", "fatal", "exception", "stack", "thread", "posix", " ipc",
+                       "engine", "database", "catalog", "embedding", "onnx", "mlx", "coreml", "pid ", "/users/",
+                       "/volumes/", "(code", "code=", "optional(", "{", "}", "_", "\\"]
+        return markers.contains { lowered.contains($0) }
+    }
+
     private func engineErrorRow(_ err: EngineError) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text(Self.errorTitle(err.kind)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(err.message).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
+                Text(Self.errorText(kind: err.kind, message: err.message)).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)
             DSIconButton("Dismiss error", systemImage: "xmark", tint: Theme.text3) { engine.clearLastError() }

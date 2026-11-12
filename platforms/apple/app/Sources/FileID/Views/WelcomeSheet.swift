@@ -54,7 +54,9 @@ struct WelcomeSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            SectionLabel("1 · Download the AI models").padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 4)
+            SectionLabel("Download the AI models").padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 2)
+            MetaText("Without these, FileID still finds files by name and by text inside them.", size: 11.5)
+                .padding(.horizontal, 22).padding(.bottom, 4)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -100,7 +102,7 @@ struct WelcomeSheet: View {
                         selectedVLM = kind
                     } label: {
                         HStack {
-                            Text("\(kind.displayName) · \(kind.licenseName)")
+                            Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
                             if kind == selectedVLM {
                                 Image(systemName: "checkmark").accessibilityHidden(true)
                             }
@@ -108,12 +110,13 @@ struct WelcomeSheet: View {
                     }
                     .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
                     .disabled(!vlmChoiceAvailable(kind))
+                    .help("\(kind.displayName) · \(kind.licenseName)")
                 }
             } label: {
                 HStack {
                     Text("Description model")
                     Spacer()
-                    Text(selectedVLM.displayName)
+                    Text(Self.shortName(selectedVLM))
                     Image(systemName: "chevron.up.chevron.down")
                 }
             }
@@ -121,8 +124,9 @@ struct WelcomeSheet: View {
             .menuStyle(.borderlessButton)
             .font(Theme.Font.body(13.5))
             .padding(.horizontal, 22).padding(.top, 12)
+            .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
             .accessibilityLabel("Description model")
-            .accessibilityValue(selectedVLM.displayName)
+            .accessibilityValue(Self.shortName(selectedVLM))
             Text(selectedVLM == hardwareRecommendedVLM
                  ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
                  : "Your choice. FileID uses it to describe files and answer Chat.")
@@ -175,12 +179,12 @@ struct WelcomeSheet: View {
             bge.refreshStatus()
         }
         .onDisappear { installAllRequested = false }
-        .onChange(of: anyInProgress) { _, inProgress in
-            // Once everything "Install all" kicked off has settled without
-            // completing the full set — a cancel or a failure leaves models
+        .onChange(of: essentialsInProgress) { _, inProgress in
+            // Once everything the essentials button kicked off has settled
+            // without completing the set — a cancel or a failure leaves models
             // missing and idle — re-enable the button instead of latching it
             // disabled for the rest of the session.
-            if !inProgress && !allInstalled { installAllRequested = false }
+            if !inProgress && !essentialsInstalled { installAllRequested = false }
         }
         .onChange(of: selectedVLM) { _, kind in
             DeepAnalyzeSettings.shared.activeKind = kind
@@ -223,8 +227,9 @@ struct WelcomeSheet: View {
             // platform parity,); route it like the prewarm_*
             // family so the row flips to Failed instead of spinning.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
+                || ModelFailureText.isModelFailure(err)
                 || err.message.contains(selectedVLM.displayName) {
-                vlmLastError = err.message
+                vlmLastError = ModelFailureText.plain(err)
                 vlmRequested = false
             }
         }
@@ -235,7 +240,7 @@ struct WelcomeSheet: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Welcome to FileID").font(Theme.Font.display(34)).foregroundStyle(Theme.text1)
-                MetaText("FileID sorts your files with AI that runs on this Mac. The models download once from Hugging Face; after that, nothing leaves your Mac.", color: Theme.text2)
+                MetaText("FileID sorts your files with AI that runs on this Mac. The models download once from the internet (huggingface.co); after that, nothing leaves your Mac.", color: Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -246,23 +251,32 @@ struct WelcomeSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            MetaText(allInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
-            Spacer()
-            Button(allInstalled ? "Continue" : "Later") { dismiss() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 32))
-                .keyboardShortcut(.cancelAction)
-            Button(allInstalled ? "All downloaded" : installAllRequested ? "Downloading…" : "Download all · \(totalDownloadLabel)") {
-                installAllRequested = true
-                if !clipInstalled, !clipInProgress { clip.install() }
-                if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
-                if !arcfaceInstalled, !arcfaceInProgress { arcface.install() }
-                if !bgeInstalled, !bgeInProgress { bge.install() }
-                if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
+            VStack(alignment: .leading, spacing: 2) {
+                MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
+                if let free = availableDiskBytes {
+                    MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac", size: 11)
+                }
             }
-            .buttonStyle(DSPrimaryButtonStyle(height: 32))
-            .keyboardShortcut(.defaultAction)
-            .disabled(allInstalled || installAllRequested
-                      || (!vlmInstalled && !selectedVLMCanInstall))
+            Spacer()
+            if essentialsInstalled {
+                Button("Continue") { dismiss() }
+                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                    .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Later") { dismiss() }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 32))
+                    .keyboardShortcut(.cancelAction)
+                Button(installAllRequested ? "Downloading…" : "Download the essentials · \(essentialsDownloadLabel)") {
+                    installAllRequested = true
+                    if !clipInstalled, !clipInProgress { clip.install() }
+                    if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
+                    if !arcfaceInstalled, !arcfaceInProgress { arcface.install() }
+                    if !bgeInstalled, !bgeInProgress { bge.install() }
+                }
+                .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                .disabled(installAllRequested)
+                .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
+            }
         }
         .padding(.horizontal, 22).padding(.vertical, 16)
         .overlay(alignment: .top) { Hairline() }
@@ -315,7 +329,7 @@ struct WelcomeSheet: View {
     private func triggerVLMInstall() {
         guard !vlmInProgress else { return }
         guard selectedVLMCanInstall else {
-            vlmLastError = selectedVLMInstallBlocker ?? "This model cannot be installed safely on this Mac."
+            vlmLastError = selectedVLMInstallBlocker ?? "This description model can't be used on this Mac. Choose another one."
             return
         }
         guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
@@ -332,14 +346,18 @@ struct WelcomeSheet: View {
         engine.prewarmModel(selectedVLM.rawValue)
         // If the engine never reports progress, surface a clear error
         // after 30 s rather than spinning forever. A real download
-        // sends a fraction event well within that window.
+        // sends a fraction event well within that window. Files already on
+        // disk from an earlier attempt are re-checked first, silently, and
+        // that can take minutes for a multi-GB model — so wait longer then.
+        let kind = selectedVLM
+        let recheckingFiles = DescriptionModelStore.folder(for: kind)
+            .map { ((try? FileManager.default.contentsOfDirectory(atPath: $0.path)) ?? []).contains { !$0.hasPrefix(".") } } ?? false
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(30))
+            try? await Task.sleep(for: .seconds(recheckingFiles ? 300 : 30))
             guard vlmRequested,
                   vlmRequestedAt == started,
-                  engine.modelDownloadProgress?.modelKind != selectedVLM.rawValue else { return }
-            vlmLastError = "No response from engine — try again."
-            vlmRequested = false
+                  engine.modelDownloadProgress?.modelKind != kind.rawValue else { return }
+            stopVLMRequest(kind, error: "The download didn't start. Try again.")
         }
         // started-then-stalled watchdog. A download that emits ≥1 progress
         // event then goes silent (server hang / dropped link without RST) defeats
@@ -357,12 +375,31 @@ struct WelcomeSheet: View {
                 if vlmLastFraction < 0.999,
                    let last = vlmLastProgressAt,
                    Date().timeIntervalSince(last) > 45 {
-                    vlmLastError = "Download stalled — check your connection and try again."
-                    vlmRequested = false
+                    stopVLMRequest(kind, error: "The download stopped. Check your internet connection, then try again.")
                     return
                 }
             }
         }
+    }
+
+    /// A watchdog gave up: tell the engine to stop too, so a download that
+    /// comes back to life later can't run behind a row that says it failed.
+    private func stopVLMRequest(_ kind: AIModelKind, error: String) {
+        engine.cancelPrewarm()
+        engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
+        resetVLMTracking()
+        vlmLastError = error
+        vlmRequested = false
+    }
+
+    static func shortName(_ kind: AIModelKind) -> String {
+        kind.displayName.replacingOccurrences(of: #"\s*\([^)]*bit\)$"#, with: "", options: .regularExpression)
+    }
+
+    private func vlmChoiceBlocker(_ kind: AIModelKind) -> String? {
+        if !kind.fits(ramGB: systemRAMGB) { return "needs more memory than this Mac has" }
+        if !ModelInstallStatus.isInstalled(kind: kind), !kind.fits(freeDiskBytes: availableDiskBytes) { return "not enough free space" }
+        return nil
     }
 
     private var clipInstalled: Bool { clip.status.isInstalled }
@@ -388,11 +425,10 @@ struct WelcomeSheet: View {
     private var selectedVLMInstallBlocker: String? {
         guard !vlmInstalled else { return nil }
         if !selectedVLM.fits(ramGB: systemRAMGB) {
-            return "\(selectedVLM.displayName) needs more unified memory than this Mac can safely provide. Choose a lighter model."
+            return "This description model needs more memory than this Mac has. Choose a smaller one."
         }
-        if !selectedVLM.fits(freeDiskBytes: availableDiskBytes) {
-            let gib = Double(selectedVLM.requiredFreeBytes) / 1_073_741_824.0
-            return "Free space on the models drive before installing (about \(gib.formatted(.number.precision(.fractionLength(1)))) GB required while files are verified)."
+        if !selectedVLM.fits(freeDiskBytes: availableDiskBytes), let free = availableDiskBytes {
+            return ModelInstaller.notEnoughSpace(needed: selectedVLM.requiredFreeBytes, available: free)
         }
         return nil
     }
@@ -412,7 +448,7 @@ struct WelcomeSheet: View {
         return nil
     }
     private var vlmProgressLabel: String? {
-        if let err = vlmLastError { return "Failed: \(err)" }
+        if let err = vlmLastError { return err }
         guard vlmRequested else { return nil }
         if let p = engine.modelDownloadProgress, p.modelKind == selectedVLM.rawValue {
             return p.message
@@ -503,24 +539,27 @@ struct WelcomeSheet: View {
         vlmLastError = nil
     }
 
-    private var totalDownloadLabel: String {
+    private var essentialsDownloadLabel: String {
         var bytes: Int64 = 0
         if !clipInstalled { bytes += Int64(CLIPModelInstaller.approxDownloadBytes) }
         if !ramplusInstalled { bytes += ramplus.spec.approxBytes }
         if !arcfaceInstalled { bytes += Int64(recommendedFace.approxBytes) }
         if !bgeInstalled { bytes += bge.spec.approxBytes }
-        if !vlmInstalled { bytes += resolvedVLMTotalBytes }
-        return "~" + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "about " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private var essentialsInstalled: Bool {
+        clipInstalled && ramplusInstalled && arcfaceInstalled && bgeInstalled
     }
 
     private var allInstalled: Bool {
-        clipInstalled && ramplusInstalled && arcfaceInstalled && bgeInstalled && vlmInstalled
+        essentialsInstalled && vlmInstalled
     }
 
-    /// True while any of the three onboarding downloads is still running.
-    /// Drives "Install all" re-enablement once a cancel/failure settles
-    /// everything back to idle.
-    private var anyInProgress: Bool {
-        clipInProgress || ramplusInProgress || arcfaceInProgress || bgeInProgress || vlmInProgress
+    /// True while any of the four required downloads is still running.
+    /// Drives the essentials button's re-enablement once a cancel/failure
+    /// settles everything back to idle.
+    private var essentialsInProgress: Bool {
+        clipInProgress || ramplusInProgress || arcfaceInProgress || bgeInProgress
     }
 }

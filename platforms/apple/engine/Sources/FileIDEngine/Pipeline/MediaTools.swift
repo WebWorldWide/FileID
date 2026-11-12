@@ -146,7 +146,7 @@ public actor MediaTools {
         var reserved = Set<String>()
         for fileID in ids {
             let source: String? = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id=?", arguments: [fileID]) }
-            guard let source else { throw Failure(text: "A selected file is no longer in the catalog.") }
+            guard let source else { throw Failure(text: "A selected file is no longer in your library.") }
             let sourceURL = URL(fileURLWithPath: source)
             let chapters = try await database.pool.read { db in try CatalogStore.chapters(db, fileID: fileID).filter { !$0.stale } }
             if recipe.kind == "chapters", chapters.isEmpty { throw Failure(text: "A selected file has no current chapter markers.") }

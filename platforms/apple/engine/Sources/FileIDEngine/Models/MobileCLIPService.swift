@@ -6,8 +6,8 @@
 // output is an L2-normalized 512-d float vector. Legacy MobileCLIP vectors
 // require fresh inference; equal dimensions do not establish compatibility.
 //
-// `@unchecked Sendable`: locks guard internals. `inferenceSem` bounds ANE
-// concurrency at 4 (flooding from 14 workers thrashes the ANE).
+// `@unchecked Sendable`: locks guard internals. On the ONNX path `inferenceSem`
+// bounds how many embeds run at once; the default MLX path batches on the GPU.
 import Foundation
 import CoreGraphics
 import FileIDShared
@@ -23,7 +23,7 @@ public final class MobileCLIPService: @unchecked Sendable {
     private var session: ORTSession?
     private var inputName: String?
     private var isImageLoaded = false
-    // Defaults to 4 (ANE-thrash cap); raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
+    // ONNX path only. Override with FILEID_INFERENCE_CONCURRENCY.
     private static let inferenceConcurrency: Int =
         ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
             .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
@@ -107,6 +107,12 @@ public final class MobileCLIPService: @unchecked Sendable {
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
         return isImageLoaded && session != nil
+    }
+
+    /// An image encoder is loaded on either backend (after `preWarm`).
+    public var canEmbed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (isImageLoaded && session != nil) || gpuEncoder != nil
     }
 
     // MARK: - Inference

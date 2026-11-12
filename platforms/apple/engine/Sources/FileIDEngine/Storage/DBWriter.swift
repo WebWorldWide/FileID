@@ -90,6 +90,9 @@ public struct TaggedFile: Sendable {
     // timeout (empty result) cannot wipe a file's previously-persisted auto-tags,
     // OCR text + FTS, or — critically — manual person_id assignments on a
     // rescan. Default FALSE: the safe, no-delete state for any partial row.
+    /// Set by discovery's moved-file shortcut: the row is only re-bound to this
+    /// path (rename/move heal). Nothing was analysed, so nothing else is written.
+    var healOnly = false
     public var tagsEvaluated: Bool
     public var facesEvaluated: Bool
     public var ocrStageRan: Bool
@@ -337,13 +340,13 @@ public actor DBWriter {
             let userMessage: String
             switch primary {
             case .SQLITE_IOERR:
-                userMessage = "The database is no longer reachable mid-scan (SQLite I/O error). This usually means another FileID process held the .sqlite file. Quit FileID completely (⌘Q), then re-run ./run.sh — it now kills stale processes before wiping."
+                userMessage = "FileID lost access to its library during the scan. Quit FileID completely (⌘Q), reopen it and scan again."
             case .SQLITE_BUSY, .SQLITE_LOCKED:
-                userMessage = "Another FileID process is holding the database. Quit FileID (⌘Q) and re-run ./run.sh."
+                userMessage = "Another copy of FileID is using the library. Quit FileID completely (⌘Q), reopen it and scan again."
             case .SQLITE_FULL:
-                userMessage = "Disk full — free space and re-run."
+                userMessage = "Your disk is full. Free up some space, then scan again."
             default:
-                userMessage = "Batch \(self.batchIndex) write failed: \(error)"
+                userMessage = "FileID couldn't save some scan results."
             }
             self.consecutiveCommitFailures += 1
             if self.abortedForWriteFailure {
@@ -354,7 +357,7 @@ public actor DBWriter {
                 await self.coordinator.requestCancel()
                 await sink.emit(.error(EngineError(
                     kind: "db_write_failed",
-                    message: userMessage + " Scan stopped — nothing was being saved."
+                    message: userMessage + " The scan stopped because results weren't being saved."
                 )))
             } else {
                 await sink.emit(.error(EngineError(
@@ -533,6 +536,20 @@ public actor DBWriter {
                     SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
                     """),
                 arguments: [file.url.path])
+        }
+
+        if file.healOnly {
+            if let existing {
+                let fileID: Int64 = existing["id"]
+                try db.cachedStatement(sql: "UPDATE files SET scanned_at = ? WHERE id = ?")
+                    .execute(arguments: [Date().timeIntervalSince1970, fileID])
+            } else {
+                // The old path came back or the new one was taken between the walk
+                // and this write. No row is made from an unanalysed file; the next
+                // scan sees it as new.
+                JSONLog.shared.info(ev: "rename_heal_deferred", path: redactPathForLog(file.url.path))
+            }
+            return
         }
 
         // A failure on a file that scanned before (transient decode error, NAS
@@ -837,7 +854,7 @@ public actor DBWriter {
     /// skip-set's content_hash carve-out (scan_session.rs), which likewise
     /// keeps a file whose derived data is still missing IN the pipeline.
     static let skipSetClipBackfillExclusionSQL = """
-        NOT (files.kind IN ('image','video') AND NOT EXISTS (
+        NOT ((files.kind = 'image' OR (files.kind = 'video' AND files.text_stage_done = 0)) AND NOT EXISTS (
             SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id
               AND model = '\(CLIPEmbeddingSpace.modelID)' AND length(embedding) = 2048))
         """
@@ -907,6 +924,7 @@ public actor DBWriter {
         newPathSearch: String, oldPathExists: [String: Bool], db: GRDB.Database
     ) throws -> Int64? {
         let refInt = fileRef.map { Int64(bitPattern: $0) }
+        let contentHash = healHash(contentHash, size: newSize)
         let candidates = try Row.fetchAll(
             db.cachedStatement(sql: """
                 SELECT id, path_text,
@@ -916,6 +934,7 @@ public actor DBWriter {
                   AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
                        OR (content_hash IS NOT NULL AND content_hash = ?3))
                 ORDER BY by_ref DESC
+                LIMIT \(healCandidateLimit)
                 """),
             arguments: [newPath, refInt, contentHash, newSize])
         for row in candidates {
@@ -950,6 +969,16 @@ public actor DBWriter {
         return nil
     }
 
+    /// Thousands of empty or near-empty files share one content hash, so matching
+    /// a move by hash there costs a probe per look-alike per file (quadratic) and
+    /// proves nothing. Those files heal by inode only.
+    static let healHashMinimumBytes: Int64 = 4096
+    static let healCandidateLimit = 16
+
+    static func healHash(_ hash: Data?, size: Int64) -> Data? {
+        size >= healHashMinimumBytes ? hash : nil
+    }
+
     /// Old-path-gone probe for the rename-heal gate. `lstat` (not `stat`) so a
     /// dangling symlink still counts as PRESENT and is never treated as a move,
     /// mirroring the Windows `symlink_metadata` gate.
@@ -970,15 +999,24 @@ public actor DBWriter {
     private func healOldPathExistence(_ batchFiles: [TaggedFile]) async -> [String: Bool] {
         let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
             var paths: Set<String> = []
+            let atPath = try db.cachedStatement(sql: "SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?)")
+            let lookup = try db.cachedStatement(sql: """
+                SELECT path_text,
+                       (?2 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4) AS by_ref
+                FROM files
+                WHERE path_text != ?1
+                  AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
+                       OR (content_hash IS NOT NULL AND content_hash = ?3))
+                ORDER BY by_ref DESC
+                LIMIT \(Self.healCandidateLimit)
+                """)
             for file in batchFiles {
-                guard file.fileRef != nil || file.contentHash != nil else { continue }
+                let hash = Self.healHash(file.contentHash, size: file.sizeBytes)
+                guard file.fileRef != nil || hash != nil else { continue }
+                // The heal only runs for a path with no row yet.
+                if try Bool.fetchOne(atPath, arguments: [file.url.path]) == true { continue }
                 let refInt = file.fileRef.map { Int64(bitPattern: $0) }
-                let rows = try Row.fetchAll(db, sql: """
-                    SELECT path_text FROM files
-                    WHERE path_text != ?1
-                      AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
-                           OR (content_hash IS NOT NULL AND content_hash = ?3))
-                    """, arguments: [file.url.path, refInt, file.contentHash, file.sizeBytes])
+                let rows = try Row.fetchAll(lookup, arguments: [file.url.path, refInt, hash, file.sizeBytes])
                 for row in rows { paths.insert(row["path_text"]) }
             }
             return paths

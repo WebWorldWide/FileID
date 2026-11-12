@@ -38,8 +38,14 @@ struct RestructureView: View {
     @State private var loading = false
     @State private var status: String?
     @State private var statusIsError = false
-    @State private var staysPutExpanded: Bool = false
+    @State private var moveOutcome: MoveOutcome?
+    @State private var undoing = false
     @State private var confirmApply: Bool = false
+    @State private var confirmLargeApply = false
+    @State private var storedPlanFolders: [RestructureCategoryCount] = []
+    @State private var planBuild: Task<Void, Never>?
+    @State private var planVersion = 0
+    @State private var sankeyHeaderStat = ""
     /// Single-flight guard for the apply / convert paths. A real move is
     /// irreversible inside the app, so a double-click must never run apply
     /// twice — the bar buttons disable while this is set.
@@ -73,7 +79,7 @@ struct RestructureView: View {
     @State private var drillDownGroups: [Group] = []
 
     /// Shared hover state used by the Sankey, recommendation rows,
-    /// tree, and staysPut disclosure to drive cross-highlight.
+    /// and tree to drive cross-highlight.
     @State private var hoverBus = RestructureHoverBus()
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
@@ -120,7 +126,26 @@ struct RestructureView: View {
         case movedOutAsOutlier  // outlier from a Mixed folder
     }
 
-    struct Proposal: Identifiable, Hashable {
+    struct MoveOutcome {
+        let title: String
+        let detail: String
+        let warning: Bool
+    }
+
+    struct PlanModel: Sendable {
+        let proposals: [Proposal]
+        let summary: AssistantSummary
+        let groups: [Group]
+        let selectedIDs: Set<Int64>
+        let inlineGroups: [RestructureOutcome: [Group]]
+        let inlineMatched: [RestructureOutcome: Int]
+        let headerStat: String
+        let analyzable: Int
+        let captioned: Int
+        let embeddings: (clip: Int, text: Int)
+    }
+
+    struct Proposal: Identifiable, Hashable, Sendable {
         var id: Int64 { fileID }
         let fileID: Int64
         let oldPath: String
@@ -140,7 +165,7 @@ struct RestructureView: View {
         var isHighConfidence: Bool { confidence.lowercased() == "auto" }
     }
 
-    struct Group: Identifiable {
+    struct Group: Identifiable, Sendable {
         var id: String { bucket }
         let bucket: String
         let proposals: [Proposal]
@@ -154,15 +179,10 @@ struct RestructureView: View {
         var staysPutFiles: Int          // unchanged
         var movedOutFiles: Int          // outliers
         var dissolvedFiles: Int         // junk-folder contents
-        /// Per-anchor-folder breakdown: (folder display name, file count
-        /// staying inside it). Sorted alphabetically. Used by the
-        /// "Staying put" disclosure to show which folders are anchored.
-        var staysPutBreakdown: [(folder: String, count: Int)]
 
         static let empty = AssistantSummary(
             anchorFolders: 0, mixedFolders: 0, junkFolders: 0,
-            staysPutFiles: 0, movedOutFiles: 0, dissolvedFiles: 0,
-            staysPutBreakdown: []
+            staysPutFiles: 0, movedOutFiles: 0, dissolvedFiles: 0
         )
 
         var hasContent: Bool {
@@ -194,11 +214,26 @@ struct RestructureView: View {
                     } message: {
                         Text("The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was.")
                     }
+                    .confirmationDialog(
+                        "Move \(pendingApplyCount.formatted()) file\(pendingApplyCount == 1 ? "" : "s") without checking each one?",
+                        isPresented: $confirmLargeApply,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Move without checking each file", role: .destructive) {
+                            applyViaEngine()
+                        }
+                        Button("Cancel", role: .cancel) { }
+                    } message: {
+                        Text(largeApplyMessage)
+                    }
                 Hairline()
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     header
+                    if let outcome = moveOutcome {
+                        moveOutcomeBanner(outcome)
+                    }
                     if storedPlanMoveCount > 0 {
                         largePlanCard
                     } else if libraryRoot == nil
@@ -242,10 +277,14 @@ struct RestructureView: View {
             guard libraryRoot?.standardizedFileURL.path
                     != selectedRoot?.standardizedFileURL.path else { return }
             libraryRoot = selectedRoot
+            planBuild?.cancel()
             proposals = []
             groups = []
             selectedIDs = []
             summary = .empty
+            sankeyHeaderStat = ""
+            planVersion &+= 1
+            moveOutcome = nil
             if selectedRoot != nil { requestPlan() }
         }
         // Re-request a plan only on Deep Analyze terminal events
@@ -271,24 +310,39 @@ struct RestructureView: View {
         .onChange(of: engine.restructureApplyResultSignal) { _, _ in
             guard libraryRoot != nil, let result = engine.restructureApplyResult else { return }
             applying = false
-            if let priv = result.privilegeError, !priv.isEmpty {
-                status = priv
-                statusIsError = true
-            } else if result.cancelled {
-                status = "Stopped — \(result.applied) file\(result.applied == 1 ? "" : "s") already moved, still undoable."
-                statusIsError = false
-            } else {
-                status = "\(result.applied) moved · \(result.failed) failed"
-                statusIsError = false
-            }
+            let wasUndo = undoing
+            undoing = false
             store.notifyChanged()
             requestPlan()
+            // requestPlan clears `status`, so the result is shown in its own banner.
+            let n = result.applied
+            let files = "\(n.formatted()) file\(n == 1 ? "" : "s")"
+            let failed = result.failed
+            if let priv = result.privilegeError, !priv.isEmpty {
+                moveOutcome = MoveOutcome(title: "The move couldn't start", detail: priv, warning: true)
+            } else if wasUndo {
+                moveOutcome = failed > 0 || result.cancelled
+                    ? MoveOutcome(title: "Put back \(files), \(failed.formatted()) couldn't be put back",
+                                  detail: "The rest are still in their new folders. Press Undo move to try again.", warning: true)
+                    : MoveOutcome(title: "Put back \(files)", detail: "Every file is back where it was.", warning: false)
+            } else if result.cancelled {
+                moveOutcome = MoveOutcome(title: "Stopped after moving \(files)",
+                                          detail: "The rest stayed where they were. Undo move puts the moved files back.", warning: false)
+            } else if failed > 0 {
+                moveOutcome = MoveOutcome(
+                    title: "Moved \(files), \(failed.formatted()) couldn't be moved",
+                    detail: "The \(failed.formatted()) file\(failed == 1 ? "" : "s") that didn't move \(failed == 1 ? "is" : "are") still where \(failed == 1 ? "it was" : "they were"), usually because a file changed, went missing, or its drive was disconnected. FileID doesn't get a list of which ones; any that still need a new home show up in the plan again.",
+                    warning: true)
+            } else {
+                moveOutcome = MoveOutcome(title: "Moved \(files)", detail: "Undo move puts every file back where it was.", warning: false)
+            }
         }
         // The engine died before a terminal plan/apply event could clear the
         // local in-flight UI — release it so the tab doesn't wedge.
         .onChange(of: engine.engineResetSignal) { _, _ in
             if applying {
                 applying = false
+                undoing = false
                 status = "FileID restarted in the middle of the move. Files already moved can be put back with Undo move; try again for the rest."
                 statusIsError = true
             }
@@ -310,6 +364,7 @@ struct RestructureView: View {
             // mirroring the engineResetSignal handler above.
             if applying, kind == "db_unavailable" {
                 applying = false
+                undoing = false
                 status = "FileID is still getting ready. Try again in a moment."
                 statusIsError = true
             }
@@ -373,17 +428,36 @@ struct RestructureView: View {
             pendingApplyCount = pendingMoves.count
         }
         guard pendingApplyCount > 0 else { return }
-        confirmApply = true
+        if storedPlanMoveCount > 0 {
+            guard !storedPlanFolders.isEmpty else { return }
+            confirmLargeApply = true
+        } else {
+            confirmApply = true
+        }
+    }
+
+    private var largeApplyBlocked: Bool { storedPlanMoveCount > 0 && storedPlanFolders.isEmpty }
+
+    private var largeApplyMessage: String {
+        let shown = storedPlanFolders.prefix(8)
+            .map { "\($0.category) (\($0.count.formatted()))" }
+            .joined(separator: ", ")
+        let more = storedPlanFolders.count - min(8, storedPlanFolders.count)
+        let tail = more > 0 ? ", and \(more.formatted()) more folder\(more == 1 ? "" : "s")" : ""
+        return "This plan is too large to list file by file. It sorts files into: \(shown)\(tail). Only the moves FileID is sure about happen now; the rest stay put. Nothing is deleted, and Undo move puts every file back."
     }
 
     private func undoLastMove() {
         guard let root = libraryRoot, !applying else { return }
         applying = true
+        undoing = true
+        moveOutcome = nil
         status = "Putting the moved files back…"
         statusIsError = false
         // A failed send never gets a result event, so release the guard here.
         if !engine.undoRestructure(libraryRoot: root.path) {
             applying = false
+            undoing = false
             status = "FileID is still getting ready. Try again in a moment."
             statusIsError = true
         }
@@ -412,7 +486,7 @@ struct RestructureView: View {
             RestructureStepCell(number: 2, title: "Review", state: reviewState,
                                 detail: !planReady ? "Check each group of moves and skip any you don't want."
                                     : (storedPlanMoveCount > 0
-                                        ? "Large plan: only the \(applyCount.formatted()) confident moves apply. The rest stay put."
+                                        ? "Too many moves to list one by one. Only the \(applyCount.formatted()) FileID is sure about will move; the rest stay put."
                                         : "\(applyCount.formatted()) of \(plannedMoveCount.formatted()) moves selected")) {
                 if planReady && !proposals.isEmpty {
                     Button("Review all moves") { drillDown = .all }
@@ -438,7 +512,13 @@ struct RestructureView: View {
                     if planReady && applyCount > 0 {
                         Button("Move \(applyCount.formatted()) file\(applyCount == 1 ? "" : "s")") { beginApply() }
                             .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                            .help("Move the chosen files into their new folders. You confirm first, and you can undo.")
+                            .disabled(largeApplyBlocked)
+                            .help(largeApplyBlocked
+                                  ? "This plan is too large to show, so it can't be checked. Choose a smaller folder."
+                                  : "Move the chosen files into their new folders. You confirm first, and you can undo.")
+                        if largeApplyBlocked {
+                            MetaText("Too large to check. Choose a smaller folder.", color: Theme.warning, size: 11.5)
+                        }
                     }
                     if moved {
                         Button { undoLastMove() } label: { Label("Undo move", systemImage: "arrow.uturn.backward") }
@@ -531,7 +611,9 @@ struct RestructureView: View {
                 Button("Not now") { dismissedDeepAnalyzeHint = true }
                     .buttonStyle(.dsGhost)
                 Button {
-                    engine.deepAnalyzeAll(modelKind: DeepAnalyzeSettings.shared.activeKind.rawValue, skipExisting: true)
+                    let kind = DeepAnalyzeSettings.shared.activeKind
+                    guard ModelLicenseGate.ensureAccepted(for: kind) else { return }
+                    engine.deepAnalyzeAll(modelKind: kind.rawValue, skipExisting: true)
                 } label: { Label("Describe files", systemImage: "sparkles") }
                     .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
             }
@@ -569,7 +651,7 @@ struct RestructureView: View {
                 } else {
                     TreeDiffView(
                         proposals: proposals,
-                        summary: summary,
+                        planVersion: planVersion,
                         onTapSource: { folder in drillDown = .sourceFolder(folder) },
                         onTapDestination: { bucket in drillDown = .destBucket(bucket) },
                         hoverBus: hoverBus
@@ -639,7 +721,14 @@ struct RestructureView: View {
     }
 
     private func statusBanner(_ message: String, isError: Bool = false) -> some View {
-        notice(tone: isError ? Theme.warning : Theme.delight, title: isError ? "Something went wrong" : "Done", body: message) { EmptyView() }
+        notice(tone: isError ? Theme.warning : Theme.delight, title: isError ? "Something went wrong" : "Organize Folders", body: message) { EmptyView() }
+    }
+
+    private func moveOutcomeBanner(_ outcome: MoveOutcome) -> some View {
+        notice(tone: outcome.warning ? Theme.warning : Theme.delight, title: outcome.title, body: outcome.detail) {
+            Button("Dismiss") { moveOutcome = nil }
+                .buttonStyle(.dsGhost)
+        }
     }
 
     // MARK: - Header
@@ -664,67 +753,60 @@ struct RestructureView: View {
                body: "This library is already organized: every folder has a clear name and matching contents.") { EmptyView() }
     }
 
+    @ViewBuilder
     private var largePlanCard: some View {
-        let body: String
-        if let counts = storedPlanConfidenceCounts {
-            let heldBack = counts.review + counts.ask + counts.unknown
-            body = "All \(storedPlanMoveCount.formatted()) moves are stored as one undoable run. Move applies the \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) that need review stay put."
+        let sure = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
+        let heldBack = max(0, storedPlanMoveCount - sure)
+        let scope = "FileID found \(storedPlanMoveCount.formatted()) files to move, too many to list one by one."
+        if largeApplyBlocked {
+            notice(tone: Theme.warning, title: "This plan is too large to check",
+                   body: "\(scope) Choose a smaller folder, such as one year or one project, so you can see every move before it happens.") { EmptyView() }
         } else {
-            body = "All \(storedPlanMoveCount.formatted()) moves are stored as one undoable run. Move applies only the confident moves."
-        }
-        return notice(tone: Theme.gold, title: "Large plan ready", body: body) { EmptyView() }
-    }
-
-    /// One row inside "Staying put". Hovering it lights the matching node in
-    /// the map. A standalone view so its hover-bus read only re-renders the
-    /// row, not the whole page.
-    private struct StaysPutRow: View {
-        let entry: (folder: String, count: Int)
-        let hoverBus: RestructureHoverBus
-        var body: some View {
-            let isHovered = hoverBus.touchesSource(entry.folder)
-            HStack(spacing: 10) {
-                Circle().fill(Theme.delight.opacity(isHovered ? 1 : 0.7)).frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text(entry.folder).font(Theme.Font.mono(12)).foregroundStyle(isHovered ? Theme.text1 : Theme.text2)
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer()
-                Text("\(entry.count.formatted()) file\(entry.count == 1 ? "" : "s")").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+            notice(tone: Theme.gold, title: "A large plan",
+                   body: "\(scope) Move takes the \(sure.formatted()) FileID is sure about\(heldBack > 0 ? " and leaves the other \(heldBack.formatted()) where they are" : ""). To check every move first, choose a smaller folder.") { EmptyView() }
+            Panel {
+                PanelHeader("Where the files would go") {
+                    MetaText("\(storedPlanFolders.count.formatted()) folder\(storedPlanFolders.count == 1 ? "" : "s") · counts cover the whole plan", size: 12)
+                }
+                VStack(spacing: 0) {
+                    ForEach(Array(storedPlanFolders.prefix(40).enumerated()), id: \.offset) { _, entry in
+                        HStack(spacing: 10) {
+                            Image(systemName: bucketIconName(entry.category))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.gold)
+                                .frame(width: 20)
+                                .accessibilityHidden(true)
+                            Text(entry.category).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1)
+                                .lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Text("\(entry.count.formatted()) file\(entry.count == 1 ? "" : "s")")
+                                .font(Theme.Font.body(11.5)).monospacedDigit().foregroundStyle(Theme.text3)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                        .accessibilityElement(children: .combine)
+                    }
+                    if storedPlanFolders.count > 40 {
+                        MetaText("+ \((storedPlanFolders.count - 40).formatted()) more folders", size: 11.5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                    }
+                }
             }
-            .padding(.horizontal, 14).padding(.vertical, 6)
-            .background(Theme.delight.opacity(isHovered ? 0.08 : 0), ignoresSafeAreaEdges: [])
-            .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
-            .contentShape(Rectangle())
-            .onHover { hovering in hoverBus.set(hovering ? .sourceFolder(entry.folder) : nil) }
-            .accessibilityElement(children: .combine)
         }
     }
 
     private var staysPutSection: some View {
         Panel {
-            Button { withAnimation(Theme.springStandard) { staysPutExpanded.toggle() } } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.text3)
-                        .rotationEffect(.degrees(staysPutExpanded ? 90 : 0))
-                    SectionLabel("Staying put")
-                    MetaText("\(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") · \(summary.staysPutFiles.formatted()) file\(summary.staysPutFiles == 1 ? "" : "s")", size: 12)
-                    Spacer()
-                }
-                .padding(.horizontal, 14)
-                .frame(height: 38)
-                .contentShape(Rectangle())
+            HStack(spacing: 10) {
+                Circle().fill(Theme.delight).frame(width: 7, height: 7).accessibilityHidden(true)
+                SectionLabel("Staying put")
+                MetaText("\(summary.staysPutFiles.formatted()) file\(summary.staysPutFiles == 1 ? "" : "s")\(summary.anchorFolders > 0 ? " in \(summary.anchorFolders.formatted()) well-named folder\(summary.anchorFolders == 1 ? "" : "s")" : "") stay exactly where they are.", size: 12)
+                Spacer()
             }
-            .buttonStyle(DSRowButtonStyle(radius: 0))
-            .accessibilityLabel("Staying put, \(summary.anchorFolders) folders")
-            .accessibilityValue(staysPutExpanded ? "Expanded" : "Collapsed")
-            if staysPutExpanded {
-                Hairline()
-                MetaText("Folders with a meaningful name and matching contents. Their files stay exactly where they are.")
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                ForEach(Array(summary.staysPutBreakdown.enumerated()), id: \.offset) { _, entry in
-                    StaysPutRow(entry: entry, hoverBus: hoverBus)
-                }
-            }
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -832,7 +914,10 @@ struct RestructureView: View {
                     if let reason = p.reason, !reason.isEmpty {
                         Text(reason)
                             .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2)
-                            .lineLimit(1).truncationMode(.tail)
+                            .lineLimit(3).truncationMode(.tail)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .help(reason)
                     }
                 }
                 Spacer()
@@ -856,26 +941,29 @@ struct RestructureView: View {
     private func confidenceBadge(_ confidence: String) -> some View {
         switch confidence.lowercased() {
         case "auto":
-            Image(systemName: "checkmark.seal.fill")
-                .foregroundStyle(Theme.gold)
-                .font(Theme.Font.body(12))
-                .help("FileID is sure about this one")
-                .accessibilityLabel("High confidence")
+            confidenceLabel("Sure", icon: "checkmark.seal.fill", tint: Theme.gold,
+                            help: "FileID is sure about this one")
         case "review":
-            Image(systemName: "questionmark.circle")
-                .foregroundStyle(Theme.warning)
-                .font(Theme.Font.body(12))
-                .help("Fairly sure; worth a look")
-                .accessibilityLabel("Medium confidence — review")
+            confidenceLabel("Check", icon: "questionmark.circle", tint: Theme.warning,
+                            help: "Fairly sure; worth a look")
         case "ask":
-            Image(systemName: "hand.raised")
-                .foregroundStyle(Theme.text3)
-                .font(Theme.Font.body(12))
-                .help("Not sure; check before moving")
-                .accessibilityLabel("Low confidence — ask")
+            confidenceLabel("Ask you", icon: "hand.raised", tint: Theme.text3,
+                            help: "Not sure, so it starts unchecked. Tick it if the new folder is right.")
         default:
             EmptyView()
         }
+    }
+
+    private func confidenceLabel(_ word: String, icon: String, tint: Color, help: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).accessibilityHidden(true)
+            Text(word)
+        }
+        .font(Theme.Font.body(11.5, .medium))
+        .foregroundStyle(tint)
+        .fixedSize()
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     // MARK: - Engine-routed plan + apply
@@ -892,6 +980,7 @@ struct RestructureView: View {
         storedPlanID = nil
         storedPlanMoveCount = 0
         storedPlanConfidenceCounts = nil
+        storedPlanFolders = []
         loading = true
         status = nil
         if !engine.planRestructure(libraryRoot: root.path) {
@@ -921,12 +1010,16 @@ struct RestructureView: View {
             storedPlanID = planID
             storedPlanMoveCount = totalMoves
             storedPlanConfidenceCounts = plan.confidenceCounts
+            storedPlanFolders = plan.categoryCounts.filter { $0.count > 0 }
+            planBuild?.cancel()
             proposals = []
             groups = []
             selectedIDs = []
             summary = .empty
             inlineGroupsByOutcome = [:]
             inlineMatchedCountByOutcome = [:]
+            sankeyHeaderStat = ""
+            planVersion &+= 1
             loading = false
             status = nil
             statusIsError = false
@@ -935,16 +1028,49 @@ struct RestructureView: View {
         storedPlanID = nil
         storedPlanMoveCount = 0
         storedPlanConfidenceCounts = nil
+        storedPlanFolders = []
 
-        let mapped = Self.mapProposals(from: plan)
-        proposals = mapped
-        summary = Self.makeSummary(from: plan, proposals: mapped, libraryFiles: store.totalFiles)
+        // Up to 100k moves: mapping, grouping and the two catalog reads run off
+        // the main actor; only the assignments below happen on it.
+        let libraryFiles = store.totalFiles
+        let deselected = priorDeselectedIDs
+        let skipped = skippedOutcomes
+        let store = store
+        planBuild?.cancel()
+        planBuild = Task {
+            let model = await Task.detached(priority: .userInitiated) {
+                Self.buildModel(from: plan, libraryFiles: libraryFiles,
+                                deselected: deselected, skipped: skipped, store: store)
+            }.value
+            guard !Task.isCancelled, let current = libraryRoot,
+                  Self.pathsMatch(plan.libraryRoot, current.path) else { return }
+            proposals = model.proposals
+            summary = model.summary
+            groups = model.groups
+            selectedIDs = model.selectedIDs
+            inlineGroupsByOutcome = model.inlineGroups
+            inlineMatchedCountByOutcome = model.inlineMatched
+            sankeyHeaderStat = model.headerStat
+            totalAnalyzableFiles = model.analyzable
+            captionedFraction = model.analyzable > 0 ? Double(model.captioned) / Double(model.analyzable) : 0
+            embeddingCounts = model.embeddings
+            planVersion &+= 1
+            loading = false
+        }
+    }
+
+    nonisolated static func buildModel(
+        from plan: RestructurePlan, libraryFiles: Int, deselected: Set<Int64>,
+        skipped: Set<RestructureOutcome>, store: ReadStore
+    ) -> PlanModel {
+        let mapped = mapProposals(from: plan)
+        let summary = makeSummary(from: plan, proposals: mapped, libraryFiles: libraryFiles)
 
         let by = Dictionary(grouping: mapped, by: { $0.bucket })
-        groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
+        let groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
             .sorted { a, b in a.proposals.count != b.proposals.count ? a.proposals.count > b.proposals.count : a.bucket < b.bucket }
 
-        selectedIDs = Set(mapped.map(\.fileID))
+        var selectedIDs = Set(mapped.map(\.fileID))
         // Ask-confidence moves start deselected — "No clear signal, the decision
         // is yours." The user must explicitly check them before applying.
         // (RESTRUCTURE.md §6 — confidence-tier autonomy)
@@ -952,14 +1078,12 @@ struct RestructureView: View {
             selectedIDs.remove(p.fileID)
         }
         // Re-apply per-file deselections that carried into the fresh set.
-        selectedIDs.subtract(priorDeselectedIDs)
+        selectedIDs.subtract(deselected)
         // Preserve the user's "Skip these" choices: re-exclude any persisted
         // skipped outcome's proposals (otherwise skipped rows render dimmed but
         // get re-applied).
-        for outcome in skippedOutcomes {
-            for p in mapped where outcomeFor(p) == outcome {
-                selectedIDs.remove(p.fileID)
-            }
+        for p in mapped where skipped.contains(outcome(for: p)) {
+            selectedIDs.remove(p.fileID)
         }
 
         // Per-outcome groupings the recommendation row's expand-in-place file
@@ -970,7 +1094,7 @@ struct RestructureView: View {
         var byOutcome: [RestructureOutcome: [Group]] = [:]
         var matchedCount: [RestructureOutcome: Int] = [:]
         for outcome in [RestructureOutcome.tidy, .reorganize] {
-            let matched = mapped.filter { outcomeFor($0) == outcome }
+            let matched = mapped.filter { Self.outcome(for: $0) == outcome }
             matchedCount[outcome] = matched.count
             let buckets = Dictionary(grouping: matched, by: \.bucket)
             let order = buckets.keys.sorted {
@@ -983,15 +1107,15 @@ struct RestructureView: View {
                 )
             }
         }
-        inlineGroupsByOutcome = byOutcome
-        inlineMatchedCountByOutcome = matchedCount
-
+        let srcCount = Set(mapped.map(\.sourceFolder)).count
+        let dstCount = by.count
         let (total, captioned) = store.filesAnalysisStats()
-        totalAnalyzableFiles = total
-        captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
-        embeddingCounts = store.contentEmbeddingCounts()
-
-        loading = false
+        return PlanModel(
+            proposals: mapped, summary: summary, groups: groups, selectedIDs: selectedIDs,
+            inlineGroups: byOutcome, inlineMatched: matchedCount,
+            headerStat: "\(srcCount) folder\(srcCount == 1 ? "" : "s") → \(dstCount) folder\(dstCount == 1 ? "" : "s")",
+            analyzable: total, captioned: captioned,
+            embeddings: store.contentEmbeddingCounts())
     }
 
     /// Apply the selected, non-skipped moves through the engine butler.
@@ -1027,6 +1151,8 @@ struct RestructureView: View {
             return
         }
         applying = true
+        undoing = false
+        moveOutcome = nil
         status = nil
         if !engine.applyRestructure(
             libraryRoot: root.path, moves: moves, planID: pendingPlanID)
@@ -1044,7 +1170,7 @@ struct RestructureView: View {
     /// root (e.g. "Photos/2023/January", "People/Marie Curie/2023") so the
     /// Sankey/TreeDiff bucket icons + grouping match the prior app-side output;
     /// `kind` comes from the engine's per-move folder tier when present.
-    static func mapProposals(from plan: RestructurePlan) -> [Proposal] {
+    nonisolated static func mapProposals(from plan: RestructurePlan) -> [Proposal] {
         plan.moves.map { m in
             Proposal(
                 fileID: m.fileID,
@@ -1061,13 +1187,10 @@ struct RestructureView: View {
         }
     }
 
-    /// Derive the at-a-glance summary from the plan. Folder tiers come from the
-    /// engine's `folderClassifications` when present; otherwise (current macOS
-    /// engine) every received move is a relocation — the engine strips
-    /// anchor-folder moves before sending — so we count distinct source folders
-    /// per outcome. That is aggregation of the engine's moves, NOT a re-run of
-    /// the retired app-side classifier.
-    static func makeSummary(from plan: RestructurePlan, proposals: [Proposal], libraryFiles: Int = 0) -> AssistantSummary {
+    /// Derive the at-a-glance summary from the plan. Folder counts come from the
+    /// engine's `folderClassifications`; a reply without them (an older engine)
+    /// falls back to counting distinct source folders per outcome.
+    nonisolated static func makeSummary(from plan: RestructurePlan, proposals: [Proposal], libraryFiles: Int = 0) -> AssistantSummary {
         let movedOut = proposals.filter { $0.kind == .movedOutAsOutlier }
         let dissolved = proposals.filter { $0.kind == .dissolved }
         let anchorFolders: Int
@@ -1089,19 +1212,18 @@ struct RestructureView: View {
             // The plan carries only moves, so everything else in the library stays.
             staysPutFiles: max(0, libraryFiles - proposals.count),
             movedOutFiles: movedOut.count,
-            dissolvedFiles: dissolved.count,
-            staysPutBreakdown: [])
+            dissolvedFiles: dissolved.count)
     }
 
     /// "Mixed" folders contribute outliers (Tidy); "Junk"/unknown/absent
-    /// dissolve (Reorganize). The current macOS engine sends `nil` → Reorganize.
-    static func kind(forTier tier: String?) -> ProposalKind {
+    /// dissolve (Reorganize).
+    nonisolated static func kind(forTier tier: String?) -> ProposalKind {
         tier?.lowercased() == "mixed" ? .movedOutAsOutlier : .dissolved
     }
 
     /// Destination's parent directory relative to the library root, or the
     /// engine's category label when the destination isn't under the root.
-    static func bucketLabel(destination: String, root: String, fallback: String) -> String {
+    nonisolated static func bucketLabel(destination: String, root: String, fallback: String) -> String {
         let parent = (destination as NSString).deletingLastPathComponent
         let rootNorm = root.hasSuffix("/") ? String(root.dropLast()) : root
         if parent == rootNorm { return fallback }
@@ -1113,19 +1235,13 @@ struct RestructureView: View {
         return fallback
     }
 
-    static func pathsMatch(_ a: String, _ b: String) -> Bool {
+    nonisolated static func pathsMatch(_ a: String, _ b: String) -> Bool {
         if a == b { return true }
         return URL(fileURLWithPath: a).standardizedFileURL.path
             == URL(fileURLWithPath: b).standardizedFileURL.path
     }
 
     // MARK: - View-mode toggle + Sankey + recommendations
-
-    private var sankeyHeaderStat: String {
-        let srcCount = Set(proposals.map(\.sourceFolder)).count
-        let dstCount = Set(proposals.map(\.bucket)).count
-        return "\(srcCount) folder\(srcCount == 1 ? "" : "s") → \(dstCount) folder\(dstCount == 1 ? "" : "s")"
-    }
 
     private func toggleExpand(_ outcome: RestructureOutcome) {
         withAnimation(Theme.springStandard) {
@@ -1185,7 +1301,9 @@ struct RestructureView: View {
         }
     }
 
-    private func outcomeFor(_ p: Proposal) -> RestructureOutcome {
+    private func outcomeFor(_ p: Proposal) -> RestructureOutcome { Self.outcome(for: p) }
+
+    nonisolated static func outcome(for p: Proposal) -> RestructureOutcome {
         switch p.kind {
         case .dissolved:        return .reorganize
         case .movedOutAsOutlier: return .tidy
@@ -1217,7 +1335,8 @@ struct RestructureView: View {
             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, 20).padding(.bottom, 14)
             Hairline()
             if groups.isEmpty {
-                DashedNotice(title: "Nothing to show")
+                DashedNotice(title: "No files to move here",
+                             subtitle: "Nothing in the current plan moves from or to this folder. The plan may have changed since you opened this list. Press Done and look at the new plan.")
                     .padding(Theme.Metrics.pageInsetX)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

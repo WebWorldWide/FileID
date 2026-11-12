@@ -102,7 +102,7 @@ enum ModelBenchmarkRunner {
         var errorDescription: String? {
             switch self {
             case .notInstalled(let name): return "\(name) isn't downloaded. Benchmarks only run on installed models and never download."
-            case .busy: return "Deep Analyze is running. Benchmark after it finishes."
+            case .busy: return "Describe Files is running. Test the model after it finishes."
             }
         }
     }

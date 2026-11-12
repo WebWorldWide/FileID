@@ -41,36 +41,62 @@ public final class ThumbnailService {
 
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.countLimit = 4000          // cover a full ~3–4k-file library
-        c.totalCostLimit = 256 * 1024 * 1024
+        // Cost (decoded bytes) is the real bound: a Retina grid tile is about
+        // 1 MB, so 512 MB holds roughly 500 of them. The count is only a
+        // ceiling for small, non-Retina tiles.
+        c.countLimit = 4000
+        c.totalCostLimit = 512 * 1024 * 1024
         return c
     }()
 
-    private var inflight: [String: Task<Data?, Never>] = [:]
+    @MainActor private final class Inflight {
+        let task: Task<Data?, Never>
+        var waiters = 1
+        init(task: Task<Data?, Never>) { self.task = task }
+    }
 
-    private init() {}
+    private var inflight: [String: Inflight] = [:]
+
+    private init() { ThumbnailDiskCache.trimInBackground() }
+
+    /// Waits for the shared render. When the last view waiting on it goes away
+    /// (a tile scrolled off), the render is cancelled before it starts.
+    private func wait(on entry: Inflight, key: String) async -> Data? {
+        await withTaskCancellationHandler {
+            await entry.task.value
+        } onCancel: {
+            Task { @MainActor in
+                entry.waiters -= 1
+                guard entry.waiters <= 0 else { return }
+                entry.task.cancel()
+                if self.inflight[key] === entry { self.inflight[key] = nil }
+            }
+        }
+    }
 
     public func thumbnail(for url: URL, size requested: CGFloat = 192, revision: String? = nil) async -> NSImage? {
         let size = Self.bucket(requested)
         let key = ("\(url.path)|\(Int(size))" + (revision.map { "|" + $0 } ?? "")) as NSString
         if let hit = cache.object(forKey: key) { return hit }
-        if let task = inflight[key as String] {
-            if let data = await task.value {
-                return await Self.decoded(data)
-            }
-            return nil
-        }
-
+        let keyString = key as String
         // Capture the screen scale on MainActor BEFORE entering the detached
         // task; NSScreen.main also requires MainActor isolation.
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let videoSource = Self.isVideo(url) ? videoSource : nil
-        let task = Task<Data?, Never> {
-            await ThumbnailService.generate(url: url, size: size, scale: scale, videoSource: videoSource)
+        let entry: Inflight
+        if let running = inflight[keyString] {
+            running.waiters += 1
+            entry = running
+        } else {
+            let videoSource = Self.isVideo(url) ? videoSource : nil
+            entry = Inflight(task: Task<Data?, Never> {
+                await ThumbnailService.generate(url: url, size: size, scale: scale, videoSource: videoSource)
+            })
+            inflight[keyString] = entry
         }
-        inflight[key as String] = task
-        let data = await task.value
-        inflight.removeValue(forKey: key as String)
+        let data = await wait(on: entry, key: keyString)
+        if inflight[keyString] === entry { inflight[keyString] = nil }
+        guard !Task.isCancelled else { return nil }
+        if let hit = cache.object(forKey: key) { return hit }
         if let data, let image = await Self.decoded(data) {
             // Cost in PIXELS, not points — a Retina request yields a
             // scale× representation, and point-based costs undercount
@@ -92,7 +118,7 @@ public final class ThumbnailService {
 
     /// Requests round up to a few shared sizes so views reuse one cache entry.
     nonisolated static func bucket(_ size: CGFloat) -> CGFloat {
-        [256, 512, 1024].first { size <= $0 } ?? size
+        [256, 512, 1024].first { size <= $0 } ?? 2048
     }
 
     /// Screen-sized still for the preview sheet, decoded straight from the
@@ -177,6 +203,14 @@ public final class ThumbnailService {
     /// written back to disk.
     nonisolated private static func generate(url: URL, size: CGFloat, scale: CGFloat,
                                              videoSource: VideoThumbnailSource?) async -> Data? {
+        // The stat and the disk read wait behind the gate too: on a network
+        // volume a fast scroll would otherwise stat hundreds of files at once,
+        // most of them for tiles already scrolled past.
+        await thumbDecodeGate.acquire()
+        guard !Task.isCancelled else {
+            await thumbDecodeGate.release()
+            return nil
+        }
         // File identity for invalidation — a stat is cheap next to a remote
         // decode, and lets an edited / replaced file miss its stale thumb.
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -185,13 +219,16 @@ public final class ThumbnailService {
         let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
         let diskURL = ThumbnailDiskCache.url(path: url.path, mtime: mtime,
                                              bytes: bytes, size: size, scale: scale)
-        if let cachedData = ThumbnailDiskCache.load(diskURL) { return cachedData }
+        let cachedData = ThumbnailDiskCache.load(diskURL)
+        await thumbDecodeGate.release()
+        if let cachedData { return cachedData }
 
         let jpegData = await render(url: url, size: size, scale: scale, modifiedAt: modified,
                                     videoSource: videoSource, quickLook: quickLookJPEG)
-        if let jpegData {
+        if let jpegData, !Task.isCancelled {
             if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
                 try? jpegData.write(to: diskURL, options: .atomic)
+                ThumbnailDiskCache.noteWrite()
             }
         }
         return jpegData
@@ -205,12 +242,13 @@ public final class ThumbnailService {
     ) async -> Data? {
         if let videoSource {
             await engineVideoGate.acquire()
-            let engineData = await videoSource(url.path, modifiedAt, enginePixelSize(size: size, scale: scale))
+            let engineData = Task.isCancelled ? nil
+                : await videoSource(url.path, modifiedAt, enginePixelSize(size: size, scale: scale))
             await engineVideoGate.release()
             if let engineData { return engineData }
         }
         await thumbDecodeGate.acquire()
-        let jpegData = await quickLook(url, size, scale)
+        let jpegData = Task.isCancelled ? nil : await quickLook(url, size, scale)
         await thumbDecodeGate.release()
         return jpegData
     }
@@ -230,15 +268,16 @@ public final class ThumbnailService {
                 guard let rep, error == nil else {
                     cont.resume(returning: nil); return
                 }
-                let image = rep.nsImage
-                guard let tiff = image.tiffRepresentation,
-                      let bitmapRep = NSBitmapImageRep(data: tiff),
-                      let jpeg = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
-                    cont.resume(returning: nil); return
-                }
-                cont.resume(returning: jpeg)
+                cont.resume(returning: jpegData(rep.cgImage))
             }
         }
+    }
+
+    nonisolated static func jpegData(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 }
 
@@ -296,5 +335,45 @@ private enum ThumbnailDiskCache {
 
     static func load(_ url: URL) -> Data? {
         return try? Data(contentsOf: url)
+    }
+
+    static let byteCap: Int64 = 2 * 1024 * 1024 * 1024
+    private static let writesBetweenTrims = 300
+    private static let writeCount = MutexBox(0)
+
+    static func noteWrite() {
+        let due = writeCount.withLock { count -> Bool in
+            count += 1
+            guard count >= writesBetweenTrims else { return false }
+            count = 0
+            return true
+        }
+        if due { trimInBackground() }
+    }
+
+    static func trimInBackground() {
+        DispatchQueue.global(qos: .utility).async { trim() }
+    }
+
+    /// Deletes the oldest thumbnails until the folder is back under the cap.
+    private static func trim() {
+        guard (try? ReadOnlyLocations.requireWritable(dir)) != nil,
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles])
+        else { return }
+        var entries: [(url: URL, bytes: Int64, date: Date)] = []
+        var total: Int64 = 0
+        for file in files where file.pathExtension == "jpg" {
+            guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { continue }
+            let bytes = Int64(values.fileSize ?? 0)
+            total += bytes
+            entries.append((file, bytes, values.contentModificationDate ?? .distantPast))
+        }
+        guard total > byteCap else { return }
+        let target = byteCap / 10 * 9
+        for entry in entries.sorted(by: { $0.date < $1.date }) {
+            if total <= target { break }
+            if (try? FileManager.default.removeItem(at: entry.url)) != nil { total -= entry.bytes }
+        }
     }
 }

@@ -1,10 +1,8 @@
 // Tagging stage — Stage B of the pipeline.
 //
 // Per-file work: load CGImage, run Vision primary pass, optionally OCR,
-// compute dHash, read EXIF, build a TaggedFile struct. Bounded ANE access
-// via a semaphore — the v1 lesson was that flooding ANE with 14 simultaneous
-// requests causes thrashing and a throughput collapse. 3-4 in-flight is
-// enough to keep ANE saturated.
+// compute dHash, read EXIF, build a TaggedFile struct. Each model service
+// bounds its own concurrency; the worker pool bounds the Vision passes.
 //
 // All work happens on a concurrent GCD queue so a slow file (corrupt JPEG,
 // network volume hiccup) doesn't park a Swift cooperative thread.
@@ -25,6 +23,8 @@ public enum Tagging {
         qos: .userInitiated,
         attributes: .concurrent
     )
+
+    static let hashTimeoutSeconds: TimeInterval = 30
 
     // Hot-loop constants — allocated once, not per file.
     private static let gregorianCalendar = Calendar(identifier: .gregorian)
@@ -47,6 +47,15 @@ public enum Tagging {
         let kind = discovered.kind.rawValue
         let ext = url.pathExtension.lowercased()
         let started = CFAbsoluteTimeGetCurrent()
+
+        if discovered.movedFromKnownRow {
+            var moved = TaggedFile(
+                url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
+                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                fileRef: discovered.fileRef)
+            moved.healOnly = true
+            return moved
+        }
 
         var tagged: TaggedFile
         switch discovered.kind {
@@ -81,19 +90,19 @@ public enum Tagging {
         if tagged.contentHash == nil && !Task.isCancelled {
             let contentSize = UInt64(max(0, discovered.sizeBytes))
             let state = ContentHashContinuation()
+            let giveUp = DispatchWorkItem { state.finish(nil) }
             tagged.contentHash = await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
                     state.install(continuation)
                     visionQueue.async {
                         state.finish(ContentHash.compute(url: url, size: contentSize))
                     }
-                    visionQueue.asyncAfter(deadline: .now() + 30) {
-                        state.finish(nil)
-                    }
+                    visionQueue.asyncAfter(deadline: .now() + hashTimeoutSeconds, execute: giveUp)
                 }
             } onCancel: {
                 state.finish(nil)
             }
+            giveUp.cancel()
         }
         tagged.fileRef = discovered.fileRef
         return tagged
@@ -217,6 +226,7 @@ public enum Tagging {
                     // Vision uses the Neural Engine below; join before building
                     // the result. All three only read `cgImage`.
                     let sideWork = DispatchGroup()
+                    let hashWork = DispatchGroup()
                     let clipBox = ScanSideResult<(blob: Data?, ms: Double)>()
                     let hashBox = ScanSideResult<Data?>()
                     DispatchQueue.global(qos: .userInitiated).async(group: sideWork) {
@@ -224,7 +234,8 @@ public enum Tagging {
                         let blob = MobileCLIPService.shared.embedImage(cgImage).map { FloatBlob.encode($0) }
                         clipBox.set((blob, (CFAbsoluteTimeGetCurrent() - clipStart) * 1000))
                     }
-                    DispatchQueue.global(qos: .utility).async(group: sideWork) {
+                    // The worker blocks on this join, so the read must not run below its priority.
+                    DispatchQueue.global(qos: .userInitiated).async(group: hashWork) {
                         hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
                     }
 
@@ -242,12 +253,14 @@ public enum Tagging {
                     // mirroring the Windows per-file-timeout row.
                     if !pass.didComplete {
                         sideWork.wait()
+                        _ = hashWork.wait(timeout: .now() + hashTimeoutSeconds)
                         JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
+                            contentHash: hashBox.get() ?? nil,
                             failed: true,
                             errorMessage: FileIDEngineMain.visionTimeoutMessage,
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -348,6 +361,8 @@ public enum Tagging {
                     }
 
                     sideWork.wait()
+                    // A stalled network volume must not park this worker for good.
+                    _ = hashWork.wait(timeout: .now() + hashTimeoutSeconds)
                     let contentHash = hashBox.get() ?? nil
                     let clipBlob = clipBox.get()?.blob ?? nil
                     let clipMs = clipBox.get()?.ms ?? 0
@@ -428,10 +443,17 @@ public enum Tagging {
                 // runs off-thread with a hard timeout, since AVFoundation duration/decode can
                 // hang on a NAS file; on timeout the video clusters by filename, as before.
                 // Mirrors the Windows engine, which CLIP-embeds the video keyframe at scan.
-                if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
+                let keyframe = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6)
+                if let cg = keyframe.image,
                    let blob = MobileCLIPService.shared.embedImage(cg)
                         .map({ FloatBlob.encode($0) }) {
                     tagged.clipEmbeddingBlob = blob
+                }
+                // A video with no usable keyframe can never get its embedding; record the
+                // attempt so the CLIP carve-out stops sending it through every scan. Not
+                // on a timeout (the volume may be slow today) or before CLIP can run.
+                if tagged.clipEmbeddingBlob == nil, !keyframe.timedOut, MobileCLIPService.shared.canEmbed {
+                    tagged.textStageDone = true
                 }
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
@@ -442,7 +464,7 @@ public enum Tagging {
     /// Extract a video keyframe with a hard wall-clock bound. AVFoundation duration/decode
     /// can hang on an unresponsive NAS file, so it runs in a detached task and is cancelled
     /// when the caller's timeout expires.
-    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> CGImage? {
+    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> (image: CGImage?, timedOut: Bool) {
         let box = KeyframeBox()
         let sema = DispatchSemaphore(value: 0)
         let task = Task.detached(priority: .utility) {
@@ -451,9 +473,9 @@ public enum Tagging {
         }
         if sema.wait(timeout: .now() + timeout) == .timedOut {
             task.cancel()
-            return nil
+            return (nil, true)
         }
-        return box.get()
+        return (box.get(), false)
     }
 
     private final class KeyframeBox: @unchecked Sendable {

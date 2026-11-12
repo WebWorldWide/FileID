@@ -44,13 +44,13 @@ Models: keep about 10-15 curated defaults (2-3 per hardware tier); the Windows a
 
 ## Mac app audit follow-ups (2026-11-12)
 
-- [ ] **Owner:** refresh the egress digests for `EngineClient.swift` and `ThumbnailService.swift` (no network code added), open the PR, and check the fixes on screen (People drag merge dialog, Duplicates per-group confirm, Settings before a scan, Restart on a stopped helper, Privacy card).
-- [ ] **Owner decisions:** description models live in `~/Documents/huggingface` on Developer ID builds (iCloud Desktop & Documents would upload them); Spotlight indexing default (now on, with a switch).
-- [ ] **Destructive actions:** one merge flow with confirmation and Undo in People (five paths today); one rename flow that honours Name style (three today); separate Undo slots for Trash from Duplicates, Best Takes and Chat; Return must not trash in Best Takes.
-- [ ] **Models:** show size and download progress on Describe Files before a download starts; license gate on every Describe entry point; Remove for description models; "Download all" must not be blocked by, or include, the optional model; cancel the engine download when the Welcome watchdogs fire; resume partial downloads.
-- [ ] **Plain language:** map every engine error kind and message (raw Swift errors, "run ./run.sh", Prewarm, Deep Analyze, Restructure); hide model names, repo ids and specs behind a details disclosure; one name each for Describe Files, Duplicates, location, take.
-- [ ] **Performance, needs an on-screen check:** lava lamp float16 `drawingGroup` under frosted panes at 30 fps; indeterminate bars animate while the window is hidden; Library reloads the grid every second during a scan and loads the whole library on preview; Moments polls jobs every second; Spotlight re-indexes the whole library after every run; the thumbnail disk cache has no size cap; exact-duplicate hashes are cached for 30 s only.
-- [ ] Unused code to remove: `SidebarProcessingControl`, `SidebarPipelineProgress`, the Library bulk-rename sheet state, the auto-pilot stage.
+- [ ] **On-screen pass (owner's session):** nothing from the audit fixes has been seen running. Walk: People merge dialogs and Stop; Describe Files download prompt, progress and failure card; Settings Download/Remove and "Download the essentials"; Welcome sheet; rename sheets and Undo; Library "New files · Show", ⌘K, mid-scan folder switch; Duplicates tiles with folders; Organize Folders large-plan panel and result banner; Best Takes ⌘⌫ and "Put back last move"; File Tools segmented bar width; Chat composer row. Then a real download with the network dropped and offline.
+- [ ] **Lava lamp cost** (untouched, needs eyes): float16 `drawingGroup` at 30 fps under frosted panes; try 8-bit colour, quarter-resolution blobs, 15 fps, and no material under ≥0.8 fills.
+- [ ] **Merge Undo in People:** the helper only undoes review-queue merges; `mergeClusters` needs a journal (engine + IPC change).
+- [ ] **Identical-image reuse in the Swift engine** (plan in the 2026-11-12 agent report: hash first, scan-scoped registry, copy the first file's result into the twin's `TaggedFile`).
+- [ ] **Measure before changing:** RAM++ caps a Mac scan near 8 files/s when installed (defer to a post-scan pass?); Vision classify on the GPU; careful-read warm-up skips files scanned in the first seconds; a decode pool for HEIC.
+- [ ] **Smaller:** structured reason codes for Trash failures (IPC); `chat.lastTrashBatch` unused after restart; make `EngineClient.catalogResponse(for:)` internal so Best Takes stops polling; speech permission asked by the app instead of the helper mid-scan; download resume across relaunch; `Detail` `.id(activeTab)` rebuilds pages; mirror the plain error strings in the Rust engine (`server.rs`, `catalog_index.rs`, `timeline.rs`, `restructure.rs`); Spotlight incremental pass is still full after a scan because rescans touch `scanned_at`.
+- [ ] **Owner:** open the PR for `agent/engine-tagging-breakthroughs` (blocked from the agent session); Spotlight default (on, with a switch).
 
 ## Tagging accuracy and scan speed (2026-11-12)
 

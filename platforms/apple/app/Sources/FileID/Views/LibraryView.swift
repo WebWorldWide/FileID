@@ -9,6 +9,14 @@ import FileIDShared
 struct LibraryView: View {
     let engine: EngineClient
     let store: ReadStore
+    var pickedURL: URL? = nil
+    var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
+    var pickFolder: () -> Void = {}
+
+    /// The title bar's "Find … in the library" writes the query here; observed
+    /// so it applies even while Library is already on screen.
+    static let queryHandoffKey = "libraryQueryHandoff"
+    @AppStorage(LibraryView.queryHandoffKey) private var queryHandoff: String = ""
 
     @State private var rows: [FileRow] = []
     /// Top vision tags per visible file, batched in one SQL query
@@ -42,6 +50,15 @@ struct LibraryView: View {
     @State private var similarSeed: FileRow? = nil
     @State private var visualSearchPending = false
     @State private var visualSummary: String?
+    @State private var searchProblem: SearchProblem?
+    @State private var clipModelOnDisk = false
+    /// Bumped whenever `rows` or `tagsByFile` is replaced, so the grid can tell
+    /// "same content" without comparing thousands of rows.
+    @State private var rowsEpoch = 0
+    @State private var gridAtTop = true
+    /// A live scan added files the grid hasn't loaded, because the user had
+    /// scrolled away from the top.
+    @State private var newFilesWaiting = false
     /// Persisted across launches. Empty string means "no filter" since
     /// AppStorage doesn't support optional bindings cleanly.
     @AppStorage("library.kindFilter") private var kindFilterRaw: String = ""
@@ -50,6 +67,8 @@ struct LibraryView: View {
     }
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
+    @State private var lastCounterRefreshAt: Date = .distantPast
+    @State private var scrollToTopToken = 0
     /// Drives the preview sheet: which file is shown is keyed on its id
     /// (not a raw `FileRow`) so navigation mutates the displayed file in
     /// place — the sheet keeps identity instead of dismissing+re-presenting.
@@ -65,16 +84,13 @@ struct LibraryView: View {
     @State private var listedQuery: (String, String?)? = nil
     private static let pageSize = 300
     private static let refreshCap = 3_000
+    private static let liveReloadInterval: TimeInterval = 5
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
-    /// nav context (the LIMIT 200 query reorders by scanned_at).
+    /// nav context. Later pages are appended as the grid loads them.
     @State private var previewSiblings: [FileRow] = []
-    /// In-flight full-library sibling upgrade for the open preview. Cancelled
-    /// before each new `openPreview` and on dismiss so rapid open/close or
-    /// fast photo-switching can't pile up concurrent 1M-row fetches.
-    @State private var previewSiblingTask: Task<Void, Never>? = nil
-    @State private var bulkRenameSheetOpen: Bool = false
+    @State private var previewIndex: [Int64: Int] = [:]
     @State private var lastBatchAvailable: Bool = false
     @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
@@ -151,20 +167,33 @@ struct LibraryView: View {
         view
             .onAppear {
                 store.openIfPossible()
-                reload()
+                refreshClipModelOnDisk()
+                if queryHandoff.isEmpty { reload() } else { consumeQueryHandoff() }
                 refreshBulkState()
                 engine.refreshLibraryRoots()
             }
+            .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
             .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
                 if new != lastSeenBatchIndex {
                     lastSeenBatchIndex = new
-                    guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
-                    lastReloadAt = Date()
-                    store.notifyChanged()
-                    reload()
-                    refreshBulkState()
+                    let now = Date()
+                    if now.timeIntervalSince(lastCounterRefreshAt) >= 1.0 {
+                        lastCounterRefreshAt = now
+                        store.notifyChanged()
+                    }
+                    // New files are prepended, which reloads the whole grid.
+                    // An empty grid fills right away; otherwise it refreshes
+                    // only while the user sits at the top, and at a slow beat.
+                    let wait = rows.isEmpty ? 1.0 : Self.liveReloadInterval
+                    guard Date().timeIntervalSince(lastReloadAt) >= wait else { return }
+                    if rows.isEmpty || (gridAtTop && !selectMode && previewSelectedID == nil) {
+                        lastReloadAt = Date()
+                        reload(firstPageOnly: true)
+                    } else {
+                        newFilesWaiting = true
+                    }
                 }
             }
             .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
@@ -212,6 +241,9 @@ struct LibraryView: View {
             }
             if let hint = clipSearchHint {
                 clipHintBanner(hint)
+            }
+            if let problem = searchProblem {
+                searchProblemBanner(problem)
             }
             if rows.isEmpty {
                 empty
@@ -278,12 +310,70 @@ struct LibraryView: View {
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3, similarSeed == nil,
               !CLIPModelInstaller.shared.textEncoderReady else { return nil }
-        return FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path) ? .preparing : .install
+        return clipModelOnDisk ? .preparing : .install
     }
 
-    /// One-line keyword-fallback banner: missing → points the user at
-    /// Settings (doesn't switch tabs; avoids extra wiring), compiling →
-    /// spinner while the encoder finishes loading.
+    private func refreshClipModelOnDisk() {
+        clipModelOnDisk = FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path)
+    }
+
+    private func consumeQueryHandoff() {
+        guard !queryHandoff.isEmpty else { return }
+        let query = queryHandoff
+        queryHandoff = ""
+        similarSeed = nil
+        if searchText == query { reload() } else { searchText = query }
+    }
+
+    struct SearchProblem: Equatable {
+        let title: String
+        let detail: String
+        var needsModel = false
+    }
+
+    /// Why a visual search gave nothing, in plain words.
+    private static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
+        let title = similar ? "Couldn't find similar files" : "Showing matches by name and text only"
+        var installed = false
+        if case .installed = CLIPModelInstaller.shared.status { installed = true }
+        if !installed {
+            return SearchProblem(title: title, detail: "Searching by what's in a picture needs the Search by description model. You can download it in Settings.", needsModel: true)
+        }
+        guard let response else {
+            return SearchProblem(title: title, detail: "FileID's helper didn't answer in time. Try again in a moment.")
+        }
+        if let message = response.message, !Sidebar.looksTechnical(message) {
+            return SearchProblem(title: title, detail: message)
+        }
+        return SearchProblem(title: title, detail: similar
+            ? "FileID hasn't finished reading this file yet. Scan the folder again, then try once more."
+            : "Searching by what's in a picture isn't ready yet. Try again after the scan finishes.")
+    }
+
+    @ViewBuilder
+    private func searchProblemBanner(_ problem: SearchProblem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.warning)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(problem.title).font(Theme.Font.body(13.5, .semibold))
+                Text(problem.detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            if problem.needsModel {
+                Button("Open Settings") { onSwitchTab(.settings) }.buttonStyle(.dsSecondary)
+            }
+            DSIconButton("Dismiss", systemImage: "xmark", tint: Theme.text3) { searchProblem = nil }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.30), lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+
+    /// One-line keyword-fallback banner: missing → a button to Settings,
+    /// compiling → spinner while the encoder finishes loading.
     @ViewBuilder
     private func clipHintBanner(_ hint: CLIPSearchHint) -> some View {
         HStack(spacing: 10) {
@@ -301,6 +391,8 @@ struct LibraryView: View {
             Spacer()
             if hint == .preparing {
                 ProgressView().controlSize(.small).tint(Theme.ai)
+            } else {
+                Button("Open Settings") { onSwitchTab(.settings) }.buttonStyle(.dsSecondary)
             }
         }
         .padding(10)
@@ -345,7 +437,7 @@ struct LibraryView: View {
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Finding files…"
-                         : p.phase == .tagging ? "Reading files…" : "Grouping faces…")
+                         : p.phase == .tagging ? "Reading files…" : "Finishing up…")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Tagging photos and finding faces. You can browse while this runs.")
                         .font(Theme.Font.body(11))
@@ -558,16 +650,7 @@ struct LibraryView: View {
             }
         }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
-        .onAppear {
-            if let handoff = UserDefaults.standard.string(forKey: "libraryQueryHandoff"), !handoff.isEmpty {
-                searchText = handoff
-                UserDefaults.standard.removeObject(forKey: "libraryQueryHandoff")
-            }
-        }
-        .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
-            BulkRenameSheet(engine: engine, store: store)
-        }
-        .sheet(isPresented: $bulkTagSheetOpen) {
+        .sheet(isPresented: $bulkTagSheetOpen, onDismiss: refreshBulkState) {
             BulkTagSheet(
                 files: Array(checkedFiles.values),
                 store: store,
@@ -713,6 +796,8 @@ struct LibraryView: View {
             checkedIDs: Set(checkedFiles.keys),
             selectedID: previewSelectedID ?? paneSelectedID,
             refreshToken: tileRefreshToken,
+            contentVersion: rowsEpoch,
+            scrollToTopToken: scrollToTopToken,
             textSize: ContentTextScale.shared.size,
             offline: offlineRoots,
             onSelect: { paneSelectedID = $0.id },
@@ -722,10 +807,22 @@ struct LibraryView: View {
             onNearEnd: { loadMore() },
             onClearSelection: { paneSelectedID = nil },
             onRangeCheck: checkRange,
-            onCommandCheck: { row in selectMode = true; toggleCheck(row) })
+            onCommandCheck: { row in selectMode = true; toggleCheck(row) },
+            onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
         .overlay(alignment: .bottom) {
             if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
         }
+        .overlay(alignment: .top) {
+            if newFilesWaiting {
+                Button { scrollToTopToken += 1; gridAtTop = true; reload(firstPageOnly: true) } label: { Label("New files · Show", systemImage: "arrow.up") }
+                    .buttonStyle(DSPrimaryButtonStyle(height: 28))
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                    .padding(.top, 10)
+                    .help("The scan found more files. Show them at the top of the list.")
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(Theme.spring, value: newFilesWaiting)
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
         .sheet(isPresented: Binding(
@@ -734,26 +831,37 @@ struct LibraryView: View {
                 if !$0 {
                     if paneSelectedID != nil { paneSelectedID = previewSelectedID }
                     previewSelectedID = nil
-                    previewSiblingTask?.cancel()
-                    previewSiblingTask = nil
+                    refreshBulkState()
                 }
             }
         )) {
             FilePreviewSheet(siblings: previewSiblings,
+                              indexByID: previewIndex,
                               selectedID: $previewSelectedID,
                               store: store, engine: engine,
-                              onEdit: { editEpoch += 1 })
+                              onEdit: { editEpoch += 1; refreshBulkState() },
+                              onNearEnd: { loadMore() })
         }
     }
 
     @ViewBuilder
     private var empty: some View {
-        if store.totalFiles == 0 {
-            EmptyStateView(
-                icon: "arrow.left.circle",
-                title: "No files yet",
-                message: "Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar."
-            )
+        if store.scopedTotalFiles == 0 {
+            if scanActive {
+                EmptyStateView(icon: "hourglass", title: "Reading your files",
+                               message: "Files appear here as the scan reads them.")
+            } else if store.totalFiles > 0 {
+                EmptyStateView(icon: "folder", title: "No files in this location yet",
+                               message: "Choose All locations in the folder menu at the top, or scan this location again.")
+            } else if let url = pickedURL {
+                EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
+                               message: "Scan \(url.lastPathComponent) to see its files here. Nothing is moved or changed.",
+                               primaryAction: (label: "Scan", run: { engine.startScan(rootURL: url) }))
+            } else {
+                EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
+                               message: "Choose a folder for FileID to read. Nothing is moved or changed.",
+                               primaryAction: (label: "Choose a folder", run: pickFolder))
+            }
         } else {
             EmptyStateView(
                 icon: "magnifyingglass",
@@ -765,37 +873,26 @@ struct LibraryView: View {
 
     // MARK: - Data
 
-    /// Open the full-screen preview for `row`. Opens immediately on the on-screen rows,
-    /// then upgrades the prev/next nav context to the FULL library so arrow-nav isn't
-    /// capped at the 200-tile grid window (and the frozen list won't churn with the
-    /// live-scan `scanned_at` reorder). A search / find-similar result keeps its own set
-    /// so arrows stay within those matches.
+    /// Open the full-screen preview for `row`. Arrow keys walk the rows the
+    /// grid has loaded; nearing the end pages more in, exactly as scrolling does.
     private func openPreview(_ row: FileRow) {
-        previewSiblings = rows
+        setPreviewSiblings(rows)
         previewSelectedID = row.id
-        guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
-        let kf = kindFilter
-        previewSiblingTask?.cancel()
-        previewSiblingTask = Task { @MainActor in
-            let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
-            guard !Task.isCancelled else { return }
-            // Upgrade the nav context by id — the user may have arrowed to a
-            // different photo while this loaded; keep the upgrade as long as the
-            // current selection is still represented in the full set.
-            guard let id = previewSelectedID, !full.isEmpty,
-                  full.contains(where: { $0.id == id }) else { return }
-            previewSiblings = full
-        }
+    }
+
+    private func setPreviewSiblings(_ list: [FileRow]) {
+        previewSiblings = list
+        previewIndex = Dictionary(list.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     private func refreshOpenPreview() {
         guard let id = previewSelectedID,
-              let updated = store.files(forFileIDs: [id]).first,
-              let index = previewSiblings.firstIndex(where: { $0.id == id }) else { return }
+              let index = previewIndex[id], previewSiblings.indices.contains(index),
+              let updated = store.files(forFileIDs: [id]).first else { return }
         previewSiblings[index] = updated
     }
 
-    private func reload() {
+    private func reload(firstPageOnly: Bool = false) {
         // Off the MainActor: similarity + semantic search cosine-scan the full
         // clip_embeddings table (O(N·512)) and the keyword query hits multiple
         // tables plus a face join — multi-second on a 50k library, and the live
@@ -808,7 +905,8 @@ struct LibraryView: View {
         let kind = kindFilter
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
-        let want = sameListing ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
+        let want = sameListing && !firstPageOnly ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
+        newFilesWaiting = false
         reloadTask?.cancel()
         loadMoreTask?.cancel()
         loadingMore = false
@@ -818,12 +916,17 @@ struct LibraryView: View {
             var newRows: [FileRow]
             var pageable = false
             var summary: String?
+            var problem: SearchProblem?
             if let seed {
                 visualSearchPending = true
-                if let response = await catalogSearch(seedID: seed.id), response.status == "ok" {
+                let response = await catalogSearch(seedID: seed.id)
+                guard !Task.isCancelled else { return }
+                if let response, response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
-                    summary = response.message
-                } else { newRows = [] }
+                } else {
+                    newRows = []
+                    problem = Self.searchProblem(response, similar: true)
+                }
             } else {
                 newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
                 pageable = newRows.count == want
@@ -831,12 +934,18 @@ struct LibraryView: View {
                 if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
                     guard !Task.isCancelled else { return }
                     rows = newRows
+                    rowsEpoch &+= 1
                     visualSearchPending = true
-                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled,
-                       let response = await catalogSearch(query: trimmed, vector: vector), response.status == "ok" {
-                        newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
-                        pageable = false
-                        summary = response.message
+                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled {
+                        let response = await catalogSearch(query: trimmed, vector: vector)
+                        guard !Task.isCancelled else { return }
+                        if let response, response.status == "ok" {
+                            newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            pageable = false
+                            summary = "Matches by name, text and what's in the picture"
+                        } else {
+                            problem = Self.searchProblem(response, similar: false)
+                        }
                     }
                 }
             }
@@ -848,10 +957,13 @@ struct LibraryView: View {
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
             guard !Task.isCancelled else { return }
+            if rows.isEmpty { gridAtTop = true }
             rows = newRows
             tagsByFile = tags
+            rowsEpoch &+= 1
             canLoadMore = pageable
             visualSummary = summary
+            searchProblem = problem
             listedQuery = seed == nil ? (query, kind) : nil
         }
     }
@@ -884,8 +996,13 @@ struct LibraryView: View {
             }.value
             guard !Task.isCancelled, offset == rows.count else { return }
             let known = Set(rows.map(\.id))
-            rows.append(contentsOf: page.filter { !known.contains($0.id) })
+            let fresh = page.filter { !known.contains($0.id) }
+            rows.append(contentsOf: fresh)
             tagsByFile.merge(tags) { _, new in new }
+            rowsEpoch &+= 1
+            if previewSelectedID != nil {
+                setPreviewSiblings(previewSiblings + fresh.filter { previewIndex[$0.id] == nil })
+            }
             canLoadMore = page.count == Self.pageSize
         }
     }
@@ -896,12 +1013,15 @@ struct LibraryView: View {
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
 private struct FilePreviewSheet: View {
     let siblings: [FileRow]              // for prev/next arrow nav
+    /// Position of each sibling, built once when the list changes.
+    let indexByID: [Int64: Int]
     @Binding var selectedID: Int64?
     let store: ReadStore
     let engine: EngineClient
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
+    var onNearEnd: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
     @State private var tags: [String] = []
@@ -915,12 +1035,17 @@ private struct FilePreviewSheet: View {
 
     /// Displayed file + its position, derived from selectedID so navigation
     /// mutates the shown file in place without swapping the sheet's identity.
-    private var file: FileRow? { siblings.first { $0.id == selectedID } }
-    private var siblingIndex: Int? { siblings.firstIndex { $0.id == selectedID } }
+    private var siblingIndex: Int? {
+        guard let id = selectedID, let index = indexByID[id],
+              siblings.indices.contains(index), siblings[index].id == id else { return nil }
+        return index
+    }
+    private var file: FileRow? { siblingIndex.map { siblings[$0] } }
 
     private func step(_ delta: Int) {
         guard let idx = siblingIndex else { return }
         let t = idx + delta
+        if t >= siblings.count - 8 { onNearEnd() }
         guard siblings.indices.contains(t) else { return }
         selectedID = siblings[t].id
     }
@@ -1095,8 +1220,9 @@ private struct FilePreviewSheet: View {
                     infoSection("Description") {
                         Text(caption).font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                             .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                        if let model = file.vlmModel, let kind = AIModelKind(rawValue: model) {
-                            MetaText("Written by \(kind.displayName)", size: 11)
+                        if let model = file.vlmModel {
+                            MetaText("Description written by AI on this Mac", size: 11)
+                                .help(AIModelKind(rawValue: model)?.displayName ?? model)
                         }
                         if file.vlmInheritedFrom != nil {
                             MetaText("Same as a similar photo", size: 11)
@@ -1147,12 +1273,12 @@ private struct FilePreviewSheet: View {
                     VStack(spacing: 0) {
                         DetailRow("Path", file.pathText)
                         if file.hasText { DetailRow("Text", "Found in this file") }
-                        if let phash = file.phash { DetailRow("pHash", String(phash, radix: 16)) }
-                        if let aesthetic = file.aesthetic { DetailRow("Aesthetic", String(format: "%.2f", aesthetic)) }
+                        if let phash = file.phash { DetailRow("Fingerprint", String(phash, radix: 16)) }
+                        if let aesthetic = file.aesthetic { DetailRow("Quality", String(format: "%.2f", aesthetic)) }
                     }
                     .padding(.top, 6)
                 } label: {
-                    SectionLabel("Technical")
+                    SectionLabel("Details for support")
                 }
             }
             .padding(16)
@@ -1172,12 +1298,23 @@ private struct FilePreviewSheet: View {
 private struct DetailRow: View {
     let key: String
     let value: String
-    init(_ key: String, _ value: String) { self.key = key; self.value = value }
+    var stacked = false
+    init(_ key: String, _ value: String, stacked: Bool = false) { self.key = key; self.value = value; self.stacked = stacked }
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
-            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
-            Spacer(minLength: 0)
+        Group {
+            if stacked {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                    Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
+                    Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                }
+            }
         }
         .padding(.vertical, 5)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
@@ -1194,7 +1331,7 @@ private struct FileDetailRows: View {
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }
         if !people.isEmpty { DetailRow("People", people.joined(separator: ", ")) }
-        if let lat = file.locationLat, let lon = file.locationLon { DetailRow("Location", String(format: "%.4f, %.4f", lat, lon)) }
+        if let lat = file.locationLat, let lon = file.locationLon { DetailRow("Where it was taken", String(format: "%.4f, %.4f", lat, lon), stacked: true) }
     }
 }
 
@@ -1592,6 +1729,16 @@ private struct LibrarySelectedPane: View {
                     }
                 }
 
+                if let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines), !proposed.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        MetaText("Suggested name", size: 11)
+                        Text(row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)")
+                            .font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.gold)
+                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    }
+                    .help("Open the preview to rename the file to this name.")
+                }
+
                 if !tags.isEmpty {
                     FlowLayout(spacing: 6) {
                         ForEach(TagLabel.unique(tags).prefix(12), id: \.self) { tag in
@@ -1609,7 +1756,7 @@ private struct LibrarySelectedPane: View {
                 VStack(spacing: 6) {
                     Button(action: onOpen) { Label("Open preview", systemImage: "eye").frame(maxWidth: .infinity) }
                         .buttonStyle(DSPrimaryButtonStyle(height: 30))
-                        .help("Full preview with tags, smart name and Deep Analyze (or double-click the tile)")
+                        .help("Full preview with tags, the suggested name and Describe Files (or double-click the tile)")
                     HStack(spacing: 6) {
                         if row.kind == "image" || row.kind == "video" {
                             Button(action: onFindSimilar) { Text("Similar").lineLimit(1).frame(maxWidth: .infinity) }

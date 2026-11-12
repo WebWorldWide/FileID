@@ -36,6 +36,9 @@ struct CatalogWorkbench: View {
     @State private var captureWindow = CaptureWindow()
     @State private var checkedRows: Set<Int> = []
     @State private var rowAnchor: Int?
+    @State private var chapterToDelete: CatalogChapter?
+    /// File whose chapters were edited in this visit, so Undo has something to reverse.
+    @State private var undoableFileID: Int64?
     var inline = false
 
     var body: some View {
@@ -83,10 +86,26 @@ struct CatalogWorkbench: View {
             TakeWorkbench(engine: engine, candidates: hits)
         }
         .task {
+            // Ask every second only while something is waiting or running;
+            // otherwise once every ten seconds.
+            var idleTicks = 0
             while !Task.isCancelled {
-                _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))
+                let active = engine.catalogJobs.contains { $0.state == "queued" || $0.state == "running" }
+                if active || idleTicks == 0 {
+                    _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))
+                }
+                idleTicks = active ? 0 : (idleTicks + 1) % 10
                 do { try await Task.sleep(for: .seconds(1)) } catch { break }
             }
+        }
+        .confirmationDialog("Delete this chapter?", isPresented: Binding(get: { chapterToDelete != nil }, set: { if !$0 { chapterToDelete = nil } }),
+                            titleVisibility: .visible, presenting: chapterToDelete) { chapter in
+            Button("Delete chapter", role: .destructive) {
+                send(CatalogRequest(requestID: UUID().uuidString, action: "deleteChapter", fileID: chapter.fileID, chapterID: chapter.id))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { chapter in
+            Text("“\(chapter.title)” is removed from FileID. The video file is not changed. Undo last edit brings it back.")
         }
         .task(id: selected?.fileID) { await loadTimeline() }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
@@ -230,7 +249,7 @@ struct CatalogWorkbench: View {
                         send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [hit.fileID], timelineMode: timelineMode))
                     }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                    .help("Watch this video and suggest chapters. Uses the description model; if it isn't ready, describe one file on the Describe Files page first.")
+                    .help("Watch this video and suggest chapters.")
                 }
                 Spacer(minLength: 8)
                 if video && player != nil {
@@ -258,6 +277,8 @@ struct CatalogWorkbench: View {
                     send(CatalogRequest(requestID: UUID().uuidString, action: "undoChapterEdit", fileID: hit.fileID))
                 }
                 .buttonStyle(.dsGhost)
+                .disabled(undoableFileID != hit.fileID)
+                .help(undoableFileID == hit.fileID ? "Reverse your last change to these chapters" : "Nothing to undo yet")
                 Button { openEditor(nil) } label: { Label("Add chapter", systemImage: "plus") }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
             }
@@ -296,7 +317,7 @@ struct CatalogWorkbench: View {
     }
 
     private func chapterStatus(_ chapter: CatalogChapter) -> (String, Color) {
-        if chapter.stale { return ("Stale", Theme.warning) }
+        if chapter.stale { return ("Out of date", Theme.warning) }
         if chapter.userEdited { return ("Accepted", Theme.delight) }
         return ("Draft", Theme.ai)
     }
@@ -326,18 +347,15 @@ struct CatalogWorkbench: View {
             .accessibilityLabel("\(chapter.title), at \(DurationText.spoken(chapter.startSeconds))")
             .accessibilityHint("Plays from this chapter")
             StatusPill(text: status.0, color: status.1)
+                .help(draft ? "A suggestion FileID is \(Int((chapter.confidence * 100).rounded()))% sure about. Accept it if it looks right."
+                      : chapter.stale ? "The video changed after this chapter was made. Check it still fits." : "You accepted or wrote this chapter.")
             if draft {
-                Text("\(Int((chapter.confidence * 100).rounded()))%")
-                    .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3).frame(width: 34, alignment: .trailing)
-                    .accessibilityLabel("Confidence \(Int((chapter.confidence * 100).rounded())) percent")
                 Button("Accept") { accept(chapter) }
                     .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
             }
             Button("Rename") { openEditor(chapter) }
                 .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
-            DSIconButton("Delete chapter", systemImage: "trash", tint: Theme.text3) {
-                send(CatalogRequest(requestID: UUID().uuidString, action: "deleteChapter", fileID: fileID, chapterID: chapter.id))
-            }
+            DSIconButton("Delete chapter", systemImage: "trash", tint: Theme.text3) { chapterToDelete = chapter }
         }
         .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 6)
         .background(current ? Theme.goldWash : Color.clear, ignoresSafeAreaEdges: [])
@@ -418,7 +436,7 @@ struct CatalogWorkbench: View {
     private var queuePanel: some View {
         Panel {
             PanelHeader("Video analysis") {
-                MetaText(engine.catalogJobs.isEmpty ? "Idle" : "\(engine.catalogJobs.count) job\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
+                MetaText(engine.catalogJobs.isEmpty ? "Nothing running" : "\(engine.catalogJobs.count) task\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
             }
             if engine.catalogJobs.isEmpty {
                 MetaText("Nothing waiting. Pick a video and press Find moments.")
@@ -442,6 +460,7 @@ struct CatalogWorkbench: View {
     // MARK: - Actions
 
     private func select(_ hit: CatalogHit, at index: Int) {
+        if selected?.fileID != hit.fileID { undoableFileID = nil }
         selected = hit
         selectedIndex = index
         closeEditor()
@@ -539,15 +558,24 @@ struct CatalogWorkbench: View {
         let action = pendingAction
         pendingID = ""
         pendingAction = ""
-        message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
-        if !message.isEmpty, action != "search" {
-            if action == "enqueueTimeline", response.status != "ok", message.localizedCaseInsensitiveContains("model"), let onSwitchTab {
-                ToastCenter.shared.show(message, actionLabel: "Open Describe Files", duration: 8) { onSwitchTab(.deep) }
+        let failed = response.status != "ok"
+        let raw = response.message ?? ""
+        // The helper's own wording is written for a log; show it only when it
+        // reads like a sentence, and never for a request that worked.
+        message = failed ? (raw.isEmpty || Sidebar.looksTechnical(raw) ? "That didn't work. Try again in a moment." : raw) : ""
+        if failed, action != "search" {
+            if action == "enqueueTimeline", raw.localizedCaseInsensitiveContains("model") {
+                message = "Finding moments needs an AI model that describes files. Set one up on the Describe Files page, then try again."
+                if let onSwitchTab {
+                    ToastCenter.shared.show(message, actionLabel: "Open Describe Files", duration: 8) { onSwitchTab(.deep) }
+                } else {
+                    ToastCenter.shared.show(message, duration: 8)
+                }
             } else {
                 ToastCenter.shared.show(message)
             }
         }
-        guard response.status == "ok" else { return }
+        guard !failed else { return }
         switch action {
         case "search":
             hits = response.hits
@@ -563,12 +591,15 @@ struct CatalogWorkbench: View {
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)
         case "detail", "saveChapter", "undoChapterEdit":
+            if action == "saveChapter" { undoableFileID = selected?.fileID }
+            if action == "undoChapterEdit" { undoableFileID = nil }
             withAnimation(Theme.springStandard) { chapters = response.chapters }
             if action == "detail" { cast = response.hits.filter { $0.kind == "person" } } else { closeEditor() }
         case "deleteChapter":
+            undoableFileID = selected?.fileID
             if let selected { send(CatalogRequest(requestID: UUID().uuidString, action: "detail", fileID: selected.fileID)) }
         case "enqueueTimeline":
-            ToastCenter.shared.show("Queued for analysis")
+            ToastCenter.shared.show("Looking for moments in this video…")
         default:
             break
         }
@@ -600,7 +631,7 @@ struct MomentResultRow: Equatable, Identifiable {
         if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
         if let page = hit.page { parts.append("Page \(page)") }
         switch hit.kind {
-        case "sampledFrame": parts.append("Video frame, not checked")
+        case "sampledFrame": parts.append("From a video frame (not reviewed)")
         case "chapter": parts.append("Chapter")
         case "passage": parts.append("Speech or text")
         case "person": parts.append("Person")
@@ -801,9 +832,20 @@ struct CatalogJobRow: View {
 
     private var title: String {
         if job.kind == "catalogIndex" { return "Search index" }
-        if job.kind == "takeGrouping" { return "Related tries" }
+        if job.kind == "takeGrouping" { return "Similar takes" }
         let count = job.fileIDs.count
         return "\(count) video\(count == 1 ? "" : "s") · finding moments"
+    }
+
+    private var stateText: String {
+        switch job.state {
+        case "queued": return "Waiting"
+        case "running": return "Working"
+        case "paused": return "Paused"
+        case "completed": return "Done"
+        case "cancelled", "canceled": return "Stopped"
+        default: return "Didn't finish"
+        }
     }
 
     private var tone: (Color, ProgressTone) {
@@ -820,7 +862,7 @@ struct CatalogJobRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Text(title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1)
-                Text(job.state.capitalized).font(Theme.Font.body(12, .semibold)).foregroundStyle(tone.0)
+                Text(stateText).font(Theme.Font.body(12, .semibold)).foregroundStyle(tone.0)
                 Spacer(minLength: 8)
                 Text("\(Int((job.progress * 100).rounded()))%").font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
                 if ["running", "queued"].contains(job.state) {
@@ -840,13 +882,13 @@ struct CatalogJobRow: View {
             }
             GrainProgressBar(progress: job.progress, tone: tone.1, height: 4)
             if let error = job.error, !error.isEmpty {
-                Text(error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                Text(Sidebar.looksTechnical(error) ? "This didn't finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(title), \(job.state)")
+        .accessibilityLabel("\(title), \(stateText)")
     }
 }
 

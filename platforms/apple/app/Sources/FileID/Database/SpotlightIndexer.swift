@@ -96,7 +96,26 @@ public enum SpotlightIndexer {
         await SpotlightIndexCoordinator.shared.requestIndex(dbPath: dbPath)
     }
 
+    /// When the last complete pass started, so the next one only sends rows
+    /// scanned or described since. Missing (first run, after a wipe, or after
+    /// the Spotlight switch was off) means index everything.
+    static let lastIndexedKey = "spotlight.lastIndexedAt"
+
     fileprivate static func indexPass(dbPath: String) async -> Bool {
+        let defaults = UserDefaults.standard
+        let since: Double? = defaults.object(forKey: lastIndexedKey) as? Double
+        // A few seconds of overlap covers rows written while this pass reads.
+        let passStart = Date().timeIntervalSince1970 - 5
+        let queue: DatabaseQueue
+        do {
+            var configuration = Configuration()
+            configuration.readonly = true
+            queue = try DatabaseQueue(path: dbPath, configuration: configuration)
+        } catch {
+            let ns = error as NSError
+            NSLog("FileID Spotlight: open failed — \(ns.domain) \(ns.code)")
+            return false
+        }
         var afterID: Int64 = -1
         while true {
             let pageStart = afterID
@@ -104,7 +123,7 @@ public enum SpotlightIndexer {
             for attempt in 0..<2 {
                 let result = await Task.detached(priority: .background) {
                     Result {
-                        try readRows(dbPath: dbPath, afterID: pageStart, limit: batchSize)
+                        try readRows(queue, afterID: pageStart, since: since, limit: batchSize)
                     }
                 }.value
                 switch result {
@@ -121,7 +140,13 @@ public enum SpotlightIndexer {
                 if rows != nil { break }
             }
             guard let rows else { return false }
-            guard !rows.isEmpty else { return true }
+            guard !rows.isEmpty else {
+                // A wipe during the pass removed the marker's meaning; leave it unset.
+                if since == nil || defaults.object(forKey: lastIndexedKey) != nil {
+                    defaults.set(passStart, forKey: lastIndexedKey)
+                }
+                return true
+            }
             let items = rows.map(makeItem)
             do {
                 try await CSSearchableIndex.default().indexSearchableItems(items)
@@ -138,6 +163,7 @@ public enum SpotlightIndexer {
     /// wipe-library flow (EngineClient.deleteLibraryFiles) so wiped
     /// files' captions/tags/paths leave ⌘Space with the library.
     public static func wipe() {
+        UserDefaults.standard.removeObject(forKey: lastIndexedKey)
         Task { await SpotlightIndexCoordinator.shared.requestWipe() }
     }
 
@@ -148,7 +174,10 @@ public enum SpotlightIndexer {
                     withDomainIdentifiers: [domainIdentifier]
                 ) { continuation.resume(returning: $0) }
             }
-            guard let error else { return true }
+            guard let error else {
+                UserDefaults.standard.removeObject(forKey: lastIndexedKey)
+                return true
+            }
             if attempt < 2 {
                 try? await Task.sleep(for: .milliseconds(250))
             } else {
@@ -188,11 +217,8 @@ public enum SpotlightIndexer {
     // MARK: - Internals
 
     private static func readRows(
-        dbPath: String, afterID: Int64, limit: Int
+        _ q: DatabaseQueue, afterID: Int64, since: Double?, limit: Int
     ) throws -> [SpotlightRow] {
-        var c = Configuration()
-        c.readonly = true
-        let q = try DatabaseQueue(path: dbPath, configuration: c)
         return try q.read { db -> [SpotlightRow] in
             let raw = try Row.fetchAll(db, sql: """
                 SELECT files.id, files.path_text, files.kind,
@@ -201,9 +227,10 @@ public enum SpotlightIndexer {
                           FROM tags WHERE tags.file_id = files.id) AS taglist
                 FROM files
                 WHERE files.failed = 0 AND files.id > ?
+                  AND (?1 IS NULL OR files.scanned_at > ?1 OR files.vlm_analyzed_at > ?1)
                 ORDER BY files.id
                 LIMIT ?
-                """, arguments: [afterID, limit])
+                """.replacingOccurrences(of: "?1", with: since.map { String($0) } ?? "NULL"), arguments: [afterID, limit])
             return raw.compactMap { r -> SpotlightRow? in
                 guard let id: Int64 = r["id"],
                       let path: String = r["path_text"],

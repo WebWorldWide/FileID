@@ -269,13 +269,13 @@ struct TitleBar: View {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         var groups: [(String, [SearchItem])] = []
         if !q.isEmpty {
-            groups.append(("Ask Chat", [SearchItem(id: "ask", label: "“\(q)”", hint: "↵", color: Theme.ai) {
+            groups.append(("Library", [SearchItem(id: "lib", label: "Find “\(q)” in the library", hint: "↵", color: Theme.text1) {
+                UserDefaults.standard.set(q, forKey: LibraryView.queryHandoffKey)
+                activeTab = .library
+            }]))
+            groups.append(("Ask Chat", [SearchItem(id: "ask", label: "“\(q)”", hint: "Chat", color: Theme.ai) {
                 UserDefaults.standard.set(q, forKey: "chatDraft")
                 if activeTab != .chat { chatPresented = true }
-            }]))
-            groups.append(("Library", [SearchItem(id: "lib", label: "Find “\(q)” in the library", hint: "Library", color: Theme.text1) {
-                UserDefaults.standard.set(q, forKey: "libraryQueryHandoff")
-                activeTab = .library
             }]))
         }
         let pages = MainWindow.Tab.allCases.filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.rawValue.localizedCaseInsensitiveContains(q) || $0.summary.localizedCaseInsensitiveContains(q) }.prefix(q.isEmpty ? 10 : 4)
@@ -330,7 +330,7 @@ struct TitleBar: View {
 
     private struct ActivityRow: Identifiable {
         let id: String; let name: String; let sub: String; let state: String; let color: Color
-        let progress: Double; let tone: ProgressTone; let button: (label: String, run: () -> Void)?; let open: MainWindow.Tab
+        let progress: Double?; let tone: ProgressTone; let button: (label: String, run: () -> Void)?; let open: MainWindow.Tab
     }
 
     private var scanRunning: Bool {
@@ -345,9 +345,10 @@ struct TitleBar: View {
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
                                    sub: running ? "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" : "\(p.processed.formatted()) files",
-                                   state: p.phase == .completed ? "DONE" : running ? (engine.isPaused ? "PAUSED " : "") + "\(Int(frac * 100))%" : Self.phaseLabel(p.phase),
+                                   state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac) : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
-                                   progress: frac, tone: p.phase == .completed ? .done : engine.isPaused ? .paused : .gold,
+                                   progress: running && !engine.isPaused && p.phase != .tagging ? nil : frac,
+                                   tone: p.phase == .completed ? .done : engine.isPaused || !running ? .paused : .gold,
                                    button: running ? (engine.isPaused ? "Resume" : "Pause", { engine.isPaused ? engine.resume() : engine.pause() }) : nil,
                                    open: .library))
         }
@@ -357,45 +358,72 @@ struct TitleBar: View {
                                    state: "\(Int(frac * 100))%", color: Theme.ai, progress: frac, tone: .ai,
                                    button: ("Cancel", { engine.deepAnalyzeCancel() }), open: .deep))
         } else if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(done.processed.formatted()) files", state: "DONE", color: Theme.delight,
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(done.processed.formatted()) files", state: "Done", color: Theme.delight,
                                    progress: 1, tone: .done, button: nil, open: .deep))
         }
         if engine.faceClusteringInFlight {
-            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: "Finding the same person across photos", state: "RUNNING", color: Theme.ai, progress: 0.5, tone: .ai, button: nil, open: .people))
+            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: "Finding the same person across photos", state: "Working", color: Theme.ai, progress: nil, tone: .ai, button: nil, open: .people))
+        }
+        if let download = engine.modelDownloadProgress {
+            let name = AIModelKind.migrated(rawValue: download.modelKind).displayName
+            out.append(ActivityRow(id: "download", name: "Downloading an AI model", sub: name,
+                                   state: "\(Int(download.fraction * 100))%", color: Theme.ai, progress: download.fraction, tone: .ai,
+                                   button: nil, open: .settings))
         }
         for job in engine.catalogJobs where job.state != "completed" || job.updatedAt > Date().timeIntervalSince1970 - 3600 {
             let running = job.state == "running" || job.state == "queued"
             out.append(ActivityRow(id: "job-\(job.id)", name: Self.jobName(job.kind), sub: "\(job.fileIDs.count) file\(job.fileIDs.count == 1 ? "" : "s")",
-                                   state: job.state == "completed" ? "DONE" : "\(job.state.uppercased()) \(Int(job.progress * 100))%",
+                                   state: Self.jobStateLabel(job.state, progress: job.progress),
                                    color: running ? Theme.ai : job.state == "completed" ? Theme.delight : Theme.text3,
-                                   progress: job.progress, tone: running ? .ai : job.state == "completed" ? .done : .paused, button: nil, open: .moments))
+                                   progress: job.state == "completed" ? 1 : job.progress, tone: running ? .ai : job.state == "completed" ? .done : .paused, button: nil, open: .moments))
         }
         return out
     }
 
     private static func jobName(_ kind: String) -> String {
-        kind == "catalogIndex" ? "Search index" : kind == "takeGrouping" ? "Related tries" : "Video analysis"
+        kind == "catalogIndex" ? "Search index" : kind == "takeGrouping" ? "Similar takes" : "Video analysis"
     }
 
     private static func phaseLabel(_ phase: ScanPhase) -> String {
         switch phase {
-        case .cancelled: return "STOPPED"
-        case .failed: return "FAILED"
-        default: return phase.rawValue.uppercased()
+        case .cancelled: return "Stopped"
+        case .failed: return "Didn't finish"
+        default: return ""
         }
     }
 
-    private var currentActivity: (label: String, color: Color, progress: Double, tone: ProgressTone, idle: Bool) {
+    private static func scanStateLabel(_ phase: ScanPhase, paused: Bool, fraction: Double) -> String {
+        if paused { return "Paused" }
+        switch phase {
+        case .discovering: return "Counting files"
+        case .postScan: return "Finishing up"
+        default: return "\(Int(fraction * 100))%"
+        }
+    }
+
+    static func jobStateLabel(_ state: String, progress: Double) -> String {
+        switch state {
+        case "completed": return "Done"
+        case "queued": return "Waiting"
+        case "running": return "Working \(Int(progress * 100))%"
+        case "paused": return "Paused"
+        case "cancelled", "canceled": return "Stopped"
+        default: return "Didn't finish"
+        }
+    }
+
+    private var currentActivity: (label: String, color: Color, progress: Double?, tone: ProgressTone, idle: Bool) {
         if scanRunning, let p = engine.lastProgress {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
-            return ("Scanning", Theme.gold, frac, .gold, false)
+            return ("Scanning", Theme.gold, p.phase == .tagging ? frac : nil, .gold, false)
         }
         if engine.deepAnalyzeInFlight, let d = engine.deepAnalyzeProgress {
             return ("Describing", Theme.ai, d.total > 0 ? Double(d.processed) / Double(d.total) : 0, .ai, false)
         }
-        if engine.faceClusteringInFlight { return ("Faces", Theme.ai, 0.5, .ai, false) }
+        if engine.faceClusteringInFlight { return ("Faces", Theme.ai, nil, .ai, false) }
         if let job = engine.catalogJobs.first(where: { $0.state == "running" }) { return ("Moments", Theme.ai, job.progress, .ai, false) }
-        return ("Idle", Theme.info, 1, .info, true)
+        if let download = engine.modelDownloadProgress { return ("Downloading", Theme.ai, download.fraction, .ai, false) }
+        return ("Idle", Theme.info, nil, .info, true)
     }
 
     private var activityButton: some View {
@@ -404,8 +432,12 @@ struct TitleBar: View {
             HStack(spacing: 8) {
                 Circle().fill(a.color).frame(width: 6, height: 6)
                 Text(a.label).font(Theme.ChromeFont.body(12.5, .medium)).foregroundStyle(Theme.text1)
-                GrainProgressBar(progress: a.progress, tone: a.tone).frame(width: 54)
-                if !a.idle { Text("\(Int(a.progress * 100))%").font(Theme.ChromeFont.body(12.5, .semibold)).monospacedDigit().foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
+                if let progress = a.progress {
+                    GrainProgressBar(progress: progress, tone: a.tone).frame(width: 54)
+                } else if !a.idle {
+                    IndeterminateBar().frame(width: 54)
+                }
+                if let progress = a.progress { Text("\(Int(progress * 100))%").font(Theme.ChromeFont.body(12.5, .semibold)).monospacedDigit().foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
             }
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
@@ -426,7 +458,7 @@ struct TitleBar: View {
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 .overlay(alignment: .bottom) { Hairline() }
             if list.isEmpty {
-                MetaText("Nothing is running. Scans, descriptions and video analysis show their progress here.").padding(14)
+                MetaText("Nothing is running. Scans, descriptions, downloads and video analysis show their progress here.").padding(14)
             }
             ForEach(list) { row in
                 VStack(alignment: .leading, spacing: 8) {
@@ -436,7 +468,11 @@ struct TitleBar: View {
                         Spacer(minLength: 4)
                         MetaText(row.state, color: row.color)
                     }
-                    GrainProgressBar(progress: row.progress, tone: row.tone)
+                    if let progress = row.progress {
+                        GrainProgressBar(progress: progress, tone: row.tone)
+                    } else {
+                        IndeterminateBar()
+                    }
                     HStack(spacing: 6) {
                         if let button = row.button { Button(button.label) { button.run() }.buttonStyle(DSSecondaryButtonStyle(height: 24)) }
                         Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(DSSecondaryButtonStyle(height: 24))

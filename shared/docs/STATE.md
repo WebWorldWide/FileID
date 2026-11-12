@@ -1,5 +1,18 @@
 # FileID — State
 
+## 2026-11-12 — Mac app audit fixes: destructive actions, models, plain language, app and scan waste
+
+Five agents fixed the audit's open items on disjoint files; integrated on `agent/engine-tagging-breakthroughs`. Both products build; 980 Swift tests pass (181 shared, 128 app, 663 engine, 8 other); the egress gate passes. **Nothing was run on screen**: every behaviour is compile- and test-checked only.
+
+- **People:** every merge path confirms and says it can't be undone (the helper can only undo merges made through the review queue); bulk merges show progress with Stop; move, tag and replace confirm; failed name saves are reported; match strength is words, not percentages.
+- **Describe Files and models:** the page shows whether the model is downloaded and its size, asks before a download, shows real progress with Cancel and a failure card; Settings can download, cancel and remove a description model; "Download the essentials" covers only the four required models and Return can't start a download; friendly installer failures. New installs keep description models in `~/Library/Application Support/FileID/Models/huggingface`; an existing `~/Documents/huggingface/models` stays in use (no migration).
+- **Renaming:** the three rename paths use one naming path (Name style honoured), always confirm, and share a 10-batch undo journal (`bulkRename.batches.v3`).
+- **Library and shell:** plain crash and error text; ⌘K searches first; Find Similar failures are shown; tiles show real names; choosing a folder mid-scan asks; Library reloads at most every 5 s at the top during a scan and otherwise offers "New files · Show"; preview no longer loads the whole library; thumbnails get a 2 GB disk cap, cancellable renders and a 2048 bucket; Spotlight indexes incrementally; indeterminate bars stop when the window is hidden; dead sidebar views removed.
+- **Duplicates, Organize Folders, Best Takes, File Tools, Chat:** copies show their folder; Trash undo is separate per page; digests are cached for the session with a 64 KiB prefilter; large plans need an extra confirmation or are disabled; the move result banner now appears and reports failures; ⌘⌫ (not Return) trashes takes; scores are words; codec terms are plain; Chat merge confirms and Chat follows the Describe Files model.
+- **Swift engine:** plain error messages (kinds unchanged), `VLMDownloaderError` descriptions, downloads in ~32 MB pieces with 3 retries and in-process resume, "No internet connection" after 15 s, accurate purpose strings, engine version from the bundle. Scan waste: moved or renamed files re-bind without analysis, cloud-only files are left out and counted, files that can never get a CLIP row stop being retried, hash heal skips tiny files.
+- **Reverted:** the engine's speech-permission change (it would have left speech off for new users with no app-side prompt).
+- **Digests refreshed** under the owner's "fix all the open problems": EngineClient, ThumbnailService, CLIPModelInstaller, DocText, VLMDownloader, StreamingDownload. Diff audited: no host, session or process launch added.
+
 ## 2026-11-12 — Mac app critical audit: first fixes landed, most findings open
 
 - **Audit:** four source reviews (first run and Library; People, Duplicates, Describe Files, Organize Folders, Best Takes, File Tools, Chat; Settings, models and errors; app performance) found about 250 issues. Nothing was checked on screen. The scan-engine performance review had not reported when this was written.

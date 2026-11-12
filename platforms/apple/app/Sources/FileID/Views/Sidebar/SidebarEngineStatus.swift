@@ -14,7 +14,7 @@ struct EngineStatusRow: View {
             Label("Ready", systemImage: "checkmark.circle.fill")
                 .font(Theme.ChromeFont.body(13.5, .semibold))
                 .foregroundStyle(Theme.delight)
-                .help("\(info.workerCap) workers · \(Int(info.physicalMemoryGB)) GB RAM · pid \(info.pid)")
+                .help("FileID is ready. Working on up to \(info.workerCap) files at a time with \(Int(info.physicalMemoryGB)) GB of memory.")
         case .crashed(let reason):
             VStack(alignment: .leading, spacing: 6) {
                 Label("FileID's helper stopped", systemImage: "xmark.octagon.fill")
