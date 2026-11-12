@@ -5,6 +5,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 import Vision
+import FileIDImaging
 
 /// Finds faces for take scoring. Kept behind a protocol so a shared face-quality
 /// gate (size, blur, pose, occlusion) can replace the Vision judgement later

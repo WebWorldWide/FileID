@@ -1,5 +1,6 @@
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("AI model hardware recommendation")
 struct AIModelRecommendationTests {

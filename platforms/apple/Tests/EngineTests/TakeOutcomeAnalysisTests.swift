@@ -3,6 +3,7 @@ import GRDB
 import Testing
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("Goal-conditioned temporal take evidence")
 struct TakeOutcomeAnalysisTests {

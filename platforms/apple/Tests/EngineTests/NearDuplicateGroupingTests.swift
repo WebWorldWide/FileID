@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 struct NearDuplicateGroupingTests {
     private func vector(_ angle: Float) -> [Float] {

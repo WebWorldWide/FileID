@@ -1,3 +1,4 @@
+import FileIDVLMCore
 import CryptoKit
 import Foundation
 import GRDB

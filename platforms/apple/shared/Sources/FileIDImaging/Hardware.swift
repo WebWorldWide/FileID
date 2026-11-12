@@ -1,0 +1,148 @@
+// Hardware tier detection. Ported from v1 Sources/Services/Hardware.swift, kept
+// minimal for M1 — the worker-cap formula and memory readouts. Will grow as
+// later milestones add per-tier thumbnail caches, Deep Analyze throttle, etc.
+import Foundation
+import Darwin
+
+public enum Hardware {
+
+    public static let physicalMemoryGB: Double = {
+        Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+    }()
+
+    public static let coreCount: Int = ProcessInfo.processInfo.processorCount
+
+    /// Logical thread count (Intel Hyper-Threading siblings included). On
+    /// Apple Silicon this equals the physical core count — there is no SMT.
+    public static let logicalCoreCount: Int = max(1, ProcessInfo.processInfo.activeProcessorCount)
+
+    /// True when the kernel exposes Apple Silicon's P/E split (hw.perflevelN.*).
+    /// False on Intel Macs, where we derive a physical core count and lean on
+    /// the logical-core clamp instead.
+    package static let hasPerformanceLevels: Bool = {
+        var size: size_t = MemoryLayout<Int32>.size
+        var value: Int32 = 0
+        return sysctlbyname("hw.perflevel0.physicalcpu", &value, &size, nil, 0) == 0
+    }()
+
+    public static let performanceCoreCount: Int = {
+        // sysctl hw.perflevel0.physicalcpu — Apple Silicon P-cores.
+        var size: size_t = MemoryLayout<Int32>.size
+        var value: Int32 = 0
+        if sysctlbyname("hw.perflevel0.physicalcpu", &value, &size, nil, 0) == 0 {
+            return Int(value)
+        }
+        // Intel Macs / pre-M1: no perf levels. Use the PHYSICAL core count
+        // (hw.physicalcpu) — NOT activeProcessorCount, which counts each
+        // Hyper-Threading sibling as a core and doubled the P-count, sizing the
+        // worker pool ~1.5x too large on every Intel Mac.
+        var phys: Int32 = 0
+        var psize: size_t = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.physicalcpu", &phys, &psize, nil, 0) == 0, phys > 0 {
+            return Int(phys)
+        }
+        // Last resort: logical count, which workerCap's clamp then bounds.
+        return logicalCoreCount
+    }()
+
+    public static let efficiencyCoreCount: Int = {
+        var size: size_t = MemoryLayout<Int32>.size
+        var value: Int32 = 0
+        if sysctlbyname("hw.perflevel1.physicalcpu", &value, &size, nil, 0) == 0 {
+            return Int(value)
+        }
+        return 0
+    }()
+
+    /// Worker count for the tagging stage.
+    ///
+    /// Formula: P + E + max(1, P/2). On M1 Pro (8P + 2E) → 14. Mac Studio
+    /// Ultra (16P + 8E) → 32. Capped at 32.
+    ///
+    /// Iteration 8 finding: bumping workers from 14 → 18 caused NAS read
+    /// times to spike from 2 ms → 1510 ms (saturated network share). 14 is
+    /// the sweet spot for this hardware tier — keeps ANE fed without
+    /// overwhelming the file source. Faster local SSDs may benefit from
+    /// more workers; revisit per-storage tier if needed.
+    /// Default ONNX/CoreML model inference concurrency dynamically scaled
+    /// to Apple Neural Engine (ANE) / GPU performance core count (4..12).
+    public static let defaultInferenceConcurrency: Int = {
+        max(4, min(12, performanceCoreCount))
+    }()
+
+    public static let workerCap: Int = computeWorkerCap(
+        performanceCores: performanceCoreCount,
+        efficiencyCores: efficiencyCoreCount,
+        logicalCores: logicalCoreCount,
+        hasPerformanceLevels: hasPerformanceLevels)
+
+    /// Pure worker-cap formula (factored out so the topology is injectable in
+    /// tests). `performanceCores`/`efficiencyCores` are PHYSICAL counts;
+    /// `logicalCores` includes SMT siblings.
+    ///
+    /// On Apple Silicon (exact P/E split, `hasPerformanceLevels == true`) the
+    /// `+P/2` oversubscription is the tuned sweet spot — M1 Pro 8P+2E → 14 —
+    /// and is deliberately left above the 10 physical cores. On Intel (no perf
+    /// levels) the counts are generic, so the pool is clamped to logical
+    /// threads, mirroring the Windows `CpuTopology::worker_cap` clamp so a
+    /// fallback mis-count can never oversubscribe SMT.
+    package static func computeWorkerCap(performanceCores: Int, efficiencyCores: Int,
+                                 logicalCores: Int, hasPerformanceLevels: Bool) -> Int {
+        let p = max(1, performanceCores)
+        let e = max(0, efficiencyCores)
+        let computed = p + e + max(1, p / 2)
+        let bounded = hasPerformanceLevels ? computed : min(computed, max(1, logicalCores))
+        return min(32, max(4, bounded))
+    }
+
+    /// Coarse RAM tier for sizing in-memory budgets (DB batch, read-ahead) so a
+    /// powerful box uses more of its headroom and a low-RAM box stays
+    /// conservative. Mirrors the Windows engine's `memory_tier`. M1 Pro 16 GB →
+    /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
+    /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
+    /// runtime memory-pressure adaptation is not implemented.
+    public enum MemoryTier: Sendable { case low, balanced, high }
+
+    public static let memoryTier: MemoryTier = {
+        let gb = physicalMemoryGB
+        if gb < 12 { return .low }
+        if gb < 48 { return .balanced }
+        return .high
+    }()
+
+    /// Resident-set MB of the current process.
+    public static func residentMB() -> Int {
+        // proc_pidinfo(getpid(), …) avoids the Darwin `mach_task_self_` global
+        // var, which Swift 6 on the Xcode 16 SDK rejects as shared mutable state
+        // (and there is no use-site annotation that suppresses reading it). getpid()
+        // is a plain function and is concurrency-safe on every toolchain.
+        var info = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.size)
+        let got = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &info, size)
+        guard got == size else { return 0 }
+        return Int(info.pti_resident_size / (1024 * 1024))
+    }
+
+    /// Available system memory in MB (free + inactive pages).
+    public static func availableMemoryMB() -> Int {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        let pageSize = Int(getpagesize())
+        let reclaimable = Int(stats.free_count) + Int(stats.inactive_count)
+            + Int(stats.speculative_count) + Int(stats.purgeable_count)
+        let counted = reclaimable * pageSize / (1024 * 1024)
+        // The kernel's availability level (what memory_pressure reports) also
+        // credits compressible and file-backed memory the pager can reclaim.
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_level", &level, &size, nil, 0) == 0, (1...100).contains(level) else { return counted }
+        let kernelMB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * Int(level) / 100
+        return max(counted, kernelMB)
+    }
+}

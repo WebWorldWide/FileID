@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import Testing
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 @Suite("Imported face orientation")
 struct FaceOrientationRefreshTests {

@@ -671,6 +671,94 @@ pub(crate) async fn analyze_file_via_server(
     })
 }
 
+/// The Mac app's engine: one file through the Swift engine's MLX analysis
+/// (`DeepAnalyze.analyze` in FileIDAppleKit), which decodes the file, prompts,
+/// parses and grounds the reply as the Swift engine does. Audio keeps the
+/// metadata path, as on Swift; a 3D model the model can't read falls back to it.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn analyze_file_via_mlx(
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    lease: &mut crate::apple::vlm::MlxLease,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    face_names: &[String],
+    on_token: impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
+) -> anyhow::Result<AnalyzeOutcome> {
+    use std::sync::atomic::Ordering;
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let (path, kind) = analysis_source(&db, file_id, scope)?;
+    if kind == "audio"
+        && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
+    {
+        return Ok(outcome);
+    }
+    let document_text = if kind == "doc" || kind == "pdf" {
+        let persisted: Option<String> =
+            db.lock().query_row("SELECT text FROM doc_text WHERE file_id=?1", [file_id], |row| row.get(0)).ok();
+        match persisted {
+            Some(text) => Some(text),
+            None => {
+                let source = path.clone();
+                tokio::task::spawn_blocking(move || crate::pipeline::doc_extract::extract(&source, None))
+                    .await
+                    .context("document extraction task failed")?
+                    .ok()
+                    .flatten()
+            }
+        }
+    } else {
+        None
+    };
+    let request = crate::apple::vlm::AnalyzeRequest {
+        path: path.clone(),
+        media_kind: kind.clone(),
+        document_text,
+        face_names: face_names.to_vec(),
+        propose_filename: mode.requests_rename(),
+        tags_only: mode == AnalyzeMode::TagsOnly,
+        scene_caption: false,
+    };
+    let reply = lease.analyze(&request, &cancel, on_token).await?;
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let failed = if mode == AnalyzeMode::TagsOnly { reply.description_failed() } else { reply.failed() };
+    if failed {
+        if kind == "model"
+            && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
+        {
+            return Ok(outcome);
+        }
+        anyhow::bail!(reply.description);
+    }
+    let description = mode.requests_caption().then_some(reply.description);
+    let tags = if mode.requests_tags() { reply.tags } else { Vec::new() };
+    let proposed_name = {
+        let conn = db.lock();
+        let proposed_name = if mode.requests_rename() {
+            naming::vetted_generated_proposed_name(&conn, file_id, reply.proposed_name)?
+                .and_then(|name| crate::util::smart_name::readable_stem(&name, face_names))
+        } else {
+            None
+        };
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+        proposed_name
+    };
+    if mode.requests_caption() && (kind == "image" || kind == "pdf") && transcription_wanted(&db, file_id) && !cancel.load(Ordering::Relaxed) {
+        match lease.transcribe(&path, kind == "pdf", &cancel).await {
+            Ok(raw) => store_transcription_output(&db, file_id, &raw),
+            Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
+        }
+    }
+    Ok(AnalyzeOutcome { file_id, description, proposed_name })
+}
+
 async fn complete_text_cancellable(
     server: &crate::models::vlm_server::VlmServer,
     prompt: &str,

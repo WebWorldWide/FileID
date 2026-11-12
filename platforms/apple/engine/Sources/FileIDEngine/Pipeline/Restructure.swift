@@ -19,6 +19,7 @@ import Foundation
 import CryptoKit
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 public struct RestructureProposal: Sendable {
     public let fileID: Int64

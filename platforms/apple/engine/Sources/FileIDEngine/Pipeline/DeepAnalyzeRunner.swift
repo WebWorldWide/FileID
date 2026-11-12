@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // DeepAnalyzeRunner — batch driver around `DeepAnalyze.shared`.
 //
 // Glue between IPC commands and the model. Picks the right set of files
@@ -8,6 +9,7 @@
 import Foundation
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 public enum DeepAnalyzeScope: Sendable {
     case singleFile(Int64)
@@ -366,7 +368,7 @@ public enum DeepAnalyzeRunner {
                 inheritedFrom = shared.fileID
                 requiresGeneratedFilenameMinimum = true
             } else if kind == .audio {
-                result = await analyzer.runCancellableAnalysis {
+                result = await analyzer.guardedAnalysis {
                     await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                 }
             } else {
@@ -387,7 +389,7 @@ public enum DeepAnalyzeRunner {
                 }
                 // Pull face cluster names (if any) to inject into the prompt.
                 let modelFaceNames = faceNames
-                result = await analyzer.runCancellableAnalysis {
+                result = await analyzer.guardedAnalysis {
                     await analyzer.analyze(
                         imageURL: url,
                         mediaKind: kind,
@@ -402,7 +404,7 @@ public enum DeepAnalyzeRunner {
                 // couldn't caption → its embedded-name metadata, so it still gets a name.
                 if kind == .model, Self.isAnalysisFailure(result.description) {
                     requiresGeneratedFilenameMinimum = false
-                    result = await analyzer.runCancellableAnalysis {
+                    result = await analyzer.guardedAnalysis {
                         await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                     }
                 }
@@ -474,10 +476,10 @@ public enum DeepAnalyzeRunner {
                     )))
                     if !tagsOnly, !(await analyzer.isCancelled()) {
                         let fileID = target.id
-                        _ = await analyzer.runCancellableAnalysis {
+                        _ = await analyzer.guardedAnalysis {
                             await Self.transcribeTextIfNeeded(analyzer: analyzer, database: database,
                                                               fileID: fileID, url: url, kind: kind)
-                            return DeepAnalyze.AnalysisResult(description: "", proposedName: nil)
+                            return DeepAnalyze.AnalysisResult.make(description: "", proposedName: nil)
                         }
                     }
                 } catch {

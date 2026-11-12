@@ -3,6 +3,7 @@ import Testing
 import GRDB
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("Reviewed naming evidence", .serialized)
 struct CatalogNamingContextTests {

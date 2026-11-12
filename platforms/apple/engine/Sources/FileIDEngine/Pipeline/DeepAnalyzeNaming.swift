@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // Deep Analyze metadata naming for non-rasterizable kinds (audio + 3D models).
 //
 // The VLM path needs a raster image; audio and `.obj` have none, but they carry their
@@ -228,7 +229,7 @@ enum DeepAnalyzeNaming {
                 if desc == nil { desc = sound.description }
                 pushUnique(&tags, sound.name)
             }
-            return DeepAnalyze.AnalysisResult(
+            return DeepAnalyze.AnalysisResult.make(
                 description: desc ?? "",
                 proposedName: name,
                 tags: tags)
@@ -237,12 +238,12 @@ enum DeepAnalyzeNaming {
             var tags: [String] = []
             for t in objects + materials { pushUnique(&tags, t) }
             if tags.count > 6 { tags = Array(tags.prefix(6)) }
-            return DeepAnalyze.AnalysisResult(
+            return DeepAnalyze.AnalysisResult.make(
                 description: objDescription(objects: objects, materials: materials) ?? "",
                 proposedName: buildObjName(objects: objects, materials: materials),
                 tags: tags)
         default:
-            return DeepAnalyze.AnalysisResult(description: "", proposedName: nil)
+            return DeepAnalyze.AnalysisResult.make(description: "", proposedName: nil)
         }
     }
 

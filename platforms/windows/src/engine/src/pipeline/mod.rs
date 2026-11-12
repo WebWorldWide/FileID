@@ -33,3 +33,5 @@ pub mod obj_render;
 pub mod doc_extract;
 pub(crate) mod text_reading;
 pub(crate) mod timeline_analysis;
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) mod speech_passages;

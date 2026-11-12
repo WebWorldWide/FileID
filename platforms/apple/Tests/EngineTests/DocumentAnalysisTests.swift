@@ -4,6 +4,8 @@ import GRDB
 import Testing
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
+@testable import FileIDImaging
 
 private typealias EngineDatabase = FileIDEngine.Database
 
@@ -174,7 +176,7 @@ struct DocumentExtractionTests {
         defer { try? FileManager.default.removeItem(at: file) }
         try text.write(to: file, atomically: true, encoding: .utf8)
         let tagged = await Tagging.processFile(
-            discovered: DiscoveredFile(
+            discovered: FileIDEngine.DiscoveredFile(
                 url: file,
                 sizeBytes: Int64(text.utf8.count),
                 creationDate: nil,
@@ -200,7 +202,7 @@ struct DocumentExtractionTests {
         let bytes = Data(repeating: 0x41, count: 512)
         try bytes.write(to: file)
         let tagged = await Tagging.processFile(
-            discovered: DiscoveredFile(
+            discovered: FileIDEngine.DiscoveredFile(
                 url: file,
                 sizeBytes: Int64(bytes.count),
                 creationDate: nil,
@@ -224,7 +226,7 @@ struct DocumentExtractionTests {
         let bytes = Data(repeating: 0, count: 512)
         try bytes.write(to: file)
         let tagged = await Tagging.processFile(
-            discovered: DiscoveredFile(
+            discovered: FileIDEngine.DiscoveredFile(
                 url: file,
                 sizeBytes: Int64(bytes.count),
                 creationDate: nil,
@@ -244,7 +246,7 @@ struct DocumentExtractionTests {
 struct DeepAnalyzeFileTypeMatrixTests {
     @Test("every promised extension routes to the intended analysis kind")
     func classifications() {
-        let matrix: [(String, DiscoveredFile.Kind)] = [
+        let matrix: [(String, FileIDEngine.DiscoveredFile.Kind)] = [
             ("jpg", .image), ("heic", .image),
             ("mp4", .video), ("mts", .video), ("m2ts", .video), ("3gp", .video),
             ("pdf", .pdf),

@@ -13,7 +13,9 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "prefix", "value": [..]}  a list that starts with these elements
   {"$tol": "contains", "value": [..]}  a list holding a match for each element
   {"$tol": "present"}             any non-null value
-  {"$engine": {"swift": A, "rust": B}}  per-engine expectation
+  {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
+      "rustHosted" applies to the Rust engine the Mac app hosts (the
+      apple-adapters build, events on stderr) instead of "rust"
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
@@ -27,11 +29,13 @@ time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
 also checks "symlinks".
+A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
-A case with "hosted": true runs only on engines the Mac app hosts (events on
-stderr: the Swift engine and the Rust apple-adapters build). Case "env" values
-expand {state} and {root}.
+A case with "appHosted": true runs only when every engine it uses (the one under
+test and any it "requires") is one the Mac app hosts, i.e. writes events on stderr:
+the Swift engine and the Rust engine built with the Apple adapters. Case "env"
+values expand {state} and {root}.
 A case may list knownDivergences ({"engine", "reason", optional "os" list and
 "run": false when running it is unsafe}). A divergent case is expected to fail on
 that engine; if it passes, the marker is stale and the run fails so the tracker
@@ -324,6 +328,7 @@ class Context:
     def __init__(self, case, flavor, os_name, directory):
         self.case = case
         self.flavor = flavor
+        self.hosted = False
         self.os = os_name
         self.state = directory / "state"
         self.root = (directory / "tree")
@@ -391,6 +396,8 @@ class Context:
             return self.lookup(expected["$var"])
         if isinstance(expected, dict) and set(expected) == {"$engine"}:
             options = expected["$engine"]
+            if self.flavor == "rust" and self.hosted and "rustHosted" in options:
+                return self.select(options["rustHosted"])
             return self.select(options.get(self.flavor, options.get("default")))
         if isinstance(expected, dict) and set(expected) == {"$os"}:
             options = expected["$os"]
@@ -500,6 +507,8 @@ def build_tree(ctx, entries):
             wav_bytes(target)
         elif generator == "pdf":
             target.write_bytes(pdf_bytes(entry.get("content", "FileID conformance")))
+        elif "copy" in entry:
+            target.write_bytes((ROOT / entry["copy"]).read_bytes())
         elif "contentHex" in entry:
             target.write_bytes(bytes.fromhex(entry["contentHex"]))
         else:
@@ -672,6 +681,7 @@ def start(binaries, flavor, ctx):
     engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
+    ctx.hosted = engine.stream.get("ready") == "stderr"
     return engine
 
 
@@ -724,8 +734,9 @@ def load_cases(selected):
             if not selected or any(fnmatch.fnmatch(case["name"], pattern) for pattern in selected)]
 
 
-def detect_flavor(binary, parent):
-    """The engine's flavour and whether the Mac app hosts it (events on stderr)."""
+def detect_engine(binary, parent):
+    """The engine's flavour and whether it writes events on stderr (the Swift
+    engine and the Rust engine the Mac app hosts)."""
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         engine = Engine(binary, temporary)
         try:
@@ -758,13 +769,13 @@ def main():
     TEST_TRASH_ROOT = args.test_trash_root
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
-    detected, hosted_engine = detect_flavor(binary, parent)
+    detected, hosted_engine = detect_engine(binary, parent)
     flavor = detected if args.flavor == "auto" else args.flavor
     binaries = {flavor: binary}
     hosted = {flavor: hosted_engine}
     if args.peer_engine:
         peer = args.peer_engine.resolve(strict=True)
-        peer_flavor, peer_hosted = detect_flavor(peer, parent)
+        peer_flavor, peer_hosted = detect_engine(peer, parent)
         binaries[peer_flavor] = peer
         hosted[peer_flavor] = peer_hosted
     counts = {"pass": 0, "fail": 0, "known": 0, "stale": 0, "skip": 0}
@@ -773,7 +784,7 @@ def main():
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
         needs_trash_root = case.get("requiresTestTrashRoot") and not TEST_TRASH_ROOT
-        unhosted = case.get("hosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
+        unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
         if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted \
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1

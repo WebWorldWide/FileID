@@ -3,9 +3,11 @@ import PackageDescription
 
 // FileID — workspace package.
 //
-// Two products + a shared module:
+// Two products + shared modules:
 // - FileIDShared: Codable DTOs, the IPC protocol and the few read-only
 //                 catalog/model routines both the engine and the app run.
+// - FileIDImaging: decode, Vision and MLX image code the Swift engine and
+//                 FileIDAppleKit (the Rust engine's adapters) both run.
 // - FileIDEngine: CLI binary — owns the scan pipeline, the SQLite DB,
 //                 and ML inference. Reads commands from stdin
 //                 (newline-delimited JSON), writes events to stdout (same).
@@ -27,7 +29,7 @@ let package = Package(
         .executable(name: "FileIDEngine", targets: ["FileIDEngine"]),
         // Swift adapters the shared Rust engine (`Contents/MacOS/fileidd`)
         // links through the C interface in adapters/include/fileid_apple.h.
-        // Shipped in Contents/Frameworks. No package dependencies.
+        // Shipped in Contents/Frameworks. Links MLX for the VLM sessions, CLIP and RAM++.
         .library(name: "FileIDAppleKit", type: .dynamic, targets: ["FileIDAppleKit"])
     ],
     dependencies: [
@@ -58,15 +60,36 @@ let package = Package(
             ],
             path: "shared/Sources/FileIDORTC"
         ),
+        // Model kinds, the MLX model catalog, model paths and file kinds:
+        // Foundation only (no download, ONNX Runtime or MLX code), so the MLX
+        // code in FileIDVLMCore and FileIDAppleKit can use them.
+        .target(
+            name: "FileIDModelInfo",
+            path: "shared/Sources/FileIDModelInfo",
+            resources: [.process("Resources")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .target(
             name: "FileIDShared",
             dependencies: [
+                "FileIDModelInfo",
                 "FileIDORTC",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             path: "shared/Sources/FileIDShared",
-            resources: [.process("Resources")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
+        // Decode, Vision, text-read and MLX image code both engines run: the
+        // Swift engine links it directly, FileIDAppleKit exposes it to the
+        // Rust engine. No package dependency beyond the MLX the two already link.
+        .target(
+            name: "FileIDImaging",
+            dependencies: [
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
+            path: "shared/Sources/FileIDImaging",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
@@ -77,10 +100,31 @@ let package = Package(
         //
         // Production targets compile in Swift 6 mode; concurrency diagnostics
         // are release-blocking rather than deferred to code review.
+        // The Swift engine's MLX vision-language code (Deep Analyze, chat,
+        // selection checks, benchmarks, timeline captions), shared with
+        // FileIDAppleKit. Host services come in through VLMCoreHost hooks; no
+        // FileIDShared, so no download or ONNX Runtime code.
+        .target(
+            name: "FileIDVLMCore",
+            dependencies: [
+                "FileIDModelInfo",
+                "FileIDImaging",
+                .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
+                .product(name: "MLXVLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXLLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace",       package: "mlx-swift-lm"),
+                .product(name: "Tokenizers",           package: "swift-transformers")
+            ],
+            path: "shared/Sources/FileIDVLMCore",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
         .executableTarget(
             name: "FileIDEngine",
             dependencies: [
                 "FileIDShared",
+                "FileIDImaging",
+                "FileIDVLMCore",
                 .product(name: "AsyncAlgorithms",      package: "swift-async-algorithms"),
                 .product(name: "GRDB",                 package: "GRDB.swift"),
                 .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
@@ -114,23 +158,44 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
-        // Apple-framework adapters for the Rust engine (IOPM, bookmarks so
-        // far). Exports @_cdecl functions only; see adapters/include.
+        // MLX sessions for the Rust engine: FileIDVLMCore behind the request
+        // surface the C exports call, with the Rust host's offline model check.
+        .target(
+            name: "FileIDAppleVLM",
+            dependencies: [
+                "FileIDModelInfo",
+                "FileIDImaging",
+                "FileIDVLMCore",
+                .product(name: "MLXLMCommon",          package: "mlx-swift-lm")
+            ],
+            path: "adapters/Sources/FileIDAppleVLM",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
+        // Apple-framework adapters for the Rust engine. Exports @_cdecl
+        // functions only; see adapters/include. Scan work runs FileIDImaging,
+        // the same decode, Vision and MLX code the Swift engine runs; VLM
+        // sessions run FileIDAppleVLM.
         .target(
             name: "FileIDAppleKit",
+            dependencies: [
+                "FileIDImaging",
+                "FileIDAppleVLM",
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
             path: "adapters/Sources/FileIDAppleKit",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
         .testTarget(
             name: "AppleKitTests",
-            dependencies: ["FileIDAppleKit"],
+            dependencies: ["FileIDAppleKit", "FileIDAppleVLM", "FileIDVLMCore", "FileIDModelInfo"],
             path: "Tests/AppleKitTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "SharedTests",
-            dependencies: ["FileIDShared"],
+            dependencies: ["FileIDShared", "FileIDModelInfo"],
             path: "Tests/SharedTests",
             // PEM fixtures are read via #filePath traversal (the SPKI
             // tests), not Bundle resources.
@@ -139,7 +204,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EngineTests",
-            dependencies: ["FileIDEngine"],
+            dependencies: ["FileIDEngine", "FileIDVLMCore"],
             path: "Tests/EngineTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

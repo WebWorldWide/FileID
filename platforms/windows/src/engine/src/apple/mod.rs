@@ -6,6 +6,9 @@
 //! writes, job policy and ranking stay in Rust.
 
 mod ffi;
+pub(crate) mod media;
+pub mod scan;
+pub mod vlm;
 
 use std::ffi::{CStr, CString, OsString, c_char};
 use std::os::unix::ffi::OsStringExt;
@@ -26,6 +29,13 @@ pub fn adapter_abi_version() -> u32 {
 /// Run as the Mac app's engine: events on fd 2 (the app reads the engine's
 /// stderr), state in the Swift engine's folder, then a hard exit.
 pub fn run_hosted() -> ! {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if media::is_worker(&args) {
+        if adapter_abi_version() != ABI_VERSION {
+            hard_exit(EXIT_ABI_MISMATCH);
+        }
+        hard_exit(media::run_worker(&args).unwrap_or(2));
+    }
     match crate::paths::logs_dir() {
         Ok(logs) => {
             if let Err(error) = crate::ipc::sink::route_events_to_stderr(&logs) {
@@ -39,6 +49,7 @@ pub fn run_hosted() -> ! {
         eprintln!("FileIDEngine: FileIDAppleKit interface {abi}, engine expects {ABI_VERSION}");
         hard_exit(EXIT_ABI_MISMATCH);
     }
+    scan::start_ocr_warmup_when_idle();
     let code = match crate::server::run() {
         Ok(()) => 0,
         Err(error) => {

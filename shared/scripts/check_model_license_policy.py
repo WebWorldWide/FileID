@@ -192,7 +192,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--mac-catalog",
-        default=Path(__file__).resolve().parents[2] / "platforms/apple/shared/Sources/FileIDShared/Resources/model-catalog.json",
+        default=Path(__file__).resolve().parents[2] / "platforms/apple/shared/Sources/FileIDModelInfo/Resources/model-catalog.json",
         type=Path,
         help="Mac MLX model catalog to check against the denylist",
     )

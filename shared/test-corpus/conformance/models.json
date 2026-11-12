@@ -5,7 +5,7 @@
     "os": [
       "darwin"
     ],
-    "hosted": true,
+    "appHosted": true,
     "env": {
       "FILEID_HF_CACHE_ROOT": "{root}/hf"
     },
@@ -174,7 +174,7 @@
     "os": [
       "darwin"
     ],
-    "hosted": true,
+    "appHosted": true,
     "env": {
       "FILEID_HF_CACHE_ROOT": "{root}/hf"
     },
@@ -224,7 +224,7 @@
     "os": [
       "darwin"
     ],
-    "hosted": true,
+    "appHosted": true,
     "env": {
       "FILEID_HF_CACHE_ROOT": "{root}/hf"
     },
@@ -287,7 +287,7 @@
     "os": [
       "darwin"
     ],
-    "hosted": true,
+    "appHosted": true,
     "requires": [
       "swift",
       "rust"
@@ -389,7 +389,7 @@
     "os": [
       "darwin"
     ],
-    "hosted": true,
+    "appHosted": true,
     "requires": [
       "swift",
       "rust"

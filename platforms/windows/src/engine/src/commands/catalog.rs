@@ -48,7 +48,7 @@ pub async fn handle(
             let Some(database) = database else {
                 bail!("The catalog database is unavailable")
             };
-            let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
+            let (model, ffmpeg) = (super::timeline::installed_model(), super::timeline_media::available());
             let (id, response) = super::timeline::enqueue(&mut database.lock(), &request, model, ffmpeg)?;
             return Ok((response, Some(id)));
         }
@@ -318,7 +318,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             result.jobs = jobs(conn)?;
         }
         "enqueueTimeline" => {
-            let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
+            let (model, ffmpeg) = (super::timeline::installed_model(), super::timeline_media::available());
             return Ok(super::timeline::enqueue(conn, request, model, ffmpeg)?.1);
         }
         "autoTakeGroups" => {

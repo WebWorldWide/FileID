@@ -301,7 +301,7 @@ struct Store {
     results: Vec<StoredBenchmark>,
 }
 
-fn store_path() -> Result<PathBuf> {
+pub(crate) fn store_path() -> Result<PathBuf> {
     Ok(crate::paths::root()?.join("model-benchmarks.json"))
 }
 

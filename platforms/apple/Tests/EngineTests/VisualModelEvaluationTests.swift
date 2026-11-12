@@ -3,6 +3,7 @@ import Testing
 import FileIDShared
 import Tokenizers
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("Explicit visual-model evaluation", .serialized)
 struct VisualModelEvaluationTests {
@@ -17,7 +18,7 @@ struct VisualModelEvaluationTests {
     func downloadRegisteredModel() async throws {
         let root = try #require(ProcessInfo.processInfo.environment["FILEID_HF_CACHE_ROOT"])
         try #require(root.hasPrefix("/"))
-        try await VLMDownloader.shared.fetchRepo(
+        try await FileIDEngine.VLMDownloader.shared.fetchRepo(
             repo: try evaluationModel.sourceRepo,
             documentsHF: URL(fileURLWithPath: root, isDirectory: true)
         ) { _, _, _ in }

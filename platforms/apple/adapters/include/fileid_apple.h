@@ -28,8 +28,8 @@ extern "C" {
 /* Interface version the library implements. */
 uint32_t fileid_apple_abi_version(void);
 
-/* Release adapter-owned state (sleep assertions, bookmark leases) before the
- * engine's hard exit. Idempotent. */
+/* Release adapter-owned state (sleep assertions, bookmark leases) and cancel
+ * VLM requests before the engine's hard exit. Idempotent. */
 void fileid_apple_shutdown(void);
 
 /* Free memory the adapter allocated for the caller. NULL is ignored. */
@@ -66,6 +66,151 @@ char *fileid_apple_tags_read(const char *path, char **out_error);
  * Returns 0 on success, otherwise nonzero with *out_error set. */
 int32_t fileid_apple_tags_write(const char *path, const char *const *tags, size_t count,
                                 char **out_error);
+
+/* --- Stage 8: timeline, speech and video tools --- */
+/* `cancel` arguments point at a caller-owned flag (a Rust AtomicBool) and may be
+ * NULL; set it to stop long work. Replies are JSON objects freed with
+ * fileid_apple_free; a failure is {"error": text}. */
+
+/* Inspect a media file with AVFoundation. `strict` applies the media tools'
+ * refusals (unplayable or protected input, duration and dimension limits);
+ * otherwise only what timeline analysis reads. `mime_type` (may be NULL) names
+ * the type of a staged file without a media extension. Reply: duration,
+ * videoCount, audioCount, otherCount, width, height (displayed), rotation
+ * (clockwise degrees), videoCodec, audioCodec (ffprobe names), videoStart,
+ * audioStart, audioDuration, hdr, alpha, frameRate. */
+char *fileid_apple_media_probe(const char *path, const char *mime_type, bool strict);
+
+/* One export from {"recipe": ToolRecipe, "source", "output"}.
+ * trim/remux/audio/proxy/rotate run AVAssetExportSession and reply {"probe":
+ * source probe}; "video" fits or pads to a frame, stabilizes or follows people
+ * and replies {"probe": output probe, "summary"}, or, without "output", only
+ * plans and replies the source probe and summary. The output must not exist. */
+char *fileid_apple_media_export(const char *request_json, const bool *cancel);
+
+/* One upright RGB frame (width*height*3 bytes, freed with fileid_apple_free)
+ * at `seconds`, drawn at exactly width x height; NULL on failure.
+ * *out_seconds receives the decoded frame's time. */
+uint8_t *fileid_apple_video_frame(const char *path, double seconds, uint32_t width,
+                                  uint32_t height, double *out_seconds);
+
+/* Frame pool: one sequential decode writing a JPEG no larger than max_side for
+ * the first frame at or after every `interval`, plus manifest.json ({duration,
+ * size, modifiedAt, frames: [{seconds, file, signature (32x18 gray)}]}), into
+ * the existing empty `directory`. Returns 0, 2 (invalid request), 3 (failed) or
+ * 4 (the source changed while decoding). */
+int32_t fileid_apple_video_pool(const char *path, double interval, uint32_t max_side,
+                                const char *directory, const bool *cancel);
+
+/* On-device speech recognition: 1 ready, 0 unavailable or denied, -1 the host
+ * bundle has no speech usage description (never asks). With `ask`, a user who
+ * has not decided sees the system permission prompt. */
+int32_t fileid_apple_speech_status(bool ask);
+
+/* "apple-speech-ondevice-v1/<locale>/macOS-<version>", freed with fileid_apple_free. */
+char *fileid_apple_speech_model_version(void);
+
+/* Transcribe [start, end) seconds of the first audio track on device. Reply
+ * {"segments": [{text, timestamp (relative to start), duration, confidence}]}. */
+char *fileid_apple_speech_transcribe(const char *path, double start, double end,
+                                     const bool *cancel);
+/* --- end Stage 8 --- */
+
+/* --- Stage 5: scan decode and per-file ML --- */
+/* Images are handles to a decoded CGImage held by the adapter; release each
+ * with fileid_apple_image_release. Results are JSON objects (free with
+ * fileid_apple_free); NULL means the call failed. */
+
+/* The scan's working image (Tagging.loadImageAndEXIF: ImageIO, MPF and RAW
+ * previews, the VideoToolbox HEIF decoder; long edge max_pixel_size, 0 for
+ * FILEID_SCAN_MAX_PIXELS or 1536). *out_image receives the handle. JSON:
+ * width, height, cameraModel, lat, lon, capturedAt. */
+char *fileid_apple_image_decode(const char *path, int64_t size_bytes,
+                                uint32_t max_pixel_size, uint64_t *out_image);
+
+/* AVFoundation keyframe at a quarter of the duration, abandoned after
+ * timeout_ms. JSON: width, height. */
+char *fileid_apple_video_keyframe(const char *path, uint32_t max_pixel_size,
+                                  uint32_t timeout_ms, uint64_t *out_image);
+
+/* The Swift scan's 9x8 CoreGraphics dHash. Call it after Vision and CLIP have
+ * read the image: a JPEG-backed image keeps the decode its first draw needed. */
+uint64_t fileid_apple_image_dhash(uint64_t image);
+
+/* Packed sRGB RGB8 of an image (free *out_pixels with fileid_apple_free). */
+bool fileid_apple_image_rgb(uint64_t image, uint8_t **out_pixels, size_t *out_length,
+                            uint32_t *out_width, uint32_t *out_height);
+
+/* Release an image handle. Unknown handles are ignored. */
+void fileid_apple_image_release(uint64_t image);
+
+/* Vision primary pass (classify, face rectangles, capture quality). JSON:
+ * complete, classifyTags, classifyConfidences, faceCount, faces [{bbox,
+ * quality, excluded}]. */
+char *fileid_apple_vision_primary(uint64_t image);
+
+/* The scan's text read. request JSON: classifyTags, tags, hasCamera. JSON:
+ * ran, text, handwritten, fastMs, carefulMs. */
+char *fileid_apple_text_read(uint64_t image, const char *request);
+
+/* OCR of an image-only PDF's first three pages. JSON: opened, text,
+ * handwritten, carefulMs. */
+char *fileid_apple_pdf_ocr(const char *path);
+
+/* Compile the accurate text tier once (asynchronous; FILEID_OCR_WARMUP=0
+ * skips it). Until it is ready, text reads use the fast tier only. */
+void fileid_apple_ocr_warmup(void);
+bool fileid_apple_ocr_ready(void);
+
+/* Document text as the Swift engine extracts it (plain text, PDFKit, the
+ * Cocoa text system for Word/RTF/OpenDocument), at most max_chars. Returns
+ * NULL with *out_handled false for types the caller extracts itself, NULL
+ * with *out_handled true when the document has no text. */
+char *fileid_apple_document_text(const char *path, size_t max_chars, bool *out_handled);
+
+/* MLX CLIP ViT-B/32 image tower from the verified ONNX file. False when MLX
+ * or its Metal library is unavailable. */
+bool fileid_apple_clip_load(const char *onnx_path);
+
+/* L2-normalized 512-d embedding into out (capacity floats). */
+bool fileid_apple_clip_embed(uint64_t image, float *out, size_t capacity);
+
+/* MLX RAM++ from a folder holding ram_plus.onnx and its tag sidecars. */
+bool fileid_apple_ramplus_load(const char *directory);
+
+/* RAM++ tags agreed with the primary pass (vision_confidences: its
+ * classifyConfidences JSON). JSON [[tag, score], ...]. */
+char *fileid_apple_ramplus_tag(uint64_t image, const char *vision_confidences,
+                               size_t face_count);
+/* --- end Stage 5 --- */
+
+/* --- Stage 7: MLX vision-language models --- */
+
+/* Events a VLM request reports through its callback. */
+#define FILEID_APPLE_VLM_TOKEN 1    /* payload: UTF-8 text chunk */
+#define FILEID_APPLE_VLM_PROGRESS 2 /* payload: JSON object */
+#define FILEID_APPLE_VLM_DONE 3     /* payload: JSON reply; terminal */
+#define FILEID_APPLE_VLM_FAILED 4   /* payload: {"message","cancelled"}; terminal */
+
+/* Called from any thread. The payload is valid only during the call. Exactly
+ * one terminal event (DONE or FAILED) ends every accepted request; the
+ * callback is never called for it again. */
+typedef void (*fileid_apple_vlm_callback)(void *context, uint32_t event,
+                                          const uint8_t *payload, size_t length);
+
+/* Start a VLM request: a UTF-8 JSON object with an "op" (status, load, unload,
+ * prefetch, analyze, generate, chat, transcribe, sequence, benchmark) and its
+ * fields. Models load only from the local folder the request names; nothing
+ * is downloaded. Returns a handle, 0 when the request was refused (then the
+ * callback is never called). */
+uint64_t fileid_apple_vlm_submit(const uint8_t *request, size_t length,
+                                 fileid_apple_vlm_callback callback, void *context);
+
+/* Cancel a running request; it still reports its terminal event. Unknown
+ * handles are ignored. */
+void fileid_apple_vlm_cancel(uint64_t handle);
+
+/* --- end Stage 7 --- */
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 // `actor var` would require `await`, which the sync enumerator can't do.
 import Foundation
 import FileIDShared
+import FileIDImaging
 
 public actor ScanCoordinator {
 

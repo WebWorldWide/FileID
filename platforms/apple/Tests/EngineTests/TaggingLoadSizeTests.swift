@@ -14,6 +14,7 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 @testable import FileIDEngine
+@testable import FileIDImaging
 
 @Suite("Tagging image loading")
 struct TaggingLoadSizeTests {
