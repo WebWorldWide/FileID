@@ -234,13 +234,14 @@ internal sealed class ChatActionRunner
             return;
         }
         var settings = AppViewModel.Instance.Settings;
-        var previous = settings.CleanupAutoTagKept;
-        settings.CleanupAutoTagKept = value;
+        var key = action.Setting!;
+        var previous = ChatActionPolicy.SettingValue(settings, key);
+        ChatActionPolicy.ApplySetting(settings, key, value);
         settings.Save();
         Set(action.Id, ChatActionPhase.Done(value ? "Turned on." : "Turned off."));
         OfferUndo(action.Id, "Undo", () =>
         {
-            settings.CleanupAutoTagKept = previous;
+            ChatActionPolicy.ApplySetting(settings, key, previous);
             settings.Save();
             return Task.FromResult("Changed back.");
         });

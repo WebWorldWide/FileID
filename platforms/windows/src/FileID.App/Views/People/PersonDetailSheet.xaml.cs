@@ -16,8 +16,12 @@ using FileID.IpcSchema;
 using FileID.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace FileID.Views.People;
 
@@ -46,6 +50,9 @@ public sealed partial class PersonDetailSheet : UserControl
         """;
 
     private long _personId;
+    private bool _selectMode;
+    private bool _moving;
+    private readonly HashSet<long> _checked = new();
     private readonly ObservableCollection<FaceTile> _faces = new();
 
     public PersonDetailSheet()
@@ -53,6 +60,7 @@ public sealed partial class PersonDetailSheet : UserControl
         InitializeComponent();
         FaceGrid.ItemsSource = _faces;
         ReviewPanel.TotalChanged += OnReviewTotalChanged;
+        FaceGrid.ElementPrepared += OnTilePrepared;
         FaceGrid.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
                           xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
@@ -188,6 +196,8 @@ public sealed partial class PersonDetailSheet : UserControl
             }
             _faces.Clear();
             foreach (var f in result.Faces) _faces.Add(f);
+            _checked.IntersectWith(result.Faces.Select(f => f.FaceId));
+            SyncMoveToolbar();
         }
 
         // ConfigureAwait(true) resumes on the captured UI context; the
@@ -202,6 +212,217 @@ public sealed partial class PersonDetailSheet : UserControl
             dispatcher.TryEnqueue(Apply);
         }
     });
+
+    internal const string MoveTargetsQuery = """
+        SELECT p.id, COALESCE(p.name, p.first_name, 'Person ' || p.id), COUNT(fp.id),
+               COALESCE((SELECT fp2.id FROM face_prints fp2 JOIN files f2 ON f2.id = fp2.file_id
+                         WHERE fp2.person_id = p.id AND COALESCE(fp2.excluded, 0) = 0 AND f2.failed = 0
+                         ORDER BY COALESCE(fp2.face_quality, 0) DESC, fp2.id ASC LIMIT 1), 0)
+        FROM persons p
+        JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
+        JOIN files f ON f.id = fp.file_id AND f.failed = 0
+        WHERE p.id <> @id AND COALESCE(p.is_unknown, 0) = 0
+        GROUP BY p.id
+        ORDER BY COUNT(fp.id) DESC, p.id ASC
+        """;
+
+    private sealed record MoveTarget(long Id, string Name, int Count, long AnchorFaceId);
+
+    private void SyncMoveToolbar()
+    {
+        SelectModeButton.Visibility = !_selectMode && _faces.Count >= 2 ? Visibility.Visible : Visibility.Collapsed;
+        var selecting = _selectMode ? Visibility.Visible : Visibility.Collapsed;
+        SelectedCountText.Visibility = selecting;
+        MoveButton.Visibility = selecting;
+        CancelSelectButton.Visibility = selecting;
+        SelectedCountText.Text = $"{_checked.Count} selected";
+        MoveButton.IsEnabled = _checked.Count > 0 && !_moving;
+    }
+
+    private void OnTilePrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not Border tile || args.Index < 0 || args.Index >= _faces.Count) return;
+        tile.Tag = _faces[args.Index].FaceId;
+        tile.Tapped -= OnTileTapped;
+        tile.Tapped += OnTileTapped;
+        StyleTile(tile);
+    }
+
+    private void StyleTile(Border tile)
+    {
+        var on = tile.Tag is long id && _checked.Contains(id);
+        tile.BorderThickness = new Thickness(on ? 2 : 0);
+        tile.BorderBrush = on ? ThemeHelper.GetBrushSafe("GoldBrush") : null;
+        tile.Opacity = _selectMode && !on ? 0.75 : 1;
+    }
+
+    private void RestyleTiles()
+    {
+        for (var i = 0; i < _faces.Count; i++)
+        {
+            if (FaceGrid.TryGetElement(i) is Border tile) StyleTile(tile);
+        }
+    }
+
+    private void OnTileTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (!_selectMode || _moving || sender is not Border { Tag: long id } tile) return;
+        if (!_checked.Add(id)) _checked.Remove(id);
+        StyleTile(tile);
+        SyncMoveToolbar();
+    }
+
+    private void OnSelectModeClicked(object sender, RoutedEventArgs e)
+    {
+        _selectMode = true;
+        _checked.Clear();
+        StatusText.Text = "";
+        SyncMoveToolbar();
+        RestyleTiles();
+    }
+
+    private void OnCancelSelectClicked(object sender, RoutedEventArgs e) => EndSelectMode();
+
+    private void EndSelectMode()
+    {
+        _selectMode = false;
+        _checked.Clear();
+        SyncMoveToolbar();
+        RestyleTiles();
+    }
+
+    private async void OnMoveClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnMoveClicked), async () =>
+    {
+        if (_checked.Count == 0 || _moving) return;
+        var sourceId = _personId;
+        List<MoveTarget> targets;
+        try
+        {
+            targets = await Task.Run(() => LoadMoveTargets(sourceId)).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Couldn't load people: {ex.Message}";
+            return;
+        }
+        if (targets.Count == 0)
+        {
+            StatusText.Text = "There's nobody else to move these photos to yet.";
+            return;
+        }
+
+        var count = _checked.Count;
+        var list = new ListView { SelectionMode = ListViewSelectionMode.None, IsItemClickEnabled = true, MaxHeight = 360, MinWidth = 300 };
+        foreach (var target in targets) list.Items.Add(BuildTargetRow(target));
+        var flyout = new Flyout
+        {
+            Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom,
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = $"Move {count} photo{(count == 1 ? "" : "s")} to…", Style = ThemeHelper.GetStyleSafe("BodyStrongTextBlockStyle") },
+                    new TextBlock
+                    {
+                        Text = "Pick the person these photos actually show. Only the selected photos move; the rest of this person's group stays put.",
+                        Style = ThemeHelper.GetStyleSafe("CaptionTextBlockStyle"),
+                        TextWrapping = TextWrapping.Wrap,
+                        MaxWidth = 300,
+                    },
+                    list,
+                },
+            },
+        };
+        list.ItemClick += async (_, args) =>
+        {
+            flyout.Hide();
+            if (args.ClickedItem is FrameworkElement { Tag: MoveTarget chosen })
+            {
+                await DebugLog.SafeRunAsync("MoveFacesTo", () => MoveFacesAsync(sourceId, chosen));
+            }
+        };
+        flyout.ShowAt(MoveButton);
+    });
+
+    private static List<MoveTarget> LoadMoveTargets(long excludePersonId)
+    {
+        var rows = new List<MoveTarget>();
+        if (!File.Exists(AppPaths.DbPath)) return rows;
+        var connStr = new SqliteConnectionStringBuilder { DataSource = AppPaths.DbPath, Mode = SqliteOpenMode.ReadOnly }.ToString();
+        using var conn = new SqliteConnection(connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = MoveTargetsQuery;
+        cmd.Parameters.AddWithValue("@id", excludePersonId);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            rows.Add(new MoveTarget(r.GetInt64(0), r.IsDBNull(1) ? $"Person {r.GetInt64(0)}" : r.GetString(1), r.GetInt32(2), r.GetInt64(3)));
+        }
+        return rows;
+    }
+
+    private static FrameworkElement BuildTargetRow(MoveTarget target)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Padding = new Thickness(0, 4, 0, 4), Tag = target };
+        var crop = Path.Combine(AppPaths.Root, "face_crops", $"{target.AnchorFaceId}.jpg");
+        var photo = new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(20), Background = ThemeHelper.GetBrushSafe("SubtleFillColorTertiaryBrush") };
+        if (File.Exists(crop))
+        {
+            photo.Child = new Image { Source = new BitmapImage { UriSource = new Uri(crop), DecodePixelWidth = 80 }, Stretch = Stretch.UniformToFill };
+        }
+        row.Children.Add(photo);
+        var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        text.Children.Add(new TextBlock { Text = target.Name, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 200 });
+        text.Children.Add(new TextBlock
+        {
+            Text = $"{target.Count} photo{(target.Count == 1 ? "" : "s")}",
+            Style = ThemeHelper.GetStyleSafe("CaptionTextBlockStyle"),
+            Foreground = ThemeHelper.GetBrushSafe("Text3Brush"),
+        });
+        row.Children.Add(text);
+        AutomationProperties.SetName(row, $"Move to {target.Name}, {target.Count} photo{(target.Count == 1 ? "" : "s")}");
+        return row;
+    }
+
+    private async Task MoveFacesAsync(long sourceId, MoveTarget target)
+    {
+        if (_moving || sourceId != _personId) return;
+        var faceIds = _checked.OrderBy(id => id).ToArray();
+        _moving = true;
+        SyncMoveToolbar();
+        StatusText.Text = $"Moving {faceIds.Length} photo{(faceIds.Length == 1 ? "" : "s")}…";
+        var moved = 0;
+        string? problem = null;
+        try
+        {
+            foreach (var faceId in faceIds)
+            {
+                var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "reassignFace",
+                    () => ViewModels.EngineClient.Instance.ReassignFaceAsync(faceId, target.Id),
+                    TimeSpan.FromSeconds(30));
+                if (result.Succeeded == 1) moved++;
+                else if (result.Messages?.FirstOrDefault(m => !m.Ok)?.Message is { Length: > 0 } message) problem = message;
+            }
+        }
+        catch (Exception ex)
+        {
+            problem = ex is TimeoutException ? "The move didn't confirm. Try again." : ex.Message;
+            Services.DebugLog.Warn("PersonDetailSheet.MoveFaces failed: " + ex.Message);
+        }
+        finally
+        {
+            _moving = false;
+        }
+        StatusText.Text = moved > 0
+            ? $"Moved {moved} photo{(moved == 1 ? "" : "s")} to {target.Name}." + (problem is null ? "" : $" {problem}")
+            : problem ?? "Nothing moved.";
+        EndSelectMode();
+        Load();
+    }
 
     // Read-only existence probe for the rename pre-write guard. persons.id is
     // INTEGER PRIMARY KEY AUTOINCREMENT, so an id is never reused — a present

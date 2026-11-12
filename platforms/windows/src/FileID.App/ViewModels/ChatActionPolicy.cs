@@ -236,8 +236,28 @@ internal static class ChatActionPolicy
         return (parts[0], parts.Length > 1 ? string.Join(' ', parts.Skip(1)) : null);
     }
 
-    /// <summary>Only Duplicates' "tag kept files" exists on Windows; the other Chat settings have no WinUI control.</summary>
-    public static bool SettingSupported(string? setting) => setting == "cleanupAutoTag";
+    /// <summary>The Chat settings with a Windows control: Duplicates' "tag kept files", Appearance's lava lamp and Chat's written answers.</summary>
+    public static bool SettingSupported(string? setting) => setting is not null && Settings.Contains(setting);
+
+    public static bool SettingValue(AppSettings settings, string setting) => setting switch
+    {
+        "cleanupAutoTag" => settings.CleanupAutoTagKept,
+        "backgroundMotion" => settings.BackgroundMotionOn,
+        _ => settings.ChatUseModel,
+    };
+
+    public static void ApplySetting(AppSettings settings, string setting, bool value)
+    {
+        switch (setting)
+        {
+            case "cleanupAutoTag": settings.CleanupAutoTagKept = value; break;
+            case "backgroundMotion":
+                settings.LavaMode = value ? AppSettings.LavaModeFull : AppSettings.LavaModeOff;
+                AppearanceApplier.Apply(settings);
+                break;
+            case "chatSummaries": settings.ChatUseModel = value; break;
+        }
+    }
 
     /// <summary>A rename still applies only when the file's suggestion is the one the card showed.</summary>
     public static bool SuggestionStillMatches(string? proposedName, string currentPath, string newName)

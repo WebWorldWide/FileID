@@ -289,7 +289,7 @@ public sealed class AdversarialUiSafetyContractTests
     }
 
     [Fact]
-    public void RemovedFolderExclusionsDoNotLeaveDeadSettingsControls()
+    public void FolderExclusionsLiveOnDescribeFilesAndNotInSettings()
     {
         var settingsXaml = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "Settings",
@@ -303,7 +303,10 @@ public sealed class AdversarialUiSafetyContractTests
         Assert.DoesNotContain("ExcludedFolders", settingsXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("OnAddExcludedFolderClicked", settingsCode, StringComparison.Ordinal);
         Assert.DoesNotContain("OnRemoveExcludedFolderClicked", settingsCode, StringComparison.Ordinal);
-        Assert.DoesNotContain("ExcludedFolders", appSettings, StringComparison.Ordinal);
+        Assert.Contains("DeepAnalyzeExcludedFolders", appSettings, StringComparison.Ordinal);
+        var commands = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.Commands.cs"));
+        Assert.Contains("ExcludedFolders: excluded.Count > 0", commands, StringComparison.Ordinal);
     }
 
     [Fact]

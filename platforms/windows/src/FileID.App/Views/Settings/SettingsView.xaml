@@ -639,6 +639,104 @@
                 </StackPanel>
             </Expander>
 
+            <!-- Appearance. Mirrors macOS AppearanceCard (lava lamp, Text size). -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
+
+                    <Grid ColumnSpacing="12" MinHeight="28">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Lava lamp" TextWrapping="Wrap" />
+                            <TextBlock Text="Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <RadioButtons x:Name="LavaModeRadios"
+                                      Grid.Column="1"
+                                      MaxColumns="2"
+                                      VerticalAlignment="Center"
+                                      AutomationProperties.Name="Lava lamp"
+                                      AutomationProperties.HelpText="Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it."
+                                      SelectionChanged="OnLavaModeChanged">
+                            <RadioButton Content="Full" Tag="full" />
+                            <RadioButton Content="Off" Tag="off" />
+                        </RadioButtons>
+                    </Grid>
+
+                    <Grid ColumnSpacing="12" MinHeight="28">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Text size" TextWrapping="Wrap" />
+                            <TextBlock Text="File names, details, descriptions and chat. The title bar and sidebar stay the same size."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <RadioButtons x:Name="TextSizeRadios"
+                                      Grid.Column="1"
+                                      MaxColumns="4"
+                                      VerticalAlignment="Center"
+                                      AutomationProperties.Name="Text size"
+                                      AutomationProperties.HelpText="Changes the size of text on every page. The title bar and sidebar stay the same size."
+                                      SelectionChanged="OnTextSizeChanged">
+                            <RadioButton Content="Small" Tag="small" />
+                            <RadioButton Content="Default" Tag="standard" />
+                            <RadioButton Content="Large" Tag="large" />
+                            <RadioButton Content="Larger" Tag="larger" />
+                        </RadioButtons>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Organize Folders. Mirrors macOS Settings' "Folder granularity" row. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Organize Folders" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
+
+                    <Grid ColumnSpacing="12" MinHeight="28">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Folder granularity"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap" />
+                        <RadioButtons x:Name="GranularityRadios"
+                                      Grid.Column="1"
+                                      MaxColumns="3"
+                                      VerticalAlignment="Center"
+                                      AutomationProperties.Name="Folder granularity"
+                                      SelectionChanged="OnGranularityChanged">
+                            <RadioButton Content="Looser" Tag="loose" />
+                            <RadioButton Content="Balanced" Tag="normal" />
+                            <RadioButton Content="Tighter" Tag="tight" />
+                        </RadioButtons>
+                    </Grid>
+                    <TextBlock Text="How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after you quit and reopen FileID."
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <!-- Cleanup. Mirrors macOS Settings' single "Cleanup" toggle. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"

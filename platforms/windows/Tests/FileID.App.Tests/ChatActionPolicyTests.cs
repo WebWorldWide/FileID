@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text.Json;
 using FileID.IpcSchema;
+using FileID.Services;
 using FileID.ViewModels;
 using Xunit;
 
@@ -172,7 +173,23 @@ public sealed class ChatActionPolicyTests
         Assert.False(ChatActionPolicy.IsUnavailable(Action("undoLastMove"), null, canUndoMove: true));
         Assert.Equal("There's no applied layout to undo.", ChatActionPolicy.Detail(Action("undoLastMove"), null, canUndoMove: false));
         Assert.False(ChatActionPolicy.IsUnavailable(Action("changeSetting") with { Setting = "cleanupAutoTag", Value = false }, null, false));
-        Assert.True(ChatActionPolicy.IsUnavailable(Action("changeSetting") with { Setting = "backgroundMotion", Value = false }, null, false));
+        Assert.False(ChatActionPolicy.IsUnavailable(Action("changeSetting") with { Setting = "backgroundMotion", Value = false }, null, false));
+        Assert.False(ChatActionPolicy.IsUnavailable(Action("changeSetting") with { Setting = "chatSummaries", Value = true }, null, false));
+        Assert.True(ChatActionPolicy.IsUnavailable(Action("changeSetting") with { Setting = "telemetry", Value = true }, null, false));
+    }
+
+    [Fact]
+    public void ChatSettingsReadAndWriteTheirAppSettings()
+    {
+        var settings = new AppSettings();
+        Assert.True(ChatActionPolicy.SettingValue(settings, "backgroundMotion"));
+        Assert.True(ChatActionPolicy.SettingValue(settings, "chatSummaries"));
+        ChatActionPolicy.ApplySetting(settings, "chatSummaries", false);
+        Assert.False(settings.ChatUseModel);
+        ChatActionPolicy.ApplySetting(settings, "cleanupAutoTag", false);
+        Assert.False(ChatActionPolicy.SettingValue(settings, "cleanupAutoTag"));
+        settings.LavaMode = AppSettings.LavaModeOff;
+        Assert.False(ChatActionPolicy.SettingValue(settings, "backgroundMotion"));
     }
 
     [Fact]
