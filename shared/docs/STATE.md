@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-12 — BGE text CoreML EP A/B (`agent/left-bge`)
+
+- BGE text, ORT 1.22.0 release, pinned model: Rust CoreML (Swift's config) is bit-identical to Swift but 6x slower than CPU (42 vs 6.5 ms mean); CPU vs Swift differs by 2.9e-5 max (cosine 0.9999996). BGE stays on CPU in the Rust engine. Numbers and reasoning in DECISIONS 2026-11-12 (BGE). `examples/coreml_ab.rs` has a `bge` mode. No engine code changed.
+
 ## 2026-11-12 — Stage 0 leftovers: CoreML EP A/B and `ready` timing (`agent/left-coreml`)
 
 - CoreML EP vs CPU on ORT 1.22.0, release, scratch models: vectors match within 4.2e-7 (SFace) and 3.0e-7 (CLIP text). SFace CoreML is about 15% slower per call than CPU (kept on CoreML for Swift bit parity); CLIP text CoreML is 4-5x slower with 5-8 s session builds (stays CPU). BGE is not installed here, so it is untested. Load was 31-45 throughout.

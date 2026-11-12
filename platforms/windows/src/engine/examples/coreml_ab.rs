@@ -1,6 +1,6 @@
-//! CoreML EP vs CPU A/B for SFace and CLIP text (macOS).
+//! CoreML EP vs CPU A/B for SFace, CLIP text and BGE text (macOS).
 //!
-//!     coreml_ab <sface|cliptext> <cpu|coreml> <models_dir> <out_vectors.f32> <cache_dir> [iters]
+//!     coreml_ab <sface|cliptext|bge> <cpu|coreml|coreml-mlp> <models_dir> <out_vectors.f32> <cache_dir> [iters]
 //!
 //! Prints one JSON line: session build ms, first-run ms, and per-inference
 //! latency percentiles. Writes the L2-normalised vectors (little-endian f32).
@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use fileid_engine::models::clip_tokenizer::ClipTokenizer;
 use fileid_engine::models::sface::{Provider, SFace};
+use fileid_engine::models::wordpiece_tokenizer::WordPieceTokenizer;
 use ndarray::Array2;
 use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat};
 use ort::session::{Session, SessionInputValue};
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let (model, ep, models, out, cache) = (&args[1], &args[2], &args[3], &args[4], &args[5]);
     let iters: usize = args.get(6).and_then(|v| v.parse().ok()).unwrap_or(200);
-    let coreml = ep == "coreml";
+    let coreml = ep.starts_with("coreml");
     let mut times = Vec::new();
     let mut vectors: Vec<f32> = Vec::new();
     let (build_ms, first_ms);
@@ -114,6 +115,69 @@ fn main() -> Result<()> {
                 let v = run(QUERIES[i % QUERIES.len()])?;
                 times.push(started.elapsed().as_secs_f64() * 1e3);
                 if i < QUERIES.len() {
+                    vectors.extend(v);
+                }
+            }
+        }
+        "bge" => {
+            let dir = format!("{models}/bge_text");
+            let tokenizer = WordPieceTokenizer::from_vocab_file(format!("{dir}/vocab.txt"), true)?;
+            let texts: Vec<String> = std::fs::read_to_string(format!("{dir}/texts.txt"))?.lines().map(str::to_owned).collect();
+            fileid_engine::ort_runtime::commit_environment().context("ORT environment")?;
+            let started = Instant::now();
+            let mut builder = Session::builder()?
+                .with_log_level(ort::logging::LogLevel::Error)?
+                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?;
+            if coreml {
+                std::fs::create_dir_all(cache)?;
+                let base = CoreMLExecutionProvider::default().with_subgraphs(true).with_model_cache_dir(cache.as_str());
+                let p = if ep == "coreml-mlp" {
+                    base.with_model_format(CoreMLModelFormat::MLProgram).with_compute_units(CoreMLComputeUnits::All)
+                } else {
+                    base.with_compute_units(CoreMLComputeUnits::CPUAndGPU)
+                };
+                builder = builder.with_execution_providers([p.build().error_on_failure()])?;
+            }
+            let mut session = builder.commit_from_file(format!("{dir}/bge_small.onnx"))?;
+            build_ms = started.elapsed().as_secs_f64() * 1e3;
+            let names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();
+            let mut run = |q: &str| -> Result<Vec<f32>> {
+                let enc = tokenizer.encode(q.trim(), 256);
+                let n = enc.ids.len();
+                let mk = |v: &[i64]| -> Result<Tensor<i64>> { Ok(Tensor::from_array(Array2::<i64>::from_shape_vec((1, n), v.to_vec())?)?) };
+                let mut inputs: Vec<(String, SessionInputValue)> = Vec::new();
+                for name in &names {
+                    match name.as_str() {
+                        "input_ids" => inputs.push((name.clone(), SessionInputValue::from(mk(&enc.ids)?))),
+                        "attention_mask" => inputs.push((name.clone(), SessionInputValue::from(mk(&enc.attention_mask)?))),
+                        "token_type_ids" => inputs.push((name.clone(), SessionInputValue::from(mk(&enc.type_ids)?))),
+                        _ => {}
+                    }
+                }
+                let outputs = session.run(inputs)?;
+                let (_, value) = outputs.iter().next().context("no output")?;
+                let (_, data) = value.try_extract_tensor::<f32>()?;
+                let mut emb = vec![0f32; 384];
+                let mut total = 0f32;
+                for t in 0..n {
+                    let m = enc.attention_mask[t] as f32;
+                    if m == 0.0 { continue; }
+                    total += m;
+                    for h in 0..384 { emb[h] += data[t * 384 + h] * m; }
+                }
+                if total > 0.0 { for x in &mut emb { *x /= total; } }
+                let norm = emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+                for x in &mut emb { *x /= norm; }
+                Ok(emb)
+            };
+            let started = Instant::now();
+            let _ = run(&texts[0])?;
+            first_ms = started.elapsed().as_secs_f64() * 1e3;
+            for i in 0..iters {
+                let started = Instant::now();
+                let v = run(&texts[i % texts.len()])?;
+                times.push(started.elapsed().as_secs_f64() * 1e3);
+                if i < texts.len() {
                     vectors.extend(v);
                 }
             }
