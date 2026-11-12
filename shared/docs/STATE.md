@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-12 — Windows: ONNX Runtime built from source without Microsoft telemetry (CI green)
+
+- **CI builds ONNX Runtime 1.22.0 with DirectML** from Microsoft's source, without `--use_telemetry`, for x64 and arm64, on GitHub's `windows-2022` runners. A cold-cache build takes about 37–65 minutes per architecture; the build is cached by the build script's hash.
+- **Privacy scan:** the scan found ORT's provider outside Microsoft's telemetry group.
+- **Load check:** the `--ort-runtime` load check showed the runtime writes nothing.
+- **Packages and tools:** the Windows Store package and the native tools jobs pass with the new DLLs.
+- Open (NEXT): the Windows hardware checks (DirectML binding, files/s against the old DLL, Diagnostic Data Viewer, `System32\DirectML.dll`).
+
 ## 2026-11-10 — Windows ONNX Runtime built without telemetry; DirectML.dll found to report too
 
 - **Found** (agent): every Microsoft-built Windows ORT 1.22.0 FileID used (DirectML NuGet x64/arm64, GitHub GPU zip) puts ORT's ETW provider in Microsoft's telemetry provider group, which Windows' diagnostic-data service collects. Microsoft's pipeline passes `--use_telemetry` and writes the private `TraceLoggingConfigPrivate.h`. Builds without it keep the same provider with an all-zero group: pyke's 1.22 Windows builds (static `.lib` only, DirectML included) and the Intel-built OpenVINO pack. `DirectML.dll` 1.15.4 (Microsoft.AI.DirectML, also inside pyke's archives) registers `Microsoft.Windows.AI.MachineLearning.Dml` in the same group; it is closed source.
