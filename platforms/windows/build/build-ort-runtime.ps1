@@ -86,6 +86,11 @@ New-Item -ItemType Directory -Force -Path $SourceDir | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $SourceDir '.git'))) {
     Invoke-Native 'git' @('-C', $SourceDir, 'init', '--quiet')
 }
+# Keep the commit's LF bytes: with Git for Windows' default autocrlf the patch
+# files under cmake/patches become CRLF, and the patch.exe CMake finds first on
+# hosted runners (Strawberry Perl's 2.5.9) crashes on them (arm64 cpuinfo patch).
+Invoke-Native 'git' @('-C', $SourceDir, 'config', 'core.autocrlf', 'false')
+Invoke-Native 'git' @('-C', $SourceDir, 'config', 'core.eol', 'lf')
 $head = (& git -C $SourceDir rev-parse --verify --quiet HEAD) | Select-Object -First 1
 if ($head -ne $OrtCommit) {
     Write-Host "Fetching ONNX Runtime $OrtVersion ($OrtCommit)..." -ForegroundColor Cyan
@@ -94,7 +99,8 @@ if ($head -ne $OrtCommit) {
 }
 Invoke-Native 'git' @('-C', $SourceDir, 'reset', '--quiet', '--hard', $OrtCommit)
 Invoke-Native 'git' @('-C', $SourceDir, 'clean', '-xdfq')
-$head = (& git -C $SourceDir rev-parse HEAD).Trim()
+Invoke-Native 'git' @('-C', $SourceDir, 'checkout-index', '--quiet', '--force', '--all')
+$head =(& git -C $SourceDir rev-parse HEAD).Trim()
 if ($head -ne $OrtCommit) {
     throw "ONNX Runtime checkout is at $head, expected $OrtCommit."
 }
