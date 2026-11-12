@@ -345,6 +345,36 @@ impl Shell {
             }
             Action::ScanFolder(path) => self.choose(Path::new(&path)),
             Action::FocusSearch => self.title_bar.focus_search(),
+            Action::FocusLibrarySearch => {
+                self.navigate("library");
+                if let Some(editable) = self
+                    .page_content("library")
+                    .and_then(|root| find_editable(root, LIBRARY_SEARCH_HINT))
+                {
+                    editable.grab_focus();
+                    editable.select_region(0, -1);
+                }
+            }
+            Action::SelectAll => match self.current.get() {
+                "cleanup" => self.page_action("cleanup", "cleanup.select-all"),
+                "library" => {
+                    if let Some(button) = self
+                        .page_content("library")
+                        .and_then(|root| find_button(root, "Select all"))
+                    {
+                        button.emit_clicked();
+                    }
+                }
+                _ => {}
+            },
+            Action::TrashSelected => {
+                if self.current.get() == "cleanup" {
+                    self.page_action("cleanup", "cleanup.trash-selected");
+                }
+            }
+            Action::Undo => {
+                crate::changes::undo_latest();
+            }
             Action::ToggleChat => {
                 let open = !self.inspector.reveals_child() && self.current.get() != "chat";
                 self.inspector.set_reveal_child(open);
@@ -380,6 +410,29 @@ impl Shell {
                     target.set_opacity(v.clamp(0.0, 1.0))
                 });
             }
+    }
+
+    fn page_content(&self, page: &str) -> Option<&gtk::Widget> {
+        self.contents
+            .iter()
+            .find(|(id, _)| *id == page)
+            .map(|(_, root)| root)
+    }
+
+    fn page_action(&self, page: &str, action: &str) {
+        if let Some(root) = self.page_content(page) {
+            let _ = root.activate_action(action, None);
+        }
+    }
+
+    /// A local desktop notification (GNOME/KDE notification daemon over
+    /// D-Bus); nothing leaves the machine.
+    fn notify_scan_complete(&self, processed: u64) {
+        let Some(app) = self.window.application() else { return };
+        let notification = gtk::gio::Notification::new("Scan complete");
+        notification.set_body(Some(&scan_complete_body(processed)));
+        notification.set_default_action("app.raise");
+        app.send_notification(Some("scan-complete"), &notification);
     }
 
     fn hand_off(&self, page: &str, placeholder: &str, text: &str) -> Option<gtk::Editable> {
@@ -575,6 +628,11 @@ impl Shell {
     fn on_engine(self: &Rc<Self>, state: EngineState) {
         let mut recount = false;
         let mut note: Option<Option<String>> = None;
+        let mut finished_scan = None;
+        if let EngineState::QueueState(queue) = &state {
+            self.sidebar.set_queue(queue);
+            return;
+        }
         {
             let mut status = self.status.borrow_mut();
             match state {
@@ -618,6 +676,7 @@ impl Shell {
                     }
                 }
                 EngineState::ScanComplete(processed) => {
+                    finished_scan = Some(processed);
                     if let Some(progress) = status.progress.as_mut() {
                         progress.processed = progress.processed.max(processed);
                     }
@@ -695,6 +754,9 @@ impl Shell {
                 _ => return,
             }
         }
+        if let Some(processed) = finished_scan {
+            self.notify_scan_complete(processed);
+        }
         let blocked = matches!(&note, Some(Some(text)) if text.starts_with("Scan blocked"));
         if let Some(note) = note {
             self.set_note(note);
@@ -740,6 +802,36 @@ fn find_editable(root: &gtk::Widget, placeholder: &str) -> Option<gtk::Editable>
     None
 }
 
+/// Keys that also edit text must stay with a focused entry or text view.
+fn needs_text_guard(action: &Action) -> bool {
+    matches!(action, Action::SelectAll | Action::TrashSelected | Action::Undo)
+}
+
+fn text_has_focus(window: &adw::ApplicationWindow) -> bool {
+    GtkWindowExt::focus(window)
+        .is_some_and(|focus| focus.is::<gtk::Editable>() || focus.is::<gtk::TextView>())
+}
+
+fn scan_complete_body(processed: u64) -> String {
+    format!("{} files ready to browse.", shell::grouped(processed))
+}
+
+fn find_button(root: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+    if let Some(button) = root.downcast_ref::<gtk::Button>()
+        && button.label().as_deref() == Some(label)
+    {
+        return Some(button.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if let Some(found) = find_button(&widget, label) {
+            return Some(found);
+        }
+        child = widget.next_sibling();
+    }
+    None
+}
+
 fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) {
     let controller = gtk::ShortcutController::new();
     controller.set_scope(gtk::ShortcutScope::Global);
@@ -749,8 +841,17 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
                 .map(|page| (format!("<Control>{n}"), Action::Navigate(page.id)))
         })
         .collect();
+    bindings.extend((1..=9).filter_map(|n| {
+        shell::page_for_shortcut(n).map(|page| (format!("<Alt>{n}"), Action::Navigate(page.id)))
+    }));
     bindings.extend([
         ("<Control>comma".to_owned(), Action::Navigate("settings")),
+        ("<Control>f".to_owned(), Action::FocusLibrarySearch),
+        ("<Control><Shift>s".to_owned(), Action::ToggleSidebar),
+        ("<Control>a".to_owned(), Action::SelectAll),
+        ("Delete".to_owned(), Action::TrashSelected),
+        ("KP_Delete".to_owned(), Action::TrashSelected),
+        ("<Control>z".to_owned(), Action::Undo),
         ("<Control>k".to_owned(), Action::FocusSearch),
         ("<Control><Shift>k".to_owned(), Action::ToggleChat),
         ("<Control>o".to_owned(), Action::PickFolder),
@@ -759,7 +860,12 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
     ]);
     for (trigger, action) in bindings {
         let act = act.clone();
+        let guarded = needs_text_guard(&action);
+        let window = window.downgrade();
         let callback = gtk::CallbackAction::new(move |_, _| {
+            if guarded && window.upgrade().is_some_and(|window| text_has_focus(&window)) {
+                return glib::Propagation::Proceed;
+            }
             act(action.clone());
             glib::Propagation::Stop
         });
@@ -772,6 +878,17 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
 
     // Pages ask the shell to switch pages through `win.navigate` ("moments",
     // "tools", ...) without knowing about the window.
+    if let Some(app) = window.application() {
+        let raise = gtk::gio::SimpleAction::new("raise", None);
+        let window = window.downgrade();
+        raise.connect_activate(move |_, _| {
+            if let Some(window) = window.upgrade() {
+                window.present();
+            }
+        });
+        app.add_action(&raise);
+    }
+
     let navigate = gtk::gio::SimpleAction::new(NAVIGATE_ACTION, Some(glib::VariantTy::STRING));
     let to_page = act.clone();
     navigate.connect_activate(move |_, parameter| {
@@ -979,5 +1096,25 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
     match renderer.render_texture(&node, None).save_to_png(path) {
         Ok(()) => eprintln!("[self_capture] wrote {path} ({width}x{height})"),
         Err(err) => eprintln!("[self_capture] save failed: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn only_text_editing_keys_defer_to_a_focused_field() {
+        for action in [Action::SelectAll, Action::TrashSelected, Action::Undo] {
+            assert!(needs_text_guard(&action));
+        }
+        for action in [Action::FocusSearch, Action::FocusLibrarySearch, Action::ToggleSidebar, Action::Navigate("library")] {
+            assert!(!needs_text_guard(&action));
+        }
+    }
+
+    #[test]
+    fn the_scan_notification_counts_files_like_windows() {
+        assert_eq!(scan_complete_body(1234), "1,234 files ready to browse.");
     }
 }

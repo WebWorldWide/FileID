@@ -121,6 +121,39 @@ impl LoadResult {
 
 type LoadOutcome = Result<LoadResult, String>;
 
+/// For each file about to be trashed, the copies of its group that stay.
+fn keepers_by_victim(groups: &[DupGroup], requested: &[i64]) -> HashMap<i64, Vec<i64>> {
+    let requested: HashSet<i64> = requested.iter().copied().collect();
+    let mut map = HashMap::new();
+    for group in groups {
+        let keepers: Vec<i64> = group
+            .members
+            .iter()
+            .filter(|member| !requested.contains(&member.id))
+            .map(|member| member.id)
+            .collect();
+        if keepers.is_empty() {
+            continue;
+        }
+        for member in group.members.iter().filter(|member| requested.contains(&member.id)) {
+            map.insert(member.id, keepers.clone());
+        }
+    }
+    map
+}
+
+fn tagged_summary(tagged: usize) -> String {
+    if tagged == 0 {
+        String::new()
+    } else {
+        format!(
+            " · tagged {tagged} kept file{} with \"{}\"",
+            plural(tagged),
+            crate::app_settings::CLEANUP_AUTO_TAG_NAME
+        )
+    }
+}
+
 // ─── The tab ──────────────────────────────────────────────────────────────────
 
 struct Cleanup {
@@ -136,8 +169,11 @@ struct Cleanup {
     deleting: Cell<bool>,
     trash_generation: Cell<u64>,
     pending_trash: RefCell<Option<PendingTrash>>,
+    keepers_by_victim: RefCell<HashMap<i64, Vec<i64>>>,
     last_candidates: Cell<usize>,
     last_batch: RefCell<Option<String>>,
+    last_entry: Cell<Option<u64>>,
+    restoring_batch: RefCell<Option<(String, Option<u64>)>>,
     restoring: Cell<bool>,
     last_warning: RefCell<Option<String>>,
     last_refresh_error: RefCell<Option<String>>,
@@ -211,12 +247,31 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     actions_box.append(&clear_btn);
     actions_box.append(&delete_btn);
 
+    let auto_tag = gtk::Switch::builder()
+        .valign(gtk::Align::Center)
+        .active(crate::app_settings::cleanup_auto_tag())
+        .tooltip_text("After you move extra copies to Trash, the copies you keep get the tag \"duplicate-resolved\".")
+        .build();
+    auto_tag.update_property(&[gtk::accessible::Property::Label("Tag kept files")]);
+    auto_tag.connect_active_notify(|switch| {
+        crate::app_settings::remember_cleanup_auto_tag(switch.is_active());
+    });
+    let auto_tag_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .valign(gtk::Align::Center)
+        .css_classes(["v3-toggle-row"])
+        .build();
+    auto_tag_row.append(&auto_tag);
+    auto_tag_row.append(&gtk::Label::new(Some("Tag kept files")));
+
     let header_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
     header_row.append(&pillbox);
     header_row.append(&filler);
+    header_row.append(&auto_tag_row);
     header_row.append(&actions_box);
 
     // ── Status bar (shown after a trash) ────────────────────────────────────
@@ -303,9 +358,12 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         deleting: Cell::new(false),
         trash_generation: Cell::new(0),
         pending_trash: RefCell::new(None),
+        keepers_by_victim: RefCell::new(HashMap::new()),
         last_candidates: Cell::new(0),
         last_warning: RefCell::new(None),
         last_batch: RefCell::new(None),
+        last_entry: Cell::new(None),
+        restoring_batch: RefCell::new(None),
         restoring: Cell::new(false),
         last_refresh_error: RefCell::new(None),
         reload_throttle: Cell::new(Instant::now() - Duration::from_secs(10)),
@@ -339,23 +397,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header actions ───────────────────────────────────────────────────────
     {
         let this = this.clone();
-        select_nonkeepers_btn.connect_clicked(move |_| {
-            {
-                let groups = this.groups.borrow();
-                let skipped = this.skipped.borrow();
-                let mut sel = this.selection.borrow_mut();
-                sel.clear();
-                for g in groups.iter().filter(|g| !skipped.contains(&g.key)) {
-                    for (i, m) in g.members.iter().enumerate() {
-                        if i > 0 {
-                            sel.insert(m.id);
-                        }
-                    }
-                }
-            }
-            this.rebuild_list();
-            this.update_global_summary();
-        });
+        select_nonkeepers_btn.connect_clicked(move |_| this.select_extra_copies());
     }
     {
         let this = this.clone();
@@ -415,6 +457,14 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                     EngineEvent::Exited if this.restoring.get() => {
                         this.restoring.set(false);
+                        if let Some((_, Some(entry))) = this.restoring_batch.take() {
+                            crate::changes::set_status(
+                                entry,
+                                crate::changes::Status::Failed(
+                                    "FileID restarted before the files were put back".to_owned(),
+                                ),
+                            );
+                        }
                         this.restore_button.set_sensitive(true);
                         this.update_global_summary();
                         this.status_label
@@ -435,6 +485,30 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         root.connect_map(move |_| this.reload());
     }
     this.update_global_summary();
+
+    // Window shortcuts (Ctrl+A, Delete) reach this page as `cleanup.*` actions.
+    let actions = gio::SimpleActionGroup::new();
+    {
+        let select = gio::SimpleAction::new("select-all", None);
+        let this = this.clone();
+        select.connect_activate(move |_, _| {
+            if this.select_nonkeepers_btn.is_visible() {
+                this.select_extra_copies();
+            }
+        });
+        actions.add_action(&select);
+    }
+    {
+        let trash = gio::SimpleAction::new("trash-selected", None);
+        let this = this.clone();
+        trash.connect_activate(move |_, _| {
+            if this.delete_btn.is_sensitive() {
+                this.confirm_delete_selected(&this.delete_btn);
+            }
+        });
+        actions.add_action(&trash);
+    }
+    root.insert_action_group("cleanup", Some(&actions));
 
     root.upcast()
 }
@@ -1083,6 +1157,24 @@ impl Cleanup {
 
     // ── Trash (engine `trashFiles` IPC) ──────────────────────────────────────
 
+    fn select_extra_copies(self: &Rc<Self>) {
+        {
+            let groups = self.groups.borrow();
+            let skipped = self.skipped.borrow();
+            let mut sel = self.selection.borrow_mut();
+            sel.clear();
+            for g in groups.iter().filter(|g| !skipped.contains(&g.key)) {
+                for (i, m) in g.members.iter().enumerate() {
+                    if i > 0 {
+                        sel.insert(m.id);
+                    }
+                }
+            }
+        }
+        self.rebuild_list();
+        self.update_global_summary();
+    }
+
     fn confirm_delete_selected(self: &Rc<Self>, anchor: &gtk::Button) {
         let ids: Vec<i64> = {
             let groups = self.groups.borrow();
@@ -1146,6 +1238,8 @@ impl Cleanup {
         let operation = self.trash_generation.get().wrapping_add(1);
         self.trash_generation.set(operation);
         self.reveal_status();
+        self.keepers_by_victim
+            .replace(keepers_by_victim(&self.groups.borrow(), &ids));
 
         if self.mode.borrow().as_str() == "similar" {
             self.send_trash(operation, ids, 0, None);
@@ -1358,20 +1452,40 @@ impl Cleanup {
             .set(self.trash_generation.get().wrapping_add(1));
         self.deleting.set(false);
         if result.succeeded > 0 {
-            *self.last_batch.borrow_mut() = result
+            let batch = result
                 .action
                 .split_once(':')
                 .map(|(_, batch)| batch.to_owned());
+            self.last_entry.set(batch.clone().map(|batch| {
+                let weak = Rc::downgrade(self);
+                let entry = Rc::new(Cell::new(0u64));
+                let slot = entry.clone();
+                let reverse: crate::changes::Reverse = Rc::new(move || {
+                    weak.upgrade()
+                        .is_some_and(|this| this.restore_batch(&batch, Some(slot.get())))
+                });
+                let label = format!(
+                    "Moved {} file{} to Trash",
+                    result.succeeded,
+                    plural(result.succeeded as usize)
+                );
+                let id = crate::changes::push(&label, Some(reverse));
+                entry.set(id);
+                id
+            }));
+            *self.last_batch.borrow_mut() = batch;
             self.restore_button
                 .set_visible(self.last_batch.borrow().is_some());
         }
+        let tagged = self.tag_keepers(&succeeded);
         let total_failed = result.failed as usize + pending.preflight_rejected;
         if total_failed == 0 {
             self.status_label.set_text(&format!(
-                "Moved {} file{} to Trash · freed {} · restore from Trash to undo",
+                "Moved {} file{} to Trash · freed {}{} · restore from Trash to undo",
                 result.succeeded,
                 plural(result.succeeded as usize),
                 file_size_i64(freed),
+                tagged_summary(tagged),
             ));
         } else {
             let details = result
@@ -1412,6 +1526,40 @@ impl Cleanup {
         self.reload();
     }
 
+    /// Tags the copies kept next to the files just trashed (macOS
+    /// `keeperTagsByVictim`); returns how many kept files were asked to be tagged.
+    fn tag_keepers(&self, trashed: &[i64]) -> usize {
+        let keepers = self.keepers_by_victim.take();
+        if !crate::app_settings::cleanup_auto_tag() {
+            return 0;
+        }
+        let mut ids: Vec<i64> = trashed
+            .iter()
+            .filter_map(|id| keepers.get(id))
+            .flatten()
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return 0;
+        }
+        let count = ids.len();
+        let sent = self
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::ApplyTags(fileid_engine::ipc::ApplyTagsPayload {
+                file_ids: ids,
+                tags: vec![crate::app_settings::CLEANUP_AUTO_TAG_NAME.to_owned()],
+                mode: fileid_engine::ipc::TagMode::Add,
+            }));
+        if sent.is_ok() {
+            count
+        } else {
+            0
+        }
+    }
+
     fn restore_last_batch(self: &Rc<Self>) {
         if self.restoring.get() || self.deleting.get() {
             return;
@@ -1419,6 +1567,16 @@ impl Cleanup {
         let Some(batch_id) = self.last_batch.borrow().clone() else {
             return;
         };
+        self.restore_batch(&batch_id, self.last_entry.get());
+    }
+
+    fn restore_batch(self: &Rc<Self>, batch_id: &str, entry: Option<u64>) -> bool {
+        if self.restoring.get() || self.deleting.get() {
+            return false;
+        }
+        let batch_id = batch_id.to_owned();
+        self.restoring_batch
+            .replace(Some((batch_id.clone(), entry)));
         self.restoring.set(true);
         self.update_global_summary();
         self.restore_button.set_sensitive(false);
@@ -1432,11 +1590,14 @@ impl Cleanup {
             }))
         {
             self.restoring.set(false);
+            self.restoring_batch.take();
             self.restore_button.set_sensitive(true);
             self.update_global_summary();
             self.status_label
                 .set_text(&format!("Could not send restore command: {error}"));
+            return false;
         }
+        true
     }
 
     fn finish_restore(self: &Rc<Self>, result: fileid_engine::ipc::BulkActionResult) {
@@ -1445,9 +1606,30 @@ impl Cleanup {
         }
         self.restore_button.set_sensitive(true);
         self.update_global_summary();
+        let restored = self.restoring_batch.take();
+        if let Some((_, Some(entry))) = &restored {
+            crate::changes::set_status(
+                *entry,
+                if result.failed == 0 {
+                    crate::changes::Status::Undone
+                } else {
+                    crate::changes::Status::Failed(format!(
+                        "{} file{} couldn't be put back",
+                        result.failed,
+                        plural(result.failed as usize)
+                    ))
+                },
+            );
+        }
         if result.failed == 0 {
-            self.last_batch.borrow_mut().take();
-            self.restore_button.set_visible(false);
+            let newest = restored
+                .as_ref()
+                .is_none_or(|(batch, _)| self.last_batch.borrow().as_deref() == Some(batch));
+            if newest {
+                self.last_batch.borrow_mut().take();
+                self.last_entry.set(None);
+                self.restore_button.set_visible(false);
+            }
             self.status_label.set_text(&format!(
                 "Restored {} file{} to the library.",
                 result.succeeded,
@@ -2032,6 +2214,35 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn kept_copies_follow_each_trashed_file() {
+        let member = |id: i64| Member {
+            id,
+            path: format!("/p/{id}"),
+            name: format!("{id}"),
+            size: 1,
+            modified: None,
+            kind: "image".into(),
+            is_keeper: id == 1,
+        };
+        let group = |ids: &[i64]| DupGroup {
+            key: format!("dup-{}", ids[0]),
+            members: ids.iter().copied().map(member).collect(),
+            total_members: ids.len(),
+            is_similar: false,
+            is_approximate: false,
+            total_bytes: ids.len() as i64,
+            keeper_bytes: 1,
+            exact_hash: None,
+        };
+        let map = keepers_by_victim(&[group(&[1, 2, 3]), group(&[4, 5])], &[2, 3, 4, 5]);
+        assert_eq!(map.get(&2), Some(&vec![1]));
+        assert_eq!(map.get(&3), Some(&vec![1]));
+        assert!(!map.contains_key(&4));
+        assert_eq!(tagged_summary(0), "");
+        assert!(tagged_summary(1).contains("1 kept file with"));
     }
 
     #[test]

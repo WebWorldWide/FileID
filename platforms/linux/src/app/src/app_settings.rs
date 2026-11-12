@@ -158,6 +158,39 @@ pub fn remember_welcome_sheet_seen() {
     set_entries(&[("welcomeSheetSeen", Value::Bool(true))]);
 }
 
+// ── Cleanup auto-tag and Chat summaries (parity-gtk-shell) ───────────────────
+
+fn get_bool(key: &str, default: bool) -> bool {
+    let Some(path) = settings_path() else {
+        return default;
+    };
+    load_map(&path)
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
+}
+
+/// Tag the copies kept after Cleanup moves extras to Trash. Windows
+/// `CleanupAutoTagKept` / macOS `cleanup.autoTagKeepers`; default on.
+pub const CLEANUP_AUTO_TAG_NAME: &str = "duplicate-resolved";
+
+pub fn cleanup_auto_tag() -> bool {
+    get_bool("cleanupAutoTagKept", true)
+}
+
+pub fn remember_cleanup_auto_tag(on: bool) {
+    set_entries(&[("cleanupAutoTagKept", Value::Bool(on))]);
+}
+
+/// Chat "Summarize with local AI" preference (macOS `chatUseModel`); default on.
+pub fn chat_use_model() -> bool {
+    get_bool("chatUseModel", true)
+}
+
+pub fn remember_chat_use_model(on: bool) {
+    set_entries(&[("chatUseModel", Value::Bool(on))]);
+}
+
 /// Describe Files ▸ Name style, stored under the Windows `naming*` keys
 /// (macOS `naming.*`). Defaults: short, 40 characters, people and event on,
 /// date off, learning from renames on.

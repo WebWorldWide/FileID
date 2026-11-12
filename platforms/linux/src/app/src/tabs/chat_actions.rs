@@ -22,6 +22,31 @@ pub(super) const CONFIRMING: [&str; 6] = [
 pub(super) const SETTING_UNAVAILABLE: &str =
     "This setting isn't on Linux yet. Nothing will change.";
 
+/// The settings Chat can change on Linux.
+pub(super) fn setting_supported(setting: Option<&str>) -> bool {
+    matches!(setting, Some("backgroundMotion" | "cleanupAutoTag" | "chatSummaries"))
+}
+
+pub(super) fn setting_value(setting: &str) -> bool {
+    match setting {
+        "backgroundMotion" => crate::app_settings::lava_lamp_on(),
+        "cleanupAutoTag" => crate::app_settings::cleanup_auto_tag(),
+        _ => crate::app_settings::chat_use_model(),
+    }
+}
+
+pub(super) fn set_setting(setting: &str, value: bool) {
+    match setting {
+        "backgroundMotion" => {
+            crate::app_settings::remember_lava_lamp(value);
+            crate::lavalamp::set_enabled(value);
+        }
+        "cleanupAutoTag" => crate::app_settings::remember_cleanup_auto_tag(value),
+        "chatSummaries" => crate::app_settings::remember_chat_use_model(value),
+        _ => {}
+    }
+}
+
 pub(super) fn needs_confirmation(kind: &str) -> bool {
     CONFIRMING.contains(&kind)
 }
@@ -326,7 +351,7 @@ pub(super) fn unavailable(action: &ChatAction, plan: Option<&PlanSummary>, descr
         "describeFiles" if !describe_runtime => Some(
             "Describing needs the llama.cpp runtime, which isn't in this installation.",
         ),
-        "changeSetting" if action.setting.as_deref() != Some("backgroundMotion") => Some(SETTING_UNAVAILABLE),
+        "changeSetting" if !setting_supported(action.setting.as_deref()) => Some(SETTING_UNAVAILABLE),
         _ => None,
     }
 }
@@ -703,12 +728,13 @@ mod tests {
     #[test]
     fn unavailable_settings_and_runtime_disable_the_button() {
         let mut setting = action("changeSetting");
-        setting.setting = Some("backgroundMotion".into());
         setting.value = Some(false);
-        assert!(runnable(&setting));
-        assert_eq!(unavailable(&setting, None, true), None);
-        setting.setting = Some("cleanupAutoTag".into());
+        setting.setting = Some("appearance".into());
         assert_eq!(unavailable(&setting, None, true), Some(SETTING_UNAVAILABLE));
+        for supported in ["backgroundMotion", "cleanupAutoTag", "chatSummaries"] {
+            setting.setting = Some(supported.into());
+            assert_eq!(unavailable(&setting, None, true), None);
+        }
         assert!(unavailable(&action("describeFiles"), None, false).is_some());
         assert_eq!(unavailable(&action("describeFiles"), None, true), None);
     }

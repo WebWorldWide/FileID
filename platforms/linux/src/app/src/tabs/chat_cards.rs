@@ -425,21 +425,20 @@ impl Runner {
                     self.fail(id, "File Tools isn't open in this window. Nothing was exported.");
                 }
             }
-            "changeSetting" if action.setting.as_deref() == Some("backgroundMotion") => {
-                let Some(on) = action.value else { return };
-                let previous = crate::app_settings::lava_lamp_on();
-                let set = |on: bool| {
-                    crate::app_settings::remember_lava_lamp(on);
-                    crate::lavalamp::set_enabled(on);
-                };
-                set(on);
+            "changeSetting" => {
+                let (Some(setting), Some(value)) = (action.setting.clone(), action.value) else { return };
+                if !rules::setting_supported(Some(&setting)) {
+                    self.fail(id, rules::SETTING_UNAVAILABLE);
+                    return;
+                }
+                let previous = rules::setting_value(&setting);
+                rules::set_setting(&setting, value);
                 let undo: UndoFn = Rc::new(move |runner, id| {
-                    set(previous);
+                    rules::set_setting(&setting, previous);
                     runner.finish(id, "Changed back.".to_owned(), None);
                 });
-                self.finish(id, format!("Turned {}.", if on { "on" } else { "off" }), Some(("Undo", undo)));
+                self.finish(id, if value { "Turned on." } else { "Turned off." }.to_owned(), Some(("Undo", undo)));
             }
-            "changeSetting" => self.fail(id, rules::SETTING_UNAVAILABLE),
             "suggestFolderLayout" => {
                 let root = action.path.clone().unwrap_or_default();
                 if !self.send(CommandPayload::PlanRestructure(PlanRestructurePayload {
