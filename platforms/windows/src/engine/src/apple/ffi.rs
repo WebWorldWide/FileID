@@ -3,7 +3,7 @@
 //! FileIDAppleKit dynamic library in `FileID.app/Contents/Frameworks`.
 //! Reviewed surface (shared/scripts/check_runtime_egress.py): no adapter opens
 //! a URL, socket or HTTP client or launches a process. Keep this file to
-//! declarations; safe wrappers live in `super`.
+//! declarations and the one callback trampoline; safe wrappers live in `super`.
 //!
 //! Conventions: plain C types; strings are NUL-terminated UTF-8; memory the
 //! adapter returns is released with `fileid_apple_free`; handles are nonzero,
@@ -124,6 +124,28 @@ unsafe extern "C" {
     pub fn fileid_apple_take_tiles_close(tiles: u64);
     // --- end Stage 6 ---
 
+    // --- Stage 8: timeline, speech and video tools ---
+    // `cancel` points at a caller-owned `AtomicBool` (or is null); replies are
+    // JSON freed with `fileid_apple_free`, `{"error": text}` on failure.
+
+    /// AVFoundation probe; `strict` applies the media tools' refusals,
+    /// `mime_type` (nullable) types a staged file without a media extension.
+    pub fn fileid_apple_media_probe(path: *const c_char, mime_type: *const c_char, strict: bool) -> *mut c_char;
+    /// One export from `{"recipe", "source", "output"}`: trim/remux/audio/proxy/
+    /// rotate, or the fit/pad/stabilize/follow-people video export.
+    pub fn fileid_apple_media_export(request_json: *const c_char, cancel: *const bool) -> *mut c_char;
+    /// One upright RGB frame of exactly `width`x`height`, null on failure.
+    pub fn fileid_apple_video_frame(path: *const c_char, seconds: f64, width: u32, height: u32, out_seconds: *mut f64) -> *mut u8;
+    /// Frame pool JPEGs and `manifest.json` in `directory`: 0, 2 invalid, 3 failed, 4 source changed.
+    pub fn fileid_apple_video_pool(path: *const c_char, interval: f64, max_side: u32, directory: *const c_char, cancel: *const bool) -> i32;
+    /// 1 ready, 0 unavailable or denied, -1 the host cannot ask (no usage description).
+    pub fn fileid_apple_speech_status(ask: bool) -> i32;
+    /// The Apple Speech model version string.
+    pub fn fileid_apple_speech_model_version() -> *mut c_char;
+    /// On-device transcription of `[start, end)` seconds: `{"segments": [...]}`.
+    pub fn fileid_apple_speech_transcribe(path: *const c_char, start: f64, end: f64, cancel: *const bool) -> *mut c_char;
+    // --- end Stage 8 ---
+
     // --- Stage 5: scan decode and per-file ML ---
     /// The scan's working image; `out_image` receives its handle. JSON info.
     pub fn fileid_apple_image_decode(path: *const c_char, size_bytes: i64, max_pixel_size: u32, out_image: *mut u64) -> *mut c_char;
@@ -163,4 +185,57 @@ unsafe extern "C" {
     /// RAM++ tags agreed with the primary pass. JSON `[[tag, score], ...]`.
     pub fn fileid_apple_ramplus_tag(image: u64, vision_confidences: *const c_char, face_count: usize) -> *mut c_char;
     // --- end Stage 5 ---
+
+    // --- Stage 7: MLX vision-language models ---
+    /// Start a VLM request (UTF-8 JSON with an `op`). Returns a handle, 0 when
+    /// refused (the callback is then never called). The callback runs on any
+    /// thread and gets exactly one terminal event (`DONE` or `FAILED`).
+    pub fn fileid_apple_vlm_submit(
+        request: *const u8,
+        length: usize,
+        callback: VlmCallback,
+        context: *mut c_void,
+    ) -> u64;
+    /// Cancel a running request; it still reports its terminal event.
+    pub fn fileid_apple_vlm_cancel(handle: u64);
+    // --- end Stage 7 ---
 }
+
+// --- Stage 7: MLX vision-language models ---
+/// Event callback for `fileid_apple_vlm_submit`; the payload is valid only
+/// during the call.
+pub type VlmCallback = unsafe extern "C" fn(context: *mut c_void, event: u32, payload: *const u8, length: usize);
+
+/// What a request's events go to: boxed as the callback context by
+/// `super::vlm::request`, called once per event.
+pub struct VlmReceiver(pub Box<dyn Fn(u32, &[u8]) + Send + Sync>);
+
+/// The callback every VLM request passes: forwards each event to its
+/// [`VlmReceiver`] and frees the receiver after the terminal event.
+///
+/// # Safety
+/// `context` must be a `Box<VlmReceiver>` leaked for this request, and the
+/// adapter must call back exactly once with `VLM_DONE` or `VLM_FAILED`.
+pub unsafe extern "C" fn vlm_callback(context: *mut c_void, event: u32, payload: *const u8, length: usize) {
+    if context.is_null() {
+        return;
+    }
+    let bytes: &[u8] = if payload.is_null() || length == 0 {
+        &[]
+    } else {
+        // SAFETY: the adapter passes `length` readable bytes, valid during this call.
+        unsafe { std::slice::from_raw_parts(payload, length) }
+    };
+    // SAFETY: `context` is the receiver boxed for this request (see above).
+    unsafe { &*context.cast::<VlmReceiver>() }.0(event, bytes);
+    if matches!(event, VLM_DONE | VLM_FAILED) {
+        // SAFETY: the terminal event is the last call for this request.
+        drop(unsafe { Box::from_raw(context.cast::<VlmReceiver>()) });
+    }
+}
+
+pub const VLM_TOKEN: u32 = 1;
+pub const VLM_PROGRESS: u32 = 2;
+pub const VLM_DONE: u32 = 3;
+pub const VLM_FAILED: u32 = 4;
+// --- end Stage 7 ---

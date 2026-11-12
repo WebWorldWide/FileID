@@ -6,6 +6,7 @@ import MLXLMCommon
 import MLXVLM
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("Frame-sequence moment evidence")
 struct TimelineMomentAnalysisTests {

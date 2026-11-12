@@ -8,9 +8,10 @@ import Foundation
 // meaningful — two same-topic documents must be closer than two different-topic ones.
 @Suite("BGE text embedder (on-device, model-gated)")
 struct BGETextServiceTests {
-    private var modelDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/FileID/Models/bge_text")
+    /// Only an explicit scratch copy (`FILEID_MODELS_DIR`), never the owner's live Models folder.
+    private var modelDir: URL? {
+        guard let root = ProcessInfo.processInfo.environment["FILEID_MODELS_DIR"], root.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("bge_text")
     }
 
     private func cos(_ a: [Float], _ b: [Float]) -> Float {
@@ -19,9 +20,8 @@ struct BGETextServiceTests {
 
     @Test("loads + embeds: same-topic docs are closer than different-topic")
     func semanticOrdering() {
-        let onnx = modelDir.appendingPathComponent("bge_small.onnx")
-        guard FileManager.default.fileExists(atPath: onnx.path) else {
-            return // model not installed in this environment — skip
+        guard let modelDir, FileManager.default.fileExists(atPath: modelDir.appendingPathComponent("bge_small.onnx").path) else {
+            return // no scratch model copy in this environment — skip
         }
         let svc = BGETextService.shared
         #expect(svc.load(modelDir: modelDir))

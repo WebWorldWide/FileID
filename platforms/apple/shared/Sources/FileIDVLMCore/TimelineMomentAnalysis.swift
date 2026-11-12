@@ -1,20 +1,25 @@
 import Foundation
 import CoreImage
 import MLXLMCommon
-import FileIDShared
+import FileIDModelInfo
 
-enum TimelineMomentAnalysis {
-    struct Window: Sendable, Equatable {
-        let start: Double
-        let end: Double
-        let times: [Double]
+package enum TimelineMomentAnalysis {
+    package struct Window: Sendable, Equatable {
+        package let start: Double
+        package let end: Double
+        package let times: [Double]
+        package init(start: Double, end: Double, times: [Double]) {
+            self.start = start
+            self.end = end
+            self.times = times
+        }
     }
 
-    struct Moment: Sendable, Equatable {
-        let title: String
-        let summary: String
-        let firstFrame: Int
-        let lastFrame: Int
+    package struct Moment: Sendable, Equatable {
+        package let title: String
+        package let summary: String
+        package let firstFrame: Int
+        package let lastFrame: Int
     }
 
     private struct Seconds: Decodable {
@@ -35,7 +40,7 @@ enum TimelineMomentAnalysis {
     private struct RawMoment: Decodable {
         let title: String
         let summary: String
-        let start: Seconds?
+        package let start: Seconds?
         let end: Seconds?
         let firstFrame: Int?
         let lastFrame: Int?
@@ -47,11 +52,11 @@ enum TimelineMomentAnalysis {
 
     static var labelsFrames: Bool { ProcessInfo.processInfo.environment["FILEID_TIMELINE_FRAME_LABELS"] == "1" }
 
-    struct InvalidResponse: LocalizedError {
-        var errorDescription: String? { "The visual model did not return valid moment evidence. This interval remains incomplete." }
+    package struct InvalidResponse: LocalizedError {
+        package var errorDescription: String? { "The visual model did not return valid moment evidence. This interval remains incomplete." }
     }
 
-    static func windows(duration: Double, signals: [TimelineSignalAnalysis.Signal]) -> [Window] {
+    package static func windows(duration: Double, signals: [TimelineSignalAnalysis.Signal]) -> [Window] {
         guard duration.isFinite, duration > 0, duration <= 21_600 else { return [] }
         let validSignals = signals.filter {
             $0.seconds.isFinite && $0.seconds >= 0 && $0.seconds < duration
@@ -82,7 +87,7 @@ enum TimelineMomentAnalysis {
         return result
     }
 
-    static func parse(_ raw: String, times: [Double]) throws -> [Moment] {
+    package static func parse(_ raw: String, times: [Double]) throws -> [Moment] {
         guard (2...8).contains(times.count), raw.utf8.count <= 16_384,
               let begin = raw.firstIndex(of: "{"), let finish = raw.lastIndex(of: "}"), begin <= finish,
               let response = try? JSONDecoder().decode(Response.self, from: Data(raw[begin...finish].utf8)),
@@ -122,7 +127,7 @@ enum TimelineMomentAnalysis {
         return times.indices.min { abs(times[$0] - seconds) < abs(times[$1] - seconds) }
     }
 
-    static func distinctFrameIndices(times: [Double], window: Window) throws -> [Int] {
+    package static func distinctFrameIndices(times: [Double], window: Window) throws -> [Int] {
         guard (2...8).contains(times.count),
               times.allSatisfy({ $0.isFinite && $0 >= window.start && $0 <= window.end }),
               zip(times, times.dropFirst()).allSatisfy({ $0 <= $1 }) else { throw InvalidResponse() }
@@ -131,7 +136,7 @@ enum TimelineMomentAnalysis {
         return indices
     }
 
-    static func chapters(moments: [Moment], times: [Double], window: Window, fileID: Int64,
+    package static func chapters(moments: [Moment], times: [Double], window: Window, fileID: Int64,
                          sourceRevision: String, modelVersion: String) -> [CatalogChapter] {
         guard (2...8).contains(times.count),
               times.allSatisfy({ $0.isFinite && $0 >= window.start && $0 <= window.end }),

@@ -36,13 +36,13 @@ final class VLMPassStats: @unchecked Sendable {
     }
 }
 
-enum VLMTiming {
-    static func loadAverage() -> Double {
+package enum VLMTiming {
+    package static func loadAverage() -> Double {
         var load = [Double](repeating: 0, count: 3)
         return getloadavg(&load, 3) > 0 ? load[0] : -1
     }
 
-    static func milliseconds(since start: ContinuousClock.Instant) -> Double {
+    package static func milliseconds(since start: ContinuousClock.Instant) -> Double {
         let elapsed = ContinuousClock.now - start
         return Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
     }

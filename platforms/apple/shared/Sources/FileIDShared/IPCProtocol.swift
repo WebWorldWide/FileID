@@ -408,33 +408,6 @@ public struct BenchmarkResult: Codable, Sendable, Equatable {
     }
 }
 
-public struct ModelBenchmark: Codable, Sendable, Equatable {
-    public let measuredAt: String
-    public let hardware: String
-    public let loadSeconds: Double
-    public let promptTokensPerSecond: Double?
-    public let generatedTokensPerSecond: Double?
-    public let secondsPerImage: Double?
-    public let peakResidentGB: Double?
-    public let jsonValidRate: Double?
-    public let probeAccuracy: Double?
-    public let tunedArguments: [String]?
-
-    public init(measuredAt: String, hardware: String, loadSeconds: Double, promptTokensPerSecond: Double? = nil,
-                generatedTokensPerSecond: Double? = nil, secondsPerImage: Double? = nil, peakResidentGB: Double? = nil,
-                jsonValidRate: Double? = nil, probeAccuracy: Double? = nil, tunedArguments: [String]? = nil) {
-        self.measuredAt = measuredAt
-        self.hardware = hardware
-        self.loadSeconds = loadSeconds
-        self.promptTokensPerSecond = promptTokensPerSecond
-        self.generatedTokensPerSecond = generatedTokensPerSecond
-        self.secondsPerImage = secondsPerImage
-        self.peakResidentGB = peakResidentGB
-        self.jsonValidRate = jsonValidRate
-        self.probeAccuracy = probeAccuracy
-        self.tunedArguments = tunedArguments
-    }
-}
 
 public struct HealthCheckResult: Codable, Sendable {
     public let requestID: String

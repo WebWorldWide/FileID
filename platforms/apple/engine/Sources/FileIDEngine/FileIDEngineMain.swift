@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // FileIDEngine — child process spawned by the FileID SwiftUI app.
 // Reads IPC commands from stdin (newline-delimited JSON), emits events
 // over the fd-2 pipe in the same format (dup'ed aside at startup by
@@ -22,6 +23,7 @@ struct FileIDEngineMain {
 
     static func main() async {
         ORTPrivacy.disableTelemetryBeforeLoad()
+        VLMCoreHostSetup.install()
         ImagingLog.route { level, event, error, metrics in
             if level == "warn" { return JSONLog.shared.warn(ev: event, error: error) }
             JSONLog.shared.info(ev: event, extra: metrics.isEmpty ? nil : metrics.mapValues { AnyCodable($0) })
@@ -729,13 +731,15 @@ struct FileIDEngineMain {
                 SleepGuard.shared.begin(reason: "Model prewarm")
                 defer { SleepGuard.shared.end() }
                 do {
-                    try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
-                        Task {
-                            await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
-                                modelKind: kind.rawValue, fraction: frac, message: msg,
-                                bytesDone: done > 0 ? done : nil,
-                                totalBytes: total > 0 ? total : nil
-                            )))
+                    try await catchingMLX {
+                        try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
+                            Task {
+                                await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                                    modelKind: kind.rawValue, fraction: frac, message: msg,
+                                    bytesDone: done > 0 ? done : nil,
+                                    totalBytes: total > 0 ? total : nil
+                                )))
+                            }
                         }
                     }
                     await DeepAnalyze.shared.markInstalledSentinel(kind: kind)

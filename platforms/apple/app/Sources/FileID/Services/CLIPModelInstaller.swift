@@ -118,7 +118,11 @@ final class CLIPModelInstaller: ModelInstalling {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install CLIP models") {
-                await self?.runHubFetch()
+                if EngineModelInstall.active {
+                    await self?.runEngineInstall()
+                } else {
+                    await self?.runHubFetch()
+                }
             }
             self?.task = nil
         }
@@ -231,6 +235,28 @@ final class CLIPModelInstaller: ModelInstalling {
         // The engine embeds search text; marking ready lets search use it now.
         markTextEncoderReady()
         refreshStatus()
+    }
+
+    /// Under the Rust engine the engine downloads the same four files to the
+    /// same places (`prewarmModel` for the image and text encoders).
+    private func runEngineInstall() async {
+        installing = true
+        defer { installing = false }
+        status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
+        let outcome = await EngineModelInstall.install(kinds: ["mobileclip_s2", "clip_text"], files: Self.requiredFiles) { [weak self] fraction, message in
+            guard let self, self.installing else { return }
+            self.status = .downloading(fraction: fraction, message: message, bytesPerSecond: 0, etaSeconds: 0)
+        }
+        switch outcome {
+        case .finished:
+            markTextEncoderReady()
+            refreshStatus()
+        case .cancelled:
+            status = .missing(reason: "Cancelled.")
+        case .failed(let message):
+            status = .installFailed(message)
+            recomputePresentFiles()
+        }
     }
 
     /// `.clip-staging-<UUID>` roots from a process killed mid-install

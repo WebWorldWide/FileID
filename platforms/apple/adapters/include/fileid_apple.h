@@ -28,8 +28,8 @@ extern "C" {
 /* Interface version the library implements. */
 uint32_t fileid_apple_abi_version(void);
 
-/* Release adapter-owned state (sleep assertions, bookmark leases) before the
- * engine's hard exit. Idempotent. */
+/* Release adapter-owned state (sleep assertions, bookmark leases) and cancel
+ * VLM requests before the engine's hard exit. Idempotent. */
 void fileid_apple_shutdown(void);
 
 /* Free memory the adapter allocated for the caller. NULL is ignored. */
@@ -143,6 +143,55 @@ void fileid_apple_take_tiles_close(uint64_t tiles);
 
 /* --- end Stage 6 --- */
 
+/* --- Stage 8: timeline, speech and video tools --- */
+/* `cancel` arguments point at a caller-owned flag (a Rust AtomicBool) and may be
+ * NULL; set it to stop long work. Replies are JSON objects freed with
+ * fileid_apple_free; a failure is {"error": text}. */
+
+/* Inspect a media file with AVFoundation. `strict` applies the media tools'
+ * refusals (unplayable or protected input, duration and dimension limits);
+ * otherwise only what timeline analysis reads. `mime_type` (may be NULL) names
+ * the type of a staged file without a media extension. Reply: duration,
+ * videoCount, audioCount, otherCount, width, height (displayed), rotation
+ * (clockwise degrees), videoCodec, audioCodec (ffprobe names), videoStart,
+ * audioStart, audioDuration, hdr, alpha, frameRate. */
+char *fileid_apple_media_probe(const char *path, const char *mime_type, bool strict);
+
+/* One export from {"recipe": ToolRecipe, "source", "output"}.
+ * trim/remux/audio/proxy/rotate run AVAssetExportSession and reply {"probe":
+ * source probe}; "video" fits or pads to a frame, stabilizes or follows people
+ * and replies {"probe": output probe, "summary"}, or, without "output", only
+ * plans and replies the source probe and summary. The output must not exist. */
+char *fileid_apple_media_export(const char *request_json, const bool *cancel);
+
+/* One upright RGB frame (width*height*3 bytes, freed with fileid_apple_free)
+ * at `seconds`, drawn at exactly width x height; NULL on failure.
+ * *out_seconds receives the decoded frame's time. */
+uint8_t *fileid_apple_video_frame(const char *path, double seconds, uint32_t width,
+                                  uint32_t height, double *out_seconds);
+
+/* Frame pool: one sequential decode writing a JPEG no larger than max_side for
+ * the first frame at or after every `interval`, plus manifest.json ({duration,
+ * size, modifiedAt, frames: [{seconds, file, signature (32x18 gray)}]}), into
+ * the existing empty `directory`. Returns 0, 2 (invalid request), 3 (failed) or
+ * 4 (the source changed while decoding). */
+int32_t fileid_apple_video_pool(const char *path, double interval, uint32_t max_side,
+                                const char *directory, const bool *cancel);
+
+/* On-device speech recognition: 1 ready, 0 unavailable or denied, -1 the host
+ * bundle has no speech usage description (never asks). With `ask`, a user who
+ * has not decided sees the system permission prompt. */
+int32_t fileid_apple_speech_status(bool ask);
+
+/* "apple-speech-ondevice-v1/<locale>/macOS-<version>", freed with fileid_apple_free. */
+char *fileid_apple_speech_model_version(void);
+
+/* Transcribe [start, end) seconds of the first audio track on device. Reply
+ * {"segments": [{text, timestamp (relative to start), duration, confidence}]}. */
+char *fileid_apple_speech_transcribe(const char *path, double start, double end,
+                                     const bool *cancel);
+/* --- end Stage 8 --- */
+
 /* --- Stage 5: scan decode and per-file ML --- */
 /* Images are handles to a decoded CGImage held by the adapter; release each
  * with fileid_apple_image_release. Results are JSON objects (free with
@@ -210,6 +259,34 @@ bool fileid_apple_ramplus_load(const char *directory);
 char *fileid_apple_ramplus_tag(uint64_t image, const char *vision_confidences,
                                size_t face_count);
 /* --- end Stage 5 --- */
+
+/* --- Stage 7: MLX vision-language models --- */
+
+/* Events a VLM request reports through its callback. */
+#define FILEID_APPLE_VLM_TOKEN 1    /* payload: UTF-8 text chunk */
+#define FILEID_APPLE_VLM_PROGRESS 2 /* payload: JSON object */
+#define FILEID_APPLE_VLM_DONE 3     /* payload: JSON reply; terminal */
+#define FILEID_APPLE_VLM_FAILED 4   /* payload: {"message","cancelled"}; terminal */
+
+/* Called from any thread. The payload is valid only during the call. Exactly
+ * one terminal event (DONE or FAILED) ends every accepted request; the
+ * callback is never called for it again. */
+typedef void (*fileid_apple_vlm_callback)(void *context, uint32_t event,
+                                          const uint8_t *payload, size_t length);
+
+/* Start a VLM request: a UTF-8 JSON object with an "op" (status, load, unload,
+ * prefetch, analyze, generate, chat, transcribe, sequence, benchmark) and its
+ * fields. Models load only from the local folder the request names; nothing
+ * is downloaded. Returns a handle, 0 when the request was refused (then the
+ * callback is never called). */
+uint64_t fileid_apple_vlm_submit(const uint8_t *request, size_t length,
+                                 fileid_apple_vlm_callback callback, void *context);
+
+/* Cancel a running request; it still reports its terminal event. Unknown
+ * handles are ignored. */
+void fileid_apple_vlm_cancel(uint64_t handle);
+
+/* --- end Stage 7 --- */
 
 #ifdef __cplusplus
 }

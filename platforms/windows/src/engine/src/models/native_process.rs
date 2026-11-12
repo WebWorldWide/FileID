@@ -285,6 +285,108 @@ impl Drop for ParentOwnership {
     }
 }
 
+/// Re-execution of this engine binary as one of its own AVFoundation media
+/// workers (the Mac app's `fileidd`), so a decoder crash on a damaged file ends
+/// a worker rather than the engine. Only FileID's own executable is started,
+/// with a fixed worker flag first; no shell, other program or network.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) mod self_worker {
+    use anyhow::{bail, Context, Result};
+    use std::ffi::OsStr;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Worker {
+        SampleVideo,
+        SampleVideoPool,
+        ConvertVideo,
+    }
+
+    impl Worker {
+        pub(crate) const ALL: [Worker; 3] = [Worker::SampleVideo, Worker::SampleVideoPool, Worker::ConvertVideo];
+
+        pub(crate) fn flag(self) -> &'static str {
+            match self {
+                Worker::SampleVideo => "--sample-video",
+                Worker::SampleVideoPool => "--sample-video-pool",
+                Worker::ConvertVideo => "--convert-video",
+            }
+        }
+
+        pub(crate) fn from_flag(flag: &OsStr) -> Option<Self> {
+            Self::ALL.into_iter().find(|worker| OsStr::new(worker.flag()) == flag)
+        }
+    }
+
+    pub(crate) struct Output {
+        pub(crate) status: i32,
+        pub(crate) stdout: Vec<u8>,
+    }
+
+    fn executable() -> Result<std::path::PathBuf> {
+        // Unit tests run inside the test harness; the engine binary sits one
+        // folder up in Cargo's target directory.
+        #[cfg(test)]
+        if let Some(path) = std::env::var_os("FILEID_TEST_ENGINE_PATH") {
+            return Ok(path.into());
+        }
+        let current = std::env::current_exe().context("The engine executable is unavailable")?;
+        #[cfg(test)]
+        let current = current.parent().and_then(|deps| deps.parent()).context("No target folder")?.join("FileIDEngine");
+        Ok(current)
+    }
+
+    /// Runs `worker` to completion. Stdout (at most `limit` bytes) is returned
+    /// with the exit status; the child is killed and an error returned when
+    /// `cancel` is set or `timeout` passes.
+    pub(crate) fn run(worker: Worker, args: &[&OsStr], timeout: Duration, limit: usize, cancel: &AtomicBool) -> Result<Output> {
+        if cancel.load(Ordering::Acquire) {
+            bail!("The media worker was cancelled")
+        }
+        let mut child = Command::new(executable()?)
+            .arg(worker.flag())
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("The media worker could not start")?;
+        let stdout = child.stdout.take().context("The media worker has no output")?;
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.take(limit as u64 + 1).read_to_end(&mut bytes);
+            bytes
+        });
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            let stop = if cancel.load(Ordering::Acquire) {
+                Some("The media worker was cancelled")
+            } else if started.elapsed() > timeout {
+                Some("The media worker exceeded its time limit and was stopped")
+            } else {
+                None
+            };
+            if let Some(reason) = stop {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                bail!(reason)
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = reader.join().map_err(|_| anyhow::anyhow!("The media worker output reader failed"))?;
+        if stdout.len() > limit {
+            bail!("The media worker returned too much output")
+        }
+        Ok(Output { status: status.code().unwrap_or(-1), stdout })
+    }
+}
 
 #[cfg(test)]
 #[path = "native_owner_integration_tests.rs"]

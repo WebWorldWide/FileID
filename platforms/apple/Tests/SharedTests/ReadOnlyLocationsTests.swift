@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("Read-only example locations")
 struct ReadOnlyLocationsTests {

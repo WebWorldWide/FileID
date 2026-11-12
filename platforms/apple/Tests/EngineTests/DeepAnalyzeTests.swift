@@ -12,6 +12,7 @@ import Foundation
 import AVFoundation
 import GRDB
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 // Disambiguate from GRDB.Database (both modules export `Database`).
 private typealias Database = FileIDEngine.Database
 import FileIDShared

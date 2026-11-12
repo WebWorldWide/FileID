@@ -62,6 +62,8 @@ final class ModelInstaller: ModelInstalling {
         let ownsDirectory: Bool
         let approxBytes: Int64
         let downloads: [Download]
+        /// The `prewarmModel` kind the Rust engine installs this as.
+        let engineKind: String
 
         func destination(_ download: Download) -> URL { directory.appendingPathComponent(download.file) }
         var primaryFile: URL { destination(downloads[0]) }
@@ -77,7 +79,8 @@ final class ModelInstaller: ModelInstalling {
             .init(artifact: "ram_plus_model", file: "ram_plus.onnx", parts: 12),
             .init(artifact: "ram_plus_tags", file: "ram_plus_tags.txt"),
             .init(artifact: "ram_plus_thresholds", file: "ram_plus_thresholds.txt", optional: true),
-        ]))
+        ],
+        engineKind: "ram_plus"))
 
     static let bge = ModelInstaller(Spec(
         activity: "Install BGE model",
@@ -87,7 +90,8 @@ final class ModelInstaller: ModelInstalling {
         downloads: [
             .init(artifact: "bge_model", file: "bge_small.onnx", parts: 8),
             .init(artifact: "bge_vocab", file: "vocab.txt"),
-        ]))
+        ],
+        engineKind: "bge_text"))
 
     static let face = ModelInstaller(Spec(
         activity: "Install face model",
@@ -96,7 +100,8 @@ final class ModelInstaller: ModelInstalling {
         approxBytes: FaceEmbedderKind.sface.approxBytes,
         downloads: [
             .init(artifact: "sface_embedder", file: FaceEmbedderKind.sface.modelFileName, parts: 12),
-        ]))
+        ],
+        engineKind: "arcface"))
 
     static let faceMesh = ModelInstaller(Spec(
         activity: "Install eye model",
@@ -105,7 +110,8 @@ final class ModelInstaller: ModelInstalling {
         approxBytes: ModelManifest.artifact(id: "face_mesh_landmarks")?.approxBytes ?? 0,
         downloads: [
             .init(artifact: "face_mesh_landmarks", file: "face_landmarks.onnx"),
-        ]))
+        ],
+        engineKind: "face_mesh"))
 
     let spec: Spec
     private(set) var status: Status = .unknown
@@ -131,7 +137,11 @@ final class ModelInstaller: ModelInstalling {
         guard task == nil else { return }
         task = Task { [weak self, activity = spec.activity] in
             await AppSleepActivity.run(reason: activity) {
-                await self?.runInstall()
+                if EngineModelInstall.active {
+                    await self?.runEngineInstall()
+                } else {
+                    await self?.runInstall()
+                }
             }
             self?.task = nil
         }
@@ -202,6 +212,19 @@ final class ModelInstaller: ModelInstalling {
             return
         }
         refreshStatus()
+    }
+
+    private func runEngineInstall() async {
+        status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
+        let outcome = await EngineModelInstall.install(kinds: [spec.engineKind], files: spec.downloads.map(spec.destination)) { [weak self] fraction, message in
+            guard let self, self.task != nil else { return }
+            self.status = .downloading(fraction: fraction, message: message, bytesPerSecond: 0, etaSeconds: 0)
+        }
+        switch outcome {
+        case .finished: refreshStatus()
+        case .cancelled: status = .missing(reason: "Cancelled.")
+        case .failed(let message): status = .installFailed(message)
+        }
     }
 
     static func progressMessage(written: Int64, total: Int64, suffix: String = "") -> String {

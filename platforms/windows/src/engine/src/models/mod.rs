@@ -20,9 +20,11 @@
 
 pub mod bge_text;
 pub mod catalog;
+pub(crate) mod resident_model;
 pub mod launch_tuning;
 pub mod license;
 pub mod manifest;
+pub mod mlx;
 pub mod benchmark;
 pub mod clip_text;
 pub mod clip_space;

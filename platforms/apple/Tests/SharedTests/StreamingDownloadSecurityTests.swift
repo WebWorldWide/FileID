@@ -7,6 +7,7 @@
 // functions those delegates call, which are the actual invariants.
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 import Foundation
 
 @Suite("TLSPinning.allowsRedirect — https-only + host allowlist")

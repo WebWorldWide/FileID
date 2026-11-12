@@ -128,38 +128,152 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
         capabilities: vec![],
     }
 }
+/// The Swift engine's wording in the Mac app's engine (the reference there).
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const UNSUPPORTED_RECIPE: &str = "Choose files, an output folder, and a supported recipe.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const UNSUPPORTED_RECIPE: &str = "Unsupported export recipe";
+
+fn preview_message(count: usize) -> String {
+    if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
+        format!("Creates {count} new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.")
+    } else {
+        "Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into()
+    }
+}
 fn capabilities() -> Vec<ToolCapability> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    let video = apple_video::capabilities();
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    let video = portable_video_capabilities();
+    portable_capabilities().into_iter().take(2).chain(video).chain(media_capabilities()).collect()
+}
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+fn portable_video_capabilities() -> Vec<ToolCapability> {
+    portable_capabilities().into_iter().skip(2).collect()
+}
+fn portable_capabilities() -> Vec<ToolCapability> {
     vec![ToolCapability{id:"photo".into(),available:true,input_formats:vec!["png".into(),"jpeg".into()],output_formats:vec!["png".into(),"jpeg".into(),"tiff".into()],detail:"Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected; this does not recover missing detail. EXIF orientation is applied. Camera/location metadata is stripped; inputs with embedded ICC profiles are rejected until color-managed conversion is available. Output is 8-bit SDR. JPEG transparency is flattened onto white. HEIC/TIFF inputs are not yet supported on this adapter.".into()},
     ToolCapability{id:"chapters".into(),available:true,input_formats:vec!["catalog chapters".into()],output_formats:vec!["json".into(),"vtt".into()],detail:"Export current chapter markers. WebVTT is a chapter cue list, not speech subtitles.".into()},
     ToolCapability{id:"video".into(),available:super::video_export::available(),input_formats:vec!["mp4".into(),"mov".into(),"m4v".into()],output_formats:vec!["mp4".into()],detail:"Vetted local FFmpeg/OpenH264 runtime exports 1280 or 1920 pixel H.264/AAC MP4. Source, 9:16, 16:9, 1:1 and 4:5 frames fit the entire image with padding. SDR only; one video and at most one audio stream. Originals are preserved.".into()},
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
-        .into_iter()
-        .chain(media_capabilities())
-        .collect()
+}
+
+/// The FFmpeg video export, or the AVFoundation one in the Mac app's engine.
+fn video_preview(recipe: &ToolRecipe, source: &Path) -> Result<String> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    return Ok(crate::apple::media::convert_video(recipe, source, None, &AtomicBool::new(false))?.summary);
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        let _ = recipe;
+        super::video_export::probe(source)?;
+        Ok(String::new())
+    }
+}
+fn video_check(recipe: &ToolRecipe, source: &Path) -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        let _ = recipe;
+        let extension = source.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+        if !matches!(extension.as_deref(), Some("mp4" | "mov" | "m4v")) {
+            bail!("Video inputs must be MP4, MOV or M4V.")
+        }
+        Ok(())
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    video_preview(recipe, source).map(drop)
+}
+/// Writes the video export to the just-created, empty stage; returns the
+/// framing and stabilization summary.
+fn video_export(recipe: &ToolRecipe, source: &Path, (stage, file): (&Path, &File), cancelled: &AtomicBool) -> Result<String> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        let _ = file;
+        // AVAssetExportSession creates its output; the placeholder is ours and empty.
+        if fs::metadata(stage)?.len() != 0 {
+            bail!("The staged output is occupied.")
+        }
+        fs::remove_file(stage)?;
+        let converted = crate::apple::media::convert_video(recipe, source, Some(stage), cancelled)?;
+        File::open(stage)?.sync_all()?;
+        Ok(converted.summary)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        let _ = stage;
+        let before = super::video_export::probe(source)?;
+        super::video_export::export(source, file, recipe, &before, cancelled)?;
+        Ok(String::new())
+    }
+}
+/// The AVFoundation worker verifies its own output before it replies.
+fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        let _ = (recipe, source, stage);
+        Ok(())
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        let before = super::video_export::probe(source)?;
+        let after = super::video_export::probe_stage(stage)?;
+        super::video_export::verify(&before, &after, recipe)
+    }
+}
+
+/// The Swift engine's video export rules and capability text for the Mac
+/// app's engine, which runs the same AVFoundation export.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+mod apple_video {
+    use crate::ipc::{ToolCapability, ToolRecipe};
+
+    pub(super) fn capabilities() -> Vec<ToolCapability> {
+        vec![
+            ToolCapability { id: "video".into(), available: true, input_formats: vec!["mp4".into(), "mov".into(), "m4v".into()], output_formats: vec!["mp4".into()], detail: "Native H.264/AAC SDR export at 1280, 1920 or 3840 pixels. Optional conventional enlargement renders smaller sources at the selected resolution without recovering detail. Optional 9:16, 16:9, 1:1 or 4:5 frames fit the entire picture, or follow detected people with smooth cropping and full-picture fallback. Follow-people mode samples twice per second and supports clips up to ten minutes. Optional stabilization corrects estimated translation and rotation at up to 60 fps, with up to 12% edge-covering zoom and reported uncorrected samples. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved.".into() },
+            ToolCapability { id: "videoEnhancement".into(), available: false, input_formats: vec![], output_formats: vec![], detail: "Neural super-resolution is unavailable. Conventional enlargement is available through video export.".into() },
+        ]
+    }
+
+    /// The Swift engine's `MediaTools.supports` for photo, chapters and video.
+    pub(super) fn supports(recipe: &ToolRecipe) -> bool {
+        let aspect = recipe.video_aspect_ratio.as_deref().unwrap_or("source");
+        (1..=8192).contains(&recipe.max_dimension)
+            && recipe.trim_start_seconds.is_none()
+            && recipe.trim_end_seconds.is_none()
+            && recipe.trim_mode.is_none()
+            && recipe.rotation_degrees.is_none()
+            && (recipe.allow_upscale != Some(true) || ["photo", "video"].contains(&recipe.kind.as_str()))
+            && (recipe.video_aspect_ratio.is_none() || recipe.kind == "video")
+            && (recipe.video_framing.is_none() || recipe.kind == "video")
+            && (recipe.video_stabilization.is_none() || recipe.kind == "video")
+            && recipe.video_framing.as_deref().is_none_or(|framing| ["fit", "auto"].contains(&framing))
+            && (recipe.video_framing.as_deref() != Some("auto") || aspect != "source")
+            && ["source", "9:16", "16:9", "1:1", "4:5"].contains(&aspect)
+            && ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(&recipe.format.as_str()))
+                || (recipe.kind == "video" && recipe.format == "mp4" && [1280, 1920, 3840].contains(&recipe.max_dimension)))
+    }
 }
 fn media_capabilities() -> Vec<ToolCapability> {
-    let available = media_recipes::runtime().is_some();
+    let runtime = media_recipes::runtime();
     let inputs = || vec!["mp4".to_owned(), "mov".to_owned(), "m4v".to_owned()];
-    [
-        ("trim", vec!["mp4", "mov"], "Keep a start-to-end interval. Keyframe mode copies H.264/HEVC video and AAC audio without re-encoding and may start at the preceding keyframe; exact mode re-encodes to H.264/AAC MP4 and refuses HDR."),
-        ("remux", vec!["mp4", "mov"], "Move H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. Other codecs are refused rather than converted."),
-        ("audio", vec!["m4a"], "Write the single audio track as AAC in an M4A file. Files without audio are refused."),
-        ("proxy", vec!["mp4"], "Make a 640 or 960 pixel H.264/AAC preview copy linked to its source. Smaller sources are not enlarged. SDR only."),
-        ("rotate", vec!["mp4", "mov"], "Turn the displayed picture 90, 180 or 270 degrees clockwise by changing its orientation metadata. H.264/HEVC video and AAC audio are copied without re-encoding."),
-    ]
-    .into_iter()
-    .map(|(id, outputs, detail)| ToolCapability {
-        id: id.into(),
-        available,
-        input_formats: inputs(),
-        output_formats: outputs.into_iter().map(str::to_owned).collect(),
-        detail: if available { detail.into() } else { media_recipes::UNAVAILABLE.into() },
-    })
-    .collect()
+    [("trim", vec!["mp4", "mov"]), ("remux", vec!["mp4", "mov"]), ("audio", vec!["m4a"]), ("proxy", vec!["mp4"]), ("rotate", vec!["mp4", "mov"])]
+        .into_iter()
+        .map(|(id, outputs)| ToolCapability {
+            id: id.into(),
+            available: runtime.is_some(),
+            input_formats: inputs(),
+            output_formats: outputs.into_iter().map(str::to_owned).collect(),
+            detail: runtime.as_ref().map_or(media_recipes::UNAVAILABLE, |runtime| runtime.detail(id)).into(),
+        })
+        .collect()
 }
 fn supports(recipe: &ToolRecipe) -> bool {
     if media_recipes::is_media(&recipe.kind) {
         return media_recipes::validate(recipe).is_ok() && media_recipes::runtime().is_some();
+    }
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if recipe.kind == "video" || recipe.allow_upscale == Some(true) || recipe.video_framing.is_some() || recipe.video_stabilization.is_some() {
+        return apple_video::supports(recipe);
     }
     (1..=8192).contains(&recipe.max_dimension)
         && recipe.trim_start_seconds.is_none()
@@ -305,7 +419,7 @@ fn run_action(
                 || ids.iter().collect::<HashSet<_>>().len() != ids.len()
                 || !supports(recipe)
             {
-                bail!("Unsupported export recipe")
+                bail!(UNSUPPORTED_RECIPE)
             }
             let destination = Path::new(request.destination.as_deref().context("Choose an output folder")?);
             read_only::require_source_mutation(destination)?;
@@ -332,13 +446,13 @@ fn run_action(
                 if recipe.kind == "photo" {
                     validate_image(source_path)?;
                 }
-                if recipe.kind == "video" {
-                    super::video_export::probe(source_path)?;
-                }
-                let note = match &media {
+                let mut note = match &media {
                     Some(runtime) => media_recipes::preview(runtime.as_ref(), recipe, source_path)?.to_owned(),
                     None => String::new(),
                 };
+                if recipe.kind == "video" {
+                    note = video_preview(recipe, source_path)?;
+                }
                 let stem = source_path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -354,12 +468,15 @@ fn run_action(
                     "Export".to_owned()
                 };
                 let frame = if recipe.kind == "video" {
+                    let framing = if recipe.video_framing.as_deref() == Some("auto") { "People" } else { "Fit" };
+                    let stabilized = if recipe.video_stabilization == Some(true) { " - Stabilized" } else { "" };
                     recipe
                         .video_aspect_ratio
                         .as_deref()
                         .filter(|value| *value != "source")
-                        .map(|value| format!(" - {} Fit", value.replace(':', "x")))
+                        .map(|value| format!(" - {} {framing}", value.replace(':', "x")))
                         .unwrap_or_default()
+                        + stabilized
                 } else {
                     String::new()
                 };
@@ -407,7 +524,7 @@ fn run_action(
             db.with(|conn| Ok(conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,plan_json,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?))?;
             result.outputs = plan.items.into_iter().map(|i| i.output).collect();
             result.operation_id = Some(id);
-            result.message="Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into();
+            result.message = preview_message(result.outputs.len());
         }
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first")?;
@@ -449,7 +566,7 @@ fn run_action(
                     bail!("A source changed after preview. Preview again")
                 }
                 if plan.recipe.kind == "video" {
-                    super::video_export::probe(Path::new(&item.output.source_path))?;
+                    video_check(&plan.recipe, Path::new(&item.output.source_path))?;
                 }
                 if let Some(runtime) = &media {
                     media_recipes::preview(runtime.as_ref(), &plan.recipe, Path::new(&item.output.source_path))?;
@@ -493,6 +610,7 @@ fn run_action(
                         Ok(conn.execute("UPDATE catalog_operations SET plan_json=?1 WHERE id=?2", params![plan_json, id])?)
                     })?;
                     let mut file = OpenOptions::new().write(true).create_new(true).open(&stage)?;
+                    let mut video_summary = String::new();
                     let prepared = (|| -> Result<()> {
                         let mut media_source = None;
                         if let Some(runtime) = &media {
@@ -500,18 +618,16 @@ fn run_action(
                                 runtime.as_ref(),
                                 &plan.recipe,
                                 source,
-                                &file,
+                                (&stage, &file),
                                 cancelled.as_deref().context("Missing media cancellation state")?,
                             )?);
                         } else if plan.recipe.kind == "photo" {
                             export_photo(source, &mut file, &plan.recipe)?;
                         } else if plan.recipe.kind == "video" {
-                            let before = super::video_export::probe(source)?;
-                            super::video_export::export(
-                                source,
-                                &file,
+                            video_summary = video_export(
                                 &plan.recipe,
-                                &before,
+                                source,
+                                (&stage, &file),
                                 cancelled.as_deref().context("Missing video cancellation state")?,
                             )?;
                         } else {
@@ -530,9 +646,7 @@ fn run_action(
                             }
                         }
                         if plan.recipe.kind == "video" {
-                            let before = super::video_export::probe(source)?;
-                            let after = super::video_export::probe_stage(&stage)?;
-                            super::video_export::verify(&before, &after, &plan.recipe)?;
+                            video_verify(&plan.recipe, source, &stage)?;
                         }
                         if let (Some(runtime), Some(before)) = (&media, &media_source) {
                             media_recipes::verify_stage(runtime.as_ref(), &plan.recipe, before, &stage)?;
@@ -563,10 +677,10 @@ fn run_action(
                         fs::hard_link(&stage, output)?;
                         let last = receipts.last_mut().context("Missing export receipt")?;
                         last.output.state = "completed".into();
-                        last.output.message = if media.is_some() {
-                            format!("Original preserved. {}", media_recipes::summary(&plan.recipe))
-                        } else {
-                            "Original preserved.".into()
+                        last.output.message = match (&media, video_summary.is_empty()) {
+                            (Some(runtime), _) => format!("Original preserved. {}", runtime.summary(&plan.recipe)),
+                            (None, false) => format!("Original preserved. {video_summary}"),
+                            (None, true) => "Original preserved.".into(),
                         };
                         let metadata = output.metadata()?;
                         let modified = metadata
@@ -1032,8 +1146,10 @@ mod tests {
             r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#
         )
         .is_err());
+        // The Mac app's engine enlarges video conventionally, as the Swift engine does.
+        let mac = cfg!(all(target_os = "macos", feature = "apple-adapters"));
         for (kind, format, dimension) in [("chapters", "json", 64), ("video", "mp4", 1920), ("photo", "png", 8193)] {
-            assert!(!supports(&ToolRecipe {
+            assert_eq!(mac && kind == "video", supports(&ToolRecipe {
                 kind: kind.into(),
                 format: format.into(),
                 max_dimension: dimension,
@@ -1051,7 +1167,7 @@ mod tests {
             serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":"9:16"}"#)
                 .unwrap();
         assert_eq!(framed.video_aspect_ratio.as_deref(), Some("9:16"));
-        assert_eq!(supports(&framed), super::super::video_export::available());
+        assert_eq!(supports(&framed), super::super::timeline_media::available());
         assert!(serde_json::from_str::<ToolRecipe>(
             r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":1}"#
         )
@@ -1825,8 +1941,8 @@ mod tests {
 
     #[test]
     fn media_recipes_refuse_before_any_output_without_the_vetted_runtime() {
-        if super::super::video_export::available() {
-            eprintln!("the vetted FFmpeg runtime is installed; the unavailable path cannot be exercised");
+        if media_recipes::runtime().is_some() {
+            eprintln!("a media runtime is available; the unavailable path cannot be exercised");
             return;
         }
         let mut fixture = media_fixture();

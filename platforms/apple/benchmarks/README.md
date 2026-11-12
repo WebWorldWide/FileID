@@ -5,7 +5,7 @@ Run from the repository root on macOS. This compiles the actual HNSW source in r
 ```sh
 work_dir="$(mktemp -d /tmp/fileid-vector-bench.XXXXXX)"
 xcrun swiftc -O -emit-library -emit-module -module-name FileIDShared \
-  platforms/apple/shared/Sources/FileIDShared/ReadOnlyLocations.swift \
+  platforms/apple/shared/Sources/FileIDModelInfo/ReadOnlyLocations.swift \
   -o "$work_dir/libFileIDShared.dylib" \
   -emit-module-path "$work_dir/FileIDShared.swiftmodule"
 xcrun swiftc -O -parse-as-library -I "$work_dir" -L "$work_dir" -lFileIDShared \

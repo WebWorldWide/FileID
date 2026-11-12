@@ -16,3 +16,5 @@ and unit tests (e.g. the Windows `shell/ocr.rs` known-text test).
 Keep fixtures tiny and rights-clear. No real personal photos.
 
 - `face-alignment.json` — synthetic landmark/template fixtures shared by Swift and Rust; checks geometry only, without personal photographs or identity-accuracy claims.
+- `mlx-verified-install.json` — one MLX model install as the Swift and Rust engines each record it (`.fileid-verified-<revision>`); both engines check they write their own form and accept the other.
+- `mac-model-layout.json` — the Mac app's ONNX model files by install kind; the app's installers and the Rust engine it hosts both check it.

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite struct ModelResidencyTests {
     @Test func sharedMemoryAdmissionReservesSystemHeadroom() throws {

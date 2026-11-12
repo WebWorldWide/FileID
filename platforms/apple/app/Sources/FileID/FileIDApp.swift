@@ -37,6 +37,7 @@ struct FileIDApp: App {
                 .ignoresSafeArea()
                 .onAppear {
                     let engine = engine
+                    EngineModelInstall.engine = engine
                     ThumbnailService.shared.videoSource = { path, modifiedAt, maxPixelSize in
                         await engine.generateVideoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: maxPixelSize)
                     }

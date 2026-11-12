@@ -4,6 +4,7 @@ import ImageIO
 import Testing
 import UniformTypeIdentifiers
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 @testable import FileIDImaging
 
 @Suite("HEIF decoder")

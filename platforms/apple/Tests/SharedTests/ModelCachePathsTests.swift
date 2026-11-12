@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("Isolated visual-model cache")
 struct ModelCachePathsTests {

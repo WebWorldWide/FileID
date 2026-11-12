@@ -1,12 +1,16 @@
 import Foundation
 
-enum TimelineSignalAnalysis {
-    struct Signal: Codable, Sendable, Equatable {
-        let seconds: Double
-        let changeScore: Double
+package enum TimelineSignalAnalysis {
+    package struct Signal: Codable, Sendable, Equatable {
+        package let seconds: Double
+        package let changeScore: Double
+        package init(seconds: Double, changeScore: Double) {
+            self.seconds = seconds
+            self.changeScore = changeScore
+        }
     }
 
-    static func sampleTimes(
+    package static func sampleTimes(
         duration: Double,
         intervalSeconds: Double,
         signals: [Signal],

@@ -512,8 +512,45 @@ pub(crate) fn vetted_generated_proposed_name(
         .filter(|name| has_minimum_generated_filename_words(name)))
 }
 
+/// Words a generated name needs. The engine the Mac app hosts follows the
+/// Swift engine (`DeepAnalyze.hasMinimumGeneratedFilenameWords`, two words);
+/// other platforms keep three.
+pub(crate) const MIN_GENERATED_NAME_WORDS: usize = if crate::paths::APP_HOSTED { 2 } else { 3 };
+
+/// The Mac app-hosted engine reserves each proposed name per folder within a
+/// run, as `DeepAnalyzeRunner.reserveProposedName` does (`Name (2)`, ...).
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) const RESERVES_PROPOSED_NAMES: bool = crate::paths::APP_HOSTED;
+
 pub(crate) fn has_minimum_generated_filename_words(name: &str) -> bool {
-    name.split(['-', '_']).filter(|word| !word.is_empty()).count() >= 3
+    name.split(['-', '_']).filter(|word| !word.is_empty()).count() >= MIN_GENERATED_NAME_WORDS
+}
+
+/// `DeepAnalyzeRunner.reserveProposedName`: the first use of a name in a
+/// folder keeps it; later ones get ` (2)`, ` (3)`, ... within 60 characters.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) fn reserve_proposed_name(
+    name: Option<String>,
+    source_path: &str,
+    reserved: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    let base = name.filter(|name| !name.is_empty())?;
+    let folder = std::path::Path::new(source_path).parent().map(|folder| folder.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let key = |name: &str| format!("{folder}\0{}", name.to_lowercase());
+    if reserved.insert(key(&base)) {
+        return Some(base);
+    }
+    let mut ordinal = 2u64;
+    loop {
+        let suffix = format!(" ({ordinal})");
+        let budget = 60usize.saturating_sub(suffix.chars().count());
+        let prefix: String = base.chars().take(budget).collect();
+        let candidate = format!("{}{suffix}", prefix.trim());
+        if reserved.insert(key(&candidate)) {
+            return Some(candidate);
+        }
+        ordinal += 1;
+    }
 }
 
 pub(crate) fn trusted_years_in_text(text: &str) -> std::collections::HashSet<i32> {
@@ -670,10 +707,25 @@ mod tests {
             trusted_years_in_text("Invoice 2024; reference 1234; copyright 1899"),
             std::collections::HashSet::from([2024])
         );
-        assert!(!has_minimum_generated_filename_words("family-holiday"));
+        assert_eq!(has_minimum_generated_filename_words("family-holiday"), crate::paths::APP_HOSTED);
+        assert!(!has_minimum_generated_filename_words("holiday"));
         assert!(has_minimum_generated_filename_words(
             "adam-family-holiday"
         ));
+    }
+
+    #[test]
+    fn reserved_names_get_swift_ordinals_per_folder() {
+        let mut reserved = std::collections::HashSet::new();
+        let mut reserve = |name: &str, path: &str| reserve_proposed_name(Some(name.to_owned()), path, &mut reserved);
+        assert_eq!(reserve("Man By Pond", "/p/a.jpg").as_deref(), Some("Man By Pond"));
+        assert_eq!(reserve("man by pond", "/p/b.jpg").as_deref(), Some("man by pond (2)"));
+        assert_eq!(reserve("Man By Pond", "/p/c.jpg").as_deref(), Some("Man By Pond (3)"));
+        assert_eq!(reserve("Man By Pond", "/q/d.jpg").as_deref(), Some("Man By Pond"));
+        let long = "x".repeat(70);
+        assert_eq!(reserve(&long, "/p/e.jpg").map(|name| name.chars().count()), Some(70));
+        assert_eq!(reserve(&long, "/p/f.jpg"), Some(format!("{} (2)", "x".repeat(56))));
+        assert_eq!(reserve_proposed_name(None, "/p/g.jpg", &mut std::collections::HashSet::new()), None);
     }
 
     #[test]
