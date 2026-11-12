@@ -8,7 +8,7 @@ binary.
 
 | OS      | Library `ort` loads     | Where it comes from                                     |
 |---------|-------------------------|---------------------------------------------------------|
-| Windows | `onnxruntime.dll`       | Bundled beside the engine / pinned via accelerator pack |
+| Windows | `onnxruntime.dll`       | FileID's own source build, bundled beside the engine / pinned via accelerator pack |
 | Linux   | Statically linked       | `download-binaries` CPU archive (native distro recipes may link a system package) |
 | macOS   | `libonnxruntime.dylib`  | **Installed once — see below**                          |
 
@@ -17,6 +17,15 @@ are the `.onnx` weights; the runtime is the library that loads + executes them.
 A full-ML scan needs **both**.
 
 License: ONNX Runtime is **MIT-licensed** (microsoft/onnxruntime) — commercial-clean.
+
+Windows: Microsoft's packaged builds (the DirectML NuGet, the GitHub zips) are
+made with `--use_telemetry`, which registers ONNX Runtime with Windows'
+diagnostic-data service. FileID ships 1.22.0 built from source without it:
+`platforms/windows/build/build-ort-runtime.ps1` (CI: `.github/workflows/ort-runtime.yml`)
+writes `build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/<arch>/`, which
+`fetch-runtime-deps.ps1` stages. Local builds need it once: run the script
+(about an hour) or download the workflow's `onnxruntime-dml-notelemetry-<arch>`
+artifact into that folder.
 
 ---
 

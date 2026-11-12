@@ -592,6 +592,19 @@ fn cuda_provider_present() -> bool {
         4,
     )
     .is_some()
+        && pack_runtime_allowed(&root.join("packs").join("cuda"))
+}
+
+/// A pack's provider only binds against the pack's own `onnxruntime.dll`, so a
+/// pack whose runtime reports to Windows telemetry (Microsoft's official GPU
+/// zip) is treated as absent. An unreadable runtime is refused too.
+pub fn pack_runtime_allowed(pack_dir: &Path) -> bool {
+    match crate::platform::find_file_under(pack_dir, "onnxruntime.dll", 4) {
+        Some(runtime) => {
+            crate::ort_runtime::joins_windows_telemetry(&runtime).is_ok_and(|telemetry| !telemetry)
+        }
+        None => true,
+    }
 }
 
 fn tensorrt_provider_present() -> bool {
@@ -607,6 +620,7 @@ fn tensorrt_provider_present() -> bool {
     // runtime is installed as well. The CUDA performance pack intentionally
     // does not ship that separately licensed dependency.
     provider.is_some()
+        && pack_runtime_allowed(&root.join("packs").join("cuda"))
         && crate::platform::find_file_under(
             &root.join("packs").join("cuda"),
             "nvinfer_10.dll",
@@ -811,6 +825,7 @@ fn openvino_provider_present() -> bool {
         4,
     )
     .is_some()
+        && pack_runtime_allowed(&root.join("packs").join("openvino"))
 }
 
 /// The accelerator pack directory for the detected GPU vendor, if that vendor
@@ -1034,6 +1049,32 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_with_a_telemetry_runtime_is_refused() {
+        let pack = std::env::temp_dir().join(format!("fileid-pack-etw-{}", std::process::id()));
+        let lib = pack.join("onnxruntime-win-x64-gpu-1.22.0").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        assert!(pack_runtime_allowed(&pack), "a pack without its own runtime pins nothing");
+
+        let runtime = |group: [u8; 16]| {
+            let mut bytes = b"MZ\0Microsoft.ML.ONNXRuntime\0\x13\x00\x01".to_vec();
+            bytes.extend_from_slice(&group);
+            bytes
+        };
+        std::fs::write(lib.join("onnxruntime.dll"), runtime([0; 16])).unwrap();
+        assert!(pack_runtime_allowed(&pack));
+
+        std::fs::write(
+            lib.join("onnxruntime.dll"),
+            runtime([
+                0x1a, 0x73, 0x50, 0x4f, 0xcf, 0x89, 0x82, 0x47, 0xb3, 0xe0, 0xdc, 0xe8, 0xc9, 0x04, 0x76, 0xba,
+            ]),
+        )
+        .unwrap();
+        assert!(!pack_runtime_allowed(&pack));
+        let _ = std::fs::remove_dir_all(&pack);
+    }
 
     /// Regression guard: every vendor's requested EP chain must end at CPU
     /// (the always-present floor). Availability filtering below removes

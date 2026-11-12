@@ -55,6 +55,26 @@ pub fn disable_telemetry_before_load() {
     unsafe { std::env::set_var(DISABLE_TELEMETRY_ENV, "1") };
 }
 
+/// The TraceLogging metadata of ONNX Runtime's `Microsoft.ML.ONNXRuntime`
+/// provider when it joins Microsoft's telemetry provider group
+/// {4f50731a-89cf-4782-b3e0-dce8c90476ba}: name, NUL, a 19-byte group trait,
+/// then the group GUID. Windows' diagnostic-data service collects that group.
+/// Only builds made with `--use_telemetry` (Microsoft's NuGet and GitHub
+/// releases) carry it; other builds hold the same provider with an all-zero
+/// group. Their events cannot be turned off from outside in 1.22: the ETW
+/// enable callback overrides `DisableTelemetryEvents`.
+const WINDOWS_TELEMETRY_PROVIDER: &[u8] = b"Microsoft.ML.ONNXRuntime\0\x13\x00\x01\
+    \x1a\x73\x50\x4f\xcf\x89\x82\x47\xb3\xe0\xdc\xe8\xc9\x04\x76\xba";
+
+/// Whether an ONNX Runtime library is a build that reports to Windows'
+/// telemetry pipeline. FileID never loads one.
+pub fn joins_windows_telemetry(library: &std::path::Path) -> std::io::Result<bool> {
+    let bytes = std::fs::read(library)?;
+    Ok(bytes
+        .windows(WINDOWS_TELEMETRY_PROVIDER.len())
+        .any(|window| window == WINDOWS_TELEMETRY_PROVIDER))
+}
+
 /// Create the process-wide ORT environment with telemetry events off and the
 /// native log severity clamped, or keep the one that already exists. Every
 /// session path calls this first: `ort`'s lazy default environment calls
@@ -278,6 +298,31 @@ mod tests {
             }
         }
         assert!(session_sites >= 2, "session builder sites moved; update this test");
+    }
+
+    #[test]
+    fn windows_telemetry_builds_are_recognised() {
+        let dir = std::env::temp_dir().join(format!("fileid-ort-etw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = |group: &[u8]| {
+            let mut bytes = b"MZ\0\0.rdata\0".to_vec();
+            bytes.extend_from_slice(b"\x2e\0Microsoft.ML.ONNXRuntime\0\x13\x00\x01");
+            bytes.extend_from_slice(group);
+            bytes.extend_from_slice(b"\0tail");
+            bytes
+        };
+        let telemetry_group = [
+            0x1a, 0x73, 0x50, 0x4f, 0xcf, 0x89, 0x82, 0x47, 0xb3, 0xe0, 0xdc, 0xe8, 0xc9, 0x04, 0x76, 0xba,
+        ];
+        let official = dir.join("official.dll");
+        let source_build = dir.join("source-build.dll");
+        std::fs::write(&official, library(&telemetry_group)).unwrap();
+        std::fs::write(&source_build, library(&[0; 16])).unwrap();
+
+        assert!(joins_windows_telemetry(&official).unwrap());
+        assert!(!joins_windows_telemetry(&source_build).unwrap());
+        assert!(joins_windows_telemetry(&dir.join("missing.dll")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
