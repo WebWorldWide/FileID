@@ -10,6 +10,7 @@
 #![allow(clippy::type_complexity)]
 
 mod app_settings;
+mod changes;
 mod engine_client;
 mod fonts;
 mod lavalamp;

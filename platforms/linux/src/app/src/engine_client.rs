@@ -70,6 +70,7 @@ pub enum EngineState {
     RootsList(fileid_engine::ipc::RootsList),
     BenchmarkProgress(fileid_engine::ipc::BenchmarkProgress),
     BenchmarkResult(fileid_engine::ipc::BenchmarkResult),
+    QueueState(fileid_engine::ipc::QueueState),
     Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
     /// The engine process exited; a respawn follows unless the app is closing.
@@ -784,6 +785,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
         EventPayload::RootsList(list) => EngineState::RootsList(list.inner),
         EventPayload::BenchmarkProgress(progress) => EngineState::BenchmarkProgress(progress.inner),
         EventPayload::BenchmarkResult(result) => EngineState::BenchmarkResult(result.inner),
+        EventPayload::QueueState(state) => EngineState::QueueState(state.inner),
         EventPayload::Error(error) => match error.inner.kind.as_str() {
             "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
             "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),

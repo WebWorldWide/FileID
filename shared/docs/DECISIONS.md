@@ -4666,3 +4666,10 @@ Percentages compare with the baseline reps run in the same rounds (Latin-only ra
 - **CLIP text on macOS uses ONNX Runtime's default thread pool**, as Swift's `CLIPTextEncoder` builds its session. The shared path sets one intra-op thread per core; on a loaded Mac that was up to 3× slower than Swift (pip ORT 1.30 in Python under load ~120: default 20–42 ms, 10 threads 44–261 ms). Vectors are unchanged (cosine 1.0000000 against Swift on 159 prompts). Windows and Linux keep the shared EP chain.
 - **Job controls need a worker.** Pause, resume and cancel of a job whose kind the engine has no worker for (or a missing id) are refused with Swift's "This job has no supported worker in this engine."; Rust used to change their state. Pinned in `conformance/catalog.json`.
 - **Search-strength set rebuilt** in `~/FileIDDev/Eval/search` from the 499 People photo copies (the 2026-11-08 set was deleted): 72 subjects, labelled per photo from 3×3 contact sheets (yes / ambiguous), split by a hash of the query text. Stage 4 acceptance on it is Swift/Rust parity (identical results), not the old set's 0.79 / 0.54 / 10 of 11.
+
+## 2026-11-12 — GTK session change log and the scan notification
+
+- Linux has no Windows `ChangeLog`; `changes.rs` is a small session-only log (500 entries, newest first, reverse closure per entry). Only Duplicates records into it so far, because the Library and People tabs belong to other work. Ctrl+Z undoes the newest undoable entry, so it grows as other pages record changes.
+- The scan-complete notification is sent on every `scanComplete`, like Windows, through `gio::Notification` (local D-Bus notification daemon, no network). The body omits the failed-file count Windows adds, because `EngineState::ScanComplete(u64)` is matched in many tabs and keeps its shape.
+- `cleanupAutoTag` is stored as `cleanupAutoTagKept` (the Windows key) so a shared settings file round-trips; `chatSummaries` maps to `chatUseModel` as on the Mac. The Mac's tag name `duplicate-resolved` is reused for the engine tag.
+

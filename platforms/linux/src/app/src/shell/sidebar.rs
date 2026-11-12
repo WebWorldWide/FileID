@@ -46,7 +46,15 @@ pub struct Sidebar {
     rows: Vec<NavRow>,
     note: gtk::Box,
     note_label: gtk::Label,
+    queue: QueueSection,
     card: ScanCard,
+}
+
+struct QueueSection {
+    root: gtk::Box,
+    count: gtk::Label,
+    eta: gtk::Label,
+    rows: gtk::Box,
 }
 
 impl Sidebar {
@@ -106,6 +114,10 @@ impl Sidebar {
         note.append(&dismiss);
         root.append(&note);
 
+        let queue = queue_section();
+        root.append(&queue.root);
+        root.append(&changes_row());
+
         let (frame, card) = scan_card(&act);
         root.append(&frame);
 
@@ -120,6 +132,7 @@ impl Sidebar {
             rows,
             note,
             note_label,
+            queue,
             card,
         })
     }
@@ -184,6 +197,31 @@ impl Sidebar {
                 self.note.set_visible(true);
             }
             None => self.note.set_visible(false),
+        }
+    }
+
+    /// Mac `QueueListView`: what is waiting, and the total time it will take.
+    pub fn set_queue(&self, state: &fileid_engine::ipc::QueueState) {
+        let jobs: Vec<(&fileid_engine::ipc::QueuedJob, bool)> = state
+            .running
+            .iter()
+            .map(|job| (job, true))
+            .chain(state.pending.iter().map(|job| (job, false)))
+            .collect();
+        self.queue.root.set_visible(!jobs.is_empty());
+        self.queue
+            .count
+            .set_text(&queue_count(state.pending.len()));
+        self.queue.eta.set_text(
+            &state
+                .total_eta_seconds
+                .filter(|eta| *eta > 0.0)
+                .map(super::status::format_eta)
+                .unwrap_or_default(),
+        );
+        crate::v3::clear(&self.queue.rows);
+        for (job, running) in jobs {
+            self.queue.rows.append(&queue_row(job, running));
         }
     }
 
@@ -295,6 +333,109 @@ fn nav_row(page: &'static super::Page, act: &Rc<dyn Fn(Action)>) -> NavRow {
     let act = act.clone();
     button.connect_clicked(move |_| act(Action::Navigate(id)));
     NavRow { id, button, badge }
+}
+
+fn queue_count(waiting: usize) -> String {
+    format!("{waiting} waiting")
+}
+
+fn queue_icon(category: &fileid_engine::ipc::JobCategory) -> &'static str {
+    match category {
+        fileid_engine::ipc::JobCategory::Scan => "system-search-symbolic",
+        fileid_engine::ipc::JobCategory::FaceCluster => "system-users-symbolic",
+        fileid_engine::ipc::JobCategory::DeepAnalyze => "starred-symbolic",
+    }
+}
+
+fn queue_section() -> QueueSection {
+    let root = vbox(6);
+    root.set_margin_start(14);
+    root.set_margin_end(14);
+    root.set_margin_bottom(10);
+    root.set_visible(false);
+    root.append(&crate::v3::section("Queue"));
+    let head = hbox(6);
+    let icon = gtk::Image::from_icon_name("view-list-symbolic");
+    icon.add_css_class("tone-gold");
+    icon.set_pixel_size(14);
+    head.append(&icon);
+    let count = label("", &["scan-title"]);
+    count.set_hexpand(true);
+    count.set_xalign(0.0);
+    head.append(&count);
+    let eta = label("", &["scan-pct", "tone-gold"]);
+    head.append(&eta);
+    root.append(&head);
+    let rows = vbox(4);
+    root.append(&rows);
+    root.update_property(&[gtk::accessible::Property::Label("Queue")]);
+    QueueSection { root, count, eta, rows }
+}
+
+fn queue_row(job: &fileid_engine::ipc::QueuedJob, running: bool) -> gtk::Box {
+    let row = hbox(6);
+    let icon = gtk::Image::from_icon_name(queue_icon(&job.category));
+    icon.set_pixel_size(12);
+    icon.set_opacity(if running { 1.0 } else { 0.55 });
+    icon.set_valign(gtk::Align::Start);
+    row.append(&icon);
+    let text = vbox(1);
+    text.set_hexpand(true);
+    let title = label(&job.title, if running { &["scan-title"] } else { &[] });
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    text.append(&title);
+    let eta = job
+        .eta_seconds
+        .filter(|eta| *eta > 0.0)
+        .map(super::status::format_eta);
+    if let Some(eta) = &eta {
+        let meta = crate::v3::meta(&format!("ETA {eta}"));
+        meta.set_xalign(0.0);
+        text.append(&meta);
+    }
+    row.append(&text);
+    let state = if running { "Running" } else { "Queued" };
+    row.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{state}: {}{}",
+        job.title,
+        eta.map(|eta| format!(", {eta} remaining")).unwrap_or_default()
+    ))]);
+    row
+}
+
+fn changes_row() -> gtk::Button {
+    let content = hbox(8);
+    let image = gtk::Image::from_icon_name("document-open-recent-symbolic");
+    image.set_pixel_size(14);
+    content.append(&image);
+    let name = label("Recent changes", &[]);
+    name.set_hexpand(true);
+    name.set_xalign(0.0);
+    content.append(&name);
+    let badge = label("0", &["nav-badge", "tone-gold"]);
+    badge.set_visible(false);
+    content.append(&badge);
+    let button = gtk::Button::builder()
+        .child(&content)
+        .css_classes(["nav-row"])
+        .margin_start(4)
+        .margin_end(4)
+        .tooltip_text("Review and undo changes made this session")
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label("Recent changes")]);
+    button.set_visible(false);
+    let shown = button.clone();
+    button.connect_clicked(super::changes_sheet::present);
+    // Hidden until the first change lands so a fresh session stays uncluttered.
+    let badge_for_listener = badge.clone();
+    crate::changes::subscribe(Rc::new(move || {
+        let pending = crate::changes::pending_count();
+        badge_for_listener.set_text(&pending.to_string());
+        badge_for_listener.set_visible(pending > 0);
+        shown.set_visible(crate::changes::count() > 0);
+    }));
+    button
 }
 
 fn icon_button(icon: &str, text: &str, classes: &[&str]) -> (gtk::Button, adw::ButtonContent) {
