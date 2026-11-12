@@ -163,6 +163,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         }),
     )));
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content.add_css_class("fileid-pages");
     content.append(&stack);
     content.append(&inspector);
     let detail = gtk::Stack::builder()

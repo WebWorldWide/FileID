@@ -234,7 +234,6 @@ pub fn remember_naming(naming: &NamingSettings) {
 /// `~/photos` are genuinely different directories. Folding here would silently
 /// drop one of them from a privacy-motivated control — the user would believe a
 /// folder was excluded when it wasn't.
-#[cfg(test)]
 pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
     const MAX: usize = 256;
     let mut seen = std::collections::HashSet::new();
@@ -252,6 +251,80 @@ pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+fn choice_from_map(map: &Map<String, Value>, key: &str, allowed: &[&str], default: &str) -> String {
+    map.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| allowed.contains(value))
+        .unwrap_or(default)
+        .to_owned()
+}
+
+fn choice(key: &str, allowed: &[&str], default: &str) -> String {
+    settings_path().map_or_else(
+        || default.to_owned(),
+        |path| choice_from_map(&load_map(&path), key, allowed, default),
+    )
+}
+
+pub const TEXT_SIZE_IDS: [&str; 4] = ["small", "standard", "large", "larger"];
+
+/// Settings ▸ Appearance ▸ Text size (macOS `appearance.textSize`).
+pub fn text_size() -> String {
+    choice("textSize", &TEXT_SIZE_IDS, "standard")
+}
+
+pub fn remember_text_size(id: &str) {
+    set_entries(&[("textSize", Value::String(id.to_owned()))]);
+}
+
+/// Settings ▸ Appearance ▸ Lava lamp (macOS `lavaMode`); Linux offers Full and
+/// Off. A synced "calm" counts as Full.
+pub fn lava_lamp_on() -> bool {
+    choice("lavaMode", &["full", "calm", "off"], "full") != "off"
+}
+
+pub fn remember_lava_lamp(on: bool) {
+    set_entries(&[("lavaMode", Value::String(if on { "full" } else { "off" }.to_owned()))]);
+}
+
+pub const GRANULARITY_IDS: [&str; 3] = ["loose", "normal", "tight"];
+
+/// Organize Folders granularity (macOS `restructure.granularity`), passed to
+/// the engine as `FILEID_RESTRUCTURE_GRANULARITY` when it starts.
+pub fn restructure_granularity() -> String {
+    choice("restructureGranularity", &GRANULARITY_IDS, "normal")
+}
+
+pub fn remember_restructure_granularity(id: &str) {
+    set_entries(&[("restructureGranularity", Value::String(id.to_owned()))]);
+}
+
+/// Settings ▸ "Folders not to describe" (`deepAnalyzeExcludedFolders`).
+pub fn deep_analyze_excluded_folders() -> Vec<String> {
+    let Some(path) = settings_path() else { return Vec::new() };
+    let raw: Vec<String> = load_map(&path)
+        .get("deepAnalyzeExcludedFolders")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    sanitize_deep_analyze_excluded_folders(&raw)
+}
+
+pub fn remember_deep_analyze_excluded_folders(folders: &[String]) {
+    let folders = sanitize_deep_analyze_excluded_folders(folders);
+    let Some(path) = settings_path() else { return };
+    let mut map = load_map(&path);
+    if folders.is_empty() {
+        map.remove("deepAnalyzeExcludedFolders");
+    } else {
+        map.insert(
+            "deepAnalyzeExcludedFolders".into(),
+            Value::Array(folders.into_iter().map(Value::String).collect()),
+        );
+    }
+    save_map(&path, &map);
 }
 
 #[cfg(test)]
@@ -345,6 +418,16 @@ mod tests {
         else { unreachable!() };
         let sanitized = naming_from_map(&bad);
         assert_eq!((sanitized.style.as_str(), sanitized.max_length), ("short", 120));
+    }
+
+    #[test]
+    fn appearance_and_granularity_choices_fall_back_to_defaults() {
+        let Value::Object(map) = serde_json::json!({"textSize": "huge", "lavaMode": "off", "restructureGranularity": "tight"})
+        else { unreachable!() };
+        assert_eq!(choice_from_map(&map, "textSize", &TEXT_SIZE_IDS, "standard"), "standard");
+        assert_eq!(choice_from_map(&map, "lavaMode", &["full", "calm", "off"], "full"), "off");
+        assert_eq!(choice_from_map(&map, "restructureGranularity", &GRANULARITY_IDS, "normal"), "tight");
+        assert_eq!(choice_from_map(&Map::new(), "restructureGranularity", &GRANULARITY_IDS, "normal"), "normal");
     }
 
     #[test]

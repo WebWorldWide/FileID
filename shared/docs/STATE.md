@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-11-12 — GTK Settings parity (agent `parity-gtk-settings`)
+
+- **Settings ▸ Appearance:** lava lamp Full/Off (`lavaMode`), Text size Small/Default/Large/Larger (`textSize`, scales page text only; the title bar and sidebar keep their size), and a live Reduce Motion note that follows `gtk-enable-animations` (the lamp already paused on it). Chat's `backgroundMotion` setting action now works, with Undo.
+- **Organize Folders:** Looser/Balanced/Tighter (`restructureGranularity`); `engine_client.rs` passes `FILEID_RESTRUCTURE_GRANULARITY` at engine spawn when it is not Balanced.
+- **Folders not to describe:** editor card on the existing `deepAnalyzeExcludedFolders` store (`deep_scope.rs` already sends `excludedFolders`).
+- **Advanced:** engine status, Restart and Stop Engine, storage sizes (database, models, thumbnails, face crops, logs), recent scans, open logs folder, Factory Reset & Quit with confirmation (stops the engine, erases the data folder except the Models and runtime folders, then exits).
+- **Photo tags (RAM++):** the shared engine registers `ram_plus` and uses it in tagging with no platform gate, so the card is added like the other model rows.
+- Digest refreshes: GTK `engine_client.rs` and `tabs/settings.rs` (no URL, socket, HTTP client or process launch added). Not run on a Linux display: the layout, the text-size scaling and the logs launcher need a look on Linux.
+
 ## 2026-11-10 — Convergence Stage 3: Restructure under the Rust engine on the Mac
 
 - **What landed** (agent `converge-3`; details in `CONVERGENCE.md` "Stage 3 status"): one restructure undo journal format for both engines (Swift writes the Rust header and source identity, reads both; Rust on macOS reads Swift's older headerless journals inside the requested root), so a run applied by one engine is undone by the other. A refused Rust apply or undo now ends with `restructureApplyResult` like Swift; the Mac app treats the Rust plan errors as terminal; feedback never upgrades Ask moves in either engine. Rust plan kNN computed once in parallel; journal entries use `F_BARRIERFSYNC` on macOS.

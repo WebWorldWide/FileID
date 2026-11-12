@@ -425,6 +425,20 @@ impl Runner {
                     self.fail(id, "File Tools isn't open in this window. Nothing was exported.");
                 }
             }
+            "changeSetting" if action.setting.as_deref() == Some("backgroundMotion") => {
+                let Some(on) = action.value else { return };
+                let previous = crate::app_settings::lava_lamp_on();
+                let set = |on: bool| {
+                    crate::app_settings::remember_lava_lamp(on);
+                    crate::lavalamp::set_enabled(on);
+                };
+                set(on);
+                let undo: UndoFn = Rc::new(move |runner, id| {
+                    set(previous);
+                    runner.finish(id, "Changed back.".to_owned(), None);
+                });
+                self.finish(id, format!("Turned {}.", if on { "on" } else { "off" }), Some(("Undo", undo)));
+            }
             "changeSetting" => self.fail(id, rules::SETTING_UNAVAILABLE),
             "suggestFolderLayout" => {
                 let root = action.path.clone().unwrap_or_default();
