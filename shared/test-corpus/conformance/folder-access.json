@@ -1,0 +1,23 @@
+[
+  {
+    "name": "folder-access-bookmarks-grant-and-refuse-like-the-swift-engine",
+    "description": "The Mac app hands folder access over as bookmarks. A grant whose bookmark doesn't resolve is refused with folder_access_denied and a valid one is accepted silently; a scan whose bookmark doesn't resolve, or resolves to another folder, is refused with folder_access_denied and an empty scanComplete and catalogues nothing; a scan with the root's own bookmark, or with none (Developer ID builds), catalogues the tree.",
+    "appHosted": true,
+    "tree": [
+      {"path": "a/one.txt", "content": "one\n", "mtime": 1789812000},
+      {"path": "b/two.txt", "content": "two\n", "mtime": 1789812060}
+    ],
+    "steps": [
+      {"label": "grant a bookmark that doesn't resolve", "command": {"grantFolderAccess": {"rootPath": "{root}", "rootBookmark": "bm90IGEgYm9va21hcms="}}, "await": "error", "filter": {"kind": "folder_access_denied"}, "expect": {"message": "FileID couldn't restore access to the selected folder. Choose it again."}},
+      {"label": "grant the root", "command": {"grantFolderAccess": {"rootPath": "{path:a}", "rootBookmark": "{bookmark:a}"}}},
+      {"label": "no error after a valid grant", "command": {"healthCheck": {"requestID": "after-grant"}}, "await": "healthCheckResult", "collect": {"error": {"$tol": "count", "value": 0}}},
+      {"label": "scan a bookmark that doesn't resolve", "command": {"startScan": {"rootPath": "{path:a}", "rootBookmark": "bm90IGEgYm9va21hcms="}}, "await": "scanComplete", "expect": {"sessionID": "", "totalFiles": 0, "processedFiles": 0}, "collect": {"error": {"$tol": "contains", "value": [{"kind": "folder_access_denied", "message": "FileID couldn't access that folder. Choose it again."}]}}},
+      {"label": "scan another folder's bookmark", "command": {"startScan": {"rootPath": "{path:a}", "rootBookmark": "{bookmark:b}"}}, "await": "scanComplete", "expect": {"sessionID": "", "totalFiles": 0}, "collect": {"error": {"$tol": "contains", "value": [{"kind": "folder_access_denied"}]}}},
+      {"label": "nothing catalogued", "db": "SELECT COUNT(*) FROM files", "expect": [[0]]},
+      {"label": "scan with the root's bookmark", "command": {"startScan": {"rootPath": "{path:a}", "rootBookmark": "{bookmark:a}"}}, "await": "scanComplete", "timeout": 180, "abortOnError": true, "expect": {"totalFiles": 1, "processedFiles": 1, "failedFiles": 0}},
+      {"label": "scan without a bookmark", "command": {"startScan": {"rootPath": "{path:b}"}}, "await": "scanComplete", "timeout": 180, "abortOnError": true, "expect": {"totalFiles": 1, "processedFiles": 1, "failedFiles": 0}},
+      {"label": "rows", "db": "SELECT path_text FROM files ORDER BY path_text", "expect": [["{path:a/one.txt}"], ["{path:b/two.txt}"]]},
+      {"label": "shutdown", "shutdown": {"exitCode": 0}}
+    ]
+  }
+]

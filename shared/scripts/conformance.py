@@ -19,8 +19,9 @@ Expected values are literal (exact) or a tolerance object:
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation} and {clip_model} (the CLIP
-embedding model id both engines derive from the model manifest); {"$var": "name.key"}
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {clip_model} (the CLIP
+embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
+bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
 
@@ -75,6 +76,24 @@ CASES = ROOT / "shared/test-corpus/conformance"
 TIMEOUT = 30.0
 FORBIDDEN_ROOTS = ("/volumes/adlon", "/srv/data")
 PLACEHOLDER = re.compile(r"\{([a-z0-9_]+(?::[^{}]*)?)\}")
+
+
+BOOKMARK_JXA = (
+    "ObjC.import('Foundation');"
+    "function run(argv) {"
+    " const url = $.NSURL.fileURLWithPath(argv[0]);"
+    " const data = url.bookmarkDataWithOptionsIncludingResourceValuesForKeysRelativeToURLError(0, $(), $(), $());"
+    " return data.base64EncodedStringWithOptions(0).js; }"
+)
+
+
+def bookmark(path):
+    """A plain base64 bookmark of `path`, the kind the Mac app sends (macOS only)."""
+    result = subprocess.run(["osascript", "-l", "JavaScript", "-e", BOOKMARK_JXA, path],
+                            capture_output=True, text=True, timeout=30, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise Failure(f"could not make a bookmark for {path}: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 def clip_model():
@@ -369,6 +388,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "bookmark":
+            return bookmark(self.path(argument))
         raise Failure(f"unknown placeholder {{{token}}}")
 
     def expand(self, value):

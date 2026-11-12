@@ -1430,7 +1430,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             d.restructure_mutation("undoRestructure", "undo_restructure", "Could not undo the restructure", payload, commands::restructure::handle_undo_restructure)
                 .await;
         }
-        CommandPayload::GrantFolderAccess(_) => {}
+        CommandPayload::GrantFolderAccess(payload) => commands::folder_access::grant(sink, payload).await,
         CommandPayload::StartScan(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "startScan").await;

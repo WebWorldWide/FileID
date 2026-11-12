@@ -123,6 +123,21 @@ pub(crate) async fn handle_start_scan(
     }
     let _state_guard = ScanStateGuard(scan_state.clone());
 
+    let Some(_root_access) =
+        super::folder_access::scan_access(&payload.root_path, payload.root_bookmark.as_deref())
+    else {
+        sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
+        sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
+            session_id: String::new(),
+            total_files: 0,
+            processed_files: 0,
+            failed_files: 0,
+            total_seconds: 0.0,
+        }))))
+        .await;
+        return;
+    };
+
     if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
         coord.request_cancel();
         sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
