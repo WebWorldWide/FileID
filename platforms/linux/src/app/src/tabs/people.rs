@@ -26,13 +26,15 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
+use gtk::glib::clone;
 
 use super::face_queues::{self, Queue};
 use super::face_review;
+use super::people_actions as actions;
 use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
 use fileid_engine::ipc::{
-    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
-    RenamePersonPayload,
+    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload,
+    MergeClustersPayload, ReassignFacePayload, RenamePersonPayload, RevertMergePayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -150,6 +152,20 @@ struct Candidate {
     a: i64,
     b: i64,
     sim: f32,
+    /// The faces the engine anchors each card on, for a different-people verdict.
+    fa: i64,
+    fb: i64,
+}
+
+/// One merge the engine confirmed, with the source's faces as they were, so
+/// "Undo merge" can split them back out (`revertMerge`).
+#[derive(Clone, Debug, Default)]
+struct MergeRecord {
+    source: i64,
+    destination: i64,
+    source_name: String,
+    destination_name: String,
+    faces: Vec<i64>,
 }
 
 #[derive(Default)]
@@ -366,6 +382,9 @@ struct Ui {
     pending_suggestions: RefCell<VecDeque<PendingSuggestion>>,
     merge_results_pending: Cell<usize>,
     merge_failed: Cell<bool>,
+    merge_journal: RefCell<VecDeque<MergeRecord>>,
+    merge_undo: RefCell<Vec<MergeRecord>>,
+    undo_merge_button: gtk::Button,
     person_actions: PersonActionGate,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
@@ -423,8 +442,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .visible(false)
         .css_classes(["gold-button"])
         .build();
+    let undo_merge_button = gtk::Button::builder()
+        .label("Undo merge")
+        .visible(false)
+        .css_classes(["secondary"])
+        .build();
     title_row.append(&count_label);
     title_row.append(&title_spacer);
+    title_row.append(&undo_merge_button);
     title_row.append(&review_button);
     title_row.append(&actions_box);
 
@@ -554,6 +579,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         pending_suggestions: RefCell::new(VecDeque::new()),
         merge_results_pending: Cell::new(0),
         merge_failed: Cell::new(false),
+        merge_journal: RefCell::new(VecDeque::new()),
+        merge_undo: RefCell::new(Vec::new()),
+        undo_merge_button: undo_merge_button.clone(),
         person_actions: PersonActionGate::default(),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
@@ -587,6 +615,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     {
         let ui = ui.clone();
         review_button.connect_clicked(move |_| open_face_review(&ui));
+    }
+    {
+        let ui = ui.clone();
+        undo_merge_button.connect_clicked(move |_| undo_last_merge(&ui));
     }
 
     {
@@ -661,6 +693,15 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_view(&ui);
                     }
                     EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
+                        let confirmed = ui.merge_journal.borrow_mut().pop_front();
+                        if let Some(record) = confirmed
+                            && result.failed == 0
+                            && result.succeeded > 0
+                            && !record.faces.is_empty()
+                        {
+                            ui.merge_undo.borrow_mut().push(record);
+                            refresh_undo_merge(&ui);
+                        }
                         let outstanding = ui.merge_results_pending.get();
                         if outstanding == 0 {
                             continue;
@@ -1607,8 +1648,10 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             unbind_photo_tile(item);
         }
     });
+    let none_selection = gtk::NoSelection::new(Some(photos.clone()));
+    let multi_selection = gtk::MultiSelection::new(Some(photos.clone()));
     let photo_grid = gtk::GridView::builder()
-        .model(&gtk::NoSelection::new(Some(photos.clone())))
+        .model(&none_selection)
         .factory(&photo_factory)
         .min_columns(2)
         .max_columns(6)
@@ -1619,6 +1662,143 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         .hexpand(true)
         .child(&photo_grid)
         .build();
+    // Move photos that show someone else to the right person (macOS "Select
+    // photos", then "Move to another person…").
+    let select_mode = Rc::new(Cell::new(false));
+    let select_btn = crate::v3::secondary("Select photos", false);
+    select_btn.set_tooltip_text(Some("Move photos that show someone else to the right person"));
+    let picked_label = crate::v3::mono("", "v3-mono-11");
+    let move_btn = crate::v3::primary("Move to another person…", true);
+    let cancel_select = crate::v3::secondary("Cancel", false);
+    let move_status = crate::v3::meta("");
+    move_status.set_wrap(true);
+    move_status.set_xalign(0.0);
+    move_status.set_visible(false);
+    let move_bar = crate::v3::hbox(8);
+    move_bar.append(&move_status);
+    move_status.set_hexpand(true);
+    move_bar.append(&picked_label);
+    move_bar.append(&move_btn);
+    move_bar.append(&cancel_select);
+    move_bar.append(&select_btn);
+    let sync_move_bar: Rc<dyn Fn()> = Rc::new(clone!(
+        #[strong]
+        select_mode,
+        #[weak]
+        photos,
+        #[weak]
+        multi_selection,
+        #[weak]
+        select_btn,
+        #[weak]
+        picked_label,
+        #[weak]
+        move_btn,
+        #[weak]
+        cancel_select,
+        move || {
+            let picking = select_mode.get();
+            let count = multi_selection.selection().size() as usize;
+            select_btn.set_visible(!picking && photos.n_items() >= 2);
+            picked_label.set_visible(picking);
+            move_btn.set_visible(picking);
+            cancel_select.set_visible(picking);
+            picked_label.set_label(&actions::selected_label(count));
+            move_btn.set_sensitive(count > 0);
+        }
+    ));
+    sync_move_bar();
+    photos.connect_items_changed(clone!(
+        #[strong]
+        sync_move_bar,
+        move |_, _, _, _| sync_move_bar()
+    ));
+    multi_selection.connect_selection_changed(clone!(
+        #[strong]
+        sync_move_bar,
+        move |_, _, _| sync_move_bar()
+    ));
+    select_btn.connect_clicked(clone!(
+        #[strong]
+        select_mode,
+        #[strong]
+        sync_move_bar,
+        #[weak]
+        photo_grid,
+        #[weak]
+        multi_selection,
+        #[weak]
+        move_status,
+        move |_| {
+            multi_selection.unselect_all();
+            photo_grid.set_model(Some(&multi_selection));
+            select_mode.set(true);
+            move_status.set_visible(false);
+            sync_move_bar();
+        }
+    ));
+    let leave_select: Rc<dyn Fn()> = Rc::new(clone!(
+        #[strong]
+        select_mode,
+        #[strong]
+        sync_move_bar,
+        #[weak]
+        photo_grid,
+        #[weak]
+        multi_selection,
+        #[weak]
+        none_selection,
+        move || {
+            select_mode.set(false);
+            multi_selection.unselect_all();
+            photo_grid.set_model(Some(&none_selection));
+            sync_move_bar();
+        }
+    ));
+    cancel_select.connect_clicked(clone!(
+        #[strong]
+        leave_select,
+        move |_| leave_select()
+    ));
+    {
+        let ui = ui.clone();
+        let source_name = person.display_name();
+        let (photos, multi_selection, leave_select, move_status) =
+            (photos.downgrade(), multi_selection.downgrade(), leave_select.clone(), move_status.downgrade());
+        move_btn.connect_clicked(move |button| {
+            let (Some(photos), Some(multi)) = (photos.upgrade(), multi_selection.upgrade()) else {
+                return;
+            };
+            let faces: Vec<i64> = (0..photos.n_items())
+                .filter(|index| multi.is_selected(*index))
+                .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
+                .map(|object| object.borrow::<PersonFace>().face_id)
+                .collect();
+            if faces.is_empty() {
+                return;
+            }
+            let (photos, leave_select, move_status) = (photos.downgrade(), leave_select.clone(), move_status.clone());
+            let done: Rc<dyn Fn(String)> = Rc::new(move |text| {
+                leave_select();
+                if let Some(label) = move_status.upgrade() {
+                    label.set_label(&text);
+                    label.set_visible(true);
+                }
+                let rx = read_person_files_async(pid);
+                let photos = photos.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let files = rx.recv().await.unwrap_or_default();
+                    if let Some(photos) = photos.upgrade() {
+                        let items: Vec<glib::BoxedAnyObject> =
+                            files.into_iter().map(glib::BoxedAnyObject::new).collect();
+                        photos.splice(0, photos.n_items(), &items);
+                    }
+                });
+            });
+            open_move_target_picker(&ui, pid, &source_name, faces, button, done);
+        });
+    }
+    body.append(&move_bar);
     body.append(&photos_scroll);
 
     toolbar.set_content(Some(&body));
@@ -2028,6 +2208,102 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     });
 }
 
+/// Lists every other person; picking one moves `faces` there with `reassignFace`.
+fn open_move_target_picker(
+    ui: &Rc<Ui>,
+    source: i64,
+    source_name: &str,
+    faces: Vec<i64>,
+    anchor: &gtk::Button,
+    done: Rc<dyn Fn(String)>,
+) {
+    let mut targets: Vec<PersonRow> = ui.persons.borrow().iter().filter(|p| p.id != source).cloned().collect();
+    targets.sort_by(|a, b| {
+        b.has_any_name()
+            .cmp(&a.has_any_name())
+            .then(b.file_count.cmp(&a.file_count))
+            .then(a.id.cmp(&b.id))
+    });
+    let dialog = adw::Dialog::new();
+    dialog.set_title(&actions::move_title(faces.len()));
+    dialog.set_content_width(480);
+    dialog.set_content_height(440);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    let body = crate::v3::vbox(10);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.append(&crate::v3::label(&actions::move_title(faces.len()), &["title-3"]));
+    body.append(&crate::v3::wrapped(&actions::move_hint(source_name), &["dim-label"]));
+    let listbox = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    if targets.is_empty() {
+        body.append(&crate::v3::wrapped(
+            "There is no one else to move them to yet. Group faces again after more photos are added.",
+            &["dim-label"],
+        ));
+    }
+    for target in &targets {
+        let row = adw::ActionRow::builder()
+            .title(target.display_name())
+            .subtitle(target.counts())
+            .activatable(true)
+            .build();
+        let icon = gtk::Image::from_icon_name("avatar-default-symbolic");
+        icon.add_css_class("gold-accent");
+        row.add_prefix(&icon);
+        let (ui, dialog, faces, done) = (ui.clone(), dialog.clone(), faces.clone(), done.clone());
+        let (target_id, target_name) = (target.id, target.display_name());
+        let busy = Rc::new(Cell::new(false));
+        row.connect_activated(move |_| {
+            if busy.replace(true) {
+                return;
+            }
+            dialog.close();
+            let payloads = faces
+                .iter()
+                .map(|face| {
+                    CommandPayload::ReassignFace(ReassignFacePayload {
+                        face_id: *face,
+                        destination_person_id: Some(target_id),
+                        create_new_person: false,
+                    })
+                })
+                .collect();
+            set_status(&ui, "Moving photos…".to_string());
+            let (ui, faces, done, target_name) = (ui.clone(), faces.len(), done.clone(), target_name.clone());
+            glib::MainContext::default().spawn_local(async move {
+                let timeout = 30 + (faces / 10) as u32;
+                let results = actions::send_and_collect(&ui.engine, payloads, "reassignFace", timeout).await;
+                let text = match results {
+                    Some(results) => {
+                        let moved: usize = results.iter().map(|r| r.succeeded as usize).sum();
+                        actions::move_status(
+                            moved,
+                            faces.saturating_sub(moved),
+                            &target_name,
+                            actions::first_failure(&results).as_deref(),
+                        )
+                    }
+                    None => "Couldn't move the photos: FileID isn't ready. Try again.".to_owned(),
+                };
+                set_status(&ui, text.clone());
+                done(text);
+                schedule_reload_burst(&ui);
+            });
+        });
+        listbox.append(&row);
+    }
+    body.append(&crate::v3::scroller(&listbox));
+    toolbar.set_content(Some(&body));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(anchor));
+}
+
 /// An empty read (the person was merged away, or the read failed) keeps the
 /// photos already on screen.
 fn person_photos_changed(shown: &[i64], fresh: &[PersonFace]) -> bool {
@@ -2193,35 +2469,30 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                 .copied()
                 .filter(|source| *source != target_id)
                 .collect();
-            let sent = sources
-                .iter()
-                .take_while(|source| {
-                    send_cmd(
-                        &ui2,
-                        CommandPayload::MergeClusters(MergeClustersPayload {
-                            source_person_id: **source,
-                            destination_person_id: target_id,
-                        }),
-                    )
-                })
-                .count();
-            ui2.merge_results_pending.set(sent);
-            if sent < sources.len() {
-                ui2.merge_failed.set(true);
-            }
-            if sent > 0 {
-                let status = if sent == sources.len() {
-                    format!("Combining {} cards into one…", ids2.len())
-                } else {
-                    format!(
-                        "Sent {sent} of {} merges; reloading after a connection failure.",
-                        sources.len()
-                    )
-                };
-                set_status(&ui2, status);
-                set_mode(&ui2, Mode::Normal);
-                dialog2.close();
-            }
+            ui2.merge_results_pending.set(sources.len());
+            let faces_rx = actions::read_face_ids(sources.clone());
+            let (ui3, dialog3, total) = (ui2.clone(), dialog2.clone(), ids2.len());
+            glib::MainContext::default().spawn_local(async move {
+                let faces = faces_rx.recv().await.unwrap_or_default();
+                let sent = send_merges(&ui3, target_id, &sources, &faces);
+                ui3.merge_results_pending.set(sent);
+                if sent < sources.len() {
+                    ui3.merge_failed.set(true);
+                }
+                if sent > 0 {
+                    let status = if sent == sources.len() {
+                        format!("Combining {total} cards into one…")
+                    } else {
+                        format!(
+                            "Sent {sent} of {} merges; reloading after a connection failure.",
+                            sources.len()
+                        )
+                    };
+                    set_status(&ui3, status);
+                    set_mode(&ui3, Mode::Normal);
+                    dialog3.close();
+                }
+            });
         });
         listbox.append(&row);
     }
@@ -2233,6 +2504,86 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
     toolbar.set_content(Some(&body));
     dialog.set_child(Some(&toolbar));
     dialog.present(Some(&ui.anchor));
+}
+
+/// Sends one `mergeClusters` per source and journals each so a confirmed
+/// merge can be undone. Returns how many were sent.
+fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Vec<i64>)]) -> usize {
+    let name = |id: i64| {
+        ui.person_by_id
+            .borrow()
+            .get(&id)
+            .map(PersonRow::display_name)
+            .unwrap_or_else(|| format!("Person #{id}"))
+    };
+    let mut sent = 0;
+    for &source in sources {
+        let record = MergeRecord {
+            source,
+            destination,
+            source_name: name(source),
+            destination_name: name(destination),
+            faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
+        };
+        if !send_cmd(
+            ui,
+            CommandPayload::MergeClusters(MergeClustersPayload {
+                source_person_id: source,
+                destination_person_id: destination,
+            }),
+        ) {
+            break;
+        }
+        ui.merge_journal.borrow_mut().push_back(record);
+        sent += 1;
+    }
+    sent
+}
+
+fn refresh_undo_merge(ui: &Rc<Ui>) {
+    let last = ui.merge_undo.borrow().last().cloned();
+    ui.undo_merge_button.set_visible(last.is_some());
+    if let Some(record) = last {
+        ui.undo_merge_button
+            .set_tooltip_text(Some(&actions::undo_merge_label(&record.source_name, &record.destination_name)));
+    }
+}
+
+/// Splits the last merged-in card back out (`revertMerge`).
+fn undo_last_merge(ui: &Rc<Ui>) {
+    let Some(record) = ui.merge_undo.borrow().last().cloned() else {
+        return;
+    };
+    if !begin_person_action(ui, "revertMerge") {
+        return;
+    }
+    ui.undo_merge_button.set_sensitive(false);
+    set_status(ui, "Undoing the merge…".to_string());
+    let payload = CommandPayload::RevertMerge(RevertMergePayload {
+        source_person_id: record.source,
+        destination_person_id: record.destination,
+        face_ids_to_revert: record.faces.clone(),
+    });
+    let ui = ui.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let results = actions::send_and_collect(&ui.engine, vec![payload], "revertMerge", 30).await;
+        finish_person_action(&ui, "revertMerge");
+        ui.undo_merge_button.set_sensitive(true);
+        match results.as_deref().and_then(<[_]>::first) {
+            Some(result) if result.failed == 0 && result.succeeded > 0 => {
+                ui.merge_undo.borrow_mut().retain(|r| r.source != record.source || r.destination != record.destination || r.faces != record.faces);
+                refresh_undo_merge(&ui);
+                set_status(&ui, actions::UNDO_MERGE_OK.to_string());
+                schedule_reload_burst(&ui);
+            }
+            Some(result) => {
+                let detail = actions::first_failure(std::slice::from_ref(result))
+                    .unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                set_status(&ui, actions::undo_merge_failed(&detail));
+            }
+            None => set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again.")),
+        }
+    });
 }
 
 // ── Suggested merges ──────────────────────────────────────────────────────────
@@ -2259,6 +2610,8 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                             a: pair.source_person_id,
                             b: pair.destination_person_id,
                             sim: pair.similarity,
+                            fa: pair.source_anchor_face_id,
+                            fb: pair.destination_anchor_face_id,
                         })
                         .collect();
                 }
@@ -2343,36 +2696,91 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
             let (target, source) = preferred(pa, pb);
             let target_id = target.id;
             let source_id = source.id;
-            let (row, merge_btn) = build_suggestion_row(pa, pb, c.sim);
+            let (row, merge_btn, different_btn) = build_suggestion_row(pa, pb, c.sim);
             let ui2 = ui.clone();
             let row_weak = row.downgrade();
             let button_weak = merge_btn.downgrade();
             let dialog_weak = dialog.downgrade();
-            merge_btn.connect_clicked(move |button| {
-                if ui2.merge_results_pending.get() > 0 {
-                    set_status(&ui2, "Wait for the current merge to finish.".to_string());
-                    return;
-                }
-                if send_cmd(
-                    &ui2,
-                    CommandPayload::MergeClusters(MergeClustersPayload {
-                        source_person_id: source_id,
-                        destination_person_id: target_id,
-                    }),
-                ) {
+            merge_btn.connect_clicked(clone!(
+                #[strong]
+                different_btn,
+                move |button| {
+                    if ui2.merge_results_pending.get() > 0 {
+                        set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                        return;
+                    }
+                    ui2.merge_results_pending.set(1);
                     ui2.merge_failed.set(false);
                     button.set_sensitive(false);
+                    different_btn.set_sensitive(false);
                     button.set_label("Merging…");
-                    ui2.merge_results_pending.set(1);
-                    ui2.pending_suggestions
-                        .borrow_mut()
-                        .push_back(PendingSuggestion {
-                            row: row_weak.clone(),
-                            button: button_weak.clone(),
-                            dialog: dialog_weak.clone(),
-                        });
                     set_status(&ui2, "Merging…".to_string());
+                    let faces_rx = actions::read_face_ids(vec![source_id]);
+                    let (ui3, row_weak, button_weak, dialog_weak, different_btn) = (
+                        ui2.clone(),
+                        row_weak.clone(),
+                        button_weak.clone(),
+                        dialog_weak.clone(),
+                        different_btn.clone(),
+                    );
+                    glib::MainContext::default().spawn_local(async move {
+                        let faces = faces_rx.recv().await.unwrap_or_default();
+                        if send_merges(&ui3, target_id, &[source_id], &faces) == 1 {
+                            ui3.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
+                                row: row_weak,
+                                button: button_weak,
+                                dialog: dialog_weak,
+                            });
+                        } else {
+                            ui3.merge_results_pending.set(0);
+                            if let Some(button) = button_weak.upgrade() {
+                                button.set_sensitive(true);
+                                button.set_label("Merge");
+                            }
+                            different_btn.set_sensitive(true);
+                        }
+                    });
                 }
+            ));
+            let (c, ui2, row_weak, button_weak) = (*c, ui.clone(), row.downgrade(), merge_btn.downgrade());
+            different_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                if let Some(merge) = button_weak.upgrade() {
+                    merge.set_sensitive(false);
+                }
+                let payload = CommandPayload::MarkPersonsDifferent(MarkPersonsDifferentPayload {
+                    source_person_id: c.a,
+                    destination_person_id: c.b,
+                    source_anchor_face_id: c.fa,
+                    destination_anchor_face_id: c.fb,
+                });
+                let (ui3, row_weak, button_weak, different) =
+                    (ui2.clone(), row_weak.clone(), button_weak.clone(), button.downgrade());
+                glib::MainContext::default().spawn_local(async move {
+                    let results =
+                        actions::send_and_collect(&ui3.engine, vec![payload], "markPersonsDifferent", 20).await;
+                    match results.as_deref().and_then(<[_]>::first) {
+                        Some(result) if result.failed == 0 && result.succeeded > 0 => {
+                            ui3.suggestions.borrow_mut().retain(|s| s.a != c.a || s.b != c.b);
+                            if let Some(row) = row_weak.upgrade() {
+                                row.set_visible(false);
+                            }
+                            set_status(&ui3, actions::DIFFERENT_OK.to_string());
+                        }
+                        other => {
+                            let detail = other
+                                .and_then(|r| actions::first_failure(std::slice::from_ref(r)))
+                                .unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                            set_status(&ui3, actions::different_failed(&detail));
+                            if let Some(different) = different.upgrade() {
+                                different.set_sensitive(true);
+                            }
+                            if let Some(merge) = button_weak.upgrade() {
+                                merge.set_sensitive(true);
+                            }
+                        }
+                    }
+                });
             });
             listbox.append(&row);
         }
@@ -2388,7 +2796,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
     dialog.present(Some(&ui.anchor));
 }
 
-fn build_suggestion_row(pa: &PersonRow, pb: &PersonRow, sim: f32) -> (gtk::Box, gtk::Button) {
+fn build_suggestion_row(pa: &PersonRow, pb: &PersonRow, sim: f32) -> (gtk::Box, gtk::Button, gtk::Button) {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
@@ -2419,10 +2827,15 @@ fn build_suggestion_row(pa: &PersonRow, pb: &PersonRow, sim: f32) -> (gtk::Box, 
         .label("Merge")
         .css_classes(["gold-button"])
         .build();
+    let different_btn = gtk::Button::builder()
+        .label("Not the same person")
+        .tooltip_text("Keep these two cards apart. FileID won't suggest this pair again.")
+        .build();
     right.append(&sim_label);
     right.append(&merge_btn);
+    right.append(&different_btn);
     row.append(&right);
-    (row, merge_btn)
+    (row, merge_btn, different_btn)
 }
 
 fn mini_person(p: &PersonRow) -> gtk::Box {

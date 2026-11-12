@@ -24,6 +24,7 @@ mod moments_timeline;
 mod face_queues;
 mod face_review;
 pub mod people;
+mod people_actions;
 pub mod restructure;
 mod restructure_map;
 mod restructure_map_layout;

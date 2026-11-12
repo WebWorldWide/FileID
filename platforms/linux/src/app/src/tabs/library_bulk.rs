@@ -15,7 +15,7 @@ use gtk::glib::clone;
 
 use super::library_bulk_model as model;
 use super::util::{icon_for_kind, icon_paintable};
-use crate::engine_client::{read_db, texture_from_decoded, EngineClient, EngineEvent, FileRow};
+use crate::engine_client::{EngineClient, EngineEvent, FileRow, read_db, texture_from_decoded};
 use fileid_engine::ipc::{
     ApplyTagsPayload, BulkActionResult, CommandPayload, RenameEntry, RenameFilesPayload, TagMode,
 };
@@ -49,7 +49,8 @@ async fn bulk_result(
     loop {
         match subscription.0.recv().await {
             Ok(EngineEvent::BulkActionResult(result)) if result.action == action => {
-                let reported: HashSet<i64> = result.messages.iter().filter_map(|m| m.file_id).collect();
+                let reported: HashSet<i64> =
+                    result.messages.iter().filter_map(|m| m.file_id).collect();
                 if reported.is_empty() || !reported.is_disjoint(ids) {
                     return Some(result);
                 }
@@ -61,7 +62,11 @@ async fn bulk_result(
 }
 
 fn first_error(result: &BulkActionResult) -> Option<String> {
-    result.messages.iter().find(|m| !m.ok).and_then(|m| m.message.clone())
+    result
+        .messages
+        .iter()
+        .find(|m| !m.ok)
+        .and_then(|m| m.message.clone())
 }
 
 fn landed(result: &BulkActionResult, ids: &HashSet<i64>) -> HashSet<i64> {
@@ -104,11 +109,17 @@ impl BulkBar {
         let rename = crate::v3::secondary("Rename selected", false);
         rename.set_tooltip_text(Some("Apply FileID's suggested names to the chosen files"));
         let tag = crate::v3::secondary("Tag selected", false);
-        tag.set_tooltip_text(Some("Click files to choose them first, then add tags to all of them"));
-        let undo_rename = crate::v3::accent("Undo last rename", crate::shell::status::Tone::Gold, false);
+        tag.set_tooltip_text(Some(
+            "Click files to choose them first, then add tags to all of them",
+        ));
+        let undo_rename =
+            crate::v3::accent("Undo last rename", crate::shell::status::Tone::Gold, false);
         undo_rename.set_tooltip_text(Some("Reverse the most recent rename batch"));
-        let undo_tags = crate::v3::accent("Undo last tags", crate::shell::status::Tone::Gold, false);
-        undo_tags.set_tooltip_text(Some("Remove only the tags FileID added in the most recent bulk tag batch"));
+        let undo_tags =
+            crate::v3::accent("Undo last tags", crate::shell::status::Tone::Gold, false);
+        undo_tags.set_tooltip_text(Some(
+            "Remove only the tags FileID added in the most recent bulk tag batch",
+        ));
         let status = crate::v3::meta("");
         status.set_visible(false);
         status.set_wrap(true);
@@ -167,7 +178,9 @@ impl BulkBar {
         let has_rename = model::rename_journal_path()
             .and_then(|path| model::load_rename_batch(&path, now_secs()))
             .is_some();
-        let has_tags = model::tag_journal_path().and_then(|path| model::load_tag_batch(&path)).is_some();
+        let has_tags = model::tag_journal_path()
+            .and_then(|path| model::load_tag_batch(&path))
+            .is_some();
         self.undo_rename.set_visible(has_rename);
         self.undo_tags.set_visible(has_tags);
     }
@@ -257,7 +270,9 @@ fn open_rename_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
     let empty = adw::StatusPage::builder()
         .icon_name("document-edit-symbolic")
         .title("No suggested names yet")
-        .description("Describe your files first (Describe Files page). Suggested names appear here.")
+        .description(
+            "Describe your files first (Describe Files page). Suggested names appear here.",
+        )
         .vexpand(true)
         .build();
     let stack = gtk::Stack::new();
@@ -308,7 +323,12 @@ fn open_rename_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
         #[strong]
         sheet,
         move |_| {
-            let ids = sheet.plans.borrow().iter().map(|plan| plan.file_id).collect();
+            let ids = sheet
+                .plans
+                .borrow()
+                .iter()
+                .map(|plan| plan.file_id)
+                .collect();
             sheet.checked.replace(ids);
             sheet.rebuild();
         }
@@ -367,7 +387,9 @@ impl RenameSheet {
         });
         let this = self.clone();
         glib::MainContext::default().spawn_local(async move {
-            let Ok((plans, unnamed, found)) = rx.recv().await else { return };
+            let Ok((plans, unnamed, found)) = rx.recv().await else {
+                return;
+            };
             if this.generation.get() != generation {
                 return;
             }
@@ -382,7 +404,8 @@ impl RenameSheet {
             ));
             this.note.set_visible(skipped > 0 && !plans.is_empty());
             if select_all {
-                this.checked.replace(plans.iter().map(|plan| plan.file_id).collect());
+                this.checked
+                    .replace(plans.iter().map(|plan| plan.file_id).collect());
             } else {
                 let keep: HashSet<i64> = plans.iter().map(|plan| plan.file_id).collect();
                 this.checked.borrow_mut().retain(|id| keep.contains(id));
@@ -395,7 +418,8 @@ impl RenameSheet {
     fn rebuild(self: &Rc<Self>) {
         crate::v3::clear(&self.list);
         let plans = self.plans.borrow().clone();
-        self.stack.set_visible_child_name(if plans.is_empty() { "empty" } else { "list" });
+        self.stack
+            .set_visible_child_name(if plans.is_empty() { "empty" } else { "list" });
         for plan in &plans {
             self.list.append(&self.row(plan));
         }
@@ -405,9 +429,12 @@ impl RenameSheet {
     fn sync(&self) {
         let total = self.plans.borrow().len();
         let chosen = self.checked.borrow().len();
-        self.count.set_label(&format!("{chosen} of {total} selected"));
-        self.apply.set_label(&model::rename_label(chosen, self.in_flight.get()));
-        self.apply.set_sensitive(chosen > 0 && !self.in_flight.get());
+        self.count
+            .set_label(&format!("{chosen} of {total} selected"));
+        self.apply
+            .set_label(&model::rename_label(chosen, self.in_flight.get()));
+        self.apply
+            .set_sensitive(chosen > 0 && !self.in_flight.get());
         self.all.set_sensitive(!self.in_flight.get());
         self.none.set_sensitive(!self.in_flight.get());
     }
@@ -416,7 +443,10 @@ impl RenameSheet {
         let on = self.checked.borrow().contains(&plan.file_id);
         let check = gtk::CheckButton::new();
         check.set_active(on);
-        check.update_property(&[gtk::accessible::Property::Label(&format!("Rename {}", plan.old_name()))]);
+        check.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Rename {}",
+            plan.old_name()
+        ))]);
 
         let picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Cover)
@@ -428,9 +458,15 @@ impl RenameSheet {
             "image" | "video" => {
                 let video = plan.kind == "video";
                 let rx = if video {
-                    self.bar.engine.borrow().request_video_thumbnail(plan.old_path.clone(), 128)
+                    self.bar
+                        .engine
+                        .borrow()
+                        .request_video_thumbnail(plan.old_path.clone(), 128)
                 } else {
-                    self.bar.engine.borrow().request_scaled_thumbnail(plan.old_path.clone(), 128)
+                    self.bar
+                        .engine
+                        .borrow()
+                        .request_scaled_thumbnail(plan.old_path.clone(), 128)
                 };
                 let weak = picture.downgrade();
                 glib::MainContext::default().spawn_local(async move {
@@ -511,8 +547,13 @@ impl RenameSheet {
 
     fn apply_selected(self: &Rc<Self>) {
         let checked = self.checked.borrow().clone();
-        let chosen: Vec<model::RenamePlan> =
-            self.plans.borrow().iter().filter(|plan| checked.contains(&plan.file_id)).cloned().collect();
+        let chosen: Vec<model::RenamePlan> = self
+            .plans
+            .borrow()
+            .iter()
+            .filter(|plan| checked.contains(&plan.file_id))
+            .cloned()
+            .collect();
         if chosen.is_empty() || self.in_flight.replace(true) {
             return;
         }
@@ -525,7 +566,11 @@ impl RenameSheet {
                 model::save_rename_batch(&path, &renamed, now_secs());
             }
             this.in_flight.set(false);
-            this.status.set_label(&model::rename_status(renamed.len(), failed, error.as_deref()));
+            this.status.set_label(&model::rename_status(
+                renamed.len(),
+                failed,
+                error.as_deref(),
+            ));
             this.status.set_visible(true);
             this.bar.refresh_undo();
             (this.bar.reload)();
@@ -535,7 +580,10 @@ impl RenameSheet {
 }
 
 /// Sends the renames in chunks. Returns what landed, how many didn't, and the first reason.
-async fn rename_plans(engine: &Engine, plans: &[model::RenamePlan]) -> (Vec<model::RenameOutcome>, usize, Option<String>) {
+async fn rename_plans(
+    engine: &Engine,
+    plans: &[model::RenamePlan],
+) -> (Vec<model::RenameOutcome>, usize, Option<String>) {
     let mut renamed = Vec::new();
     let mut failed = 0;
     let mut error = None;
@@ -543,7 +591,10 @@ async fn rename_plans(engine: &Engine, plans: &[model::RenamePlan]) -> (Vec<mode
         let ids: HashSet<i64> = chunk.iter().map(|plan| plan.file_id).collect();
         let renames = chunk
             .iter()
-            .map(|plan| RenameEntry { file_id: plan.file_id, new_name: plan.new_name() })
+            .map(|plan| RenameEntry {
+                file_id: plan.file_id,
+                new_name: plan.new_name(),
+            })
             .collect();
         let timeout = 60 + (chunk.len() / 4) as u32;
         let result = bulk_result(
@@ -560,11 +611,16 @@ async fn rename_plans(engine: &Engine, plans: &[model::RenamePlan]) -> (Vec<mode
             break;
         };
         let done = landed(&result, &ids);
-        renamed.extend(chunk.iter().filter(|plan| done.contains(&plan.file_id)).map(|plan| model::RenameOutcome {
-            file_id: plan.file_id,
-            old_path: plan.old_path.clone(),
-            new_path: plan.new_path.clone(),
-        }));
+        renamed.extend(
+            chunk
+                .iter()
+                .filter(|plan| done.contains(&plan.file_id))
+                .map(|plan| model::RenameOutcome {
+                    file_id: plan.file_id,
+                    old_path: plan.old_path.clone(),
+                    new_path: plan.new_path.clone(),
+                }),
+        );
         failed += chunk.len() - done.len();
         if error.is_none() {
             error = first_error(&result);
@@ -574,7 +630,9 @@ async fn rename_plans(engine: &Engine, plans: &[model::RenamePlan]) -> (Vec<mode
 }
 
 fn run_undo_rename(bar: &Rc<BulkBar>) {
-    let Some(path) = model::rename_journal_path() else { return };
+    let Some(path) = model::rename_journal_path() else {
+        return;
+    };
     let Some(batch) = model::load_rename_batch(&path, now_secs()) else {
         bar.refresh_undo();
         return;
@@ -586,9 +644,12 @@ fn run_undo_rename(bar: &Rc<BulkBar>) {
     let ids: Vec<i64> = batch.iter().map(|entry| entry.file_id).collect();
     let rx = read_db(move |conn| {
         let mut current: HashMap<i64, String> = HashMap::new();
-        if let Ok(mut stmt) = conn.prepare(&format!("SELECT id, path_text FROM files WHERE id IN ({})", id_list(&ids)))
-            && let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-        {
+        if let Ok(mut stmt) = conn.prepare(&format!(
+            "SELECT id, path_text FROM files WHERE id IN ({})",
+            id_list(&ids)
+        )) && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }) {
             current.extend(rows.flatten());
         }
         let ready: Vec<model::RenameOutcome> = batch
@@ -666,7 +727,9 @@ fn open_tag_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
 
     let entry = crate::v3::text_field("e.g. Vacation, Family, Important");
     entry.set_hexpand(true);
-    entry.update_property(&[gtk::accessible::Property::Label("Tags, separated by commas")]);
+    entry.update_property(&[gtk::accessible::Property::Label(
+        "Tags, separated by commas",
+    )]);
     let status = crate::v3::meta("");
     status.set_wrap(true);
     status.set_xalign(0.0);
@@ -684,7 +747,10 @@ fn open_tag_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
     body.set_margin_bottom(16);
     body.set_margin_start(16);
     body.set_margin_end(16);
-    body.append(&crate::v3::label(&model::tag_title(ids.len()), &["title-3"]));
+    body.append(&crate::v3::label(
+        &model::tag_title(ids.len()),
+        &["title-3"],
+    ));
     body.append(&crate::v3::wrapped(
         "Comma-separated. Existing tags on each file are preserved — only new tags get added.",
         &["meta"],
@@ -774,8 +840,9 @@ async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, 
         if let Ok(mut stmt) = conn.prepare(&format!(
             "SELECT file_id, tag FROM tags WHERE source = 'user' AND file_id IN ({})",
             id_list(&read_ids)
-        )) && let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-        {
+        )) && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }) {
             for (file, tag) in rows.flatten() {
                 have.entry(file).or_default().insert(tag);
             }
@@ -788,14 +855,21 @@ async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, 
     let id_set: HashSet<i64> = ids.iter().copied().collect();
     let result = bulk_result(
         &bar.engine,
-        CommandPayload::ApplyTags(ApplyTagsPayload { file_ids: ids.to_vec(), tags: tags.to_vec(), mode: TagMode::Add }),
+        CommandPayload::ApplyTags(ApplyTagsPayload {
+            file_ids: ids.to_vec(),
+            tags: tags.to_vec(),
+            mode: TagMode::Add,
+        }),
         "applyTags",
         &id_set,
         30,
     )
     .await;
     let Some(result) = result else {
-        return ("FileID didn't finish adding tags. Try again in a moment.".to_owned(), false);
+        return (
+            "FileID didn't finish adding tags. Try again in a moment.".to_owned(),
+            false,
+        );
     };
     let ok = landed(&result, &id_set);
     let empty = HashSet::new();
@@ -806,18 +880,31 @@ async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, 
         if added.is_empty() {
             unchanged += 1;
         } else {
-            outcomes.push(model::TagOutcome { file_id: *id, tags: added });
+            outcomes.push(model::TagOutcome {
+                file_id: *id,
+                tags: added,
+            });
         }
     }
     let failed = ids.len() - ok.len();
     if let Some(path) = model::tag_journal_path() {
         model::record_tag_batch(&path, &outcomes, failed);
     }
-    (model::tag_status(outcomes.len(), unchanged, failed, first_error(&result).as_deref()), failed == 0)
+    (
+        model::tag_status(
+            outcomes.len(),
+            unchanged,
+            failed,
+            first_error(&result).as_deref(),
+        ),
+        failed == 0,
+    )
 }
 
 fn run_undo_tags(bar: &Rc<BulkBar>) {
-    let Some(path) = model::tag_journal_path() else { return };
+    let Some(path) = model::tag_journal_path() else {
+        return;
+    };
     let Some(batch) = model::load_tag_batch(&path) else {
         bar.refresh_undo();
         return;
@@ -844,7 +931,11 @@ fn run_undo_tags(bar: &Rc<BulkBar>) {
             let ids: HashSet<i64> = files.iter().copied().collect();
             let result = bulk_result(
                 &bar.engine,
-                CommandPayload::ApplyTags(ApplyTagsPayload { file_ids: files, tags: vec![tag], mode: TagMode::Remove }),
+                CommandPayload::ApplyTags(ApplyTagsPayload {
+                    file_ids: files,
+                    tags: vec![tag],
+                    mode: TagMode::Remove,
+                }),
                 "applyTags",
                 &ids,
                 30,
@@ -866,7 +957,11 @@ fn run_undo_tags(bar: &Rc<BulkBar>) {
         if failed.is_empty() {
             model::clear_journal(&path);
         }
-        bar.say(&model::undo_tag_status(undone.len(), failed.len(), error.as_deref()));
+        bar.say(&model::undo_tag_status(
+            undone.len(),
+            failed.len(),
+            error.as_deref(),
+        ));
         bar.finished();
     });
 }
