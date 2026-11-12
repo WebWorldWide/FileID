@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-12 — Windows: CUDA pack built without telemetry (CI build pending)
+
+- **New `build-ort-cuda-runtime.ps1` + `ort-cuda-runtime.yml`:** ONNX Runtime 1.22.0 (commit `f2174028`) with `--use_cuda`, CUDA 12.8.1 and cuDNN 9.8.0, built from source without `--use_telemetry` on `windows-2022`. Output is a flat pack (`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `onnxruntime_providers_cuda.dll`, the Attachment A NVIDIA DLLs, cuDNN runtime DLLs, `licenses/`) that the engine already finds under `Models\packs\cuda`; its telemetry check passes by construction. CI runs `check_binary_privacy.py` on the folder and `--ort-runtime` on the runtime, and `dumpbin` checks every import of the CUDA provider is in the pack or Windows.
+- **Not wired yet:** no installer, Store or in-app download carries the pack (about 1 GB; egress is Hugging Face only). Needs an owner decision, see NEXT.
+- **Needs an NVIDIA Windows PC:** EP bind, files/s against DirectML, a Blackwell (sm_120) run.
+
 ## 2026-11-12 — Windows: ONNX Runtime built from source without Microsoft telemetry (CI green)
 
 - **CI builds ONNX Runtime 1.22.0 with DirectML** from Microsoft's source, without `--use_telemetry`, for x64 and arm64, on GitHub's `windows-2022` runners. A cold-cache build takes about 37–65 minutes per architecture; the build is cached by the build script's hash.
