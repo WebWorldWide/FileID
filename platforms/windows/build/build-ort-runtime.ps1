@@ -120,6 +120,17 @@ if (Test-Path -LiteralPath $privateConfig) {
     throw "TraceLoggingConfigPrivate.h exists; it would put ONNX Runtime in Windows' telemetry group."
 }
 
+# CMake's FindPatch picks Strawberry Perl's patch.exe 2.5.9 first on hosted
+# runners, and it asserts on ORT's arm64 cpuinfo patch even with LF sources.
+# Use Git for Windows' GNU patch (2.7+) instead.
+$gitExe = (Get-Command git -ErrorAction Stop).Source
+$gitRoot = Split-Path -Parent (Split-Path -Parent $gitExe)
+$gnuPatch = Join-Path $gitRoot 'usr\bin\patch.exe'
+if (-not (Test-Path -LiteralPath $gnuPatch)) {
+    throw "GNU patch not found at $gnuPatch (expected beside Git for Windows)."
+}
+Write-Host "Using patch: $gnuPatch" -ForegroundColor Cyan
+
 $arguments = @(
     'tools\ci_build\build.py',
     '--build_dir', $BuildDir,
@@ -131,7 +142,7 @@ $arguments = @(
     '--use_binskim_compliant_compile_flags',
     '--compile_no_warning_as_error',
     '--cmake_generator', 'Visual Studio 17 2022',
-    '--cmake_extra_defines', 'onnxruntime_BUILD_UNIT_TESTS=OFF', 'onnxruntime_USE_TELEMETRY=OFF'
+    '--cmake_extra_defines', 'onnxruntime_BUILD_UNIT_TESTS=OFF', 'onnxruntime_USE_TELEMETRY=OFF', "Patch_EXECUTABLE=$($gnuPatch -replace '\\', '/')"
 )
 if ($Architecture -eq 'arm64') {
     $arguments += '--arm64'
