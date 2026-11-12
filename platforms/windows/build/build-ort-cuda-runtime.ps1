@@ -250,6 +250,17 @@ Write-Host "Using patch: $gnuPatch" -ForegroundColor Cyan
 
 $cudaHomeArg = $CudaHome -replace '\\', '/'
 $cudnnHomeArg = $CudnnHome -replace '\\', '/'
+# With --use_binskim_compliant_compile_flags build.py hands its "/D..." defines to
+# nvcc verbatim; nvcc's device-link step reads "/DNDEBUG" as the file D:/DNDEBUG
+# ("nvcc fatal: Don't know what to do with 'D:/DNDEBUG'"). Pass them as -D.
+$buildPy = Join-Path $SourceDir 'tools\ci_build\build.py'
+$buildPyText = [IO.File]::ReadAllText($buildPy)
+$cudaDefineLine = "                            cudaflags.append(compile_flag)`n"
+if (([regex]::Matches($buildPyText, [regex]::Escape($cudaDefineLine))).Count -ne 1) {
+    throw 'build.py does not carry the expected CUDA define line.'
+}
+[IO.File]::WriteAllText($buildPy, $buildPyText.Replace($cudaDefineLine, "                            cudaflags.append('-D' + compile_flag[2:])`n"))
+
 $arguments = @(
     'tools\ci_build\build.py',
     '--build_dir', $BuildDir,
