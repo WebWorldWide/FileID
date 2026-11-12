@@ -30,7 +30,7 @@ pub(crate) async fn prewarm(sink: Sink, kind: String, cancel: Arc<AtomicBool>) {
     let display = display_name(&kind);
     if crate::models::license::policy_for(&kind).is_some() && vlm::model_spec(&kind).is_ok_and(|spec| spec["licenseAccepted"] != true) {
         sink.send(
-            EngineError::new("model_license_required", format!("Accept the {display} license terms in Settings before using it."))
+            EngineError::new("model_license_not_accepted", format!("Accept the {display} license terms in Settings before using it."))
                 .with_model(kind.clone())
                 .into_event(),
         )

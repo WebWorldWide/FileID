@@ -4731,3 +4731,10 @@ Coordinator decisions (owner-delegated), recorded by the Stage 7 agent. These re
 - **MLX errors fail the work, not the engine.** mlx-swift's default error handler calls `fatalError`, so a Metal GPU timeout killed a hosted engine. Each adapter request, and each Swift engine file, load, selection check, goal pass, chat answer and timeline window, runs in mlx-swift's `withError` scope. MLX keeps running after an error and throws when the scope ends, so the scope is one file or one request; its result is discarded and never stored.
 - **photo_45 is accepted as parity.** One of 60 descriptions is a near-tie that flips between Rust runs (identical inputs, no grouping or transcription before it). One Rust run matched Swift on all 180 fields.
 - **Timeline CLIP runs on Stage 5's MLX tower on the Mac.** With CPU ONNX Runtime for the pool frames, Rust cut different scenes (20 vs 22) and was 30 s slower per 6 clips (moments +29%). Through the MLX tower (Swift's `CLIPVisionMLX`), scenes and moment chapters are identical and time is within 5%. Embedding the next video's pool during captions was tried and dropped: on the GPU it slowed the captions (a 7.4 s pool wait), so the engine embeds per video, as Swift does.
+
+## 2026-11-11 — One prewarm for MLX models on the Mac, in the Swift engine's order
+
+Stage 7 made `prewarmModel` for an MLX kind on the hosted Rust engine load the model and refuse when it wasn't installed; Stage 9 made it verify or download the pinned repo and write the Swift install records. The Swift engine does both, in that order (`fetchRepo`, the `.fileid-installed` marker, then `loadContainer`), and the app's installers rely on prewarm to download. So the hosted engine runs the Stage 9 install first and loads only when the repo is verified on disk afterwards and the prewarm wasn't cancelled. A failed load after a good install keeps the records, as in Swift.
+
+Conformance had two keys for the same idea (`appHosted`, checking the engine under test, and `hosted`, checking every engine a case uses). One key stays, `appHosted`, with the stricter rule: a cross-engine case needs both engines to be ones the Mac app hosts.
+

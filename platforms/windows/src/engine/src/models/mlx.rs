@@ -1,7 +1,7 @@
 //! The Mac app's MLX models as the engine it hosts (`apple-adapters`) sees
 //! them: the favourite repos pinned in `shared/models/manifest.json`
 //! (`vlmRepos`), the audited MLX catalog the app bundles
-//! (`FileIDShared/Resources/model-catalog.json`), the Swift engine's install
+//! (`FileIDModelInfo/Resources/model-catalog.json`), the Swift engine's install
 //! locations, and its verified-install records (`.fileid-verified-<revision>`
 //! plus the `-v2` file-identity record). Every rule here is a port of
 //! `MLXModelCatalog.swift`, `AIModels.swift`, `VLMDownloader.swift` and
@@ -23,7 +23,7 @@ use super::registry::{FileEntry, Model};
 use crate::ipc::{ModelBenchmark, ModelCatalogItem};
 
 #[cfg(target_os = "macos")]
-const MAC_CATALOG_JSON: &str = include_str!("../../../../../apple/shared/Sources/FileIDShared/Resources/model-catalog.json");
+const MAC_CATALOG_JSON: &str = include_str!("../../../../../apple/shared/Sources/FileIDModelInfo/Resources/model-catalog.json");
 #[cfg(not(target_os = "macos"))]
 const MAC_CATALOG_JSON: &str = "";
 

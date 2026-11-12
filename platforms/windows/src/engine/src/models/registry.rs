@@ -765,7 +765,7 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     #[test]
     fn mac_app_bundles_follow_the_shared_layout() {
-        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let dir = unique_sentinel_dir("mac-layout");
         unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
@@ -791,7 +791,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn swift_layout_install_is_verified_by_sha_without_a_sentinel() {
-        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let dir = unique_sentinel_dir("swift-layout");
         std::fs::create_dir_all(&dir).unwrap();

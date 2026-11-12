@@ -73,6 +73,7 @@ fn write_fixture_files(repo: &Repo) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn fixture_listing() -> Vec<RepoFile> {
     let manifest: serde_json::Value = serde_json::from_str(fixture()["rustManifest"].as_str().unwrap()).unwrap();
     let mut listing: Vec<RepoFile> = manifest["files"]
@@ -135,7 +136,7 @@ fn swift_set(source: &str, name: &str) -> HashSet<String> {
 
 #[test]
 fn architectures_and_exclusions_match_mlx_model_catalog_swift() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apple/shared/Sources/FileIDShared/MLXModelCatalog.swift");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apple/shared/Sources/FileIDModelInfo/MLXModelCatalog.swift");
     let source = std::fs::read_to_string(path).unwrap();
     let set = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<HashSet<_>>();
     assert_eq!(swift_set(&source, "textArchitectures"), set(TEXT_ARCHITECTURES));
@@ -228,6 +229,9 @@ fn listing_reads_the_hugging_face_tree() {
     assert!(parse_listing(b"{\"error\":\"nope\"}").is_err());
 }
 
+/// Unix only: the Swift record format proves files by device, inode and
+/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+#[cfg(unix)]
 #[test]
 fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
     let _scratch = Scratch::new("plan");
@@ -249,16 +253,17 @@ fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
     finish(&plan).unwrap();
     let written = std::fs::read(verified_record_path(&dir, revision)).unwrap();
     assert_eq!(String::from_utf8(written).unwrap(), fixture["rustManifest"].as_str().unwrap());
-    if cfg!(unix) {
-        let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
-        assert_eq!(identity["version"], 2);
-        assert_eq!(identity["manifestSHA256"], fixture["rustManifestSHA256"]);
-        assert_eq!(identity["files"].as_array().unwrap().len(), 2);
-    }
+    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
+    assert_eq!(identity["version"], 2);
+    assert_eq!(identity["manifestSHA256"], fixture["rustManifestSHA256"]);
+    assert_eq!(identity["files"].as_array().unwrap().len(), 2);
     assert!(installed_marker_path(&dir).is_file());
     assert!(installed(repo));
 }
 
+/// Unix only: the Swift record format proves files by device, inode and
+/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+#[cfg(unix)]
 #[test]
 fn swift_record_is_accepted_and_gains_an_identity_record() {
     let _scratch = Scratch::new("swift");
@@ -271,11 +276,9 @@ fn swift_record_is_accepted_and_gains_an_identity_record() {
     assert!(installed(repo));
     let paths = vec!["config.json".to_string(), "weights/model.safetensors".to_string()];
     let manifest = std::fs::read(verified_record_path(&dir, revision)).unwrap();
-    if cfg!(unix) {
-        let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
-        assert_eq!(identity["manifestSHA256"], fixture["swiftManifestSHA256"]);
-        assert!(identity_matches(&dir, revision, &manifest, &paths));
-    }
+    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(identity_record_path(&dir, revision)).unwrap()).unwrap();
+    assert_eq!(identity["manifestSHA256"], fixture["swiftManifestSHA256"]);
+    assert!(identity_matches(&dir, revision, &manifest, &paths));
     assert!(installed(repo));
 
     std::fs::write(dir.join("weights/model.safetensors"), vec![8u8; 4096]).unwrap();
@@ -299,6 +302,9 @@ fn wrong_revision_or_missing_file_is_not_installed() {
     assert!(!installed(repo));
 }
 
+/// Unix only: the Swift record format proves files by device, inode and
+/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+#[cfg(unix)]
 #[test]
 fn catalog_models_must_carry_the_audited_weights() {
     let _scratch = Scratch::new("audit");
@@ -362,7 +368,7 @@ fn license_marker_is_the_swift_acceptance_record() {
 #[test]
 fn swift_reviewed_date_matches_the_manifest_policy() {
     let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift"),
     )
     .unwrap();
     assert!(source.contains(&format!("reviewedAt = \"{LICENSE_REVIEWED_AT}\"")));

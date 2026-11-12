@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-11 — Stages 5, 7, 8 and 9 integrated on agent/converge-9
+
+- **Prewarm of an MLX model on the hosted Rust engine** now follows the Swift engine: verify or download the repo and write its install records (Stage 9), then load through FileIDAppleKit (Stage 7). Before, Stage 7's load-only path replaced the install step, so a verified install got no `modelDownloadProgress` and a gated model no `model_license_not_accepted`. The Stage 7 load path's licence refusal uses Swift's kind `model_license_not_accepted` (was `model_license_required`, which the app never handled).
+- **Conformance:** one `detect_engine` and one case key, `appHosted` (the 5 `hosted` cases in `models.json` converted). A case runs only when every engine it uses, the one under test and any it `requires`, is one the Mac app hosts. `requiresTestTrashRoot` and `$engine.rustHosted` are unchanged.
+- **Windows CI (PR #323):** three `models::mlx` tests assert installs proven by the Swift identity record (device, inode, change time), which only Unix has; they now run on Unix only (MLX installs are Mac-only). Their panics held `TEST_ENV_LOCK`, so the five `paths` tests that lock it failed on the poisoned mutex; every user of the lock now tolerates poisoning.
+- **Paths:** Stage 9's catalog include and source pins follow converge-8's move into `FileIDModelInfo`; the metallib check moves with `DeepAnalyze.swift` into `FileIDVLMCore` (`MLXKernels`). Digests refreshed: `FileIDVLMCore/DeepAnalyze.swift`, `commands/prewarm.rs` (no network change).
+
 ## 2026-11-11 — Swift engine: a missing mlx.metallib fails a model load with an error, not a process exit
 
 - **Cause** (CI macOS, PR #323): CI copies `.build/release/FileIDEngine` alone into `$RUNNER_TEMP`, without `mlx-swift_Cmlx.bundle`, so MLX finds no metallib. `DeepAnalyze.performLoad` set `Memory.cacheLimit` before the download step, and MLX turns its "Failed to load the default metallib" exception into exit 255, so `prewarmModel` for an MLX kind killed the engine (`models-mac-mlx-verified-install-needs-no-download`, and the cross-engine MLX cases on the Swift side).

@@ -284,7 +284,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn root_empty_localappdata_falls_back_to_userprofile() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("LOCALAPPDATA");
         let profile = std::env::var_os("USERPROFILE")
             .expect("USERPROFILE must be set to exercise the fallback");
@@ -314,7 +314,7 @@ mod tests {
     #[cfg(all(not(windows), not(all(target_os = "macos", feature = "apple-adapters"))))]
     #[test]
     fn root_empty_xdg_data_home_falls_back_to_home() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("XDG_DATA_HOME");
         let home = std::env::var_os("HOME")
             .expect("HOME must be set to exercise the fallback");
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn db_override_is_exact_and_empty_value_falls_back() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_DB");
         let default = {
             unsafe { std::env::remove_var("FILEID_DB") };
@@ -358,7 +358,7 @@ mod tests {
     /// beside an explicit database, else in Application Support.
     #[test]
     fn app_hosted_root_matches_the_swift_engine() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved: Vec<_> = ["FILEID_DATABASE_PATH", "FILEID_DB", "HOME"]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
@@ -393,7 +393,7 @@ mod tests {
     /// when the Rust-layout file is missing; the Rust layout wins when present.
     #[test]
     fn swift_model_layout_is_found_on_macos() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let dir = std::env::temp_dir().join(format!("fileid-swift-layout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn model_override_also_owns_the_huggingface_cache() {
-        let _g = TEST_ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let custom = std::env::temp_dir().join("fileid-model-root");
         unsafe { std::env::set_var("FILEID_MODELS_DIR", &custom) };

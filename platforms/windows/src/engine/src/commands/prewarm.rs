@@ -251,12 +251,25 @@ pub(crate) async fn handle_prewarm_model(
     model_kind: String,
     http_client: Arc<reqwest::Client>,
 ) {
-    // The Mac app's engine loads MLX models through FileIDAppleKit (no download).
+    // The Mac app's engine prewarms an MLX model as the Swift engine does:
+    // verify (or download) the repo and write its install records, then load
+    // it through FileIDAppleKit.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if crate::apple::vlm::model_spec(&model_kind).is_ok() {
         let cancel = prewarm_cancel_flag(&model_kind);
+        if let Some(repo) = mlx::repo(&model_kind) {
+            install_model(sink.clone(), model_kind.clone(), http_client).await;
+            let installed = tokio::task::spawn_blocking(move || mlx::installed(repo)).await.unwrap_or(false);
+            if !installed || cancel.load(Ordering::Relaxed) {
+                return;
+            }
+        }
         return super::mlx_models::prewarm(sink, model_kind, cancel).await;
     }
+    install_model(sink, model_kind, http_client).await;
+}
+
+async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest::Client>) {
     // Emit an immediate "Queued" progress event so the welcome sheet row
     // flips out of the captionless-spinner state the moment the engine
     // sees the prewarm command.
