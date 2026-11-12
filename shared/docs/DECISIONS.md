@@ -4807,3 +4807,9 @@ Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `
 - **Eigen pin swapped to upstream's v1.22.1 fix.** GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin in `cmake/deps.txt` no longer matched. The build script takes upstream's own fix from v1.22.1: the same Eigen commit from the GitHub `eigen-mirror`, with its SHA-1. That is the only `deps.txt` change between the two releases. The script refuses to run if the original line is not there exactly once.
 - **LF line endings for the ORT source.** The source is checked out with `core.autocrlf=false` and `core.eol=lf`, so ORT's patches apply.
 - **GNU patch from Git for Windows.** CMake is pointed at Git for Windows' patch through `Patch_EXECUTABLE`. Hosted runners find Strawberry Perl's patch.exe 2.5.9 first, and it crashes on ORT's arm64 cpuinfo patch.
+
+## 2026-11-12 — Benchmark store: Swift's format wins (`left-benchmarks`)
+
+- The Mac app already reads and writes `model-benchmarks.json` as `{modelId: ModelBenchmark}`, filtered by the entry's own `hardware`. The Rust engine now uses that format everywhere (not only when Mac-hosted), so there is one reader and one writer shape. Rust's old multi-hardware list is not kept: Swift drops other hardware on save, and the Windows/Linux apps never read the file.
+- Import is lazy and idempotent: a parse failure in the new format that succeeds as the old one rewrites the file and keeps `model-benchmarks.json.rust-v1`. No Swift change is needed because Swift never saw the Rust format work.
+- The hosted engine builds the Swift hardware string itself (sysctl brand string, `hw.memsize` GiB rounded, `hw.activecpu`, `kern.osproductversion` major.minor) instead of trusting the adapter's string, so listing and storage cannot disagree.
