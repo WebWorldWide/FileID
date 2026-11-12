@@ -33,8 +33,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: ${{ fromJSON(inputs.architectures || '["x64", "arm64"]') }}
-    # ORT 1.22's build.py only knows the "Visual Studio 17 2022" generator.
-    runs-on: windows-2025
+    # ORT 1.22's build.py only knows the "Visual Studio 17 2022" generator;
+    # windows-2025 now ships only Visual Studio 2026.
+    runs-on: windows-2022
     timeout-minutes: 300
     defaults:
       run:
