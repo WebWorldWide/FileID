@@ -55,7 +55,10 @@ $CudaArchives = @(
     @{ Path = 'cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.8.90-archive.zip'; Sha256 = '0a9d628d2582bd58c78ba92827cd9613d62790924cde1178719f677fc03b6ee2' },
     @{ Path = 'libcublas/windows-x86_64/libcublas-windows-x86_64-12.8.4.1-archive.zip'; Sha256 = '57a470112cec7e112c95253dde8b3c7184d795dbd92b0bde77a4cb7f8c94c8aa' },
     @{ Path = 'libcufft/windows-x86_64/libcufft-windows-x86_64-11.3.3.83-archive.zip'; Sha256 = 'cc6e0ba958cf23387b462017a24464c72bd901549046133f3d1ebcc3d7444c90' },
-    @{ Path = 'libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.9.90-archive.zip'; Sha256 = '46eba36c20748b21a5927b569b943337dd18485132119dfb39a5bcda4edb12e2' }
+    @{ Path = 'libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.9.90-archive.zip'; Sha256 = '46eba36c20748b21a5927b569b943337dd18485132119dfb39a5bcda4edb12e2' },
+    # Headers ORT's cuda_pch.h includes; their DLLs are not shipped.
+    @{ Path = 'libcusparse/windows-x86_64/libcusparse-windows-x86_64-12.5.8.93-archive.zip'; Sha256 = 'f13b243912d8b07cc0136ad3760cd351553c74c1b54b7a6dbedb1dcc98ee8eb5' },
+    @{ Path = 'libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.7.3.90-archive.zip'; Sha256 = 'c71e33208740f6bce9f1da8fc7e9fa679ddfc831b5368a121f9c1ada3fa3d980' }
 )
 $VsIntegrationArchive = @{ Path = 'visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.8.90-archive.zip'; Sha256 = 'f41d12a0e49b7848ed35e8a15b58926b83f635c723cab7e9952bc633e3c1f200' }
 $CudnnArchive = @{ Path = 'cudnn/windows-x86_64/cudnn-windows-x86_64-9.8.0.87_cuda12-archive.zip'; Sha256 = 'd8a23705e3884b137b7e05449fb2b61bfa524e7cfc3fda80743d633f423c6ce4' }
