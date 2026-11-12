@@ -168,14 +168,22 @@ fn plain_session(path: &Path, coreml_cache: Option<PathBuf>, intra_threads: Opti
 }
 
 /// ONNX Runtime's release as its build string names it (`rel-1.30.0` → `1.30.0`).
+/// Official builds made from a tag say `git-branch=HEAD`; their commit names them instead.
 pub fn runtime_release() -> String {
-    let info = ort::info();
-    info.split("git-branch=rel-")
-        .nth(1)
-        .and_then(|rest| rest.split([',', ' ']).next())
-        .filter(|release| !release.is_empty())
-        .unwrap_or("unknown")
-        .to_string()
+    release_from_build_info(ort::info())
+}
+
+fn release_from_build_info(info: &str) -> String {
+    let field = |key: &str| {
+        info.split(key)
+            .nth(1)
+            .and_then(|rest| rest.split([',', ' ']).next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    field("git-branch=rel-")
+        .or_else(|| field("git-commit-id=").map(|commit| format!("git-{commit}")))
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn l2_normalize(v: &mut [f32]) {
@@ -196,6 +204,13 @@ pub fn default_weights_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_release_reads_the_branch_or_the_commit() {
+        assert_eq!(super::release_from_build_info("ORT Build Info: git-branch=rel-1.30.0, git-commit-id=abc, build type=Release"), "1.30.0");
+        assert_eq!(super::release_from_build_info("ORT Build Info: git-branch=HEAD, git-commit-id=f217402897, build type=Release"), "git-f217402897");
+        assert_eq!(super::release_from_build_info(""), "unknown");
+    }
+
     use super::*;
 
     #[test]

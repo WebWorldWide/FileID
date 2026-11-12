@@ -1,5 +1,18 @@
 # FileID — State
 
+## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
+
+- **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
+- **Coverage gate:** `check_app_command_coverage.py` (policy CI) passes 86 of 86 commands and actions. The new cases fixed these Rust differences from Swift:
+  - bookmarks: `grantFolderAccess` and `startScan.rootBookmark` were ignored;
+  - stale mark-different anchors were accepted;
+  - hosted Deep Analyze and benchmark refusals differed;
+  - wording differed.
+- **Packaging:** Developer ID builds bundle `fileidd` and the official ONNX Runtime 1.22.0 dylib. The archive and dylib SHA-256 are pinned, and the dylib's code matches Microsoft's Developer ID–signed NuGet copy; it passes `--ort-runtime`. No download URL was added to a reviewed script.
+- **Measured** (release, Rust laid out as bundled, back to back, alternating, network denied, load 4–17): HEIC faces scan Swift 21.5–22.0 s vs Rust 22.1–23.4 s, clustering 23.1–23.4 s vs 22.7–23.1 s, SFace vectors bit-identical (1,272/1,272) on the bundled ORT 1.22 CoreML EP; Describe (Qwen3-VL 2B, 20 photos) 38.1–40.0 s vs 38.4–39.0 s after a 45.3 s cold first run; timeline quick on 6 clips 38.1/40.1 s on both, moments 208.5 vs 200.5 s with the same 87 chapters.
+- **Conformance** (debug, M1 Pro): Swift 89 pass + 2 known (Trash not run, no shortcut mode) with the adapters build as peer; adapters build with `--test-trash-root` 89 pass, 0 known (the other 13 are Swift-led cross-engine cases, which pass in the Swift run); plain Rust 71 pass + 1 known (Trash), 30 skip.
+- **Incident:** a probe sent `prewarmModel qwen3_vl_2b` to both engines in a scratch home, which started real Hugging Face downloads (about 80 MB) before shutdown; partials deleted, no live state touched. Later engine runs used `sandbox-exec` with network denied.
+
 ## 2026-11-11 — Convergence Stage 6: the shared engine runs the Mac face pipeline (`agent/converge-6`)
 
 - **Rust engine, app-hosted build** (agent): face alignment and the landmark match ported bit for bit (`face-alignment.json`); FileIDAppleKit face and Best Takes adapters; `runFaceClustering` extracts pending faces in the Mac namespace first, like Swift (vectors, backoff, crops); the face refresh job runs on the same pipeline instead of reporting only; SFace runs in Rust ORT on the CoreML EP; Best Takes judges faces, eyes and people with Vision (and Face Mesh when installed). Details in CONVERGENCE "Stage 6 status".

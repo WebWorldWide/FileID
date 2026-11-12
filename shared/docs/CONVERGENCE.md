@@ -105,7 +105,7 @@ Whole engine at spawn, one process at a time.
 | 7. MLX VLM | Deep Analyze, chat generation with prompt and prefix caches, selection checks, goal ranking, benchmarks, prewarm/park, transcription, timeline captions behind a Rust `ResidentModel` lease; touches locked `deep_analyze.rs`, `vlm.rs`, `DeepAnalyze.swift` in one reviewed refresh | Qwen3-VL 4B 60 photos ≤ 2.96 s × 1.1 per photo and peak ≤ 3.92 GB × 1.1 with identical greedy outputs; parks to about 107 MB; chat cache answers identical, first words ≤ 1.7 s × 1.1; selection 2B held-out precision ≥ 0.81 at recall 1.00; cancellation honoured; 50 start/stop cycles without a teardown crash | backend flag | 4–6 weeks |
 | 8. Timeline, speech, video tools (in progress 2026-11-11; see status below) | AVFoundation frame decoder and signal workers (re-exec through `native_process.rs`), Apple Speech with permission, AVFoundation `MediaRuntime` for trim/remux/audio/proxy/rotate and fit/pad export, stabilization and reframing | media-tools Rust entries flip to available on darwin; cross-engine tools cases; `timeline_eval.py` moment recall ≥ 0.772 / 0.778, precision IoU ≥ 0.52 / 0.344; speech chunk resume; video quick ≥ 2.24 s/s, full ≥ 0.72 s/s | backend flag | 3–5 weeks |
 | 9. Models and downloads (landed 2026-11-10; see status below) | Rust registry reads the Swift flat ONNX layout and MLX repo locations, serves the Mac MLX catalog; `downloader.rs` handles `vlmRepos` under the Hugging Face-only allowlist; one sentinel format; app installers retire to engine commands | catalog, license (`--mac-catalog`) and egress gates; installed models recognised without re-download; first-install network capture shows only huggingface.co / hf.co | backend flag | 2–3 weeks |
-| 10. Default flip | App Store sandbox build (bookmarks, container paths, inherited sandbox), signed TestFlight package, Rust default, Swift engine bundled and selectable for one release | every app-reachable command served by Rust on Mac or unsupported in both engines; all 71 conformance cases, no darwin divergences; owner's on-screen walk; sandbox acceptance; Stage 5–8 numbers re-run | setting back to swift; journals dual-written | 2–3 weeks |
+| 10. Default flip (headless parts landed 2026-11-11; see status below) | App Store sandbox build (bookmarks, container paths, inherited sandbox), signed TestFlight package, Rust default, Swift engine bundled and selectable for one release | every app-reachable command served by Rust on Mac or unsupported in both engines; all 71 conformance cases, no darwin divergences; owner's on-screen walk; sandbox acceptance; Stage 5–8 numbers re-run | setting back to swift; journals dual-written | 2–3 weeks |
 
 ### Stage 0 status (2026-11-10, `agent/converge-0`)
 
@@ -210,6 +210,37 @@ Landed (headless parts). Media tools, frame decoding, the frame pool, the Apple 
 - **Measured** (see STATE 2026-11-11): 4B Describe Files on 60 photos, Rust 1.82–3.05 s per photo vs Swift 2.07–3.34 s, peak 4.07–4.09 vs 4.18–4.22 GB; tags identical, names and descriptions identical apart from one near-tie each. 2B selection checks identical to Swift on 16/16 held-out questions. Parked about 145 MB in both. 50 start/stop cycles clean.
 - **Gate changes** (DECISIONS 2026-11-11): selection is parity with Swift on a held-out set (the old "precision ≥ 0.81 at recall 1.00" was set-specific); parked memory is parity (about 145–150 MB in both).
 - **Left.** Re-time on a quiet machine (load stayed above 10 for most runs). On-screen checks with `engine.backend rust`: Deep Analyze, Chat selection, Best Takes goal, model benchmark.
+
+### Stage 10 status (2026-11-11, `agent/converge-10`)
+
+Developer ID builds now start the Rust engine by default; everything that can be proved headlessly is done. The App Store gate stays shut, and the owner's checks are listed in NEXT.md (Stage 10 owner checklist).
+
+- **The flip.** `EngineBackend.swift` holds the policy. `fileidd` starts first when it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine (Shared / Swift), `defaults write com.fileid.app engine.backend swift` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the team-ID check, can't launch, exits twice before `ready`, or uses up its respawn budget; Settings then shows why. `EngineClient` takes a launch context, so app tests run it against stand-in engines: crash at start, refused signature, missing binary, and Swift chosen (`EngineFallbackTests`). `EngineClient.swift`'s reviewed digest was refreshed: no URL, socket or new launch site.
+- **App Store gate, one place.** `EngineBackendPolicy.isAppStoreBuild` (`-DFILEID_APP_STORE`): those builds run Swift whatever the setting. `assemble_app.sh` refuses `fileidd` with `FILEID_APP_STORE=1`, and `testflight.sh` sets it and checks that `fileidd` is absent.
+- **Coverage.** `shared/scripts/check_app_command_coverage.py` runs in policy CI with tests. It reads every command, catalog/tool/chat action and tool recipe the app can send, and requires a non-empty Rust dispatch plus a conformance case that runs it on the hosted engine. Result: 86 of 86, with nothing unsupported by both engines. The first run found 16 with no Rust case. Their new cases (`app-commands.json`, `folder-access.json`, chapter exports in both orders) found differences, all fixed toward Swift:
+  - bookmarks were ignored: `grantFolderAccess` was a no-op and `startScan.rootBookmark` was unused; both now go through the Stage 0 lease and refuse with `folder_access_denied`;
+  - `markPersonsDifferent` recorded verdicts for stale anchors (all builds);
+  - unknown Deep Analyze kinds were accepted silently;
+  - Deep Analyze loaded a model for a file not in the catalog;
+  - an unknown benchmark kind got an internal message;
+  - wording differed for an idle chat cancel, video analysis without a model, and 18 tool messages.
+- **Conformance** (debug builds). The hosted Rust build passes every case with `--test-trash-root` and no darwin divergence. The one darwin entry left, the Trash round trip's `run: false` for builds without the test Trash root, is the real-Trash safety rule, not a behaviour difference (DECISIONS). Counts are in STATE.
+- **Packaging.**
+  - `FILEID_WITH_RUST_ENGINE` defaults to 1 in `assemble_app.sh` (except App Store builds) and in `release.sh`.
+  - The bundled ONNX Runtime must be the official 1.22.0 osx-arm64 dylib: SHA-256 `2b885992…`, from archive `cab6dcbd…`. Its code is byte-identical to the Developer ID–signed dylib in Microsoft's signed NuGet package; only the signature differs. `assemble_app.sh` checks the pin, the linkage and `check_binary_privacy.py --ort-runtime`; `release.sh` requires it and scans the signed copy.
+  - `install_onnxruntime_macos.sh` installs from a local archive (`FILEID_ORT_ARCHIVE`). No URL was added to a reviewed script.
+- **Re-run of the Stage 5–8 numbers with the flipped default** (release builds, Rust laid out as bundled: ORT 1.22.0, FileIDAppleKit, metallib; back to back, alternating order, network denied, load 4–17):
+
+| Set | Swift | Rust (bundled default) | Outputs |
+|---|---|---|---|
+| HEIC faces, 1,532 files: scan | 21.7 / 22.0 / 21.5 s | 23.4 / 22.1 / 22.3 s | 1,272 faces, 67 persons both |
+| same: face clustering with extraction | 23.3 / 23.4 / 23.1 s | 22.7 / 22.8 / 23.1 s | SFace vectors bit-identical, 1,272/1,272, every rep (CoreML EP on ORT 1.22) |
+| Describe Files, Qwen3-VL 2B, 20 photos | 38.1 / 39.8 / 40.0 s | 45.3 (cold) / 39.0 / 38.4 s | descriptions 18–19/20, names and tags 19–20/20; Rust differs from itself on 2/20 between runs |
+| Timeline quick, 6 clips | 38.1 / 40.1 s | 38.1 / 40.1 s | chapters identical |
+| Timeline moments, 6 clips | 208.5 s | 200.5 s | 87 chapters, same times |
+
+- **Fixed on the way.** The SFace CoreML cache folder read `ortunknown` with the official 1.22.0 dylib, which names its branch `HEAD`. It now uses the build's commit id (`ortgit-f217402897`), so a runtime change still invalidates the cache.
+- **Left (owner, NEXT.md):** signed TestFlight build; App Store sandbox acceptance of the Rust engine (bookmarks, container paths); notarization of the app, `fileidd`, FileIDAppleKit, ORT and both metallibs; the on-screen walk with the Rust engine and the fallback; a quiet-machine re-time; a real-catalog copy. Also getting the ORT archive, or approving its URL in the installer.
 
 Stages 1–4 can overlap once Stage 0 lands; Stages 5–8 depend on the adapter skeleton and Stage 0's memory governance. Total about 25–38 engineer-weeks plus 1–2 for retirement.
 
