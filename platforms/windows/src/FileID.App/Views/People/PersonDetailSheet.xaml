@@ -20,6 +20,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -59,7 +60,30 @@
                       AutomationProperties.HelpText="Hides this person and leaves them out of descriptions. Their photos stay in the library." />
         </Grid>
 
-        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+        <StackPanel Grid.Row="2" x:Name="MoveToolbar" Orientation="Horizontal" Spacing="8">
+            <TextBlock x:Name="SelectedCountText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       VerticalAlignment="Center"
+                       Visibility="Collapsed" />
+            <Button x:Name="MoveButton"
+                    Content="Move to another person…"
+                    Style="{StaticResource AccentButtonStyle}"
+                    IsEnabled="False"
+                    Visibility="Collapsed"
+                    Click="OnMoveClicked" />
+            <Button x:Name="SelectModeButton"
+                    Content="Select photos"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Move photos that show someone else to the right person"
+                    Click="OnSelectModeClicked" />
+            <Button x:Name="CancelSelectButton"
+                    Content="Cancel"
+                    Visibility="Collapsed"
+                    Click="OnCancelSelectClicked" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
             <ItemsRepeater x:Name="FaceGrid">
                 <ItemsRepeater.Layout>
                     <UniformGridLayout MinItemWidth="100"
@@ -71,12 +95,12 @@
             </ItemsRepeater>
         </ScrollViewer>
 
-        <local:FaceReviewPanel Grid.Row="3"
+        <local:FaceReviewPanel Grid.Row="4"
                                x:Name="ReviewPanel"
                                MaxHeight="320"
                                Visibility="Collapsed" />
 
-        <TextBlock Grid.Row="4"
+        <TextBlock Grid.Row="5"
                    x:Name="StatusText"
                    Style="{StaticResource CaptionTextBlockStyle}"
                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"

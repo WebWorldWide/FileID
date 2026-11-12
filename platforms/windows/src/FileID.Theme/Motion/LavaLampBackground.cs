@@ -65,6 +65,7 @@ public sealed class LavaLampBackground : Control
         StartAnimations();
         ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
         TransparencyEffects.Instance.PropertyChanged += OnTransparencyChanged;
+        LavaLampMode.Instance.PropertyChanged += OnTransparencyChanged;
         if (XamlRoot is { } root)
         {
             root.Changed += OnXamlRootChanged;
@@ -76,6 +77,7 @@ public sealed class LavaLampBackground : Control
     {
         ReducedMotion.Instance.PropertyChanged -= OnReducedMotionChanged;
         TransparencyEffects.Instance.PropertyChanged -= OnTransparencyChanged;
+        LavaLampMode.Instance.PropertyChanged -= OnTransparencyChanged;
         if (XamlRoot is { } root)
         {
             root.Changed -= OnXamlRootChanged;
@@ -170,7 +172,7 @@ public sealed class LavaLampBackground : Control
                 ? ResolveColor("Bg1Color", Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0C))
                 : ResolveColor("LavaLampBaseColor", Color.FromArgb(0xFF, 0x14, 0x14, 0x14));
         }
-        bool visible = (XamlRoot?.IsHostVisible ?? true) && !solid;
+        bool visible = (XamlRoot?.IsHostVisible ?? true) && !solid && !LavaLampMode.Instance.IsOff;
         if (visible && !_animationsRunning) StartAnimations();
         else if (!visible && _animationsRunning) StopAnimations();
     }

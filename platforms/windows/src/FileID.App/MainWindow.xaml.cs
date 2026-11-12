@@ -132,6 +132,11 @@ public sealed partial class MainWindow : Window
 
         Step("AppViewModel subscribe", () => AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged);
         Step("ApplySidebarVisibility", ApplySidebarVisibility);
+        Step("ApplyAppearance", () =>
+        {
+            AppearanceApplier.Apply(AppViewModel.Instance.Settings);
+            TextScaler.Instance.Attach(DetailHost);
+        });
 
         // First-launch model installer. Async-launched after the window
         // has had a moment to layout so the user sees the chrome before
