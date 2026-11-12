@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-12 — Stage 0 leftovers: CoreML EP A/B and `ready` timing (`agent/left-coreml`)
+
+- CoreML EP vs CPU on ORT 1.22.0, release, scratch models: vectors match within 4.2e-7 (SFace) and 3.0e-7 (CLIP text). SFace CoreML is about 15% slower per call than CPU (kept on CoreML for Swift bit parity); CLIP text CoreML is 4-5x slower with 5-8 s session builds (stays CPU). BGE is not installed here, so it is untested. Load was 31-45 throughout.
+- `ready`: Rust 45-49 ms cold / 33-35 ms warm, Swift 42-44 / 29-33 ms (10 runs each, load 23-24). Gate 0.1 s met.
+- New `examples/coreml_ab.rs` in the engine crate (no engine code changed). Numbers and decisions in DECISIONS 2026-11-12.
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
