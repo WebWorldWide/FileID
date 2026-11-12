@@ -556,6 +556,10 @@
                             HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch" />
 
+            <ContentControl x:Name="ExcludedFoldersHost"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch" />
+
             <Border x:Name="ApplyActionsCard"
                     CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"

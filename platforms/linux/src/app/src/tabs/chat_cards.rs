@@ -425,7 +425,20 @@ impl Runner {
                     self.fail(id, "File Tools isn't open in this window. Nothing was exported.");
                 }
             }
-            "changeSetting" => self.fail(id, rules::SETTING_UNAVAILABLE),
+            "changeSetting" => {
+                let (Some(setting), Some(value)) = (action.setting.clone(), action.value) else { return };
+                if !rules::setting_supported(Some(&setting)) {
+                    self.fail(id, rules::SETTING_UNAVAILABLE);
+                    return;
+                }
+                let previous = rules::setting_value(&setting);
+                rules::set_setting(&setting, value);
+                let undo: UndoFn = Rc::new(move |runner, id| {
+                    rules::set_setting(&setting, previous);
+                    runner.finish(id, "Changed back.".to_owned(), None);
+                });
+                self.finish(id, if value { "Turned on." } else { "Turned off." }.to_owned(), Some(("Undo", undo)));
+            }
             "suggestFolderLayout" => {
                 let root = action.path.clone().unwrap_or_default();
                 if !self.send(CommandPayload::PlanRestructure(PlanRestructurePayload {

@@ -39,6 +39,32 @@ public class AppSettingsTests
     }
 
     [Fact]
+    public void AppearanceGranularityAndExclusions_HaveMacDefaultsAndSurviveSettingsJson()
+    {
+        var s = new AppSettings();
+        Assert.Equal(("full", "standard", "normal"), (s.LavaMode, s.TextSize, s.RestructureGranularity));
+        Assert.True(s.BackgroundMotionOn);
+        Assert.Null(s.RestructureGranularityForEngine);
+        Assert.Empty(s.DeepAnalyzeExcludedFolders);
+        var json = JsonSerializer.Serialize(new AppSettings { LavaMode = "off", TextSize = "larger", RestructureGranularity = "tight", DeepAnalyzeExcludedFolders = [@"C:\Private"] }, s_options);
+        var reloaded = JsonSerializer.Deserialize<AppSettings>(json, s_options)!;
+        Assert.False(reloaded.BackgroundMotionOn);
+        Assert.Equal("tight", reloaded.RestructureGranularityForEngine);
+        Assert.Equal(("larger", @"C:\Private"), (reloaded.TextSize, reloaded.DeepAnalyzeExcludedFolders.Single()));
+    }
+
+    [Fact]
+    public void SanitizeExcludedFolders_DropsRelativeDuplicatesAndCapsTheList()
+    {
+        string[] raw = [@"C:\Photos\", @"c:\photos", "relative\\path", "  ", @"D:\Work"];
+        string[] expected = [@"C:\Photos", @"D:\Work"];
+        var cleaned = AppSettings.SanitizeExcludedFolders(raw);
+        Assert.Equal(expected, cleaned);
+        var many = Enumerable.Range(0, 400).Select(i => $@"C:\f{i}");
+        Assert.Equal(AppSettings.MaxExcludedFolders, AppSettings.SanitizeExcludedFolders(many).Count);
+    }
+
+    [Fact]
     public void NamingStyle_HasMacDefaultsAndSurvivesSettingsJson()
     {
         var s = new AppSettings();

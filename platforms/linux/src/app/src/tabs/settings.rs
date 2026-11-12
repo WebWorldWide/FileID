@@ -10,11 +10,16 @@ use gtk::glib;
 use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-const LOCAL_MODELS: [(&str, &str, &str); 4] = [
+const LOCAL_MODELS: [(&str, &str, &str); 5] = [
     (
         "mobileclip_s2",
         "Search by description",
         "Lets you search photos by what's in them, like \"sunset at the beach\". Model: CLIP image encoder, runs on this computer. Its pinned files download only when you press Download.",
+    ),
+    (
+        "ram_plus",
+        "Photo tags",
+        "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Model: RAM++ (Apache-2.0). Without it, FileID uses a simpler built-in tagger.",
     ),
     (
         "arcface",
@@ -379,6 +384,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .margin_end(18)
         .css_classes(["fileid-tab"])
         .build();
+    root.append(&super::settings_panels::appearance());
+    root.append(&super::settings_panels::organize_folders());
+    root.append(&super::settings_panels::excluded_folders());
     root.append(
         &gtk::Label::builder()
             .label("AI models")
@@ -408,6 +416,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         })
         .collect();
     root.append(&super::model_catalog::build(engine.clone()));
+    root.append(&super::settings_panels::advanced(&engine));
     let rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {

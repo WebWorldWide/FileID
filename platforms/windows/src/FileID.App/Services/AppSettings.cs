@@ -122,6 +122,53 @@ internal sealed class AppSettings
     /// <summary>Apply the style learned from the user's edits to proposed names, and record new edits.</summary>
     public bool NamingLearn { get; set; } = ViewModels.NameStylePolicy.DefaultLearn;
 
+    /// <summary>Settings ▸ Appearance ▸ Lava lamp (macOS `lavaMode`): "full" or "off". The Mac's "calm" is not offered here and loads as "full".</summary>
+    public string LavaMode { get; set; } = LavaModeFull;
+
+    /// <summary>Settings ▸ Appearance ▸ Text size (macOS `appearance.textSize`): small, standard, large or larger.</summary>
+    public string TextSize { get; set; } = "standard";
+
+    /// <summary>Settings ▸ Organize Folders ▸ Folder granularity (macOS `restructure.granularity`): loose, normal or tight. Sent to the engine as FILEID_RESTRUCTURE_GRANULARITY when it starts.</summary>
+    public string RestructureGranularity { get; set; } = RestructureGranularityDefault;
+
+    /// <summary>Absolute folders Describe Files skips on a whole-library run (macOS `deepAnalyzeExcludedFolders`). Sent as excludedFolders with every whole-library Describe request.</summary>
+    public List<string> DeepAnalyzeExcludedFolders { get; set; } = [];
+
+    /// <summary>Chat "written answers from local AI" preference (macOS `chatUseModel`, default on); the Chat action `chatSummaries` flips it. Windows Chat answers from stored evidence only until a local chat model ships.</summary>
+    public bool ChatUseModel { get; set; } = true;
+
+    public const string LavaModeFull = "full";
+    public const string LavaModeOff = "off";
+    public const string RestructureGranularityDefault = "normal";
+    public const int MaxExcludedFolders = 256;
+
+    public static readonly IReadOnlyList<string> RestructureGranularityValues = ["loose", "normal", "tight"];
+    public static readonly IReadOnlyList<string> TextSizeValues = ["small", "standard", "large", "larger"];
+
+    public bool BackgroundMotionOn => LavaMode != LavaModeOff;
+
+    /// <summary>The granularity to export to the engine, or null for the engine's own default.</summary>
+    public string? RestructureGranularityForEngine =>
+        RestructureGranularity != RestructureGranularityDefault && RestructureGranularityValues.Contains(RestructureGranularity)
+            ? RestructureGranularity
+            : null;
+
+    /// <summary>Drops blank and relative entries, trims trailing separators, dedupes (case-insensitive, like NTFS) and caps the list at the schema's 256.</summary>
+    public static List<string> SanitizeExcludedFolders(IEnumerable<string>? raw)
+    {
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in raw ?? [])
+        {
+            if (result.Count >= MaxExcludedFolders) break;
+            var folder = entry?.Trim() ?? "";
+            if (!Path.IsPathFullyQualified(folder)) continue;
+            while (folder.Length > 3 && (folder[^1] == '\\' || folder[^1] == '/')) folder = folder[..^1];
+            if (seen.Add(folder)) result.Add(folder);
+        }
+        return result;
+    }
+
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
     /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
@@ -241,6 +288,10 @@ internal sealed class AppSettings
         {
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
+        if (s.LavaMode != LavaModeOff) s.LavaMode = LavaModeFull;
+        if (!TextSizeValues.Contains(s.TextSize)) s.TextSize = "standard";
+        if (!RestructureGranularityValues.Contains(s.RestructureGranularity)) s.RestructureGranularity = RestructureGranularityDefault;
+        s.DeepAnalyzeExcludedFolders = SanitizeExcludedFolders(s.DeepAnalyzeExcludedFolders);
         s.NamingStyle = ViewModels.NameStylePolicy.SanitizeStyle(s.NamingStyle);
         s.NamingMaxLength = ViewModels.NameStylePolicy.ClampLength(s.NamingMaxLength);
     }
@@ -306,7 +357,9 @@ internal sealed class AppSettings
         // copy is enough for serialization — and importantly, the snapshot
         // captures the state at the moment Save() was called so a setter
         // mutating the original mid-debounce doesn't corrupt the write.
-        return (AppSettings)MemberwiseClone();
+        var clone = (AppSettings)MemberwiseClone();
+        clone.DeepAnalyzeExcludedFolders = [.. DeepAnalyzeExcludedFolders];
+        return clone;
     }
 
     private static async Task WriteAsync(AppSettings snapshot)

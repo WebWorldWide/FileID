@@ -52,6 +52,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         InitializeComponent();
         NameStyleHost.Content = new NameStyleCard();
+        ExcludedFoldersHost.Content = new ExcludedFoldersCard();
         // Restore the user's last VLM choice so the auto-chain after
         // face clustering and a manual Analyze All both use the same
         // weights the user last picked. Falls back to qwen2_5_vl_7b.

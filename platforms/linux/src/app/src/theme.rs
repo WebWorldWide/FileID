@@ -778,6 +778,85 @@ pub fn install() {
     style.set_color_scheme(adw::ColorScheme::ForceDark);
     apply_high_contrast(&high_contrast, style.is_high_contrast());
     style.connect_high_contrast_notify(move |style| apply_high_contrast(&high_contrast, style.is_high_contrast()));
+    apply_text_size(&crate::app_settings::text_size());
+}
+
+/// Settings ▸ Appearance ▸ Text size: (stored id, label, scale). Mirrors macOS
+/// `TextSize` (0.9 / 1 / 1.15 / 1.3).
+pub const TEXT_SIZES: [(&str, &str, f64); 4] = [
+    ("small", "Small", 0.9),
+    ("standard", "Default", 1.0),
+    ("large", "Large", 1.15),
+    ("larger", "Larger", 1.3),
+];
+
+thread_local! {
+    static TEXT_SIZE_PROVIDER: gtk::CssProvider = gtk::CssProvider::new();
+}
+
+/// Scale page text only (`.fileid-pages`); the title bar and sidebar keep
+/// their designed size, like macOS. Default removes the override.
+pub fn apply_text_size(id: &str) {
+    let Some(display) = gtk::gdk::Display::default() else { return };
+    let factor = TEXT_SIZES
+        .iter()
+        .find(|(known, _, _)| *known == id)
+        .map_or(1.0, |(_, _, factor)| *factor);
+    TEXT_SIZE_PROVIDER.with(|provider| {
+        gtk::style_context_remove_provider_for_display(&display, provider);
+        if (factor - 1.0).abs() > f64::EPSILON {
+            provider.load_from_string(&scaled_font_css(CSS, factor));
+            gtk::style_context_add_provider_for_display(
+                &display,
+                provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
+    });
+}
+
+/// For every rule in `css` that sets a px/pt `font-size`, emit a copy scoped
+/// under `.fileid-pages` with the size multiplied by `factor` (half-point
+/// steps, as on macOS). The extra class outranks the original rule.
+fn scaled_font_css(css: &str, factor: f64) -> String {
+    let scale = |value: f64| (value * factor * 2.0).round() / 2.0;
+    let mut stripped = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        stripped.push_str(&rest[..start]);
+        rest = rest[start..].find("*/").map_or("", |end| &rest[start + end + 2..]);
+    }
+    stripped.push_str(rest);
+    let mut out = format!(".fileid-pages {{ font-size: {}px; }}\n", scale(13.5));
+    for chunk in stripped.split('}') {
+        let Some((head, body)) = chunk.split_once('{') else { continue };
+        let selectors = head.rsplit(';').next().unwrap_or(head).trim();
+        if selectors.is_empty() || selectors.starts_with('@') {
+            continue;
+        }
+        let Some(position) = body.find("font-size:") else { continue };
+        let value = body[position + "font-size:".len()..]
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let (number, unit) = if let Some(number) = value.strip_suffix("px") {
+            (number, "px")
+        } else if let Some(number) = value.strip_suffix("pt") {
+            (number, "pt")
+        } else {
+            continue;
+        };
+        let Ok(number) = number.trim().parse::<f64>() else { continue };
+        let scoped: Vec<String> = selectors
+            .split(',')
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty())
+            .map(|selector| format!(".fileid-pages {selector}"))
+            .collect();
+        out.push_str(&format!("{} {{ font-size: {}{unit}; }}\n", scoped.join(", "), scale(number)));
+    }
+    out
 }
 
 fn apply_high_contrast(provider: &gtk::CssProvider, on: bool) {
@@ -819,3 +898,23 @@ separator { background-color: alpha(#FFFFFF, 0.34); }
 .v3-take-tile.best { border-color: @fileid_gold; }
 .v3-take-tile.focused { border-color: @fileid_text1; }
 "#;
+
+#[cfg(test)]
+mod text_size_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_css_scopes_and_scales_font_sizes() {
+        let css = "@define-color a #fff;\n/* c { font-size: 99px; } */\n.title-3 { font-size: 14px; color: red; }\n.a, button.b { font-size: 8pt; }\n.none { color: red; }";
+        let out = scaled_font_css(css, 1.3);
+        assert!(out.contains(".fileid-pages .title-3 { font-size: 18px; }"), "{out}");
+        assert!(out.contains(".fileid-pages .a, .fileid-pages button.b { font-size: 10.5pt; }"), "{out}");
+        assert!(!out.contains("99") && !out.contains(".none") && !out.contains("define"), "{out}");
+    }
+
+    #[test]
+    fn real_theme_produces_scoped_rules() {
+        let out = scaled_font_css(CSS, 1.15);
+        assert!(out.contains(".fileid-pages .caption { font-size: 12.5px; }"), "{out}");
+    }
+}
