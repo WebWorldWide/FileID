@@ -201,7 +201,7 @@ class BinaryPrivacyTests(unittest.TestCase):
 
         consumers = (
             ".github/workflows/release.yml",
-            ".github/workflows/tools.yml",
+            ".github/workflows/tools-verify.yml",
             "platforms/apple/scripts/build_dmg.sh",
             "platforms/apple/scripts/release.sh",
             "platforms/linux/build/build.sh",

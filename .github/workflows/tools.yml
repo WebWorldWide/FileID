@@ -17,6 +17,7 @@ on:
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
       - '.github/workflows/tools.yml'
+      - '.github/workflows/tools-verify.yml'
   pull_request:
     paths:
       - 'platforms/cli/**'
@@ -32,6 +33,7 @@ on:
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
       - '.github/workflows/tools.yml'
+      - '.github/workflows/tools-verify.yml'
   workflow_dispatch:
 
 permissions:
@@ -47,123 +49,22 @@ jobs:
     uses: ./.github/workflows/ort-runtime.yml
 
   verify:
-    name: Engine + CLI + TUI — ${{ matrix.label }}
+    name: Native tools
+    uses: ./.github/workflows/tools-verify.yml
+    with:
+      include: >-
+        [{"label": "macOS arm64", "artifact": "macos-arm64", "runner": "macos-15"},
+         {"label": "macOS x64", "artifact": "macos-x64", "runner": "macos-15-intel"},
+         {"label": "Linux x64", "artifact": "linux-x64", "runner": "ubuntu-24.04"},
+         {"label": "Linux arm64", "artifact": "linux-arm64", "runner": "ubuntu-24.04-arm"}]
+
+  # Only the Windows jobs package the ONNX Runtime, so only they wait for its
+  # build (about an hour per architecture when the cache is cold).
+  verify-windows:
+    name: Native tools
     needs: ort-runtime
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: Windows x64
-            artifact: windows-x64
-            runner: windows-latest
-          - label: Windows arm64
-            artifact: windows-arm64
-            runner: windows-11-arm
-          - label: macOS arm64
-            artifact: macos-arm64
-            runner: macos-15
-          - label: macOS x64
-            artifact: macos-x64
-            runner: macos-15-intel
-          - label: Linux x64
-            artifact: linux-x64
-            runner: ubuntu-24.04
-          - label: Linux arm64
-            artifact: linux-arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    # The hosted Intel Mac passes tests and clippy in ~40 min, then the LTO release builds overrun 60.
-    timeout-minutes: ${{ matrix.runner == 'macos-15-intel' && 100 || 60 }}
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install Rust 1.98
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          toolchain: '1.98'
-          components: rustfmt, clippy
-
-      - name: Cache Cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            platforms/windows/src/engine/target
-            platforms/cli/target
-            platforms/tui/target
-          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/cli/Cargo.lock', 'platforms/tui/Cargo.lock') }}
-          restore-keys: |
-            tools-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Packaging policy tests
-        run: |
-          python shared/scripts/test_check_binary_privacy.py
-          python scripts/test_package_tools.py
-
-      - name: Format
-        run: |
-          cargo fmt --manifest-path platforms/windows/src/engine/Cargo.toml --all -- --check
-          cargo fmt --manifest-path platforms/cli/Cargo.toml --all -- --check
-          cargo fmt --manifest-path platforms/tui/Cargo.toml --all -- --check
-
-      # Windows engine clippy/tests run in windows-engine.yml (x64, ARM64
-      # native and ARM64 cross). These steps cover the macOS and Linux cfg
-      # paths, which a single-OS build can't lint.
-      - name: Clippy — engine
-        if: runner.os != 'Windows'
-        run: cargo clippy --locked --manifest-path platforms/windows/src/engine/Cargo.toml --all-targets -- -D warnings
-
-      - name: Tests — engine
-        if: runner.os != 'Windows'
-        run: cargo test --locked --manifest-path platforms/windows/src/engine/Cargo.toml
-
-      - name: Clippy — CLI
-        run: cargo clippy --locked --manifest-path platforms/cli/Cargo.toml --all-targets -- -D warnings
-
-      - name: Clippy — TUI
-        run: cargo clippy --locked --manifest-path platforms/tui/Cargo.toml --all-targets -- -D warnings
-
-      - name: Tests — CLI
-        run: cargo test --locked --manifest-path platforms/cli/Cargo.toml
-
-      - name: Tests — TUI
-        run: cargo test --locked --manifest-path platforms/tui/Cargo.toml
-
-      - name: Release builds
-        run: |
-          cargo build --release --locked --manifest-path platforms/windows/src/engine/Cargo.toml
-          cargo build --release --locked --manifest-path platforms/cli/Cargo.toml
-          cargo build --release --locked --manifest-path platforms/tui/Cargo.toml
-
-      - name: Smoke + privacy (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          platforms/cli/target/release/fileid --version
-          platforms/tui/target/release/fileid-tui --version
-          python3 shared/scripts/check_binary_privacy.py \
-            platforms/windows/src/engine/target/release/FileIDEngine \
-            platforms/cli/target/release/fileid \
-            platforms/tui/target/release/fileid-tui
-
-      - name: Smoke + privacy (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          & platforms/cli/target/release/fileid.exe --version
-          & platforms/tui/target/release/fileid-tui.exe --version
-          python shared/scripts/check_binary_privacy.py `
-            platforms/windows/src/engine/target/release/FileIDEngine.exe `
-            platforms/cli/target/release/fileid.exe `
-            platforms/tui/target/release/fileid-tui.exe
-
-      - name: Download the telemetry-free ONNX Runtime
-        if: runner.os == 'Windows'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: onnxruntime-dml-notelemetry-${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
-          path: platforms/windows/build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
-
-      - name: Package smoke + staged payload privacy scan
-        run: python scripts/package-tools.py --label "${{ matrix.artifact }}-ci" --output dist/tools-smoke
+    uses: ./.github/workflows/tools-verify.yml
+    with:
+      include: >-
+        [{"label": "Windows x64", "artifact": "windows-x64", "runner": "windows-latest"},
+         {"label": "Windows arm64", "artifact": "windows-arm64", "runner": "windows-11-arm"}]
