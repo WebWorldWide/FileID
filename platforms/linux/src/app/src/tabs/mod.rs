@@ -9,6 +9,8 @@ pub mod cleanup;
 pub mod deep_analyze;
 pub mod file_tools;
 pub mod library;
+mod library_bulk;
+mod library_bulk_model;
 mod library_pane;
 mod library_selection;
 pub mod library_scope;

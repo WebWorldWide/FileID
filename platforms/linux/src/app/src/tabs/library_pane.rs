@@ -162,6 +162,7 @@ impl SelectedPane {
         offline: Rc<RefCell<OfflineRoots>>,
         on_preview: Rc<dyn Fn()>,
         on_close: Rc<dyn Fn()>,
+        on_similar: Rc<dyn Fn()>,
     ) -> Rc<Self> {
         let body = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -241,6 +242,10 @@ impl SelectedPane {
         open.update_property(&[gtk::accessible::Property::Label("Open in the default app")]);
         actions.append(&reveal);
         actions.append(&open);
+        let similar = crate::v3::secondary("Similar", false);
+        similar.set_tooltip_text(Some("Find visually similar files"));
+        similar.connect_clicked(move |_| on_similar());
+        actions.append(&similar);
         body.append(&actions);
         let ask = crate::v3::secondary("Ask about this file", false);
         ask.set_halign(gtk::Align::Start);
