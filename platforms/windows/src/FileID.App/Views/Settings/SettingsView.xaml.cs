@@ -311,6 +311,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var s = AppViewModel.Instance.Settings;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
+            SelectRadio(LavaModeRadios, s.LavaMode);
+            SelectRadio(TextSizeRadios, s.TextSize);
+            SelectRadio(GranularityRadios, s.RestructureGranularity);
             // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
@@ -328,6 +331,50 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         SyncNvidiaSection();
     }
+
+    private static void SelectRadio(RadioButtons radios, string tag)
+    {
+        for (int i = 0; i < radios.Items.Count; i++)
+        {
+            if (radios.Items[i] is RadioButton { Tag: string t } && t == tag)
+            {
+                radios.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    private string? PickedRadio(RadioButtons radios)
+        => _initializingToggles ? null : (radios.SelectedItem as RadioButton)?.Tag as string;
+
+    private void OnLavaModeChanged(object sender, SelectionChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnLavaModeChanged), () =>
+        {
+            if (PickedRadio(LavaModeRadios) is not { } mode) return;
+            var s = AppViewModel.Instance.Settings;
+            s.LavaMode = mode;
+            AppearanceApplier.Apply(s);
+            s.Save();
+        });
+
+    private void OnTextSizeChanged(object sender, SelectionChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnTextSizeChanged), () =>
+        {
+            if (PickedRadio(TextSizeRadios) is not { } size) return;
+            var s = AppViewModel.Instance.Settings;
+            s.TextSize = size;
+            AppearanceApplier.Apply(s);
+            s.Save();
+        });
+
+    private void OnGranularityChanged(object sender, SelectionChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGranularityChanged), () =>
+        {
+            if (PickedRadio(GranularityRadios) is not { } granularity) return;
+            var s = AppViewModel.Instance.Settings;
+            s.RestructureGranularity = granularity;
+            s.Save();
+        });
 
     private void OnCleanupAutoTagToggled(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnCleanupAutoTagToggled), () =>

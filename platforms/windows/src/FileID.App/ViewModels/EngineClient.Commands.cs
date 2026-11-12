@@ -704,7 +704,8 @@ internal sealed partial class EngineClient
         var owner = TryReserveDeepAnalyzeCommand();
         try
         {
-            await SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames))
+            var excluded = AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders;
+            await SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames, ExcludedFolders: excluded.Count > 0 ? [.. excluded] : null))
                 .ConfigureAwait(false);
         }
         catch
@@ -1013,6 +1014,9 @@ internal sealed partial class EngineClient
 
     public Task TrashExactFilesAsync(IReadOnlyList<ExactTrashIdentity> identities) =>
         SendCommandAsync(CreateExactTrashCommand(identities));
+
+    public Task ReassignFaceAsync(long faceId, long destinationPersonId) =>
+        SendCommandAsync(new ReassignFaceCommand(faceId, destinationPersonId));
 
     public Task MergeClustersAsync(long sourcePersonId, long destinationPersonId) =>
         SendCommandAsync(new MergeClustersCommand(sourcePersonId, destinationPersonId));

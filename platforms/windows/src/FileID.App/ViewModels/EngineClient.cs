@@ -699,6 +699,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 // Pass the FILEID_LOG env to control engine tracing verbosity
                 // (debug in dev profiles, info in release).
                 psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
+                if (AppViewModel.Instance.Settings.RestructureGranularityForEngine is { } granularity)
+                {
+                    psi.Environment["FILEID_RESTRUCTURE_GRANULARITY"] = granularity;
+                }
 
                 Process startedProcess;
                 startedProcess = Process.Start(psi)
