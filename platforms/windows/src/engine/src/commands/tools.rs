@@ -48,11 +48,11 @@ impl Drop for ActiveExport {
 
 fn cancel_active(request: &ToolRequest) -> Result<ToolResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
-        bail!("Invalid tools request")
+        bail!("Invalid tools request.")
     }
     let id = request.operation_id.as_deref().context("Choose a running export")?;
     let active = active_exports().lock();
-    let cancelled = active.get(id).context("No running export matches this request")?;
+    let cancelled = active.get(id).context("No running export matches this request.")?;
     cancelled.store(true, Ordering::Release);
     let mut response = response(
         &request.request_id,
@@ -296,7 +296,7 @@ fn supports(recipe: &ToolRecipe) -> bool {
 fn hash(path: &Path) -> Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        bail!("Choose a regular file, not a link or folder")
+        bail!("Choose a regular file, not a link or folder.")
     }
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
@@ -327,7 +327,7 @@ fn load(conn: &Connection, id: &str) -> Result<(Plan, Vec<Receipt>, String)> {
     )?;
     let plan: Plan = serde_json::from_str(&plan)?;
     if plan.r#type != "export" || plan.version != 1 {
-        bail!("The export plan is unavailable")
+        bail!("The export plan is unavailable.")
     }
     Ok((plan, serde_json::from_str(&inverse)?, state))
 }
@@ -387,7 +387,7 @@ fn run_action(
     mut move_file: impl FnMut(&Path, &Path, &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>,
 ) -> Result<ToolResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
-        bail!("Invalid tools request")
+        bail!("Invalid tools request.")
     }
     let mut result = response(&request.request_id, "ok", "");
     match request.action.as_str() {
@@ -424,7 +424,7 @@ fn run_action(
             let destination = Path::new(request.destination.as_deref().context("Choose an output folder")?);
             read_only::require_source_mutation(destination)?;
             if !destination.is_absolute() || !destination.is_dir() {
-                bail!("The output folder must already exist")
+                bail!("The output folder must already exist.")
             }
             let mut items = vec![];
             let mut reserved = HashSet::new();
@@ -440,7 +440,7 @@ fn run_action(
                 })?;
                 let source_path = Path::new(&source);
                 if recipe.kind == "chapters" && chapters.is_empty() {
-                    bail!("A selected file has no current chapter markers")
+                    bail!("A selected file has no current chapter markers.")
                 }
                 let source_hash = hash(source_path)?;
                 if recipe.kind == "photo" {
@@ -527,7 +527,7 @@ fn run_action(
             result.message = preview_message(result.outputs.len());
         }
         "execute" => {
-            let id = request.operation_id.as_deref().context("Preview an export first")?;
+            let id = request.operation_id.as_deref().context("Preview an export first.")?;
             let (mut plan, previous, state) = db.with(|conn| load(conn, id))?;
             let media = if media_recipes::is_media(&plan.recipe.kind) {
                 media_recipes::validate(&plan.recipe)?;
@@ -536,10 +536,10 @@ fn run_action(
                 None
             };
             if !supports(&plan.recipe) {
-                bail!("This export recipe is unavailable on this platform")
+                bail!("This export recipe is unavailable on this platform.")
             }
             if state != "preview" || !previous.is_empty() {
-                bail!("This plan was already executed. Preview a fresh plan")
+                bail!("This plan was already executed. Preview a fresh plan.")
             }
             let cancelled = (plan.recipe.kind == "video" || media.is_some()).then(|| Arc::new(AtomicBool::new(false)));
             let _active = cancelled
@@ -557,13 +557,13 @@ fn run_action(
                         .filter(|c| !c.stale)
                         .collect::<Vec<_>>();
                     if serde_json::to_value(&current)? != serde_json::to_value(&item.chapters)? {
-                        bail!("Chapter markers changed after preview. Preview again")
+                        bail!("Chapter markers changed after preview. Preview again.")
                     }
                 }
                 let output = Path::new(&item.output.output_path);
                 read_only::require_source_mutation(output)?;
                 if hash(Path::new(&item.output.source_path))? != item.source_hash {
-                    bail!("A source changed after preview. Preview again")
+                    bail!("A source changed after preview. Preview again.")
                 }
                 if plan.recipe.kind == "video" {
                     video_check(&plan.recipe, Path::new(&item.output.source_path))?;
@@ -587,7 +587,7 @@ fn run_action(
                 )?)
             })?;
             if claimed != 1 {
-                bail!("This plan was already executed. Preview a fresh plan")
+                bail!("This plan was already executed. Preview a fresh plan.")
             }
             let mut receipts = vec![];
             let run = (|| -> Result<()> {
@@ -642,7 +642,7 @@ fn run_action(
                                 || decoded.height() == 0
                                 || decoded.width().max(decoded.height()) > plan.recipe.max_dimension
                             {
-                                bail!("Output validation failed")
+                                bail!("Output validation failed.")
                             }
                         }
                         if plan.recipe.kind == "video" {
@@ -754,11 +754,11 @@ fn run_action(
                     bail!("The export is missing and no verified owned recovery is available. Undo leaves the operation unchanged")
                 }
                 if hash(source)? != receipt.hash {
-                    bail!("An export was edited. Undo leaves all remaining exports untouched")
+                    bail!("An export was edited. Undo leaves all remaining exports untouched.")
                 }
             }
             if !["completed", "failed"].contains(&state.as_str()) {
-                bail!("This operation cannot be undone")
+                bail!("This operation cannot be undone.")
             }
             let db_path: String = db.with(|conn| {
                 Ok(conn.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0))?)
@@ -785,7 +785,7 @@ fn run_action(
                         }
                         if source.exists() {
                             if hash(&source)? != receipts[index].hash {
-                                bail!("An export was edited. Undo leaves it untouched")
+                                bail!("An export was edited. Undo leaves it untouched.")
                             }
                             fs::remove_file(&source)?;
                         }
@@ -799,7 +799,7 @@ fn run_action(
                     }
                 }
                 if hash(&source)? != receipts[index].hash {
-                    bail!("An export was edited. Undo leaves it untouched")
+                    bail!("An export was edited. Undo leaves it untouched.")
                 }
                 let target = directory.join(format!(
                     "{index}-{}",
@@ -836,7 +836,7 @@ fn run_action(
             result.outputs = receipts.into_iter().map(|r| r.output).collect();
             result.message = "Exports moved to internal recovery storage. Originals are unchanged.".into();
         }
-        _ => bail!("Unsupported tools action"),
+        _ => bail!("Unsupported tools action."),
     }
     Ok(result)
 }
@@ -883,7 +883,7 @@ fn validate_image(path: &Path) -> Result<()> {
 }
 fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<()> {
     if recipe.kind != "photo" || !supports(recipe) {
-        bail!("Unsupported photo recipe")
+        bail!("Unsupported photo recipe.")
     }
     validate_image(source)?;
     let mut reader = ImageReader::open(source)?.with_guessed_format()?;

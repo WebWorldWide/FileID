@@ -162,8 +162,19 @@ pub(crate) async fn handle_deep_analyze_file(
     payload: ipc::DeepAnalyzeFilePayload,
     cancel: Arc<AtomicBool>,
 ) {
+    // As the Swift runner, a file that isn't a Deep Analyze target is nothing to do.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    return super::deep_analyze_mlx::run_batch(sink, db, &payload.model_kind, vec![payload.file_id], cancel, false, false, true, None).await;
+    {
+        let filter = deep_analyze_target_filter();
+        let query_db = db.clone();
+        let file_id = payload.file_id;
+        let ids = tokio::task::spawn_blocking(move || {
+            collect_file_ids(&query_db, &format!("WHERE id = ?1 AND {filter}"), &[&file_id]).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        return super::deep_analyze_mlx::run_batch(sink, db, &payload.model_kind, ids, cancel, false, false, true, None).await;
+    }
     #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(unreachable_code))]
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
         DeepAnalyzeStarting {

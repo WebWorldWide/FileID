@@ -259,6 +259,13 @@ fn frame_model_version(model: &str) -> String {
     format!("timeline-frame-v2/{model}@portable")
 }
 
+/// The Mac app's engine refuses as the Swift engine does, which asks for a loaded model.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const NO_VISUAL_MODEL: &str =
+    "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const NO_VISUAL_MODEL: &str =
+    "Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
 pub(crate) fn enqueue(
     conn: &mut Connection,
     request: &CatalogRequest,
@@ -281,7 +288,7 @@ pub(crate) fn enqueue(
         bail!("Timeline analysis needs the vetted local FFmpeg runtime, which is not installed with this build.")
     }
     let Some(model) = model else {
-        bail!("Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.")
+        bail!(NO_VISUAL_MODEL)
     };
     let mut unique = ids.to_vec();
     unique.sort_unstable();

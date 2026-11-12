@@ -60,7 +60,9 @@ pub(crate) async fn grant(sink: &Sink, payload: ipc::GrantFolderAccessPayload) {
     }
 }
 
+/// Other builds have no bookmarks; async to share the Mac signature the dispatcher awaits.
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+#[allow(clippy::unused_async)]
 pub(crate) async fn grant(_sink: &Sink, _payload: ipc::GrantFolderAccessPayload) {}
 
 /// Access to a scan root, held until dropped.

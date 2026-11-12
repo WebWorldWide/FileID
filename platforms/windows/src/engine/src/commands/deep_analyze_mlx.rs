@@ -160,6 +160,17 @@ pub(crate) async fn run_batch(
     scope: Option<DeepScope>,
 ) {
     let started = Instant::now();
+    // `AIModelKind(rawValue:)` refuses a kind outside the favourites and the catalog.
+    if crate::models::mlx::repo(model_kind).is_none() {
+        sink.send(
+            EngineError::new("unknown_model", format!("Unknown Deep Analyze model: {model_kind}."))
+                .with_model(model_kind.to_owned())
+                .into_event(),
+        )
+        .await;
+        send_complete(&sink, DeepAnalyzeComplete { total_seconds: 0.0, ..complete(model_kind, 0, 1, started, false) }).await;
+        return;
+    }
     if cancel.load(Ordering::Relaxed) {
         send_complete(&sink, complete(model_kind, 0, 0, started, true)).await;
         return;

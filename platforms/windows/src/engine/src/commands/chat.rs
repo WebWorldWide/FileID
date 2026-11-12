@@ -875,6 +875,12 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
     execute_with(conn, request, &no_semantic)
 }
 
+/// A cancel with nothing running. The Mac app's engine answers as the Swift engine does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const IDLE_CANCEL: &str = "Model response stopped.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const IDLE_CANCEL: &str = "No model response is running on this adapter.";
+
 fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semantic) -> Result<ChatResponse> {
     validate(request)?;
     let (status, message, hits, actions) = match request.action.as_str() {
@@ -886,7 +892,7 @@ fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semanti
             )?;
             ("completed", "Conversation deleted.".to_owned(), vec![], vec![])
         }
-        "cancel" => ("cancelled", "No model response is running on this adapter.".to_owned(), vec![], vec![]),
+        "cancel" => ("cancelled", IDLE_CANCEL.to_owned(), vec![], vec![]),
         "send" if request.scope_file_ids.is_some() => {
             let (message, hits) = super::chat_selection::evidence_answer(conn, request)?;
             save_turn(conn, &request.conversation_id, &[("user", request.text.as_deref().unwrap_or_default()), ("assistant", &message)])?;

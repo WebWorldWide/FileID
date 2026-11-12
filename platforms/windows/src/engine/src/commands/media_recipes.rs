@@ -163,7 +163,7 @@ pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
                 probe.rotation = ((((-counter_clockwise / 90.0).round() as i64) * 90).rem_euclid(360)) as u32;
                 (probe.width, probe.height) = if probe.rotation % 180 == 90 { (height as f64, width as f64) } else { (width as f64, height as f64) };
                 probe.video_codec = stream["codec_name"].as_str().map(str::to_owned);
-                probe.video_start = Some(number(&stream["start_time"]).context("Invalid video timestamps")?);
+                probe.video_start = Some(number(&stream["start_time"]).context("Invalid video timestamps.")?);
                 let sdr = ["unknown", "bt709", "bt470bg", "smpte170m"];
                 probe.hdr = !(sdr.contains(&stream["color_transfer"].as_str().unwrap_or("unknown"))
                     && sdr.contains(&stream["color_primaries"].as_str().unwrap_or("unknown"))
@@ -174,9 +174,9 @@ pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
                 probe.audio_count += 1;
                 if probe.audio_count > 1 { continue; }
                 probe.audio_codec = stream["codec_name"].as_str().map(str::to_owned);
-                probe.audio_start = Some(number(&stream["start_time"]).context("Invalid audio timestamps")?);
-                let length = number(&stream["duration"]).context("Invalid audio timestamps")?;
-                ensure!(length > 0.0, "Invalid audio timestamps");
+                probe.audio_start = Some(number(&stream["start_time"]).context("Invalid audio timestamps.")?);
+                let length = number(&stream["duration"]).context("Invalid audio timestamps.")?;
+                ensure!(length > 0.0, "Invalid audio timestamps.");
                 probe.audio_duration = Some(length);
             }
             _ => probe.other_count += 1,

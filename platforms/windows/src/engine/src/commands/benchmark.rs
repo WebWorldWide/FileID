@@ -18,7 +18,12 @@ async fn finish(sink: &Sink, payload: &BenchmarkModelPayload, status: &str, mess
 }
 
 pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
-    if !payload.is_valid() {
+    // The Mac app's engine benchmarks only the kinds `AIModelKind(rawValue:)` knows, as Swift.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    let known = crate::models::mlx::repo(&payload.model_kind).is_some();
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    let known = true;
+    if !payload.is_valid() || !known {
         return finish(&sink, &payload, "error", Some("benchmarkModel needs a valid request ID and model kind.".into()), None).await;
     }
     let cancel = Arc::new(AtomicBool::new(false));
