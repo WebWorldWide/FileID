@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-12 — Stage 3 leftovers: respect-off parity and streaming threshold (`agent/left-restructure`)
+
+- **Which plan is right.** A labelled synthetic tree (44 well-placed files: four 8-file topic folders plus two identical-content twin folders of 6, and 6 strays) scores a plan by how many well-placed files it relocates. Swift before: 6 well-placed files relocated, and all 44 left unsettled for the rule cascade to re-propose; Rust: 0 and settled. Rust's stay-put guard and junk-prototype filter are right, so they were ported into Swift.
+- **Swift changes** (`RestructureSemantic.swift`, `Restructure.swift`): stay-put guard, already-home and settled files skipped by the rule cascade and non-image pass, one new-folder-name registry across the image, document and non-image passes, junk folders excluded as image prototypes, tagless clusters named by month and year.
+- **Tests:** four Swift unit tests mirror the Rust ones (stay-put, strays route, month naming, labelled tree); Rust gained `labelled_tree_moves_only_the_strays`; conformance case `restructure-semantic-passes-without-the-respect-stage` (`FILEID_RESTRUCTURE_RESPECT=0`) passes on both engines.
+- **Streaming threshold:** Swift 50,000 to 150,000, matching Rust, with the same env override. Reason: the embedding map is capped per memory tier, so the semantic cost is bounded, and 50,000 sent real libraries to the cascade with no respect stage. Rust measured 16 s / 668 MB at 71,333 files (release); Swift at 71,000 synthetic files (debug build, load 30-50) took 199 s / 911 MB RSS, an upper bound, not a release number.
+- **Streaming and the respect stage:** not added; the stage needs whole-library state (see CONVERGENCE Stage 3).
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".

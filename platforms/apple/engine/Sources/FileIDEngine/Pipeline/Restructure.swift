@@ -62,7 +62,17 @@ public enum Restructure {
         return (root, prefix, upper)
     }
 
-    static let largePlanThreshold = 50_000
+    /// Same value as Rust `LARGE_PLAN_STREAM_THRESHOLD`. Above it planning streams
+    /// through the rule cascade only, with no semantic passes and no respect stage,
+    /// so a library under it gets the full planner. The CLIP/BGE map is capped per
+    /// memory tier (`signalCap`: 20k/50k/100k vectors), so the semantic cost does not
+    /// grow with the library; the rest is linear metadata. Rust measured 16 s / 668 MB
+    /// at 71,333 files (release); Swift 71,000 files in a debug build under load 30–50
+    /// planned in 199 s / 911 MB RSS, an upper bound.
+    /// `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it, as in Rust.
+    static var largePlanThreshold: Int {
+        ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD"].flatMap(Int.init) ?? 150_000
+    }
     private static let largePlanChunk = 4_096
 
     /// Million-file planning path. Metadata is classified in bounded chunks

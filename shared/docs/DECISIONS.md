@@ -4807,3 +4807,10 @@ Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `
 - **Eigen pin swapped to upstream's v1.22.1 fix.** GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin in `cmake/deps.txt` no longer matched. The build script takes upstream's own fix from v1.22.1: the same Eigen commit from the GitHub `eigen-mirror`, with its SHA-1. That is the only `deps.txt` change between the two releases. The script refuses to run if the original line is not there exactly once.
 - **LF line endings for the ORT source.** The source is checked out with `core.autocrlf=false` and `core.eol=lf`, so ORT's patches apply.
 - **GNU patch from Git for Windows.** CMake is pointed at Git for Windows' patch through `Patch_EXECUTABLE`. Hosted runners find Strawberry Perl's patch.exe 2.5.9 first, and it crashes on ORT's arm64 cpuinfo patch.
+
+## 2026-11-12 — Restructure: respect-off parity and one streaming threshold
+
+- **Rust's semantic behaviour is the reference.** On a labelled tree (44 well-placed files, 6 strays) Swift relocated 6 well-placed files and left all 44 for the rule cascade; Rust relocated none. Swift now has the stay-put guard, settled files, the shared name registry, junk image prototypes and month naming.
+- **150,000 files for both streaming planners.** Rust's value had a measurement behind it (71,333 files: 16 s / 668 MB); Swift's 50,000 had none and sent ordinary libraries to the cascade. Embedding maps stay capped per tier. Swift's debug-build 71,000-file run (199 s, 911 MB, load 30-50) is only an upper bound; a release re-measure at 150,000 is open in NEXT.
+- **No respect stage in the streaming planners.** The stage needs per-file state for the whole library (event spans, loose-photo events, format siblings); keeping it would reintroduce the memory the streaming path avoids. Libraries above 150,000 files get rule-cascade moves only.
+
