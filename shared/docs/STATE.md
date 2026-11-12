@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-12 — NEXT.md leftovers checked against the code (`agent/left-verify`, docs only)
+
+- Ticked: the Stage 1 leftovers (merged the two duplicate lines; the app-hosted scan writes no `rust-align112-v1` faces), and the Convergence item (Stage 10 bundles the pinned official ORT 1.22.0 dylib).
+- Narrowed: Stage 2 (the Swift test Trash root is done; the startup reconcile still reads only `trash-journal.json`) and Stage 6 (the `ffi.rs` digest and the SFace ORT 1.22 measurement are done; only the group-shot re-label remains).
+- `check_current_docs.py` passes. No engine runs; no code changed.
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
