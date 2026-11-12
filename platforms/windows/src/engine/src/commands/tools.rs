@@ -14,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
@@ -421,7 +421,8 @@ fn run_action(
             {
                 bail!(UNSUPPORTED_RECIPE)
             }
-            let destination = Path::new(request.destination.as_deref().context("Choose an output folder")?);
+            let destination = foundation_standardized(Path::new(request.destination.as_deref().context("Choose an output folder")?));
+            let destination = destination.as_path();
             read_only::require_source_mutation(destination)?;
             if !destination.is_absolute() || !destination.is_dir() {
                 bail!("The output folder must already exist.")
@@ -960,8 +961,43 @@ fn export_chapters(chapters: &[CatalogChapter], format: &str) -> Result<Vec<u8>>
     Ok(text.into_bytes())
 }
 
+/// The output folder as the Swift engine names it, `URL.standardizedFileURL.path`:
+/// `.` and `..` resolved and, on macOS, a leading `/private` dropped when the rest
+/// exists (`/private/var/folders/…` becomes `/var/folders/…`).
+fn foundation_standardized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if cfg!(target_os = "macos")
+        && let Ok(rest) = out.strip_prefix("/private")
+        && !rest.as_os_str().is_empty()
+    {
+        let stripped = Path::new("/").join(rest);
+        if stripped.exists() {
+            return stripped;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_folders_are_named_as_foundation_standardizes_them() {
+        use std::path::Path;
+        assert_eq!(super::foundation_standardized(Path::new("/a/./b/../c")), Path::new("/a/c"));
+        assert_eq!(super::foundation_standardized(Path::new("/private/no-such-fileid-folder")), Path::new("/private/no-such-fileid-folder"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(super::foundation_standardized(Path::new("/private/tmp")), Path::new("/tmp"));
+    }
+
     use super::*;
     struct Fixture {
         root: std::path::PathBuf,

@@ -27,11 +27,14 @@ struct ModelInfoTests {
         }
     }
 
-    /// The catalog is found without SwiftPM's aborting `Bundle.module`, and a
-    /// missing bundle means an empty search, not a crash.
-    @Test func catalogLookupNeverUsesBundleModule() throws {
+    /// Every layout reads the same catalog: the compiled-in copy, byte for byte the
+    /// file the Rust engine embeds, and it must parse (an empty catalog would make
+    /// the engines disagree silently).
+    @Test func compiledCatalogMatchesTheFileAndParses() throws {
+        let file = try String(contentsOf: Self.sources.appendingPathComponent("Resources/model-catalog.json"), encoding: .utf8)
+        #expect(ModelCatalogData.json + "\n" == file)
+        #expect(MLXModelCatalog.entries.count > 100)
         let text = try String(contentsOf: Self.sources.appendingPathComponent("MLXModelCatalog.swift"), encoding: .utf8)
-        #expect(!text.contains("Bundle.module\n") && !text.contains("?? Bundle.module"))
-        #expect(!MLXModelCatalog.bundleSearchFolders().isEmpty)
+        #expect(!text.contains("Bundle.module"))
     }
 }

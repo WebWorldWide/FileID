@@ -41,57 +41,13 @@ public enum MLXModelCatalog {
         let runtime: String
         let entries: [CatalogModel]
     }
-    /// The resource bundle SwiftPM builds for this target.
-    package static let resourceBundleName = "FileID_FileIDModelInfo.bundle"
-
-    /// Folders that may hold the resource bundle, in order: the app's
-    /// Resources (the app, the Swift engine and fileidd all run inside
-    /// FileID.app), beside the executable, and beside the binary that contains
-    /// this code (libFileIDAppleKit, a test bundle) and its parents.
-    package static func bundleSearchFolders() -> [URL] {
-        var folders: [URL] = []
-        if let resources = Bundle.main.resourceURL { folders.append(resources) }
-        folders.append(Bundle.main.bundleURL)
-        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
-        folders.append(executable)
-        folders.append(executable.deletingLastPathComponent().appendingPathComponent("Resources"))
-        var info = Dl_info()
-        if dladdr(#dsohandle, &info) != 0, let name = info.dli_fname {
-            var folder = URL(fileURLWithPath: String(cString: name)).resolvingSymlinksInPath().deletingLastPathComponent()
-            for _ in 0..<4 {
-                folders.append(folder)
-                folders.append(folder.appendingPathComponent("Resources"))
-                folder = folder.deletingLastPathComponent()
-            }
-        }
-        return folders
-    }
-
-    /// `model-catalog.json` from the first folder that has the bundle, or nil.
-    /// Never SwiftPM's generated `Bundle.module`, which aborts when the bundle
-    /// is missing.
-    package static func catalogFileURL() -> URL? {
-        for folder in bundleSearchFolders() {
-            let bundleURL = folder.appendingPathComponent(resourceBundleName)
-            for relative in ["model-catalog.json", "Contents/Resources/model-catalog.json"] {
-                let file = bundleURL.appendingPathComponent(relative)
-                if FileManager.default.fileExists(atPath: file.path) { return file }
-            }
-        }
-        return nil
-    }
-
+    /// The catalog compiled into this binary (`ModelCatalogData`, generated from
+    /// Resources/model-catalog.json, the bytes the Rust engine embeds), so every
+    /// layout reads the same entries: the app, an engine copied alone, a test.
+    /// An invalid catalog yields no entries and logs `model_catalog_missing`;
+    /// `ModelInfoTests` fail on it.
     public static let entries: [CatalogModel] = {
-        guard let url = catalogFileURL() else {
-            missing("model catalog bundle \(resourceBundleName) not found; no MLX models are available")
-            return []
-        }
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            missing("model catalog unreadable")
-            return []
-        }
-        defer { try? handle.close() }
-        guard let data = try? handle.readToEnd(), let result = try? load(data: data) else {
+        guard let result = try? load(data: Data(ModelCatalogData.json.utf8)) else {
             missing("model catalog invalid")
             return []
         }

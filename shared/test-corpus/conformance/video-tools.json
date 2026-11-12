@@ -115,7 +115,7 @@
           "outputs": [
             {
               "message": "",
-              "outputPath": "{path:Clip - Export - 1x1 Fit.mp4}",
+              "outputPath": "{std_path:Clip - Export - 1x1 Fit.mp4}",
               "state": "pending"
             }
           ]
@@ -144,7 +144,7 @@
           "outputs": [
             {
               "message": "Stabilization analyzes translation and rotation during export, with up to 12% edge-covering zoom. Unsafe or unavailable registrations remain uncorrected.",
-              "outputPath": "{path:Clip - Export - 9x16 Fit - Stabilized.mp4}",
+              "outputPath": "{std_path:Clip - Export - 9x16 Fit - Stabilized.mp4}",
               "state": "pending"
             }
           ]
@@ -172,7 +172,7 @@
           "outputs": [
             {
               "message": "People framing: 0 followed samples, 7 full-picture samples. Detection is sampled twice per second; review the exported framing.",
-              "outputPath": "{path:Clip - Export - 9x16 People.mp4}",
+              "outputPath": "{std_path:Clip - Export - 9x16 People.mp4}",
               "state": "pending"
             }
           ]
@@ -199,7 +199,7 @@
           "outputs": [
             {
               "message": "",
-              "outputPath": "{path:Clip - Export.mp4}",
+              "outputPath": "{std_path:Clip - Export.mp4}",
               "state": "pending"
             }
           ]
@@ -291,7 +291,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Export - 1x1 Fit.mp4}"
+              "outputPath": "{std_path:Clip - Export - 1x1 Fit.mp4}"
             }
           ]
         }
@@ -430,7 +430,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Export - 9x16 Fit - Stabilized.mp4}"
+              "outputPath": "{std_path:Clip - Export - 9x16 Fit - Stabilized.mp4}"
             }
           ]
         }
@@ -566,7 +566,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Remux.mp4}"
+              "outputPath": "{std_path:Clip - Remux.mp4}"
             }
           ]
         }
@@ -703,7 +703,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Rotated 90.mov}"
+              "outputPath": "{std_path:Clip - Rotated 90.mov}"
             }
           ]
         }
@@ -839,7 +839,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Audio.m4a}"
+              "outputPath": "{std_path:Clip - Audio.m4a}"
             }
           ]
         }
@@ -978,7 +978,7 @@
           "status": "ok",
           "outputs": [
             {
-              "outputPath": "{path:Clip - Trim.mp4}"
+              "outputPath": "{std_path:Clip - Trim.mp4}"
             }
           ]
         }

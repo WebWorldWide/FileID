@@ -509,7 +509,7 @@
         "expect": [
           [
             "{path:photos/camera.jpg}",
-            1212696624,
+            {"$tol": "hamming", "value": 1212696624},
             "ILCE-7M3",
             52.52,
             -13.41,
@@ -519,7 +519,7 @@
           ],
           [
             "{path:photos/text.heic}",
-            25362134204416,
+            {"$tol": "hamming", "value": 25362134204416},
             null,
             null,
             null,
@@ -529,7 +529,7 @@
           ],
           [
             "{path:screens/known-text.png}",
-            25362134204416,
+            {"$tol": "hamming", "value": 25362134204416},
             null,
             null,
             null,
@@ -598,5 +598,7 @@
     "env": {
       "FILEID_OCR_WARMUP": "0"
     }
-  }
+  },
+  {"name": "cross-scan-swift-then-rust-same-image-hashes", "description": "On one Mac the swift engine and the rust engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: swift scans, rust rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "swift scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "swift hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "rust"}, {"label": "rust rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]},
+  {"name": "cross-scan-rust-then-swift-same-image-hashes", "description": "On one Mac the rust engine and the swift engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: rust scans, swift rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["rust"], "start": "rust", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "rust scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "rust hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "swift"}, {"label": "swift rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]}
 ]

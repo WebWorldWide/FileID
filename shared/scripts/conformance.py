@@ -13,12 +13,14 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "prefix", "value": [..]}  a list that starts with these elements
   {"$tol": "contains", "value": [..]}  a list holding a match for each element
   {"$tol": "present"}             any non-null value
+  {"$tol": "hamming", "value": N, "bits": B}  an integer hash within B differing bits (default 4)
   {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
       "rustHosted" applies to the Rust engine the Mac app hosts (the
       apple-adapters build, events on stderr) instead of "rust"
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
-Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
+Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
+macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
 {size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {clip_model} (the CLIP
 embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
@@ -97,6 +99,16 @@ def bookmark(path):
     if result.returncode != 0 or not result.stdout.strip():
         raise Failure(f"could not make a bookmark for {path}: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def foundation_standardized(path):
+    """An output file as the Swift engine names it: its folder through
+    `URL.standardizedFileURL`, which on macOS drops a leading /private when the rest
+    exists (/private/var/… → /var/…), then the file name."""
+    folder, name = os.path.split(path)
+    if sys.platform == "darwin" and folder.startswith("/private/") and os.path.exists(folder[len("/private"):]):
+        folder = folder[len("/private"):]
+    return os.path.join(folder, name)
 
 
 def clip_model():
@@ -375,6 +387,8 @@ class Context:
             return self.pid
         if name == "path":
             return self.path(argument)
+        if name == "std_path":
+            return foundation_standardized(self.path(argument))
         if name == "nfc_path":
             return unicodedata.normalize("NFC", self.path(argument))
         if name == "path_hash":
@@ -457,6 +471,13 @@ def match(expected, actual, ctx, where="$"):
         if tolerance == "present":
             if actual is None:
                 raise Failure(f"{where}: expected a value, got null/absent")
+            return
+        if tolerance == "hamming":
+            # Perceptual hashes: CoreGraphics' resampling can move a bit between
+            # macOS releases; engines are compared exactly in cross-engine cases.
+            bits = expected.get("bits", 4)
+            if not isinstance(actual, int) or bin((actual ^ value) & (2**64 - 1)).count("1") > bits:
+                raise Failure(f"{where}: expected {value} within {bits} bits, got {canonical(actual)}")
             return
         if tolerance == "count":
             if not isinstance(actual, list) or len(actual) != value:

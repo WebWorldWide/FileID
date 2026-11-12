@@ -146,12 +146,6 @@ for path in sys.argv[1:]:
             f.write(new)
 PY
 
-# The model catalog bundle has no code: the app's seal covers it as a
-# resource. Refuse to sign an app without it.
-if [ ! -f "$APP/Contents/Resources/FileID_FileIDModelInfo.bundle/model-catalog.json" ] && [ ! -f "$APP/Contents/Resources/FileID_FileIDModelInfo.bundle/Contents/Resources/model-catalog.json" ]; then
-    echo "❌ FileID_FileIDModelInfo.bundle missing from $APP — assemble again."
-    exit 1
-fi
 # ── Sign (inside-out, hardened runtime, no --deep) ───────────────────────────
 echo "🔐 Signing with: ${IDENTITY}"
 SIGN_TMP=$(mktemp -d /tmp/fileid-release.XXXXXX)
@@ -168,7 +162,7 @@ for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib "$SIGN_TMP/$APP/Contents/F
     [ -f "$lib" ] || continue
     codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
 done
-# SwiftPM resource bundles (the model catalog among them) carry an ad-hoc
+# SwiftPM resource bundles carry an ad-hoc
 # signature from the build; re-sign them with the release identity.
 for resource_bundle in "$SIGN_TMP/$APP/Contents/Resources/"*.bundle; do
     [ -d "$resource_bundle" ] || continue

@@ -66,15 +66,6 @@ if grep -aqF 'FILEID_TEST_TRASH_ROOT' "$BUILD_DIR/FileIDEngine"; then
     echo "❌ $BUILD_DIR/FileIDEngine is a test build (FILEID_TEST_TRASH_ROOT)"; exit 1
 fi
 
-# The MLX model catalog (FileIDModelInfo). The app, the Swift engine and
-# libFileIDAppleKit all read it from Contents/Resources; without it no local
-# AI model is offered, so refuse to assemble.
-MODEL_INFO_BUNDLE="FileID_FileIDModelInfo.bundle"
-if [ ! -f "$BUILD_DIR/$MODEL_INFO_BUNDLE/model-catalog.json" ] && [ ! -f "$BUILD_DIR/$MODEL_INFO_BUNDLE/Contents/Resources/model-catalog.json" ]; then
-    echo "❌ $MODEL_INFO_BUNDLE (model catalog) missing — rebuild FileID first."
-    exit 1
-fi
-
 rm -rf "$APP_BUNDLE"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
@@ -88,10 +79,6 @@ for resource_bundle in "$BUILD_DIR/"*.bundle; do
     cp -R "$resource_bundle" "$CONTENTS/Resources/"
 done
 shopt -u nullglob
-if [ ! -f "$CONTENTS/Resources/$MODEL_INFO_BUNDLE/model-catalog.json" ] && [ ! -f "$CONTENTS/Resources/$MODEL_INFO_BUNDLE/Contents/Resources/model-catalog.json" ]; then
-    echo "❌ $MODEL_INFO_BUNDLE didn't reach Contents/Resources."
-    exit 1
-fi
 
 mkdir -p "$CONTENTS/Frameworks"
 xcrun swift-stdlib-tool --copy --platform macosx \

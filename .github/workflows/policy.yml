@@ -56,3 +56,5 @@ jobs:
         run: python shared/scripts/test_gen_model_manifest.py
       - name: Enforce macOS model table matches manifest.json
         run: python shared/scripts/gen_model_manifest.py --check
+      - name: Enforce the compiled-in Mac model catalog matches model-catalog.json
+        run: python shared/scripts/gen_model_catalog_swift.py --check

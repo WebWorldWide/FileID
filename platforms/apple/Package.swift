@@ -66,7 +66,7 @@ let package = Package(
         .target(
             name: "FileIDModelInfo",
             path: "shared/Sources/FileIDModelInfo",
-            resources: [.process("Resources")],
+            exclude: ["Resources"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .target(
