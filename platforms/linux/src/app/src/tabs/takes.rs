@@ -2,8 +2,8 @@
 // clips by itself, scores each try without a model, and this page lets the
 // user check the starred best try, keep or skip, or move the rest to Trash
 // with Undo. Manual groups with a goal (YOUR GROUPS / MAKE A GROUP BY HAND)
-// live in takes_groups.rs. The goal ranking panel is not offered: the shared
-// engine reports it as unavailable.
+// live in takes_groups.rs. The Goal (optional) panel asks the engine to rank the
+// tries with the installed description model (`rankTakesWithGoal`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -47,6 +47,12 @@ pub(super) struct Ui {
     pub(super) current: RefCell<Option<CatalogTakeAutoGroup>>,
     resolved: RefCell<Option<(String, usize)>>,
     qualities: RefCell<Vec<CatalogTakeQuality>>,
+    ranking: RefCell<Option<CatalogTakeGoalRanking>>,
+    goal_panel: gtk::Box,
+    goal_entry: gtk::Entry,
+    goal_button: gtk::Button,
+    goal_bar: gtk::ProgressBar,
+    goal_summary: gtk::Label,
     keep: RefCell<BTreeSet<i64>>,
     focused: Cell<usize>,
     zoomed: Cell<bool>,
@@ -276,6 +282,25 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     hint.set_wrap(true);
     filmstrip.append(&hint);
     review.append(&filmstrip);
+    let goal = v3::panel("Goal (optional)");
+    let goal_bar = v3::busy_bar(60);
+    goal.trailing.append(&goal_bar);
+    goal.body.add_css_class("v3-page-pad-inner");
+    goal.body.set_spacing(10);
+    let goal_row = v3::hbox(8);
+    let goal_entry = v3::text_field(model::GOAL_PLACEHOLDER);
+    goal_entry.set_max_length(500);
+    goal_row.append(&goal_entry);
+    let goal_button = v3::accent("Rank with AI", crate::shell::status::Tone::Ai, false);
+    goal_button.set_sensitive(false);
+    goal_button.set_tooltip_text(Some(
+        "Looks at all the photos together with the description model from Describe Files. Runs on this computer.",
+    ));
+    goal_row.append(&goal_button);
+    goal.body.append(&goal_row);
+    let goal_summary = v3::wrapped(model::GOAL_IDLE_HINT, &["v3-meta-115"]);
+    goal.body.append(&goal_summary);
+    review.append(&goal.root);
     let review_scroll = v3::scroller(&review);
     stack.add_named(&review_scroll, Some("review"));
     stack.set_visible_child_name("empty");
@@ -295,6 +320,12 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
         current: RefCell::new(None),
         resolved: RefCell::new(None),
         qualities: RefCell::new(vec![]),
+        ranking: RefCell::new(None),
+        goal_panel: goal.root.clone(),
+        goal_entry: goal_entry.clone(),
+        goal_button: goal_button.clone(),
+        goal_bar,
+        goal_summary,
         keep: RefCell::new(BTreeSet::new()),
         focused: Cell::new(0),
         zoomed: Cell::new(false),
@@ -353,6 +384,16 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     zoom_button.connect_clicked(move |_| run());
     let run = with(|ui| ui.ask_chat());
     ask_button.connect_clicked(move |_| run());
+    let run = with(|ui| ui.rank_with_goal());
+    goal_button.connect_clicked(move |_| run());
+    let run = with(|ui| ui.rank_with_goal());
+    goal_entry.connect_activate(move |_| run());
+    let weak = Rc::downgrade(&ui);
+    goal_entry.connect_changed(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            ui.refresh_goal_button();
+        }
+    });
     for (best, pane) in [(true, &ui.best_pane), (false, &ui.other_pane)] {
         let weak = Rc::downgrade(&ui);
         pane.play.connect_clicked(move |_| {
@@ -724,6 +765,7 @@ impl Ui {
             model::noun(&group, group.shots.len())
         ));
         self.stack.set_visible_child_name("loading");
+        self.reset_goal();
         let mut request = catalog_request("scoreTakes");
         request.file_ids = Some(group.file_ids());
         self.send("score", request);
@@ -743,6 +785,8 @@ impl Ui {
         self.focused.set(model::best_index(&qualities).unwrap_or(0));
         self.zoomed.set(false);
         *self.qualities.borrow_mut() = qualities;
+        self.goal_panel.set_visible(!model::is_video(&group));
+        self.refresh_goal_button();
         self.hint.set_text(&model::hint_line(&group));
         self.strip
             .update_property(&[gtk::accessible::Property::Label(&format!(
@@ -759,6 +803,61 @@ impl Ui {
         if self.root.is_mapped() {
             self.strip.grab_focus();
         }
+    }
+
+    fn reset_goal(&self) {
+        self.ranking.borrow_mut().take();
+        self.requests.borrow_mut().forget("goal");
+        self.goal_bar.set_visible(false);
+        self.goal_summary.set_text(model::GOAL_IDLE_HINT);
+        self.goal_summary.remove_css_class("tone-ai");
+    }
+
+    fn refresh_goal_button(&self) {
+        let ready = model::can_rank(&self.goal_entry.text(), &self.qualities.borrow())
+            && !self.requests.borrow().busy("goal");
+        self.goal_button.set_sensitive(ready);
+    }
+
+    fn rank_with_goal(self: &Rc<Self>) {
+        let goal = self.goal_entry.text().trim().to_string();
+        let busy = self.requests.borrow().busy("goal");
+        if busy || !model::can_rank(&goal, &self.qualities.borrow()) {
+            return;
+        }
+        let mut request = catalog_request("rankTakesWithGoal");
+        request.query = Some(goal);
+        request.file_ids = Some(model::goal_order(&self.qualities.borrow()));
+        if self.send("goal", request) {
+            self.goal_bar.set_visible(true);
+            self.refresh_goal_button();
+        }
+    }
+
+    fn goal_finished(self: &Rc<Self>, reply: CatalogResponse) {
+        self.goal_bar.set_visible(false);
+        self.refresh_goal_button();
+        let Some(result) = reply.take_goal_ranking.filter(|_| reply.status == "ok") else {
+            self.toast(reply.message.as_deref().unwrap_or(model::GOAL_FAILED));
+            return;
+        };
+        self.goal_summary.set_text(&result.summary);
+        if result.status == "ranked" {
+            self.goal_summary.add_css_class("tone-ai");
+        } else {
+            self.goal_summary.remove_css_class("tone-ai");
+        }
+        model::mark_goal(&mut self.qualities.borrow_mut(), Some(&result));
+        let adopted = model::adopt_goal(&self.qualities.borrow(), &self.keep.borrow(), &result);
+        *self.ranking.borrow_mut() = Some(*result);
+        if let Some((keep, focus)) = adopted {
+            *self.keep.borrow_mut() = keep;
+            self.focused.set(focus);
+        }
+        if let Some(group) = self.current.borrow().clone() {
+            self.rebuild_strip(&group);
+        }
+        self.refresh();
     }
 
     fn score_failed(&self, message: &str) {
@@ -1294,6 +1393,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                                 .as_deref()
                                 .unwrap_or("FileID didn't answer in time. Try again in a moment."),
                         ),
+                        "goal" => ui.goal_finished(r),
                         "decision" => ui.finish_decision(ok),
                         "reopen" | "keep-rest" => {
                             ui.request_groups();
