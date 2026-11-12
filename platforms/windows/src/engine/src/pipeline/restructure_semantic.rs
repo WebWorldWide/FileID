@@ -1167,6 +1167,61 @@ mod tests {
     }
 
     #[test]
+    fn labelled_tree_moves_only_the_strays() {
+        // Labelled check shared with Swift: 44 well-placed files (four 8-file topic
+        // folders plus two identical-content twin folders of 6) and 6 labelled strays.
+        // A plan is better when it moves fewer well-placed files yet routes the strays.
+        let vec = |cls: usize, i: usize| {
+            let mut v = vec![0.0f32; 8];
+            v[cls] = 1.0;
+            v[5] = 0.04 * (i % 3) as f32;
+            v[6] = 0.03 * (i % 2) as f32;
+            v
+        };
+        let mut files = Vec::new();
+        let add = |files: &mut Vec<SemanticFile>, path: String, cls: usize, i: usize| {
+            let id = files.len() as i64 + 1;
+            files.push(file(id, &path, vec(cls, i), &[&format!("topic{cls}")]));
+        };
+        for c in 0..4 {
+            for i in 0..8 {
+                add(&mut files, format!("/lib/Topic{c}/f{i}.jpg"), c, i);
+            }
+        }
+        for i in 0..6 {
+            add(&mut files, format!("/lib/TwinA/f{i}.jpg"), 4, i);
+        }
+        for i in 0..6 {
+            add(&mut files, format!("/lib/TwinB/f{i}.jpg"), 4, i);
+        }
+        let stray_start = files.len() as i64 + 1;
+        for i in 0..3 {
+            add(&mut files, format!("/lib/Inbox/z{i}.jpg"), 0, i);
+        }
+        for i in 0..3 {
+            add(&mut files, format!("/lib/Inbox/y{i}.jpg"), 2, i);
+        }
+        let protos: Vec<_> = folder_prototypes(&files, 4)
+            .into_iter()
+            .filter(|p| !is_junk_prototype_folder(&p.path))
+            .collect();
+        let moves = semantic_classify(
+            &files,
+            &protos,
+            Path::new("/lib"),
+            &mut std::collections::HashSet::new(),
+            &mut std::collections::HashSet::new(),
+        );
+        assert!(moves.iter().all(|m| m.file_id >= stray_start), "{moves:?}");
+        let strays: Vec<_> = moves.iter().filter(|m| m.file_id >= stray_start).collect();
+        assert_eq!(strays.len(), 6, "{moves:?}");
+        for m in strays {
+            let want = if m.source.to_string_lossy().contains("/z") { "/lib/Topic0" } else { "/lib/Topic2" };
+            assert_eq!(m.destination.parent(), Some(Path::new(want)), "{m:?}");
+        }
+    }
+
+    #[test]
     fn tagless_dated_cluster_is_named_by_month_year_not_unsorted() {
         // 2014-06-11 UTC.
         let june_2014 = 1_402_444_800.0;

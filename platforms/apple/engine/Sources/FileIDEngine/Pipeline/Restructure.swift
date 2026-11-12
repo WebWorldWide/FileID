@@ -470,10 +470,19 @@ public enum Restructure {
         // homogeneity but are real relocations, not in-place anchors — exempt
         // them from the anchor strip so their best moves survive.
         var semanticSourceFolders = Set<String>()
+        // Files a semantic pass examined and left in place (already home, or
+        // well-placed per the stay-put guard); the rule cascade skips them like
+        // moved files. One name registry spans all three passes.
+        var settledIDs = Set<Int64>()
+        var usedGroupNames = Set<String>()
         if semanticFiles.count >= 2 {
+            // A Downloads/Desktop/temp dump (or all-digit export folder) is a place
+            // to organize photos OUT of, never a learn-your-style routing target.
             let protos = RestructureSemantic.folderPrototypes(semanticFiles, minFiles: 4)
+                .filter { !RestructureSemantic.isJunkPrototypeFolder($0.path) }
             let moves = RestructureSemantic.classify(
-                files: semanticFiles, prototypes: protos, libraryRoot: libraryRoot.path)
+                files: semanticFiles, prototypes: protos, libraryRoot: libraryRoot.path,
+                usedGroupNames: &usedGroupNames, settled: &settledIDs)
             for m in moves {
                 let name = (m.source as NSString).lastPathComponent
                 let newPath = (m.destinationDir as NSString).appendingPathComponent(name)
@@ -511,7 +520,8 @@ public enum Restructure {
                     tags: loaded.tags[s.id] ?? [], timeUnix: timeUnix)
             }
             let docMoves = RestructureSemantic.classifyDocuments(
-                files: docFiles, libraryRoot: libraryRoot.path)
+                files: docFiles, libraryRoot: libraryRoot.path,
+                usedGroupNames: &usedGroupNames, settled: &settledIDs)
             for m in docMoves {
                 let name = (m.source as NSString).lastPathComponent
                 let newPath = (m.destinationDir as NSString).appendingPathComponent(name)
@@ -531,14 +541,15 @@ public enum Restructure {
         // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
         if RestructureSemantic.nonImageEnabled {
             let nonImageInput: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
-                guard !movedIDs.contains(s.id) else { return nil }
+                guard !movedIDs.contains(s.id), !settledIDs.contains(s.id) else { return nil }
                 let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
                 return RestructureSemantic.SemanticFile(
                     fileID: s.id, source: s.path, clip: [],
                     tags: loaded.tags[s.id] ?? [], timeUnix: timeUnix)
             }
             let niMoves = RestructureSemantic.classifyNonImage(
-                files: nonImageInput, libraryRoot: libraryRoot.path)
+                files: nonImageInput, libraryRoot: libraryRoot.path,
+                usedGroupNames: &usedGroupNames, settled: &settledIDs)
             for m in niMoves {
                 let name = (m.source as NSString).lastPathComponent
                 let newPath = (m.destinationDir as NSString).appendingPathComponent(name)
@@ -552,7 +563,7 @@ public enum Restructure {
 
         // Rule cascade for everything the semantic butler didn't claim.
         let ruleFiles: [FileForClassify] = rows.compactMap { s in
-            guard !movedIDs.contains(s.id) else { return nil }
+            guard !movedIDs.contains(s.id), !settledIDs.contains(s.id) else { return nil }
             return FileForClassify(
                 fileID: s.id, source: s.path, kind: s.kind,
                 modifiedUnix: s.modifiedAt ?? 0, createdUnix: s.createdAt,
