@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-12 — Windows/Linux parity: Best Takes goal panel; "Faster text reading" not ported (`agent/parity-engine`)
+
+- **Best Takes goal ranking** (agent): the shared engine already ranks (`commands/take_goal.rs`: numbered contact sheet of up to six shots through the resident description model; `goal_unavailable` only when no description model is installed or the catalog is missing), so the parity audit's "engine gap" was stale. The missing piece was the pages. GTK (`tabs/takes.rs`, rules in `takes_model.rs`) and WinUI (`TakesWorkbench.Goal.cs`, rules in `TakeReviewPolicy.cs`) now have the Mac's "Goal (optional)" panel under the filmstrip: text field, "Rank with AI", busy bar, the answer's summary, "Shows the goal" / "Closest to the goal" chips, and the top try becomes the kept pick when the quality pick was the only mark. Photos only. No model is needed by the tests: Rust `take_goal.rs` (stub reply orders best, met, rest) and conformance `goal without a model` (`goal_unavailable`) already cover the engine; new unit tests cover the page rules on both apps. Not run against a real vision model (none installed here).
+- **Faster text reading (Latin scripts only): not ported.** See DECISIONS 2026-11-12. The engine's OCR has no automatic-language-detection tier to skip, so there is nothing to make faster and no toggle was added.
+- **Needs a screen check:** the new panel on Windows and Linux (layout under the filmstrip, busy bar while ranking, chips after an answer).
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
