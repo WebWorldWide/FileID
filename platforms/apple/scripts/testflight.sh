@@ -76,7 +76,11 @@ bash scripts/ensure_mlx_metallib.sh
     echo "The required MLX Metal library was not built; refusing to package." >&2
     exit 1
 }
-FILEID_BUILD_CONFIGURATION=release bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
+# The App Store gate: TestFlight builds run only the Swift engine and never
+# bundle fileidd until the owner's sandbox acceptance (CONVERGENCE.md Stage 10).
+FILEID_APP_STORE=1 FILEID_WITH_RUST_ENGINE=0 FILEID_BUILD_CONFIGURATION=release \
+    bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
+[ ! -e "$APP/Contents/MacOS/fileidd" ] || { echo "fileidd must not ship in App Store builds yet." >&2; exit 1; }
 [ -s "$APP/Contents/MacOS/mlx.metallib" ] || {
     echo "The required MLX Metal library is missing from the app bundle." >&2
     exit 1

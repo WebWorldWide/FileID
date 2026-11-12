@@ -113,7 +113,11 @@ else
     swift build -c release --product FileIDEngine
 fi
 
-bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
+# Developer ID builds bundle the shared Rust engine (fileidd, the default
+# engine since Stage 10) with the pinned ONNX Runtime; the Swift engine stays
+# bundled and selectable. FILEID_WITH_RUST_ENGINE=0 ships the Swift engine only.
+FILEID_WITH_RUST_ENGINE="${FILEID_WITH_RUST_ENGINE:-1}" FILEID_REQUIRE_ORT=1 \
+    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
 
 # ── Strip + scrub (must precede signing — both invalidate the cdhash) ────────
 echo "🧹 Stripping debug symbols…"
@@ -181,8 +185,8 @@ done
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
-# Shared Rust engine (dogfood, bundled with FILEID_WITH_RUST_ENGINE=1): same
-# identity and entitlements as the Swift engine.
+# Shared Rust engine (bundled unless FILEID_WITH_RUST_ENGINE=0): same identity
+# and entitlements as the Swift engine.
 if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
     codesign --force --options runtime $TIMESTAMP_FLAG \
         --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
@@ -215,9 +219,14 @@ if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
     fi
     PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
 fi
+ORT_CHECK=()
+if [ -f "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
+    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+    ORT_CHECK=(--ort-runtime "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+fi
 
 echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "${PRIVACY_BINARIES[@]}"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" ${ORT_CHECK[@]+"${ORT_CHECK[@]}"} "${PRIVACY_BINARIES[@]}"
 
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then
