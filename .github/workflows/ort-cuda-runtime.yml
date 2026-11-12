@@ -1,0 +1,65 @@
+name: ONNX Runtime CUDA pack (no telemetry)
+
+# Builds the CUDA execution-provider pack the engine loads on NVIDIA cards
+# (ONNX Runtime 1.22.0 + CUDA 12.8 + cuDNN 9.8) from Microsoft's source without
+# --use_telemetry: Microsoft's own onnxruntime-win-x64-gpu zip registers ONNX
+# Runtime's ETW provider in Windows' telemetry group and the engine refuses it
+# (DECISIONS 2026-11-10). NVIDIA's toolkit and cuDNN archives are pinned by
+# SHA-256 in the script. The result is cached per build-script revision.
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/build/build-ort-cuda-runtime.ps1'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/ort-cuda-runtime.yml'
+  pull_request:
+    paths:
+      - 'platforms/windows/build/build-ort-cuda-runtime.ps1'
+      - '.github/workflows/ort-cuda-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ONNX Runtime 1.22.0 CUDA 12.8 — x64
+    # ORT 1.22's build.py only knows the "Visual Studio 17 2022" generator.
+    runs-on: windows-2022
+    timeout-minutes: 345
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PACK_DIR: platforms/windows/build/runtime-cache/onnxruntime-1.22.0-cuda-notelemetry/x64
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Restore cached pack
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.PACK_DIR }}
+          key: onnxruntime-1.22.0-cuda-notelemetry-x64-${{ hashFiles('platforms/windows/build/build-ort-cuda-runtime.ps1') }}
+
+      - name: Build from source without telemetry
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: ./platforms/windows/build/build-ort-cuda-runtime.ps1 -WorkDir "${{ runner.temp }}\ortc"
+
+      - name: Privacy — reject a Windows telemetry build
+        run: python shared/scripts/check_binary_privacy.py $env:PACK_DIR
+
+      - name: Privacy — load the runtime and check it writes nothing
+        run: python shared/scripts/check_binary_privacy.py --ort-runtime "$env:PACK_DIR/onnxruntime.dll"
+
+      - name: Upload pack
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: onnxruntime-cuda-notelemetry-x64
+          path: ${{ env.PACK_DIR }}
+          if-no-files-found: error
+          retention-days: 7
