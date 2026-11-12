@@ -45,6 +45,43 @@ fn load_progress(sink: &Sink, model_kind: &str) -> impl FnMut(Event) + use<> {
     }
 }
 
+/// `AIModelKind(rawValue:)` refuses a kind outside the favourites and the catalog:
+/// Swift's error and one failure. True when refused.
+async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
+    if crate::models::mlx::repo(model_kind).is_some() {
+        return false;
+    }
+    sink.send(
+        EngineError::new("unknown_model", format!("Unknown Deep Analyze model: {model_kind}."))
+            .with_model(model_kind.to_owned())
+            .into_event(),
+    )
+    .await;
+    send_complete(sink, DeepAnalyzeComplete { total_seconds: 0.0, ..complete(model_kind, 0, 1, Instant::now(), false) }).await;
+    true
+}
+
+/// What the Swift engine sends for a Deep Analyze command before it resolves the
+/// targets: the refusal of an unknown kind, or "Queued" then "Finding files to
+/// analyze…". False when refused (the terminal event is sent).
+pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
+    if refuse_unknown_kind(sink, model_kind).await {
+        return false;
+    }
+    for (phase, message) in [
+        (DeepAnalyzeStartingPhase::Queued, "Queued"),
+        (DeepAnalyzeStartingPhase::ResolvingTargets, "Finding files to analyze…"),
+    ] {
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
+            model_kind: model_kind.to_owned(),
+            phase,
+            message: message.to_owned(),
+        }))))
+        .await;
+    }
+    true
+}
+
 /// Load the model for a batch. Emits the failure and the terminal complete
 /// itself and returns `None` when the batch can't start.
 async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started: Instant) -> Option<MlxLease> {
@@ -160,15 +197,7 @@ pub(crate) async fn run_batch(
     scope: Option<DeepScope>,
 ) {
     let started = Instant::now();
-    // `AIModelKind(rawValue:)` refuses a kind outside the favourites and the catalog.
-    if crate::models::mlx::repo(model_kind).is_none() {
-        sink.send(
-            EngineError::new("unknown_model", format!("Unknown Deep Analyze model: {model_kind}."))
-                .with_model(model_kind.to_owned())
-                .into_event(),
-        )
-        .await;
-        send_complete(&sink, DeepAnalyzeComplete { total_seconds: 0.0, ..complete(model_kind, 0, 1, started, false) }).await;
+    if refuse_unknown_kind(&sink, model_kind).await {
         return;
     }
     if cancel.load(Ordering::Relaxed) {

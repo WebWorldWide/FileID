@@ -165,6 +165,9 @@ pub(crate) async fn handle_deep_analyze_file(
     // As the Swift runner, a file that isn't a Deep Analyze target is nothing to do.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
+        if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
+            return;
+        }
         let filter = deep_analyze_target_filter();
         let query_db = db.clone();
         let file_id = payload.file_id;
@@ -326,6 +329,10 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
+        return;
+    }
     // Sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
@@ -372,6 +379,10 @@ pub(crate) async fn handle_deep_analyze_all(
     mut payload: ipc::DeepAnalyzeAllPayload,
     cancel: Arc<AtomicBool>,
 ) {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
+        return;
+    }
     let file_ids = payload.file_ids.take();
     let excluded_folders = payload.excluded_folders.take();
     let planning_db = db.clone();

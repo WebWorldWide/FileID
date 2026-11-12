@@ -2,6 +2,16 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
+/// The next event other than the "Queued"/"Finding files" lines the app-hosted build sends first.
+async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
+    loop {
+        let event = rx.recv().await.unwrap();
+        if !matches!(event.payload, EventPayload::DeepAnalyzeStarting(_)) {
+            return event.payload;
+        }
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -37,7 +47,7 @@ impl Fixture {
 }
 fn payload(ids: Option<Vec<i64>>, folders: Option<Vec<String>>) -> ipc::DeepAnalyzeAllPayload {
     ipc::DeepAnalyzeAllPayload {
-        model_kind: "generated-no-installed-model".into(), skip_existing: false,
+        model_kind: "qwen3_vl_2b".into(), skip_existing: false,
         tags_only: false, propose_renames: false, file_ids: ids, excluded_folders: folders,
     }
 }
@@ -87,10 +97,8 @@ async fn handler_scope_empty_selection_has_only_terminal_without_model_lookup() 
     let f = Fixture::new();
     f.row(1, &f.file(&f.root, "one.png"), "image", 0);
     let (sink, mut rx) = Sink::channel_for_test(8);
-    // A kind the Mac catalog knows: the app-hosted build refuses unknown kinds first, as Swift.
-    let request = ipc::DeepAnalyzeAllPayload { model_kind: "qwen3_vl_2b".into(), ..payload(Some(vec![]), None) };
-    handle_deep_analyze_all(sink, f.db, request, Arc::new(AtomicBool::new(false))).await;
-    match rx.recv().await.unwrap().payload {
+    handle_deep_analyze_all(sink, f.db, payload(Some(vec![]), None), Arc::new(AtomicBool::new(false))).await;
+    match next_payload(&mut rx).await {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed), (0, 0));
             assert!(!c.inner.cancelled);
@@ -105,15 +113,15 @@ async fn handler_scope_invalid_fields_emit_owned_error_then_terminal() {
     let f = Fixture::new();
     let (sink, mut rx) = Sink::channel_for_test(8);
     handle_deep_analyze_all(sink, f.db, payload(Some(vec![0]), None), Arc::new(AtomicBool::new(false))).await;
-    match rx.recv().await.unwrap().payload {
+    match next_payload(&mut rx).await {
         EventPayload::Error(e) => {
             assert_eq!(e.inner.kind, "deep_analyze_failed");
-            assert_eq!(e.inner.model_kind.as_deref(), Some("generated-no-installed-model"));
+            assert_eq!(e.inner.model_kind.as_deref(), Some("qwen3_vl_2b"));
             assert!(e.inner.message.contains("positive"));
         }
         _ => panic!("Invalid scope must emit an owned analysis error"),
     }
-    match rx.recv().await.unwrap().payload {
+    match next_payload(&mut rx).await {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed), (0, 1));
             assert!(!c.inner.cancelled);

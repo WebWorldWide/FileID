@@ -1479,11 +1479,7 @@ struct FileIDEngineMain {
     static func trashFiles(
         database: Database, fileIDs: [Int64], exact: [Int64: ExactTrashIdentity] = [:],
         journal journalURL: URL = TrashJournal.defaultURL,
-        trash: (URL) throws -> URL? = { url in
-            var landed: NSURL?
-            try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
-            return landed as URL?
-        }
+        trash: (URL) throws -> URL? = EngineTrash.move
     ) async -> BulkActionResult {
         SleepGuard.shared.begin(reason: "Bulk trash")
         defer { SleepGuard.shared.end() }

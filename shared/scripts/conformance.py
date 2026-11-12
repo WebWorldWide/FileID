@@ -42,11 +42,14 @@ A case may list knownDivergences ({"engine", "reason", optional "os" list and
 that engine; if it passes, the marker is stale and the run fails so the tracker
 stays honest.
 
---test-trash-root is for a Rust engine built with the `test-trash-root` cargo
-feature (test builds only, never shipped): each case's engine moves trashed
+--test-trash-root is for engines built with a test Trash root (the Rust
+`test-trash-root` cargo feature, the Swift FILEID_TEST_TRASH_ROOT compile
+condition; test builds only, never shipped): each case's engine moves trashed
 files into <state>/Trash instead of the user's Trash, divergences marked
 "liftedByTestTrashRoot" no longer apply, and cases marked "requiresTestTrashRoot"
-run (they are skipped otherwise, so no engine ever reaches the user's Trash).
+(true, or a list of OS names such as ["darwin"] where only that OS needs it) run;
+they are skipped otherwise, so no engine ever reaches the user's Trash. The Swift
+engine has the same root when built with -Xswiftc -DFILEID_TEST_TRASH_ROOT.
 """
 from __future__ import annotations
 
@@ -784,7 +787,7 @@ def main():
     parser.add_argument("--os", default=host_os(), help=argparse.SUPPRESS)
     parser.add_argument("--fixture-parent", type=Path, default=Path(tempfile.gettempdir()))
     parser.add_argument("--test-trash-root", action="store_true",
-                        help="the Rust engine was built with the test-trash-root feature (see above)")
+                        help="the engines were built with a test Trash root (see above)")
     args = parser.parse_args()
     global TEST_TRASH_ROOT
     TEST_TRASH_ROOT = args.test_trash_root
@@ -804,13 +807,14 @@ def main():
     for case in load_cases(args.case):
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
-        needs_trash_root = case.get("requiresTestTrashRoot") and not TEST_TRASH_ROOT
+        trash_root = case.get("requiresTestTrashRoot")
+        needs_trash_root = not TEST_TRASH_ROOT and (args.os in trash_root if isinstance(trash_root, list) else bool(trash_root))
         unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
         if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted \
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
             reason = (f"needs {', '.join(sorted(missing))} engine" if missing
-                      else "needs a test-trash-root Rust build (--test-trash-root)" if needs_trash_root
+                      else "needs test-trash-root engine builds (--test-trash-root)" if needs_trash_root
                       else "needs engines the Mac app hosts" if unhosted
                       else "not applicable here")
             print(f"SKIP   {name} ({reason})")

@@ -60,6 +60,11 @@ fi
 
 [ -x "$BUILD_DIR/FileID" ]       || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 [ -x "$BUILD_DIR/FileIDEngine" ] || { echo "❌ $BUILD_DIR/FileIDEngine missing — build first"; exit 1; }
+# Conformance builds of either engine (-DFILEID_TEST_TRASH_ROOT, the Rust
+# test-trash-root feature) move trashed files into a scratch folder; never ship one.
+if grep -aqF 'FILEID_TEST_TRASH_ROOT' "$BUILD_DIR/FileIDEngine"; then
+    echo "❌ $BUILD_DIR/FileIDEngine is a test build (FILEID_TEST_TRASH_ROOT)"; exit 1
+fi
 
 # The MLX model catalog (FileIDModelInfo). The app, the Swift engine and
 # libFileIDAppleKit all read it from Contents/Resources; without it no local
