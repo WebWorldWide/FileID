@@ -248,7 +248,56 @@ pub fn installation_complete(model: &Model) -> bool {
     let Some(sentinel) = sentinel_path(model) else {
         return false;
     };
-    installation_complete_with_sentinel(model, &sentinel)
+    installation_complete_with_sentinel(model, &sentinel) || verified_without_sentinel(model)
+}
+
+/// macOS: the Swift app installs models without this engine's sentinel, some
+/// under other names (`paths::SWIFT_MODEL_LAYOUT`). Every file matching its
+/// pinned SHA-256 proves the install. Hashes are cached per file identity
+/// (size, modification time), so a file is read once per engine process.
+#[cfg(target_os = "macos")]
+fn verified_without_sentinel(model: &Model) -> bool {
+    !model.files.is_empty()
+        && model.files.iter().all(|file| {
+            !is_zip_entry(file)
+                && file
+                    .sha256
+                    .as_deref()
+                    .is_some_and(|expected| cached_sha256_matches(&paths::installed_model_file(&file.dest), expected))
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verified_without_sentinel(_model: &Model) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn cached_sha256_matches(path: &Path, expected: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Identity = (PathBuf, u64, Option<std::time::SystemTime>);
+    static VERIFIED: OnceLock<Mutex<HashMap<Identity, String>>> = OnceLock::new();
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    let identity = (path.to_path_buf(), metadata.len(), metadata.modified().ok());
+    let cache = VERIFIED.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(actual) = cache.lock().ok().and_then(|cache| cache.get(&identity).cloned()) {
+        return actual.eq_ignore_ascii_case(expected);
+    }
+    let Some(actual) = file_sha256(path) else {
+        return false;
+    };
+    let matches = actual.eq_ignore_ascii_case(expected);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(identity, actual);
+    }
+    matches
 }
 
 pub(crate) fn installation_complete_with_sentinel(model: &Model, sentinel: &Path) -> bool {
@@ -682,6 +731,41 @@ mod tests {
         std::fs::write(&legacy, b"ram_plus").unwrap();
         migrate_legacy_sentinel(&dir, &model, &keyed);
         assert!(keyed.exists() && legacy.exists(), "existing keyed sentinel must not trigger a rename");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model the Mac app installed (no sentinel, Swift file names) counts as
+    /// installed when every file matches its pin, and not when one differs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn swift_layout_install_is_verified_by_sha_without_a_sentinel() {
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let dir = unique_sentinel_dir("swift-layout");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+
+        let bytes = b"sface weights";
+        std::fs::write(dir.join("face_recognition_sface_2021dec.onnx"), bytes).unwrap();
+        let pin = hex::encode(sha2::Sha256::digest(bytes));
+        let model = |sha256: String| Model {
+            id: "arcface",
+            display_name: "Faces",
+            files: vec![FileEntry {
+                url: "https://huggingface.co/x".into(),
+                dest: dir.join("sface").join("face_recognition_sface_2021dec.onnx"),
+                sha256: Some(sha256),
+                approx_bytes: bytes.len() as u64,
+            }],
+        };
+        assert!(installation_complete(&model(pin.clone())));
+        assert!(!installation_complete(&model("0".repeat(64))));
+        assert!(!dir.join(".sentinels").read_dir().is_ok_and(|mut entries| entries.next().is_some()));
+
+        match saved {
+            Some(value) => unsafe { std::env::set_var("FILEID_MODELS_DIR", value) },
+            None => unsafe { std::env::remove_var("FILEID_MODELS_DIR") },
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

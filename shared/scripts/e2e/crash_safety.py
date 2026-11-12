@@ -16,6 +16,10 @@ so anything left behind is easy to find (`ls ~/.Trash | grep <tag>`); restore_al
 
 usage: FILEID_CRASH_DIR=<scratch> FILEID_CRASH_SRC=<dir of photos> FILEID_ENGINE=<FileIDEngine>
        python3 crash_safety.py [experiment ...]      (no argument = all)
+
+The app-hosted Rust engine built with the `test-trash-root` feature (test builds only) never
+touches the real Trash: set FILEID_RUST_ENGINE to it and FILEID_CRASH_TRASH to a scratch folder,
+which the engine then uses as its Trash (FILEID_TEST_TRASH_ROOT) and this harness inspects.
 """
 import glob, hashlib, json, os, random, signal, sqlite3, subprocess, sys, threading, time, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +28,10 @@ from drive import Engine, kind
 ROOT = os.path.abspath(os.environ.get("FILEID_CRASH_DIR") or sys.exit("set FILEID_CRASH_DIR"))
 RUST = os.environ.get("FILEID_RUST_ENGINE")  # set to the Rust FileIDEngine to drive the shared engine instead
 SRC = os.path.abspath(os.environ.get("FILEID_CRASH_SRC") or sys.exit("set FILEID_CRASH_SRC"))
-TRASH = os.path.expanduser("~/.Trash")
+TEST_TRASH = os.environ.get("FILEID_CRASH_TRASH")  # test-trash-root Rust build: its stand-in Trash
+TRASH = os.path.abspath(TEST_TRASH) if TEST_TRASH else os.path.expanduser("~/.Trash")
+if TEST_TRASH:
+    os.makedirs(TRASH, exist_ok=True)
 COUNT = int(os.environ.get("FILEID_CRASH_COUNT", "60"))
 RESULTS = []
 
@@ -89,13 +96,20 @@ class Lab:
             binary = RUST
             os.makedirs(self.state + "/models", exist_ok=True)
             env.update(FILEID_DB=self.db, XDG_DATA_HOME=self.state + "/xdg", FILEID_MODELS_DIR=self.state + "/models")
+            if TEST_TRASH:
+                env.update(FILEID_TEST_TRASH_ROOT=TRASH)
         e = Engine(self.state, binary=binary, extra_env=env)
         assert e.db == self.db
         return e
 
     @property
+    def rust_root(self):
+        # The app-hosted build keeps state beside FILEID_DB, the CLI build under XDG_DATA_HOME.
+        return self.state if TEST_TRASH else os.path.join(self.state, "xdg/FileID")
+
+    @property
     def undo_journal(self):
-        return os.path.join(self.state, "xdg/FileID" if RUST else "", "restructure_undo.ndjson")
+        return os.path.join(self.rust_root if RUST else self.state, "restructure_undo.ndjson")
 
     def hidden(self):
         return [os.path.relpath(os.path.join(r, f), self.lib) for r, _, fs in os.walk(self.lib) for f in fs if f.startswith(".") and f != ".DS_Store"]
@@ -108,10 +122,25 @@ class Lab:
             con.close()
 
     def journal(self):
+        """Trash batches in the Swift journal's shape; for Rust, the newest line of each batch of
+        its signed NDJSON log (signatures are the engine's business, not checked here)."""
+        if not RUST:
+            try:
+                return json.load(open(os.path.join(self.state, "trash-journal.json")))
+            except (OSError, ValueError):
+                return []
+        batches = {}
         try:
-            return json.load(open(os.path.join(self.state, "trash-journal.json")))
+            for line in open(os.path.join(self.rust_root, "trash_log.json"), encoding="utf-8"):
+                entry = json.loads(line.split("\t")[0])
+                items = [{"trashedPath": i.get("trashed_path") or "",
+                          "rows": [{"table": "files", "columns": {"file_ref": {"int": (i.get("source_identity") or {}).get("file")}}}]}
+                         for i in entry["items"]]
+                batches.pop(entry["batch_id"], None)
+                batches[entry["batch_id"]] = {"id": entry["batch_id"], "items": items}
         except (OSError, ValueError):
-            return []
+            pass
+        return list(batches.values())
 
     def check(self, label, catalog_complete=True, allow_trash=False, layout=None, before_restart=False):
         """Assert the invariants. `layout=True` also demands every file back at its original path."""
@@ -178,7 +207,7 @@ class Lab:
                 trashed_names = {os.path.basename(t) for t in self.trashed()}
                 pending_moves = set()
                 try:
-                    for raw in open(os.path.join(self.state, "path-moves.ndjson")):
+                    for raw in open(os.path.join(self.rust_root if RUST else self.state, "path-moves.ndjson")):
                         intent = json.loads(raw).get("intent")
                         if intent:
                             pending_moves.add(intent["from"])
@@ -415,7 +444,7 @@ def tool(e, action, timeout=300, **kw):
     return inner(e.wait(lambda p: kind(p) == "toolResponse" and inner(p).get("requestID") == rid, timeout))
 
 
-def exp_rename_tools_kill():
+def exp_renames_kill():
     lab = Lab("rename")
     e = start(lab); scan(e, lab)
     rows = lab.sql("SELECT id, path_text FROM files WHERE path_text LIKE ? ORDER BY id LIMIT 12", (lab.lib + "/Trip/%",))
@@ -439,6 +468,8 @@ def exp_rename_tools_kill():
     lab.check("4 rename: rescan", layout=not stale)
     e.close()
 
+
+def exp_tools_kill():
     lab = Lab("tools")
     e = start(lab); scan(e, lab)
     ids = [r[0] for r in lab.sql("SELECT id FROM files WHERE path_text LIKE ? ORDER BY id LIMIT 8", (lab.lib + "/Trip/%",))]
@@ -606,8 +637,13 @@ def exp_claim_kill():
         e.close()
 
 
+def exp_rename_tools_kill():
+    exp_renames_kill()
+    exp_tools_kill()
+
+
 EXPERIMENTS = {"claim": exp_claim_kill, "conc": exp_concurrency, "scan": exp_scan_kill, "trash": exp_trash_kill, "restructure": exp_restructure_kill,
-               "rename": exp_rename_tools_kill, "wipe": exp_wipe_kill}
+               "rename": exp_rename_tools_kill, "renames": exp_renames_kill, "tools": exp_tools_kill, "wipe": exp_wipe_kill}
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or list(EXPERIMENTS)

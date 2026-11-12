@@ -469,6 +469,7 @@ mod tests {
                 pid: 12345,
                 worker_cap: 14,
                 physical_memory_gb: 16.0,
+                engine: None,
                 hardware: None,
             })),
         };

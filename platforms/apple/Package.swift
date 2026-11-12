@@ -22,6 +22,14 @@ let package = Package(
     platforms: [
         .macOS(.v15)
     ],
+    products: [
+        .executable(name: "FileID", targets: ["FileID"]),
+        .executable(name: "FileIDEngine", targets: ["FileIDEngine"]),
+        // Swift adapters the shared Rust engine (`Contents/MacOS/fileidd`)
+        // links through the C interface in adapters/include/fileid_apple.h.
+        // Shipped in Contents/Frameworks. No package dependencies.
+        .library(name: "FileIDAppleKit", type: .dynamic, targets: ["FileIDAppleKit"])
+    ],
     dependencies: [
         // VLM inference for Deep Analyze + AI face clustering.
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", exact: "3.32.3"),
@@ -106,6 +114,20 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
+        // Apple-framework adapters for the Rust engine (IOPM, bookmarks so
+        // far). Exports @_cdecl functions only; see adapters/include.
+        .target(
+            name: "FileIDAppleKit",
+            path: "adapters/Sources/FileIDAppleKit",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
+        .testTarget(
+            name: "AppleKitTests",
+            dependencies: ["FileIDAppleKit"],
+            path: "Tests/AppleKitTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "SharedTests",
             dependencies: ["FileIDShared"],

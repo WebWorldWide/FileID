@@ -1346,6 +1346,7 @@ mod tests {
             pid: 42,
             worker_cap: 2,
             physical_memory_gb: 8.0,
+            engine: None,
             hardware: None,
         })));
         let done = IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ScanComplete {

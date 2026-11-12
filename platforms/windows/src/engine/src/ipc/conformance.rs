@@ -524,6 +524,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             pid: 4242,
             worker_cap: 14,
             physical_memory_gb: 32.0,
+            engine: None,
             hardware: Some(hardware_info()),
         })),
         EventPayload::Progress(Wrap::new(ScanProgress {

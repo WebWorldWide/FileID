@@ -214,9 +214,9 @@ fn l2_normalize(v: &mut [f32]) {
 }
 
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(crate::paths::models_dir()?
-        .join("mobileclip")
-        .join("mobileclip_s2_image.onnx"))
+    Ok(crate::paths::installed_model_file(
+        &crate::paths::models_dir()?.join("mobileclip").join("mobileclip_s2_image.onnx"),
+    ))
 }
 
 #[cfg(test)]

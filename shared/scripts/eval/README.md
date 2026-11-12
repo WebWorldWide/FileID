@@ -6,8 +6,13 @@ never committed: only these scripts and aggregate numbers (in `STATE.md`) live i
 
 ## Local layout (outside the repo and outside synced folders)
 
+The scripts default to `~/FileIDDev/Eval` (set `FILEID_EVAL_ROOT` to use another folder).
+Keep a copy of every labels file in a separate folder, such as `~/FileIDDev/Eval-backup`.
+
 ```
-~/Library/Developer/FileIDEval/
+~/FileIDDev/Eval/
+├── NOTES.md                    private: sources, conventions, anything with real names
+├── home/                       isolated engine home with copies of the installed models
 ├── people/
 │   ├── images/<event>/...      copies of the source photos (never the originals)
 │   ├── labels.json             one record per face
@@ -49,17 +54,25 @@ cross the split. Tune thresholds on the tune half only and report both.
 ## Running
 
 Every engine run gets `FILEID_DATABASE_PATH`, `FILEID_DB` and `XDG_DATA_HOME` inside the work
-folder, and each script compares the live FileID state folders before and after and fails if
-they changed. The scripts refuse work folders on protected volumes or inside the live state.
+folder, and `HOME`, `CFFIXED_USER_HOME`, `FILEID_HF_CACHE_ROOT` and `FILEID_MODELS_DIR` inside an
+isolated home (`--home`, default `~/FileIDDev/Eval/home`). On first use the scripts copy the installed
+Mac models into that home (`Library/Application Support/FileID/Models`, and the visual model for
+`timeline_eval.py full` into `hf/models/<repo>`); the Rust engine's models go in `<home>/models`. Each
+script compares the live FileID state folders and `~/Documents/huggingface` before and after and fails
+if they changed. The scripts refuse work folders on protected volumes or inside the live state.
 
 ```bash
-E=~/Library/Developer/FileIDEval
+python3 shared/scripts/eval/people_eval.py --engine <FileIDEngine>
+# the same, spelled out:
+E=~/FileIDDev/Eval
 python3 shared/scripts/eval/people_eval.py --engine <FileIDEngine> \
-    --images $E/people/images --labels $E/people/labels.json --work $E/people/runs
+    --images $E/people/images --labels $E/people/labels.json --work $E/people/runs --home $E/home
 # re-cluster the stored scan with an override:
 python3 shared/scripts/eval/people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
 # replay a growing library: cluster the earlier half of each event, then add the rest as new faces
 python3 shared/scripts/eval/people_eval.py ... --name incremental --incremental
+# cluster one half on its own (tune merge/split queue thresholds without held-out people mixed in)
+python3 shared/scripts/eval/people_eval.py ... --name tune-merge60 --split tune --env FILEID_FACE_MERGE_SUGGEST_COS=0.60
 
 python3 shared/scripts/eval/timeline_eval.py candidates --engine <FileIDEngine> \
     --videos $E/timeline/videos --labels $E/timeline/labels.json --work $E/timeline \
@@ -88,3 +101,12 @@ aborts if the engine starts a model download, and turns speech off because a bar
 binary has no speech-recognition usage description. Both report interval recall at IoU 0.3,
 cut timestamp error, proposal precision, the share of proposals inside quiet spans, and fast
 actions that were never examined or never proposed.
+
+`search_eval.py` scores text search strength on `<eval root>/search/labels.json` (photo list,
+queries with `split`, `present`, `matches` and `ambiguous` photos). It copies a scanned catalog
+(`--catalog`, CLIP image vectors stored), sends every query as the Mac Library does (hybrid, the
+query words plus a client CLIP text vector from `--vector-engine`, default the engine under test)
+and also semantic-only, and scores the files the reply calls good matches: macro precision and
+recall over present queries, the share of present queries with a good match, and absent queries
+answered with none. Pass the Swift engine as `--vector-engine` to compare engines with identical
+client vectors; each engine still embeds its own prompt when CLIP text is installed in the home.

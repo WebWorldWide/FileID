@@ -310,17 +310,12 @@ public final class VisionWorker: @unchecked Sendable {
     }
 
     /// Blocks the calling thread (never a Swift concurrency thread) until the read ends.
-    static func performAccurateRead(_ cgImage: CGImage) -> String? {
+    static func performAccurateRead(_ cgImage: CGImage,
+                                    languages: CarefulTextRead.Languages = CarefulTextRead.configured) -> String? {
         let box = Tagging.ScanSideResult<String>()
         let done = DispatchSemaphore(value: 0)
         Task.detached(priority: .userInitiated) {
-            var request = RecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            request.automaticallyDetectsLanguage = true
-            if let observations = try? await request.perform(on: cgImage) {
-                box.set(observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n"))
-            }
+            if let text = await CarefulTextRead.read(cgImage, languages: languages) { box.set(text) }
             done.signal()
         }
         done.wait()

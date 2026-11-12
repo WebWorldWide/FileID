@@ -123,7 +123,9 @@ strip -S "$APP/Contents/MacOS/FileIDEngine"
 # MLX's vendored C++ bakes __FILE__ into __cstring; strip doesn't touch it.
 # Same-length byte rewrite keeps the binary valid.
 echo "🧹 Rewriting embedded source paths…"
-python3 - "$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine" <<'PY'
+REWRITE_BINARIES=("$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine")
+[ -f "$APP/Contents/MacOS/fileidd" ] && REWRITE_BINARIES+=("$APP/Contents/MacOS/fileidd")
+python3 - "${REWRITE_BINARIES[@]}" <<'PY'
 import sys, os
 real = os.path.expanduser("~").encode()
 generic = b"/Users/developer"
@@ -166,6 +168,13 @@ done
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
+# Shared Rust engine (dogfood, bundled with FILEID_WITH_RUST_ENGINE=1): same
+# identity and entitlements as the Swift engine.
+if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
+    codesign --force --options runtime $TIMESTAMP_FLAG \
+        --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
+        "$SIGN_TMP/$APP/Contents/MacOS/fileidd"
+fi
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$APP_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileID"
@@ -183,11 +192,19 @@ if [ "$APP_TEAM" != "$ENGINE_TEAM" ]; then
     echo "❌ Team ID mismatch between app and engine — the in-app integrity gate will refuse to spawn the engine."
     exit 1
 fi
+PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine")
+if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
+    RUST_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/fileidd" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
+    echo "   rust:   $RUST_TEAM"
+    if [ "$APP_TEAM" != "$RUST_TEAM" ]; then
+        echo "❌ Team ID mismatch between app and the Rust engine (fileidd)."
+        exit 1
+    fi
+    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
+fi
 
 echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileID" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "${PRIVACY_BINARIES[@]}"
 
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then
