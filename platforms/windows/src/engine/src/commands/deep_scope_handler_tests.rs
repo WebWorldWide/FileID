@@ -87,7 +87,9 @@ async fn handler_scope_empty_selection_has_only_terminal_without_model_lookup() 
     let f = Fixture::new();
     f.row(1, &f.file(&f.root, "one.png"), "image", 0);
     let (sink, mut rx) = Sink::channel_for_test(8);
-    handle_deep_analyze_all(sink, f.db, payload(Some(vec![]), None), Arc::new(AtomicBool::new(false))).await;
+    // A kind the Mac catalog knows: the app-hosted build refuses unknown kinds first, as Swift.
+    let request = ipc::DeepAnalyzeAllPayload { model_kind: "qwen3_vl_2b".into(), ..payload(Some(vec![]), None) };
+    handle_deep_analyze_all(sink, f.db, request, Arc::new(AtomicBool::new(false))).await;
     match rx.recv().await.unwrap().payload {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed), (0, 0));
