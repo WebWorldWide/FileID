@@ -2,6 +2,7 @@
 // the scan card, and page headers. Mirrors macOS `Views/Shell/*`,
 // `Views/Sidebar.swift` and the header in `Views/Detail.swift`.
 
+pub mod changes_sheet;
 pub mod page_header;
 pub mod sidebar;
 pub mod status;
@@ -27,6 +28,10 @@ pub enum Action {
     MomentsQuery(String),
     ScanFolder(String),
     FocusSearch,
+    FocusLibrarySearch,
+    SelectAll,
+    TrashSelected,
+    Undo,
     ToggleChat,
     DismissNote,
     ChooseScope(Option<i64>),

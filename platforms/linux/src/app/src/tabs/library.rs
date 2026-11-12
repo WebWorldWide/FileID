@@ -22,6 +22,7 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
+use super::library_bulk::BulkBar;
 use super::library_pane::SelectedPane;
 use super::library_selection::{self as picking, PaneView};
 use super::offline_roots::{self, OfflineRoots};
@@ -44,6 +45,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let kind_filter = Rc::new(RefCell::new(None::<String>));
     let query_gen = Rc::new(Cell::new(0u64));
     let debounce_gen = Rc::new(Cell::new(0u64));
+    let similar = Rc::new(RefCell::new(None::<(i64, String)>));
 
     let model = gio::ListStore::new::<BoxedAnyObject>();
     let selection = gtk::MultiSelection::new(Some(model.clone()));
@@ -102,6 +104,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // Shift+click and Shift+arrows extend; double-click/Enter opens the
     // preview; Esc clears the selection.
     let restoring = Rc::new(Cell::new(false));
+    let similar_hook: Rc<RefCell<Box<dyn Fn()>>> = Rc::new(RefCell::new(Box::new(|| {})));
     let pane = {
         let on_preview: Rc<dyn Fn()> = Rc::new(clone!(
             #[strong]
@@ -129,14 +132,33 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 selection.unselect_all();
             }
         ));
-        SelectedPane::new(engine.clone(), offline.clone(), on_preview, on_close)
+        let on_similar: Rc<dyn Fn()> = Rc::new(clone!(
+            #[strong]
+            selection,
+            #[strong]
+            similar,
+            #[strong]
+            similar_hook,
+            move || {
+                let [(_, row)] = &selected_rows(&selection)[..] else {
+                    return;
+                };
+                similar.replace(Some((row.id, row.name.clone())));
+                similar_hook.borrow()();
+            }
+        ));
+        SelectedPane::new(engine.clone(), offline.clone(), on_preview, on_close, on_similar)
     };
+    let bulk_hook: Rc<RefCell<Box<dyn Fn(usize)>>> = Rc::new(RefCell::new(Box::new(|_| {})));
     selection.connect_selection_changed(clone!(
         #[strong]
         pane,
         #[strong]
         restoring,
+        #[strong]
+        bulk_hook,
         move |selection, _, _| {
+            bulk_hook.borrow()(selection.selection().size() as usize);
             if !restoring.get() {
                 show_selection(selection, &pane, false);
             }
@@ -242,6 +264,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             selection: selection.clone(),
             pane: pane.clone(),
             restoring: restoring.clone(),
+            similar: similar.clone(),
         });
         let near_end = ctx.clone();
         scroller.vadjustment().connect_value_changed(move |adj| {
@@ -278,7 +301,68 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .spacing(10)
         .build();
     header.append(&title_row);
+    let bulk = BulkBar::new(
+        engine.clone(),
+        Rc::new(clone!(
+            #[strong]
+            selection,
+            move || selected_rows(&selection).into_iter().map(|(_, row)| row).collect()
+        )),
+        reload.clone(),
+        Rc::new(clone!(
+            #[strong]
+            selection,
+            move || {
+                selection.unselect_all();
+            }
+        )),
+    );
+    bulk.selection_changed(0);
+    let _ = bulk_hook.replace(Box::new(clone!(
+        #[strong]
+        bulk,
+        move |count| bulk.selection_changed(count)
+    )));
+    header.append(&bulk.root);
     header.append(&action_row);
+
+    let banner_title = crate::v3::label("", &["heading"]);
+    banner_title.set_xalign(0.0);
+    banner_title.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    let banner_text = crate::v3::vbox(1);
+    banner_text.set_hexpand(true);
+    banner_text.append(&banner_title);
+    banner_text.append(&crate::v3::meta("Most similar first. Clear to see every file again."));
+    let banner_clear = crate::v3::secondary("Clear", false);
+    let banner = crate::v3::hbox(10);
+    banner.add_css_class("glass-card");
+    banner.append(&gtk::Image::from_icon_name("system-search-symbolic"));
+    banner.append(&banner_text);
+    banner.append(&banner_clear);
+    banner.set_visible(false);
+    header.append(&banner);
+    {
+        let (similar, reload, banner, banner_title) =
+            (similar.clone(), reload.clone(), banner.clone(), banner_title.clone());
+        let _ = similar_hook.replace(Box::new(move || {
+            let seed = similar.borrow().clone();
+            banner.set_visible(seed.is_some());
+            if let Some((_, name)) = seed {
+                banner_title.set_label(&format!("Photos similar to {name}"));
+            }
+            reload();
+        }));
+    }
+    banner_clear.connect_clicked(clone!(
+        #[strong]
+        similar,
+        #[strong]
+        similar_hook,
+        move |_| {
+            similar.replace(None);
+            similar_hook.borrow()();
+        }
+    ));
 
     // Debounced search → reload.
     search.connect_search_changed(clone!(
@@ -288,8 +372,16 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         reload,
         #[strong]
         debounce_gen,
+        #[strong]
+        similar,
+        #[strong]
+        similar_hook,
         move |entry| {
             *search_text.borrow_mut() = entry.text().to_string();
+            if similar.borrow_mut().take().is_some() {
+                similar_hook.borrow()();
+                return;
+            }
             let g = debounce_gen.get().wrapping_add(1);
             debounce_gen.set(g);
             let reload = reload.clone();
@@ -453,6 +545,7 @@ struct ReloadCtx {
     selection: gtk::MultiSelection,
     pane: Rc<SelectedPane>,
     restoring: Rc<Cell<bool>>,
+    similar: Rc<RefCell<Option<(i64, String)>>>,
 }
 
 /// Rows to re-read on a refresh: the loaded pages when the query is the same
@@ -469,6 +562,12 @@ fn reload_limit(same_query: bool, loaded: u32) -> i64 {
 fn run_reload(ctx: &Rc<ReloadCtx>) {
     let g = ctx.query_gen.get().wrapping_add(1);
     ctx.query_gen.set(g);
+    let seed = ctx.similar.borrow().clone();
+    if let Some((seed_id, _)) = seed {
+        ctx.has_more.set(false);
+        run_similar(ctx, g, seed_id);
+        return;
+    }
     let query = (ctx.search_text.borrow().trim().to_owned(), ctx.kind_filter.borrow().clone());
     let same_query = ctx.last_query.borrow().as_ref() == Some(&query);
     let limit = reload_limit(same_query, ctx.model.n_items());
@@ -503,50 +602,204 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
             }
             Err(_) => return,
         };
-        // One items-changed signal for the whole page instead of one per row.
-        let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
-        // Keep the same files selected (and the pane on them) across a refresh.
-        let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
-        ctx.restoring.set(true);
-        ctx.model.splice(0, ctx.model.n_items(), &items);
-        let positions = picking::restore(&selected, rows.iter().map(|row| row.id));
-        let chosen = gtk::Bitset::new_empty();
-        for position in &positions {
-            chosen.add(*position);
-        }
-        ctx.selection.set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
-        ctx.restoring.set(false);
-        show_selection(&ctx.selection, &ctx.pane, true);
-        ctx.total.set(total);
-        ctx.has_more.set(total > rows.len() as i64);
-        if total > rows.len() as i64 {
-            ctx.count_label
-                .set_text(&format!("{} of {} files", rows.len(), total));
-        } else {
-            ctx.count_label.set_text(&format!("{} files", rows.len()));
-        }
-        if rows.is_empty() {
-            if filtered {
-                ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
-                ctx.empty_page.set_title("No matches");
-                let description = if searched.is_empty() {
-                    "Nothing matches this filter. Try another kind, or choose All to see every file.".to_string()
-                } else {
-                    format!("Nothing matches “{searched}”. Try other words, or choose All to see every file.")
-                };
-                ctx.empty_page.set_description(Some(&description));
-            } else {
-                ctx.empty_page.set_icon_name(Some("view-grid-symbolic"));
-                ctx.empty_page.set_title("No files yet");
-                ctx.empty_page.set_description(Some(
-                    "Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar. Scanning needs the two models in Settings; nothing downloads until you ask.",
-                ));
-            }
-            ctx.content_stack.set_visible_child_name("empty");
-        } else {
-            ctx.content_stack.set_visible_child_name("grid");
-        }
+        show_rows(&ctx, rows, total, &searched, filtered);
     });
+}
+
+fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str, filtered: bool) {
+    // One items-changed signal for the whole page instead of one per row.
+    let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
+    // Keep the same files selected (and the pane on them) across a refresh.
+    let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
+    ctx.restoring.set(true);
+    ctx.model.splice(0, ctx.model.n_items(), &items);
+    let positions = picking::restore(&selected, rows.iter().map(|row| row.id));
+    let chosen = gtk::Bitset::new_empty();
+    for position in &positions {
+        chosen.add(*position);
+    }
+    ctx.selection.set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
+    ctx.restoring.set(false);
+    show_selection(&ctx.selection, &ctx.pane, true);
+    ctx.total.set(total);
+    ctx.has_more.set(total > rows.len() as i64);
+    if total > rows.len() as i64 {
+        ctx.count_label.set_text(&format!("{} of {} files", rows.len(), total));
+    } else {
+        ctx.count_label.set_text(&format!("{} files", rows.len()));
+    }
+    if rows.is_empty() {
+        if ctx.similar.borrow().is_some() {
+            ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
+            ctx.empty_page.set_title("No similar files");
+            ctx.empty_page.set_description(Some(
+                "FileID found nothing like this file. Similar files need the file to be read by a scan first.",
+            ));
+        } else if filtered {
+            ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
+            ctx.empty_page.set_title("No matches");
+            let description = if searched.is_empty() {
+                "Nothing matches this filter. Try another kind, or choose All to see every file.".to_string()
+            } else {
+                format!("Nothing matches “{searched}”. Try other words, or choose All to see every file.")
+            };
+            ctx.empty_page.set_description(Some(&description));
+        } else {
+            ctx.empty_page.set_icon_name(Some("view-grid-symbolic"));
+            ctx.empty_page.set_title("No files yet");
+            ctx.empty_page.set_description(Some(
+                "Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar. Scanning needs the two models in Settings; nothing downloads until you ask.",
+            ));
+        }
+        ctx.content_stack.set_visible_child_name("empty");
+    } else {
+        ctx.content_stack.set_visible_child_name("grid");
+    }
+}
+
+// ── Find Similar ─────────────────────────────────────────────────────────────
+
+/// Tries a visual-index request this many times a second apart while the
+/// engine is still building its index (macOS retries for two minutes).
+const SIMILAR_TRIES: u32 = 120;
+const SIMILAR_LIMIT: usize = 60;
+
+/// Files most like `seed_id`, ranked by the engine's catalog search in
+/// semantic mode on the seed file (the same call the Mac makes), kept to the
+/// chosen location and kind.
+fn run_similar(ctx: &Rc<ReloadCtx>, generation: u64, seed_id: i64) {
+    let ctx = ctx.clone();
+    glib::MainContext::default().spawn_local(async move {
+        ctx.count_label.set_text("Finding similar files…");
+        let mut response = None;
+        for attempt in 0..SIMILAR_TRIES {
+            let reply = similar_request(&ctx.engine, seed_id).await;
+            if ctx.query_gen.get() != generation {
+                return;
+            }
+            match reply {
+                Some(reply) if similar_pending(&reply) && attempt + 1 < SIMILAR_TRIES => {
+                    glib::timeout_future_seconds(1).await;
+                    if ctx.query_gen.get() != generation {
+                        return;
+                    }
+                }
+                other => {
+                    response = other;
+                    break;
+                }
+            }
+        }
+        let Some(response) = response.filter(|r| r.status == "ok") else {
+            ctx.model.remove_all();
+            ctx.count_label.set_text("Couldn't find similar files");
+            ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
+            ctx.empty_page.set_title("Couldn't find similar files");
+            ctx.empty_page.set_description(Some(
+                "FileID is still getting ready, or this file hasn't been read yet. Try again in a moment.",
+            ));
+            ctx.content_stack.set_visible_child_name("empty");
+            return;
+        };
+        let ids: Vec<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
+        let kind = ctx.kind_filter.borrow().clone();
+        let rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
+        if ctx.query_gen.get() != generation {
+            return;
+        }
+        let total = rows.len() as i64;
+        show_rows(&ctx, rows, total, "", true);
+    });
+}
+
+fn similar_pending(response: &fileid_engine::ipc::CatalogResponse) -> bool {
+    response.status == "indexing"
+        || (response.status == "error"
+            && response.message.as_deref().is_some_and(|m| m.starts_with("Preparing the local visual search index")))
+}
+
+async fn similar_request(
+    engine: &Rc<RefCell<EngineClient>>,
+    seed_id: i64,
+) -> Option<fileid_engine::ipc::CatalogResponse> {
+    let mut request = super::workbench_state::catalog_request("search");
+    request.file_id = Some(seed_id);
+    request.search_mode = Some("semantic".into());
+    request.limit = Some(SIMILAR_LIMIT as _);
+    request.root_id = super::library_scope::current_id();
+    request.result_scope = Some("files".into());
+    let id = request.request_id.clone();
+    let events = engine.borrow_mut().subscribe();
+    let closer = events.clone();
+    let sent = engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::CatalogRequest(Box::new(
+        fileid_engine::ipc::CatalogRequestPayload { request },
+    )));
+    let timeout = glib::timeout_add_seconds_local_once(10, move || {
+        closer.close();
+    });
+    let mut found = None;
+    if sent.is_ok() {
+        while let Ok(event) = events.recv().await {
+            match event {
+                EngineEvent::CatalogResponse(response) if response.request_id == id => {
+                    found = Some(response);
+                    break;
+                }
+                EngineEvent::Exited => break,
+                _ => {}
+            }
+        }
+    }
+    timeout.remove();
+    events.close();
+    found
+}
+
+/// The rows for `ids` in that order, of one `kind` when set; files gone from the catalog drop out.
+fn read_rows_in_order(ids: Vec<i64>, kind: Option<String>) -> async_channel::Receiver<Vec<FileRow>> {
+    crate::engine_client::read_db(move |conn| {
+        let mut found = HashMap::new();
+        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, f.modified_at, \
+             f.has_faces, f.has_text, f.file_ref, f.content_hash, f.vlm_description, f.vlm_proposed_name, \
+             f.vlm_inherited_from IS NOT NULL FROM files f WHERE f.failed = 0 AND f.id IN ({list})"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql)
+            && let Ok(rows) = stmt.query_map([], |row| {
+                let path: String = row.get(1)?;
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                Ok(FileRow {
+                    id: row.get(0)?,
+                    path,
+                    name,
+                    kind: row.get(2)?,
+                    extension: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    created_at: row.get(5)?,
+                    modified_at: row.get(6)?,
+                    has_faces: row.get(7)?,
+                    has_text: row.get(8)?,
+                    file_ref: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    description: row.get(11)?,
+                    proposed_name: row.get(12)?,
+                    caption_inherited: row.get(13)?,
+                })
+            })
+        {
+            for row in rows.flatten() {
+                found.insert(row.id, row);
+            }
+        }
+        ids.iter()
+            .filter_map(|id| found.remove(id))
+            .filter(|row| kind.as_deref().is_none_or(|kind| row.kind == kind))
+            .collect()
+    })
 }
 
 // ── Kind pills ───────────────────────────────────────────────────────────────
