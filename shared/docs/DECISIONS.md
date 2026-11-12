@@ -4666,3 +4666,41 @@ Percentages compare with the baseline reps run in the same rounds (Latin-only ra
 - **CLIP text on macOS uses ONNX Runtime's default thread pool**, as Swift's `CLIPTextEncoder` builds its session. The shared path sets one intra-op thread per core; on a loaded Mac that was up to 3× slower than Swift (pip ORT 1.30 in Python under load ~120: default 20–42 ms, 10 threads 44–261 ms). Vectors are unchanged (cosine 1.0000000 against Swift on 159 prompts). Windows and Linux keep the shared EP chain.
 - **Job controls need a worker.** Pause, resume and cancel of a job whose kind the engine has no worker for (or a missing id) are refused with Swift's "This job has no supported worker in this engine."; Rust used to change their state. Pinned in `conformance/catalog.json`.
 - **Search-strength set rebuilt** in `~/FileIDDev/Eval/search` from the 499 People photo copies (the 2026-11-08 set was deleted): 72 subjects, labelled per photo from 3×3 contact sheets (yes / ambiguous), split by a hash of the query text. Stage 4 acceptance on it is Swift/Rust parity (identical results), not the old set's 0.79 / 0.54 / 10 of 11.
+
+## 2026-11-10 — Windows ships ONNX Runtime built from source without telemetry
+
+**Owner decision (delegated):** Windows must ship ORT builds made without telemetry.
+
+**How the switch works.** `--use_telemetry` sets `onnxruntime_USE_TELEMETRY`, which force-includes `TraceLoggingConfigPrivate.h`. That header is not in the public repo; Microsoft's packaging pipeline writes it from a secret GUID (`dml-vs-2022.yml`), and the DirectML NuGet jobs pass `--use_telemetry` (`c-api-noopenmp-packaging-pipelines.yml`, x64 and arm64). It puts ORT's `Microsoft.ML.ONNXRuntime` TraceLogging provider {3a26b1ff-7484-7484-7484-15261f42614d} in Microsoft's telemetry provider group {4f50731a-89cf-4782-b3e0-dce8c90476ba}, which Windows' diagnostic-data service collects. Every Windows build registers the provider; without the header its group is all zeros and nothing collects it unless someone starts a local trace.
+
+**Measured** (byte inspection on the Mac; archives verified against their published SHA-256):
+
+| Binary | Group on ORT's provider | DirectML EP | Shipped how |
+|---|---|---|---|
+| NuGet `Microsoft.ML.OnnxRuntime.DirectML` 1.22.0 `onnxruntime.dll`, x64 and arm64 | telemetry | yes | base runtime until now |
+| GitHub `onnxruntime-win-x64-gpu-1.22.0.zip` `onnxruntime.dll` | telemetry | no | CUDA pack (user-installed) |
+| HF `ort-openvino-win-x64-1.22.0.zip` `onnxruntime.dll` (Intel build) | zero | no | Store OpenVINO pack |
+| pyke `ms@1.22.0` Windows x64, arm64, x64+cu12 (`ort-sys` rc.10 `dist.txt`) | zero | yes | static `onnxruntime.lib` only, no DLL |
+| NuGet `Microsoft.AI.DirectML` 1.15.4 `DirectML.dll` (pyke bundles the same file) | `Microsoft.Windows.AI.MachineLearning.Dml` in the telemetry group | n/a | beside the engine |
+
+**Options weighed.**
+- pyke's prebuilt binaries (already pinned by the locked `ort-sys`) are clean but static-only on Windows. Linking them means dropping `load-dynamic`, which the CUDA and OpenVINO packs rely on (`ORT_DYLIB_PATH` swaps in the pack's runtime; the Store build ships the OpenVINO pack). Rejected for this change.
+- A newer `ort-sys` (rc.15) lists Windows `directml` sets for ORT 1.31: a dependency upgrade with ABI churn, not taken.
+- **Chosen:** build 1.22.0 from source in CI, the same configuration as Microsoft's DirectML NuGet minus `--use_telemetry`, `--enable_lto`, `--enable_wcos`, `--enable_generic_interface`, Node.js, C#, tests and Microsoft's internal vcpkg cache. The output is a drop-in `onnxruntime.dll` + `onnxruntime_providers_shared.dll`, so `load-dynamic` and the packs keep working.
+
+**Supply chain.** New download in build tooling: `https://github.com/microsoft/onnxruntime.git`, pinned to commit `f217402897f40ebba457e2421bc0a4702771968e` (tag v1.22.0; the script checks `HEAD`). ORT's build fetches its own third-party sources pinned by SHA-1 in `cmake/deps.txt`, plus `nuget.exe` 5.3.0 and the DirectML NuGet by version; the script checks both against SHA-256 pins (`96a1dc5a…b730`, `4e7cb7dd…15b9`) before writing output. MSVC builds are not reproducible, so the DLL has no fixed hash: provenance is the cached CI artifact, and every consumer re-checks it (PE machine, version 1.22.x, no telemetry group). Actions are pinned by commit; the runner is `windows-2025` because ORT 1.22's `build.py` only knows the VS 2022 generator. `fetch-runtime-deps.ps1` had lost its SHA-256 pins and its `-Architecture` parameter in `879985e5`, so arm64 packaging received x64 DLLs (publish-bundle's PE check would fail the arm64 release; the arm64 tools zip has no such check). Both are restored with the same pins, re-verified today.
+
+**Defence in depth.** The engine already sets `ORT_DISABLE_TELEMETRY=1` and creates every environment with telemetry off. Now it also treats a pack whose `onnxruntime.dll` joins the telemetry group as absent and keeps the bundled runtime, so a user-installed Microsoft GPU zip is never loaded. `check_binary_privacy.py` fails any binary whose ORT provider joins the group and lists other group members as notes.
+
+**Left open (NEXT).** `DirectML.dll` itself is a Microsoft telemetry provider and closed source. The CUDA pack has no telemetry-free runtime yet. The first CI build and the hardware checks (DirectML bound, speed, Diagnostic Data Viewer) have not run.
+
+## 2026-11-10 — DirectML.dll stays for now and is disclosed; the OS copy is the preferred fix
+
+Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `Microsoft.Windows.AI.MachineLearning.Dml` in Microsoft's telemetry group and is closed source, so no telemetry-free build exists. Dropping it would put Windows GPU inference on the CPU (or on the experimental WebGPU provider), losing the speed that is a core requirement. So the redistributable stays, and PRIVACY.md says it is a Microsoft graphics component whose events go through Windows' own diagnostic data under the user's Windows privacy settings; FileID itself collects and sends nothing. The preferred fix is the OS's own `System32\DirectML.dll`, which would mean FileID ships no telemetry-group binary. It must be tested on Windows hardware with ORT 1.22's DirectML provider, and adopted if it works. The WebGPU provider is measured as the fallback. ORT's own provider is already out of the telemetry group (source build without `--use_telemetry`), and the privacy gate fails any ORT binary that is in it.
+
+## 2026-11-12 — How CI builds the no-telemetry ONNX Runtime
+
+- **Runner is `windows-2022`.** `windows-2025` ships only Visual Studio 2026, and ORT 1.22's `build.py` only knows the VS 2022 generator.
+- **Eigen pin swapped to upstream's v1.22.1 fix.** GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin in `cmake/deps.txt` no longer matched. The build script takes upstream's own fix from v1.22.1: the same Eigen commit from the GitHub `eigen-mirror`, with its SHA-1. That is the only `deps.txt` change between the two releases. The script refuses to run if the original line is not there exactly once.
+- **LF line endings for the ORT source.** The source is checked out with `core.autocrlf=false` and `core.eol=lf`, so ORT's patches apply.
+- **GNU patch from Git for Windows.** CMake is pointed at Git for Windows' patch through `Patch_EXECUTABLE`. Hosted runners find Strawberry Perl's patch.exe 2.5.9 first, and it crashes on ORT's arm64 cpuinfo patch.

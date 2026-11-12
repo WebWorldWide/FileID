@@ -48,7 +48,7 @@ if (-not [string]::IsNullOrWhiteSpace($SeedDbPath)) {
 if ([string]::IsNullOrWhiteSpace($OrtRuntimeDirectory)) {
     $OrtRuntimeDirectory = Join-Path `
         $PSScriptRoot `
-        "runtime-cache\ort-directml-1.22.0\runtimes\win-x64\native"
+        "runtime-cache\onnxruntime-1.22.0-dml-notelemetry\x64"
 }
 if ([string]::IsNullOrWhiteSpace($DirectMLPath)) {
     $DirectMLPath = Join-Path `

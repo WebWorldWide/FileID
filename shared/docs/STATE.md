@@ -1,5 +1,22 @@
 # FileID — State
 
+## 2026-11-12 — Windows: ONNX Runtime built from source without Microsoft telemetry (CI green)
+
+- **CI builds ONNX Runtime 1.22.0 with DirectML** from Microsoft's source, without `--use_telemetry`, for x64 and arm64, on GitHub's `windows-2022` runners. A cold-cache build takes about 37–65 minutes per architecture; the build is cached by the build script's hash.
+- **Privacy scan:** the scan found ORT's provider outside Microsoft's telemetry group.
+- **Load check:** the `--ort-runtime` load check showed the runtime writes nothing.
+- **Packages and tools:** the Windows Store package and the native tools jobs pass with the new DLLs.
+- Open (NEXT): the Windows hardware checks (DirectML binding, files/s against the old DLL, Diagnostic Data Viewer, `System32\DirectML.dll`).
+
+## 2026-11-10 — Windows ONNX Runtime built without telemetry; DirectML.dll found to report too
+
+- **Found** (agent): every Microsoft-built Windows ORT 1.22.0 FileID used (DirectML NuGet x64/arm64, GitHub GPU zip) puts ORT's ETW provider in Microsoft's telemetry provider group, which Windows' diagnostic-data service collects. Microsoft's pipeline passes `--use_telemetry` and writes the private `TraceLoggingConfigPrivate.h`. Builds without it keep the same provider with an all-zero group: pyke's 1.22 Windows builds (static `.lib` only, DirectML included) and the Intel-built OpenVINO pack. `DirectML.dll` 1.15.4 (Microsoft.AI.DirectML, also inside pyke's archives) registers `Microsoft.Windows.AI.MachineLearning.Dml` in the same group; it is closed source.
+- **Changed:** `build-ort-runtime.ps1` builds ORT 1.22.0 (DirectML + CPU, commit `f2174028`) from source without `--use_telemetry`, checks the build's `nuget.exe` and DirectML NuGet against SHA-256 pins, the PE machine, the version and the privacy gate. New reusable workflow `ort-runtime.yml` (`windows-2025`, cached per script revision, pinned actions, load check on x64) is called by `windows-store.yml`, `tools.yml` and `release.yml`, which download the artifact. `fetch-runtime-deps.ps1` drops the Microsoft ORT NuGet, refuses a telemetry ORT DLL, and gets back the `-Architecture` parameter and SHA-256 pins lost in `879985e5` (arm64 packaging was getting x64 DLLs). `build-all.ps1` passes the architecture.
+- **Gate:** `check_binary_privacy.py` fails any binary whose ORT provider joins the telemetry group (checked against the real DLLs: NuGet and GPU zip fail; OpenVINO pack and pyke libs pass) and prints other group members as notes (DirectML.dll).
+- **Engine:** a CUDA/OpenVINO pack whose `onnxruntime.dll` joins the group is treated as absent and never pinned (`runtime::pack_runtime_allowed`), so NVIDIA boxes with Microsoft's GPU zip stay on DirectML. `ORT_DISABLE_TELEMETRY=1` and telemetry-off environments were already in place.
+- Checks (Mac): engine fmt, clippy (`-D warnings`) and 1,248 lib tests (2 new) pass; privacy-gate tests 15; workflow pin and permission gates, runtime egress (both modes) pass. Windows cross-check is not possible here (`ring` needs a Windows C toolchain). The source build and packaging changes are untested until Windows CI runs. Digest refreshes: `server.rs`, `models/runtime.rs` (no URL, socket, HTTP client or process launch added).
+- Open (NEXT): first CI build, hardware check (DirectML bound, files/s vs the old DLL, Diagnostic Data Viewer), owner decision on DirectML.dll, a telemetry-free CUDA runtime.
+
 ## 2026-11-10 — Convergence Stage 3: Restructure under the Rust engine on the Mac
 
 - **What landed** (agent `converge-3`; details in `CONVERGENCE.md` "Stage 3 status"): one restructure undo journal format for both engines (Swift writes the Rust header and source identity, reads both; Rust on macOS reads Swift's older headerless journals inside the requested root), so a run applied by one engine is undone by the other. A refused Rust apply or undo now ends with `restructureApplyResult` like Swift; the Mac app treats the Rust plan errors as terminal; feedback never upgrades Ask moves in either engine. Rust plan kNN computed once in parallel; journal entries use `F_BARRIERFSYNC` on macOS.
