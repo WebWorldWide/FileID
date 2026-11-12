@@ -162,7 +162,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/restructure.rs": "01787c96027d30df5d60bcf88cc7e02a2998f150c1b61189bbe14838215877d2",
   "platforms/windows/src/engine/src/commands/trash.rs": "04d8de99c8c882dfc43bc8538b50964bdab5f73a6d62cb8e65cd2fd91f2521de",
   "platforms/windows/src/engine/src/downloader.rs": "9d8dbe7ec8abacc2679afcb5c255cfc2fdf65411827699d8681ffd05cf11da84",
-  "platforms/windows/src/engine/src/server.rs": "e28cde32f00f77c9e9a0ae462a77760fc74e88cf5e50ad0d5c0f53f0d8c108ab",
+  "platforms/windows/src/engine/src/server.rs": "f47cfa620442eb92be1bb3e5298edc3423713ecc73a33b4743be4a1275b4ba02",
   "platforms/windows/src/engine/src/models/runtime.rs": "94b93c3d0ea4be9f507b4f313a6e70bec562c7ff2c0c69b8d6bee52d73799785",
   "platforms/windows/src/engine/src/models/vlm.rs": "da06866186668cb34ef298152cf4d4d2bad7fd0ede656313c43fa59d5967444f",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "93ef5e06c33f8f97b44116785053ca2460028ae91bc199f6bea0eb1fad3cbf6d",

@@ -248,7 +248,9 @@ class Engine:
                     self.send({"shutdown": {}})
                 except (BrokenPipeError, OSError):
                     pass
-                self.process.wait(timeout=10)
+                # The engine allows itself 30 s to quiesce active work at shutdown; a
+                # slow hosted Windows runner has taken longer than 10 s to exit.
+                self.process.wait(timeout=30)
         finally:
             if self.process.poll() is None:
                 self.process.kill()

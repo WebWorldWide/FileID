@@ -1447,7 +1447,6 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let state_c = scan_state.clone();
             let pending_cancel = scan_cancel_requested.clone();
             spawn_mutation(mutation_gate, sink, scan_state, async move {
-                let _active_guard = active_guard;
                 let _track = track;
                 commands::scan::handle_start_scan(
                     sink_c,
@@ -1455,6 +1454,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     state_c,
                     payload,
                     pending_cancel,
+                    Some(Box::new(active_guard)),
                 )
                 .await;
             })

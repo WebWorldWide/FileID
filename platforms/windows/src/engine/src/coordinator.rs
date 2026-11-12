@@ -61,6 +61,7 @@ struct Inner {
     /// Workers that hit the pause flag await on this notifier. Resume
     /// `notify_waiters()` wakes everyone at once.
     resume_notify: Notify,
+    release: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ScanCoordinator {
@@ -76,8 +77,27 @@ impl ScanCoordinator {
                 gpu_failure_latch,
                 gpu_dead_observed: AtomicBool::new(false),
                 resume_notify: Notify::new(),
+                release: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Registers what frees the scan's single-flight slot. `release_slot`
+    /// runs it once, so the slot opens before the terminal event is sent and
+    /// a client that starts its next scan on that event is never bounced.
+    pub fn on_release(&self, f: impl FnOnce() + Send + 'static) {
+        *self.inner.release.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
+    }
+
+    pub fn release_slot(&self) {
+        let f = self.inner.release.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(f) = f {
+            f();
+        }
+    }
+
+    pub fn same_scan(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Returns true once any worker has marked the GPU as device-removed.
@@ -171,6 +191,21 @@ pub struct ScanCancelled;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_slot_runs_once_and_only_for_the_registered_scan() {
+        let coord = ScanCoordinator::new();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        coord.on_release(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(coord.same_scan(&coord.clone()));
+        assert!(!coord.same_scan(&ScanCoordinator::new()));
+        coord.release_slot();
+        coord.release_slot();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn gpu_failure_is_shared_across_scan_coordinators() {
