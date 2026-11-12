@@ -42,6 +42,16 @@ Parity (Best Takes pages, Moments lanes, springs audits and the Models page fold
 
 Models: keep about 10-15 curated defaults (2-3 per hardware tier); the Windows and Linux Describe pickers list the portable catalog filtered by RAM/VRAM, curated first (2026-11-05; Linux filters by RAM only); build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
 
+## Mac app audit follow-ups (2026-11-12)
+
+- [ ] **Owner:** refresh the egress digests for `EngineClient.swift` and `ThumbnailService.swift` (no network code added), open the PR, and check the fixes on screen (People drag merge dialog, Duplicates per-group confirm, Settings before a scan, Restart on a stopped helper, Privacy card).
+- [ ] **Owner decisions:** description models live in `~/Documents/huggingface` on Developer ID builds (iCloud Desktop & Documents would upload them); Spotlight indexing default (now on, with a switch).
+- [ ] **Destructive actions:** one merge flow with confirmation and Undo in People (five paths today); one rename flow that honours Name style (three today); separate Undo slots for Trash from Duplicates, Best Takes and Chat; Return must not trash in Best Takes.
+- [ ] **Models:** show size and download progress on Describe Files before a download starts; license gate on every Describe entry point; Remove for description models; "Download all" must not be blocked by, or include, the optional model; cancel the engine download when the Welcome watchdogs fire; resume partial downloads.
+- [ ] **Plain language:** map every engine error kind and message (raw Swift errors, "run ./run.sh", Prewarm, Deep Analyze, Restructure); hide model names, repo ids and specs behind a details disclosure; one name each for Describe Files, Duplicates, location, take.
+- [ ] **Performance, needs an on-screen check:** lava lamp float16 `drawingGroup` under frosted panes at 30 fps; indeterminate bars animate while the window is hidden; Library reloads the grid every second during a scan and loads the whole library on preview; Moments polls jobs every second; Spotlight re-indexes the whole library after every run; the thumbnail disk cache has no size cap; exact-duplicate hashes are cached for 30 s only.
+- [ ] Unused code to remove: `SidebarProcessingControl`, `SidebarPipelineProgress`, the Library bulk-rename sheet state, the auto-pilot stage.
+
 ## Tagging accuracy and scan speed (2026-11-12)
 
 - [ ] **Windows GPU timing** of the two decode changes: `iterate.ps1` on a camera-JPEG corpus with duplicates, with `FILEID_TWIN_REUSE=0` and `FILEID_JPEG_MPF_PREVIEW=0` as controls; confirm `[STATS] twin_reused` / `mpf_previews` climb and People looks the same.
