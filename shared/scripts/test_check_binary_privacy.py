@@ -5,7 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_binary_privacy import FORBIDDEN, check_ort_runtime, scan
+from check_binary_privacy import FORBIDDEN, check_ort_runtime, scan, scan_binary_paths
+
+TELEMETRY_GROUP = bytes.fromhex("1a73504fcf898247b3e0dce8c90476ba")
+
+
+def tracelogging_provider(name: str, group: bytes) -> bytes:
+    encoded = name.encode("ascii") + b"\x00"
+    traits = b"\x13\x00\x01" + group
+    return (2 + len(encoded) + len(traits)).to_bytes(2, "little") + encoded + traits
 
 
 class BinaryPrivacyTests(unittest.TestCase):
@@ -93,6 +101,40 @@ class BinaryPrivacyTests(unittest.TestCase):
                 ],
             )
 
+    def test_rejects_onnxruntime_in_the_windows_telemetry_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            official = root / "official" / "onnxruntime.dll"
+            official.parent.mkdir()
+            official.write_bytes(b"MZ\x00" + tracelogging_provider("Microsoft.ML.ONNXRuntime", TELEMETRY_GROUP))
+            failures = scan([official])
+            self.assertEqual(len(failures), 1)
+            self.assertIn("ONNX Runtime ETW provider joins Microsoft's telemetry group", failures[0])
+
+            source_build = root / "onnxruntime.dll"
+            source_build.write_bytes(b"MZ\x00" + tracelogging_provider("Microsoft.ML.ONNXRuntime", bytes(16)))
+            self.assertEqual(scan([source_build]), [])
+
+    def test_lists_other_telemetry_group_providers_as_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            directml = Path(directory) / "DirectML.dll"
+            directml.write_bytes(
+                b"MZ\x00" + tracelogging_provider("Microsoft.Windows.AI.MachineLearning.Dml", TELEMETRY_GROUP)
+            )
+            notes: list[str] = []
+            self.assertEqual(scan_binary_paths([directml], notes), [])
+            self.assertEqual(
+                notes,
+                [f"{directml}: TraceLogging provider Microsoft.Windows.AI.MachineLearning.Dml joins Microsoft's telemetry group"],
+            )
+
+    def test_group_match_needs_consistent_provider_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "onnxruntime.dll"
+            metadata = tracelogging_provider("Microsoft.ML.ONNXRuntime", TELEMETRY_GROUP)
+            binary.write_bytes(b"\x00\x00" + metadata[2:])
+            self.assertEqual(scan([binary]), [])
+
     def test_discovers_shared_libraries_in_folders(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -159,7 +201,7 @@ class BinaryPrivacyTests(unittest.TestCase):
 
         consumers = (
             ".github/workflows/release.yml",
-            ".github/workflows/tools.yml",
+            ".github/workflows/tools-verify.yml",
             "platforms/apple/scripts/build_dmg.sh",
             "platforms/apple/scripts/release.sh",
             "platforms/linux/build/build.sh",

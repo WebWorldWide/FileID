@@ -183,11 +183,11 @@ async fn async_main() -> Result<()> {
                 let _ = platform::register_dll_dirs_under(&bundled_runtimes.join("llama.cpp"));
             }
 
-        // Accelerator pack: pyke's `download-binaries` ships only the base
-        // onnxruntime.dll + onnxruntime_providers_shared.dll (DirectML/CPU) —
-        // NOT the vendor provider DLL (onnxruntime_providers_{cuda,openvino}.dll)
-        // — so the vendor EP can't bind and we fall through to DirectML
-        // (~3-5x slower). The pack supplies a COMPLETE matched ORT runtime for
+        // Accelerator pack: the bundled base onnxruntime.dll (FileID's own
+        // DirectML + CPU build, made without telemetry) has no vendor provider
+        // DLL (onnxruntime_providers_{cuda,openvino}.dll), so the vendor EP
+        // can't bind and we fall through to DirectML (~3-5x slower). The pack
+        // supplies a COMPLETE matched ORT runtime for
         // this GPU's vendor (NVIDIA→cuda, Intel→openvino); pin ORT's
         // load-dynamic loader at the pack's onnxruntime.dll so the provider
         // binds against the SAME ORT build (mismatched base vs provider =
@@ -208,9 +208,15 @@ async fn async_main() -> Result<()> {
                         // pinning it when the CUDA EP's native closure can't
                         // load strands the whole process on CPU (the
                         // 2026-07-20 overnight regression). Only swap out
-                        // pyke's DirectML-capable base runtime once the full
-                        // stack is proven loadable.
-                        if ep == "cuda" && !models::runtime::cuda_stack_ready() {
+                        // the DirectML-capable base runtime once the full
+                        // stack is proven loadable and the pack's runtime is
+                        // not a telemetry build.
+                        if !models::runtime::pack_runtime_allowed(&pack_dir) {
+                            tracing::warn!(
+                                ep,
+                                "[EP] accelerator pack's ONNX Runtime is a Microsoft build that reports to Windows telemetry; keeping the base (DirectML) ONNX Runtime"
+                            );
+                        } else if ep == "cuda" && !models::runtime::cuda_stack_ready() {
                             tracing::warn!(
                                 ep,
                                 "[EP] accelerator pack present but its CUDA runtime closure failed to load; keeping the base (DirectML) ONNX Runtime"

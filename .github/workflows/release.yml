@@ -55,8 +55,13 @@ jobs:
           cargo audit --file platforms/tui/Cargo.lock
           cargo audit --file platforms/linux/Cargo.lock
 
-  tools-release:
+  ort-runtime:
+    name: ONNX Runtime (no telemetry)
     needs: dependency-policy
+    uses: ./.github/workflows/ort-runtime.yml
+
+  tools-release:
+    needs: [dependency-policy, ort-runtime]
     name: Native engine + CLI + TUI — ${{ matrix.label }}
     strategy:
       fail-fast: false
@@ -117,6 +122,13 @@ jobs:
           codesign --force --sign - platforms/cli/target/release/fileid
           codesign --force --sign - platforms/tui/target/release/fileid-tui
 
+      - name: Download the telemetry-free ONNX Runtime
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: onnxruntime-dml-notelemetry-${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
+          path: platforms/windows/build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/${{ matrix.artifact == 'windows-arm64' && 'arm64' || 'x64' }}
+
       - name: Package toolset + staged payload privacy scan
         run: python scripts/package-tools.py --label "${{ matrix.artifact }}"
 
@@ -151,7 +163,7 @@ jobs:
 
   windows-release:
     name: Build Windows release (publication gated)
-    needs: tools-release
+    needs: [tools-release, ort-runtime]
     runs-on: windows-latest
     outputs:
       publish: ${{ steps.mode.outputs.publish }}
@@ -208,6 +220,21 @@ jobs:
             Write-Host "Dry-run: building unsigned; no release will be published. Note: a thumbprint secret alone is never sufficient."
             "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Download the telemetry-free ONNX Runtime
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: onnxruntime-dml-notelemetry-*
+          path: ${{ runner.temp }}/onnxruntime
+
+      - name: Stage the telemetry-free ONNX Runtime
+        shell: pwsh
+        run: |
+          foreach ($arch in @('x64', 'arm64')) {
+            $destination = "build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/$arch"
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+            Copy-Item -Path "${{ runner.temp }}/onnxruntime/onnxruntime-dml-notelemetry-$arch/*" -Destination $destination
           }
 
       - name: Build unsigned bundle (dry-run only)
