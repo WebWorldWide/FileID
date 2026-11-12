@@ -98,6 +98,17 @@ $head = (& git -C $SourceDir rev-parse HEAD).Trim()
 if ($head -ne $OrtCommit) {
     throw "ONNX Runtime checkout is at $head, expected $OrtCommit."
 }
+# GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin no longer
+# matches. Apply upstream's fix from v1.22.1 (its only deps.txt change): the
+# same Eigen commit from the GitHub mirror, with that archive's SHA-1.
+$depsFile = Join-Path $SourceDir 'cmake\deps.txt'
+$eigenGitLab = 'eigen;https://gitlab.com/libeigen/eigen/-/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33/eigen-1d8b82b0740839c0de7f1242a3585e3390ff5f33.zip;5ea4d05e62d7f954a46b3213f9b2535bdd866803'
+$eigenMirror = 'eigen;https://github.com/eigen-mirror/eigen/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33/eigen-1d8b82b0740839c0de7f1242a3585e3390ff5f33.zip;05b19b49e6fbb91246be711d801160528c135e34'
+$deps = [IO.File]::ReadAllLines($depsFile)
+if (@($deps | Where-Object { $_ -eq $eigenGitLab }).Count -ne 1) {
+    throw "cmake/deps.txt does not carry the expected 1.22.0 Eigen line."
+}
+[IO.File]::WriteAllLines($depsFile, [string[]]@($deps | ForEach-Object { if ($_ -eq $eigenGitLab) { $eigenMirror } else { $_ } }))
 $privateConfig = Join-Path $SourceDir 'include\onnxruntime\core\platform\windows\TraceLoggingConfigPrivate.h'
 if (Test-Path -LiteralPath $privateConfig) {
     throw "TraceLoggingConfigPrivate.h exists; it would put ONNX Runtime in Windows' telemetry group."
