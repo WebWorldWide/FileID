@@ -37,6 +37,7 @@ struct CleanupView: View {
     @State private var selection: Set<Int64> = []
     @State private var skippedGroups: Set<Int64> = []
     @State private var reloadTask: Task<Void, Never>?
+    @State private var lastScanTimeReload = Date.distantPast
     @State private var reloadPending = false
 
     /// Mirrors LibraryView: true while the engine is discovering, tagging, or
@@ -101,9 +102,17 @@ struct CleanupView: View {
                 // re-verify to scan completion (the lastTerminalEventAt handler
                 // below). Similar mode's perceptual index is cheap and drive-light,
                 // so it keeps refreshing live. (reload storm)
-                if isSimilar || !scanActive { reload() }
+                if !scanActive {
+                    reload()
+                } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
+                    // Look-alike grouping compares every pair of photos; once per
+                    // batch it kept a core busy for the whole scan.
+                    lastScanTimeReload = Date()
+                    reload()
+                }
             }
         }
+        .onDisappear { reloadTask?.cancel() }
         // Exact mode skips its per-batch reload during a live scan, so the final
         // verified set — and the last batch the scan-active skip drops — is computed
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's

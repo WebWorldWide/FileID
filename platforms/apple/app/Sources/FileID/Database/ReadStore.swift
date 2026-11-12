@@ -267,18 +267,19 @@ public final class ReadStore: @unchecked Sendable {
 
     @MainActor
     private func applyCounters(_ snapshot: CounterSnapshot) {
-        self.totalFiles = snapshot.totalFiles
-        self.totalImages = snapshot.totalImages
-        self.unreadableFiles = snapshot.unreadableFiles
-        self.otherFiles = snapshot.otherFiles
-        self.scopedTotalFiles = snapshot.scopedTotalFiles
-        self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles
-        self.scopedOtherFiles = snapshot.scopedOtherFiles
-        self.totalDuplicateGroups = snapshot.totalDuplicateGroups
-        self.totalReclaimableMB = snapshot.totalReclaimableMB
-        self.hasFacePrints = snapshot.hasFacePrints
-        self.hasNamedPerson = snapshot.hasNamedPerson
-        self.hasCaptions = snapshot.hasCaptions
+        // Observation notifies on every set, changed or not; unchanged counters stay quiet.
+        if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
+        if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
+        if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }
+        if self.otherFiles != snapshot.otherFiles { self.otherFiles = snapshot.otherFiles }
+        if self.scopedTotalFiles != snapshot.scopedTotalFiles { self.scopedTotalFiles = snapshot.scopedTotalFiles }
+        if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
+        if self.scopedOtherFiles != snapshot.scopedOtherFiles { self.scopedOtherFiles = snapshot.scopedOtherFiles }
+        if self.totalDuplicateGroups != snapshot.totalDuplicateGroups { self.totalDuplicateGroups = snapshot.totalDuplicateGroups }
+        if self.totalReclaimableMB != snapshot.totalReclaimableMB { self.totalReclaimableMB = snapshot.totalReclaimableMB }
+        if self.hasFacePrints != snapshot.hasFacePrints { self.hasFacePrints = snapshot.hasFacePrints }
+        if self.hasNamedPerson != snapshot.hasNamedPerson { self.hasNamedPerson = snapshot.hasNamedPerson }
+        if self.hasCaptions != snapshot.hasCaptions { self.hasCaptions = snapshot.hasCaptions }
     }
 
     // MARK: - Library queries

@@ -158,7 +158,18 @@ public final class ThumbnailService {
             width: w * Double(pixels.width), height: h * Double(pixels.height)).integral
             .intersection(CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
         guard rect.width > 4, rect.height > 4, let cropped = pixels.cropping(to: rect) else { return nil }
-        return NSImage(cgImage: cropped, size: rect.size)
+        // `cropping(to:)` shares the parent's bitmap, so a cached crop would keep
+        // the whole photo alive while the cache counts only the crop's pixels.
+        let (width, height) = (Int(rect.width), Int(rect.height))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            return NSImage(cgImage: cropped, size: rect.size)
+        }
+        context.interpolationQuality = .high
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let owned = context.makeImage() else { return NSImage(cgImage: cropped, size: rect.size) }
+        return NSImage(cgImage: owned, size: rect.size)
     }
 
     /// Off-main thumbnail production: on-disk cache first (fast, local),
@@ -233,7 +244,8 @@ public final class ThumbnailService {
 
 /// Counting-semaphore actor. A releasing task with a pending waiter hands
 /// its permit straight to the waiter (active count stays constant), so the
-/// in-flight permit total never exceeds `limit`.
+/// in-flight permit total never exceeds `limit`. The newest waiter goes
+/// first: after a fast scroll, visible tiles load before ones scrolled past.
 private actor ThumbnailGate {
     private let limit: Int
     private var active = 0
@@ -256,7 +268,7 @@ private actor ThumbnailGate {
         if waiters.isEmpty {
             active -= 1
         } else {
-            waiters.removeFirst().resume()
+            waiters.removeLast().resume()
         }
     }
 }
