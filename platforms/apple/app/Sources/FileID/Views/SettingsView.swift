@@ -12,6 +12,7 @@ struct SettingsTab: View {
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
     @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @AppStorage(AppSettings.fastTextReadingKey) private var fastTextReading: Bool = AppSettings.fastTextReadingDefault
+    @AppStorage(EngineBackendPolicy.defaultsKey) private var engineBackendSetting: String = ""
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
     @State private var confirmFactoryReset = false
@@ -80,8 +81,22 @@ struct SettingsTab: View {
                             // Engine
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Engine").font(Theme.Font.body(12.5, .semibold))
+                                if engine.rustEngineBundled && !EngineBackendPolicy.isAppStoreBuild {
+                                    LabeledSegment("Engine") {
+                                        SegmentedBar(selection: engineChoice, options: [(EngineBackend.rust, "Shared"), (EngineBackend.swift, "Swift")])
+                                    }
+                                    Text("FileID now runs its shared engine, the one the Windows and Linux apps use. Choose Swift to go back to the previous Mac engine for this release. Switching restarts the engine and stops any scan in progress.")
+                                        .font(Theme.Font.body(11))
+                                        .foregroundStyle(Theme.text3)
+                                }
+                                if let note = engine.fallback.note {
+                                    Text(note)
+                                        .font(Theme.Font.body(11))
+                                        .foregroundStyle(Theme.text2)
+                                }
                                 infoRow("Status", connectionLabel)
                                 if case .ready(let info) = engine.state {
+                                    infoRow("Running", info.engine == "rust" ? "Shared engine" : "Swift engine")
                                     infoRow("Version", info.version)
                                     infoRow("PID",     "\(info.pid)")
                                     infoRow("Workers", "\(info.workerCap)")
@@ -224,6 +239,15 @@ struct SettingsTab: View {
             Spacer()
         }
         .padding(.vertical, 1)
+    }
+
+    private var engineChoice: Binding<EngineBackend> {
+        Binding(get: { _ = engineBackendSetting; return engine.preferredBackend },
+                set: { choice in
+                    guard choice != engine.preferredBackend else { return }
+                    engine.switchBackend(to: choice)
+                    engineBackendSetting = choice.rawValue
+                })
     }
 
     private var connectionLabel: String {
