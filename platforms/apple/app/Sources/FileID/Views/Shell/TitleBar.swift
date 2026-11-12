@@ -39,11 +39,11 @@ struct TitleBar: View {
         .background(Theme.bg1.opacity(0.62), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Hairline() }
-        .confirmationDialog("Start over with this folder?", isPresented: $confirmWipe, titleVisibility: .visible) {
-            Button("Start over", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
+        .confirmationDialog("Erase FileID's library and scan this folder again?", isPresented: $confirmWipe, titleVisibility: .visible) {
+            Button("Erase and scan again", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Forgets everything FileID learned about this folder (tags, descriptions, people and search data), then scans it again from the start. Your files are not changed.")
+            Text("Forgets everything FileID learned about every location (tags, descriptions, named people, chapters and search data), then scans this folder again from the start. Your files are not changed.")
         }
     }
 
@@ -185,11 +185,11 @@ struct TitleBar: View {
             .overlay(alignment: .top) { Hairline(color: Theme.hairlineStrong) }
             if pickedURL != nil {
                 HStack(spacing: 8) {
-                    Button("Close folder") { folderOpen = false; engine.cancel(); engine.clearProgress(); pickedURL = nil }
+                    Button("Close folder") { folderOpen = false; engine.cancelScan(); engine.clearProgress(); pickedURL = nil }
                         .buttonStyle(.dsGhost).help("Stop working on this folder. What FileID learned is kept, and your files are not changed.")
                     Spacer()
                     Button("Start over…") { folderOpen = false; confirmWipe = true }
-                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger)).help("Forget everything FileID learned about this folder and scan it again. Your files are not changed.")
+                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger)).help("Erase everything FileID learned, in every location, and scan this folder again. Your files are not changed.")
                 }
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }

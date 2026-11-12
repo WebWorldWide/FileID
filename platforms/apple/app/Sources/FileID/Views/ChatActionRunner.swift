@@ -121,7 +121,7 @@ final class ChatActionRunner {
 
     func stop(_ action: ChatAction, engine: EngineClient) {
         switch action.kind {
-        case "scanFolder", "rescan": engine.cancelAutoPilot(); engine.cancel()
+        case "scanFolder", "rescan": engine.cancelScan()
         case "describeFiles": engine.deepAnalyzeCancel()
         default: engine.cancelRestructure()
         }
@@ -200,7 +200,7 @@ final class ChatActionRunner {
             }
         case "stopJob":
             let job = action.job ?? "all"
-            if job == "scan" || job == "all" { engine.cancelAutoPilot(); engine.cancel() }
+            if job == "scan" || job == "all" { engine.cancelScan() }
             if job == "describe" || job == "all" { engine.deepAnalyzeCancel() }
             if job == "organize" || job == "all" { engine.cancelRestructure() }
             if job == "moments" || job == "all" {

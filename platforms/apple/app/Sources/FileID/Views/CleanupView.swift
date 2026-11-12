@@ -26,11 +26,12 @@ struct CleanupView: View {
     @State private var exactPreviewPartial = false
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
-    /// Single-flight guard: the per-group/header "Delete" buttons have no
-    /// confirmation, so a rapid double-tap would otherwise trash the same files
-    /// twice (the 2nd fails "already in Trash" → a confusing "1 failed").
+    /// Single-flight guard: a rapid double-tap on the confirmation would
+    /// otherwise trash the same files twice (the 2nd fails "already in Trash").
     @State private var deleting = false
     @State private var confirmDelete: Bool = false
+    /// The one group a per-group "Move to Trash" button asked about; nil means the header button (every visible group).
+    @State private var confirmGroup: DuplicateGroup?
 
     /// Initialized lazily on first reload to non-keepers per group.
     @State private var selection: Set<Int64> = []
@@ -190,14 +191,16 @@ struct CleanupView: View {
                 .disabled(totalSelected == 0)
                 .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
                 .confirmationDialog(
-                    "Move \(totalSelected) file\(totalSelected == 1 ? "" : "s") to Trash?",
+                    "Move \(confirmCount) file\(confirmCount == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
                     titleVisibility: .visible
                 ) {
                     Button("Move to Trash", role: .destructive) {
-                        Task { await trashSelected(across: visibleGroups) }
+                        let targets = confirmGroup.map { [$0] } ?? visibleGroups
+                        confirmGroup = nil
+                        Task { await trashSelected(across: targets) }
                     }
-                    Button("Cancel", role: .cancel) { }
+                    Button("Cancel", role: .cancel) { confirmGroup = nil }
                 } message: {
                     Text(confirmDeleteMessage)
                 }
@@ -318,7 +321,7 @@ struct CleanupView: View {
                         onSelectAllExceptKeeper: { setGroupNonKeepers(group) },
                         onInvert: { invertGroup(group) },
                         onSkip: { skippedGroups.insert(group.id) },
-                        onDeleteGroup: { Task { await trashSelectedInGroup(group) } }
+                        onDeleteGroup: { confirmGroup = group; confirmDelete = true }
                     )
                 }
                 if let s = status {
@@ -392,7 +395,13 @@ struct CleanupView: View {
     }
 
     private func confirmDeleteSelected() {
+        confirmGroup = nil
         confirmDelete = true
+    }
+
+    private var confirmCount: Int {
+        guard let group = confirmGroup else { return selectionTotals(in: visibleGroups).count }
+        return group.files.filter { selection.contains($0.id) }.count
     }
 
     private func trashSelectedInGroup(_ g: DuplicateGroup) async {
@@ -409,14 +418,17 @@ struct CleanupView: View {
         var work: [DuplicateTrashItem] = []
         var keeperTagsByVictim: [Int64: [URL]] = [:]
         var verificationRejected = 0
+        var keepOneSkipped = 0
         for group in groupsToScan {
             let trashed = group.files.filter { selection.contains($0.id) }
             let kept = group.files.filter { !selection.contains($0.id) }
-            let exactKeeper = group.isSimilar ? nil : kept.first?.url
-            if !group.isSimilar && exactKeeper == nil {
-                verificationRejected += trashed.count
+            // Every group keeps at least one file, look-alikes included: the
+            // tab removes extra copies, never the last version of a photo.
+            if kept.isEmpty && !trashed.isEmpty {
+                keepOneSkipped += trashed.count
                 continue
             }
+            let exactKeeper = group.isSimilar ? nil : kept.first?.url
             for file in trashed {
                 work.append(DuplicateTrashItem(
                     id: file.id, url: file.url, size: file.sizeBytes,
@@ -477,13 +489,16 @@ struct CleanupView: View {
         var summary = "Moved \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
             + " to Trash · freed \(freed)"
             + tagSummary
+        if keepOneSkipped > 0 {
+            summary += " · \(keepOneSkipped) skipped: every file in a group was chosen, and each group keeps at least one"
+        }
         if verificationRejected > 0 {
             summary += " · \(verificationRejected) skipped because the file changed since the scan"
         }
         if trashFailures > 0 {
             summary += " · \(trashFailures) couldn't be moved to Trash"
         }
-        statusWarning = verificationRejected > 0 || trashFailures > 0
+        statusWarning = verificationRejected > 0 || trashFailures > 0 || keepOneSkipped > 0
         status = summary
         store.notifyChanged()
         reload()

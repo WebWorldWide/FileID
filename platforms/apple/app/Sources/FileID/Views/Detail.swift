@@ -8,13 +8,14 @@ struct Detail: View {
     let store: ReadStore
     let toolsSession: ToolsSession
     let activeTab: MainWindow.Tab
+    @AppStorage(AppSettings.spotlightKey) private var spotlightEnabled: Bool = AppSettings.spotlightDefault
     @Binding var pickedURL: URL?
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
     var pickFolder: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
-            if pickedURL == nil && store.totalFiles == 0 {
+            if pickedURL == nil && store.totalFiles == 0 && activeTab != .settings {
                 EmptyState(onPickFolder: pickFolder)
             } else {
                 pageHeader
@@ -25,12 +26,20 @@ struct Detail: View {
         .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
-            if new == .completed {
+            if new == .completed, spotlightEnabled {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
             }
         }
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+            guard spotlightEnabled else { return }
             Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+        }
+        .onChange(of: spotlightEnabled) { _, on in
+            if on {
+                Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+            } else {
+                SpotlightIndexer.wipe()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

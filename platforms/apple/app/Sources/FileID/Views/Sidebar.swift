@@ -29,7 +29,7 @@ struct Sidebar: View {
 
             if shouldShowEngineSection {
                 VStack(alignment: .leading, spacing: 8) {
-                    EngineStatusRow(state: engine.state)
+                    EngineStatusRow(state: engine.state, onRestart: { engine.start() })
                     if let err = engine.lastError { engineErrorRow(err) }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 10)
@@ -189,7 +189,7 @@ struct Sidebar: View {
     }
 
     @ViewBuilder
-    /// Readable titles for engine notices; unknown kinds keep their code so they stay searchable in logs.
+    /// Readable titles for engine notices; the code stays in the log line, not on screen.
     static func errorTitle(_ kind: String) -> String {
         switch kind {
         case "discovery_partial": return "Some files were left out"
@@ -198,7 +198,11 @@ struct Sidebar: View {
         case "db_unavailable": return "The library couldn't be opened"
         case "model_load_failed": return "An AI model didn't load"
         case "restructure_busy", "restructure_already_running": return "A folder move is already running"
-        default: return kind
+        case "engine_exited": return "FileID's helper stopped"
+        case "bookmark_unavailable": return "FileID can't reach that folder"
+        case "ipc_frame_too_large": return "Too much to show at once"
+        case "unknown_model", "prewarm_failed": return "The AI model couldn't be used"
+        default: return "Something went wrong"
         }
     }
 

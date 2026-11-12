@@ -167,7 +167,7 @@ struct PipelineBlock: View {
                 } else {
                     Button { engine.pause() } label: { Label("Pause", systemImage: "pause.fill").frame(maxWidth: .infinity) }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 }
-                Button("Stop") { engine.cancel() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
+                Button("Stop") { engine.cancelScan() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
             } else if store.totalFiles > 0 || progress != nil {
                 Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))

@@ -627,6 +627,7 @@ public final class EngineClient {
             if !response.jobs.isEmpty { catalogJobs = response.jobs }
         case .ready(let info):
             state = .ready(info)
+            if lastError?.kind == "engine_exited" { lastError = nil }
             restoreSavedFolderAccess()
             // Do NOT clear the respawn budget merely on reaching Ready — a
             // Ready→immediate-crash flap would reset it every cycle and never trip
@@ -720,6 +721,12 @@ public final class EngineClient {
             // emits its own terminal event.
             if e.kind == "face_clustering_busy" || e.kind == "deep_analyze_already_running" {
                 Self.debug("engine bounce (benign): \(e.kind)")
+                return
+            }
+            // The user's own Cancel, a repeated click and a declined license
+            // are not failures; the request they belong to already told them.
+            if e.kind == "prewarm_cancelled" || e.kind == "scan_already_queued" || e.kind == "model_license_not_accepted" {
+                Self.debug("engine notice (user-initiated): \(e.kind)")
                 return
             }
             lastError = e
@@ -1134,6 +1141,12 @@ public final class EngineClient {
                                           rootDisplay: displayPath,
                                           rescan: false, excludedPaths: nil)) {
                     client.beginScanActivity()
+                } else {
+                    client.lastError = EngineError(
+                        kind: "engine_exited",
+                        message: "The scan couldn't start because FileID's helper isn't running. Wait a moment and press Scan again."
+                    )
+                    client.cancelAutoPilot()
                 }
             }
         }
@@ -1150,6 +1163,14 @@ public final class EngineClient {
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }
+    /// Stops the scan only; a folder move or Describe Files run keeps going.
+    public func cancelScan() {
+        isPaused = false
+        send(.cancelScan)
+        cancelAutoPilot()
+    }
+
+    /// Stops everything the engine is doing (Chat's "stop all").
     public func cancel() {
         isPaused = false
         send(.cancelScan)
@@ -1171,6 +1192,7 @@ public final class EngineClient {
     /// purge all UserDefaults, and exit the macOS app immediately.
     public func factoryResetAndQuit() {
         terminateRunningEngine()
+        SpotlightIndexer.wipe()
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
             try? fm.removeItem(at: AppSupportPath.fileID)

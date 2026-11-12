@@ -24,6 +24,14 @@ struct PeopleView: View {
     @State private var unknownMode: Bool = false
     @State private var unknownChecked: Set<Int64> = []
     @State private var mergeStatus: String?
+    /// A card dropped onto another; confirmed before anything is merged.
+    @State private var pendingDragMerge: PendingDragMerge?
+    private struct PendingDragMerge: Identifiable {
+        let source: Int64
+        let target: Int64
+        let targetName: String
+        var id: String { "\(source)-\(target)" }
+    }
 
     @State private var suggestions: [MergeSuggestionPair] = []
     @State private var suggestionsLoading: Bool = false
@@ -77,6 +85,27 @@ struct PeopleView: View {
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
         .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: reload))
+        .confirmationDialog(
+            "Merge \"\(pendingDragMerge?.targetName ?? "")\" with the dropped person?",
+            isPresented: Binding(get: { pendingDragMerge != nil }, set: { if !$0 { pendingDragMerge = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Merge", role: .destructive) {
+                guard let merge = pendingDragMerge else { return }
+                pendingDragMerge = nil
+                Task {
+                    if let n = await CatalogWrites.merge(engine, store: store, target: merge.target, sources: [merge.source]) {
+                        mergeStatus = "Merged into \(merge.targetName) (\(n) photos)."
+                    } else {
+                        mergeStatus = "The merge didn't go through. Try again in a moment."
+                    }
+                    reload()
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingDragMerge = nil }
+        } message: {
+            Text("Their photos become one person. This can't be undone from here.")
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -228,9 +257,15 @@ struct PeopleView: View {
             }
             if let faceRefresh { FaceRefreshRow(model: faceRefresh) }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
-                Text("\(count) more face\(count == 1 ? " is" : "s are") waiting to be grouped. People you marked as unknown are left out.")
-                    .font(Theme.Font.body(13.5))
-                    .foregroundStyle(Theme.text3)
+                HStack(spacing: 10) {
+                    Text("\(count) more face\(count == 1 ? " is" : "s are") waiting to be grouped. People you marked as unknown are left out.")
+                        .font(Theme.Font.body(13.5))
+                        .foregroundStyle(Theme.text3)
+                    Button("Group faces") { engine.runFaceClustering() }
+                        .buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .disabled(engine.faceClusteringInFlight)
+                        .help("Sort the waiting faces into people. Names you gave are kept.")
+                }
             }
             if mergeMode || unknownMode {
                 bulkActionStrip
@@ -497,9 +532,8 @@ struct PeopleView: View {
                                 personName: person.displayName,
                                 engine: engine,
                                 store: store,
-                                onMerged: { count in
-                                    mergeStatus = "Merged into \(person.displayName) (\(count) photos)."
-                                    reload()
+                                onDropped: { sourceID in
+                                    pendingDragMerge = PendingDragMerge(source: sourceID, target: person.id, targetName: person.displayName)
                                 }
                             ))
                             // Spring entrance: cards scale + fade in when
@@ -579,6 +613,7 @@ struct PeopleView: View {
                 icon: "person.crop.circle.badge.questionmark",
                 title: "\(totalFacePrints) faces found",
                 message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
+                primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
                 secondaryMessage: "Then click a card to type that person's name."
             )
             if engine.faceClusteringInFlight {
@@ -656,7 +691,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     let personName: String
     let engine: EngineClient
     let store: ReadStore
-    let onMerged: @Sendable @MainActor (Int) -> Void
+    let onDropped: @MainActor (Int64) -> Void
 
     func body(content: Content) -> some View {
         if enabled {
@@ -666,12 +701,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
                     guard let s = items.first,
                           let sourceID = Int64(s),
                           sourceID != personID else { return false }
-                    let targetID = personID
-                    let completion = onMerged
-                    Task { [engine, store] in
-                        let n = await CatalogWrites.merge(engine, store: store, target: targetID, sources: [sourceID]) ?? 0
-                        completion(n)
-                    }
+                    onDropped(sourceID)
                     return true
                 } isTargeted: { _ in }
         } else {

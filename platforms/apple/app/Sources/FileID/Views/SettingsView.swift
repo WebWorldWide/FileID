@@ -20,6 +20,7 @@ struct SettingsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 AppearanceCard()
+                PrivacyCard()
 
                 LocationsCard(engine: engine)
 
@@ -557,6 +558,28 @@ extension ModelInstallCard {
     }
 }
 
+
+/// What leaves FileID's own library: Spotlight gets names, tags and descriptions.
+struct PrivacyCard: View {
+    @AppStorage(AppSettings.spotlightKey) private var spotlight: Bool = AppSettings.spotlightDefault
+    var body: some View {
+        Panel(padding: 16) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Privacy").font(Theme.Font.body(14, .semibold))
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show results in Spotlight").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+                        MetaText("File names, tags and descriptions FileID wrote become searchable with ⌘Space by anyone using this Mac. Turning this off removes them from Spotlight.")
+                    }
+                    Spacer()
+                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(.switch)
+                        .accessibilityLabel("Show results in Spotlight")
+                }
+                MetaText("Nothing is sent anywhere. The only network use is a model download you start yourself.")
+            }
+        }
+    }
+}
 
 /// Prototype v3 appearance: lava lamp Full / Calm / Off, and the page text size.
 struct AppearanceCard: View {
