@@ -4807,3 +4807,9 @@ Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `
 - **Eigen pin swapped to upstream's v1.22.1 fix.** GitLab regenerated Eigen's archive, so the 1.22.0 SHA-1 pin in `cmake/deps.txt` no longer matched. The build script takes upstream's own fix from v1.22.1: the same Eigen commit from the GitHub `eigen-mirror`, with its SHA-1. That is the only `deps.txt` change between the two releases. The script refuses to run if the original line is not there exactly once.
 - **LF line endings for the ORT source.** The source is checked out with `core.autocrlf=false` and `core.eol=lf`, so ORT's patches apply.
 - **GNU patch from Git for Windows.** CMake is pointed at Git for Windows' patch through `Patch_EXECUTABLE`. Hosted runners find Strawberry Perl's patch.exe 2.5.9 first, and it crashes on ORT's arm64 cpuinfo patch.
+
+## 2026-11-12 — Timeline conformance stages a real model; MLX kernel warm-up dropped
+
+- **Real model, skipped when absent.** MLX cannot load a stub, so the timeline cases use a real Qwen3-VL 2B install. `conformance.py` cases carry `"model": {"repo": ...}`; the harness only reads the install (`$FILEID_CONFORMANCE_MODELS`, else `~/Documents/huggingface`), clones it into scratch and points both engines there, so neither writes an install record into the original. Hosted CI has no model and skips them; run them on a Mac with one installed.
+- **No warm-up.** A once-per-process test-card generation beside the first video's frame decode cost 0.6-1.1 s and removed nothing: on 4 clips the first caption took 1.7-1.9 s with and without it (quick timeline 15.1 s with CLIP either way, 23-37 s without CLIP at load 22-35). The one-time 5-6 s from the Stage 8 measurement did not reproduce on this branch. Revisit only if a cold first caption shows up again on a quiet Mac.
+
