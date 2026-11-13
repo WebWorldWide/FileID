@@ -1041,10 +1041,17 @@ fn twin_reuse_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_TWIN_REUSE").map_or(true, |v| v.trim() != "0"))
 }
 
+/// One file's analysis may take this long before it is recorded as failed.
+const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How long a copy waits for the first copy's analysis before analyzing
-/// itself. The owner is ahead of it in the queue, so this only triggers when
-/// the owner's own 60 s per-file timeout fires.
-const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(120);
+/// itself. Shorter than `PER_FILE_TIMEOUT`, and spent before that timer
+/// starts, so waiting can never fail the copy.
+const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
+
+/// A copy whose owner failed claims the hash again this many times (so the
+/// copies behind it wait on it) before it analyzes itself unshared.
+const TWIN_RECLAIM_LIMIT: u32 = 2;
 
 /// How long one scan file may wait for CPU/memory admission before it is
 /// recorded as failed. Searches, residents and low free memory are transient;
@@ -1312,6 +1319,8 @@ impl Tagger {
             let models = self.models.clone();
             let scheduler = self.scheduler.clone();
             let twins = self.twins.clone();
+            let budget = byte_budget.clone();
+            let legacy = self.legacy_hashes;
 
             tokio::spawn(async move {
                 // Drop per-worker thread priority to LOWEST so foreground
@@ -1341,6 +1350,13 @@ impl Tagger {
                         }
                         continue;
                     }
+                    // A copy of an image another worker is analyzing waits here,
+                    // holding no frame, no admission and no per-file timer.
+                    let Some(predecoded) =
+                        settle_twin(predecoded, &twins, &coord, &budget, legacy, TWIN_WAIT_PATIENCE).await
+                    else {
+                        break;
+                    };
                     let file_for_failure = predecoded.file.clone();
                     let path_for_timeout = &file_for_failure.path;
                     let twin_hash = predecoded
@@ -1375,9 +1391,9 @@ impl Tagger {
                         Err((message, 0.0))
                     } else {
                         let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord, &twins),
+                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
                         ));
-                        match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                        match tokio::time::timeout(PER_FILE_TIMEOUT, fut).await {
                             Ok(Ok(t)) => Ok(t),
                             Ok(Err(_panic)) => {
                                 tracing::error!(
@@ -1433,6 +1449,53 @@ impl Tagger {
 
         drop(out_tx);
         (out_rx, decoder_join)
+    }
+}
+
+/// Settles a copy that is waiting on the first copy of its image. Returns the
+/// item as `Ready` when the owner's analysis can be copied; otherwise reads
+/// and decodes the copy now (the decoder skipped that) so it is analyzed
+/// itself. `None` means the scan was cancelled.
+async fn settle_twin(
+    mut predecoded: PreDecoded,
+    twins: &Arc<TwinRegistry>,
+    coord: &ScanCoordinator,
+    budget: &Arc<PredecodeBudget>,
+    legacy: bool,
+    patience: Duration,
+) -> Option<PreDecoded> {
+    let mut reclaims = 0;
+    loop {
+        let TwinClaim::Pending(notify) = &predecoded.twin else {
+            return Some(predecoded);
+        };
+        let hash = predecoded.content_hash.expect("a pending twin claim carries a hash");
+        let outcome = tokio::select! {
+            ok = twins.wait(&hash, notify) => Some(ok),
+            _ = tokio::time::sleep(patience) => None,
+            _ = coord.wait_cancelled() => return None,
+        };
+        if outcome == Some(true) {
+            predecoded.twin = TwinClaim::Ready;
+            return Some(predecoded);
+        }
+        // The owner failed: claim again, so one of the remaining copies
+        // becomes the owner. The owner is only slow: analyze unshared.
+        reclaims += 1;
+        let share = (outcome.is_some() && reclaims <= TWIN_RECLAIM_LIMIT).then(|| twins.clone());
+        let file = predecoded.file;
+        let fallback = file.clone();
+        let (coord, budget) = (coord.clone(), budget.clone());
+        let decoded = tokio::task::spawn_blocking(move || {
+            let _thread_guard = DecoderThreadGuard::enter();
+            predecode_one(file, &coord, &budget, legacy, share.as_deref())
+        })
+        .await;
+        predecoded = match decoded {
+            Ok(Some(item)) => item,
+            Ok(None) => return None,
+            Err(_) => PreDecoded::failed(fallback, "the file could not be read (decoder error)"),
+        };
     }
 }
 
@@ -1631,7 +1694,7 @@ fn run_decoder_thread(
         );
         let fallback = file.clone();
         let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            predecode_one(file, &coord, &budget, legacy, &twins)
+            predecode_one(file, &coord, &budget, legacy, Some(&twins))
         })) {
             Ok(Some(item)) => item,
             Ok(None) => return,
@@ -1667,7 +1730,7 @@ fn predecode_one(
     coord: &ScanCoordinator,
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
-    twins: &TwinRegistry,
+    twins: Option<&TwinRegistry>,
 ) -> Option<PreDecoded> {
     #[cfg(test)]
     assert!(
@@ -1680,7 +1743,7 @@ fn predecode_one(
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if mac::enabled() {
         let _ = (coord, budget);
-        return Some(mac::predecode(file, legacy));
+        return Some(mac::predecode(file, legacy, twins));
     }
     {
         let decode_started = Instant::now();
@@ -1773,8 +1836,8 @@ fn predecode_one(
 
         // Only a full SHA-256 of an image is an identity worth sharing; a
         // ready twin needs no frame at all.
-        let twin = match (content_hash, file.kind) {
-            (Some(hash), FileKind::Image)
+        let twin = match (content_hash, file.kind, twins) {
+            (Some(hash), FileKind::Image, Some(twins))
                 if twin_reuse_enabled()
                     && !file.online_only
                     && file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
@@ -1783,12 +1846,15 @@ fn predecode_one(
             }
             _ => TwinClaim::None,
         };
+        // A copy of an image that is being analyzed right now is not decoded
+        // either: the worker waits for the owner and decodes only if it fails.
+        let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
 
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
         // hydrates the file picks up its content.
-        let mut decoded = if file.online_only || matches!(twin, TwinClaim::Ready) {
+        let mut decoded = if file.online_only || awaits_twin {
             None
         } else {
             match file.kind {
@@ -2369,7 +2435,6 @@ async fn process_file_predecoded(
     clip_sem: &Arc<Semaphore>,
     worker_idx: usize,
     coord: &ScanCoordinator,
-    twins: &TwinRegistry,
 ) -> TaggedFile {
     // `_budget` keeps the byte-budget reservation alive while this worker
     // holds the frame; it releases when the function returns.
@@ -2460,18 +2525,8 @@ async fn process_file_predecoded(
     // A byte-identical image already analyzed (earlier scan, or the copy
     // ahead of this one in the queue): keep the file's own EXIF, year and
     // camera chips, and let the writer copy the twin's rows.
-    let reuse = match &twin {
-        TwinClaim::Ready => true,
-        TwinClaim::Pending(notify) => {
-            let hash = content_hash.expect("a pending twin claim carries a hash");
-            tokio::select! {
-                ok = twins.wait(&hash, notify) => ok,
-                _ = tokio::time::sleep(TWIN_WAIT_PATIENCE) => false,
-                _ = coord.wait_cancelled() => false,
-            }
-        }
-        TwinClaim::Owner | TwinClaim::None => false,
-    };
+    // (A copy that was waiting on its owner has been settled by the worker.)
+    let reuse = matches!(twin, TwinClaim::Ready);
     if reuse && matches!(file.kind, FileKind::Image) {
         if let Some((cam, lat, lon, captured)) = exif {
             tagged.camera_model = cam;
@@ -3701,6 +3756,140 @@ mod tests {
         assert!(failed.is_empty(), "files failed during a search: {failed:?}");
     }
 
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    fn twin_image(dir: &std::path::Path, name: &str, bytes: &[u8]) -> DiscoveredFile {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: bytes.len() as u64,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40]))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[test]
+    fn a_copy_of_an_image_in_flight_is_hashed_but_not_decoded() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-pending-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        assert!(matches!(owner.twin, TwinClaim::Owner));
+        assert!(matches!(owner.decoded, Some(Ok(_))));
+        let copy = predecode_one(twin_image(&dir, "b.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        assert!(matches!(copy.twin, TwinClaim::Pending(_)));
+        assert!(copy.decoded.is_none() && copy.budget.is_none(), "the waiting copy holds no frame");
+        assert_eq!(copy.content_hash, owner.content_hash);
+        let unshared = predecode_one(twin_image(&dir, "c.png", &png), &coord, &budget, false, None).unwrap();
+        assert!(matches!(unshared.twin, TwinClaim::None));
+        assert!(matches!(unshared.decoded, Some(Ok(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[tokio::test]
+    async fn a_waiting_copy_reuses_a_finished_owner_and_decodes_only_when_it_failed() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-settle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20));
+        let pending = |twins: &Arc<TwinRegistry>, name: &str| {
+            let item = predecode_one(twin_image(&dir, name, &png), &coord, &budget, false, Some(twins)).unwrap();
+            assert!(matches!(item.twin, TwinClaim::Pending(_)));
+            item
+        };
+        let patience = Duration::from_secs(30);
+
+        // The owner finishes: the copy is ready and was never decoded.
+        let twins = TwinRegistry::new();
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let hash = owner.content_hash.unwrap();
+        let copy = pending(&twins, "b.png");
+        let publisher = {
+            let twins = twins.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                twins.publish(hash, true);
+            })
+        };
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        publisher.await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::Ready));
+        assert!(settled.decoded.is_none());
+
+        // The owner fails: the copy claims the image, is decoded now, and the
+        // copies behind it wait on it instead of on the failed owner.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let copy = pending(&twins, "b.png");
+        twins.publish(hash, false);
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::Owner));
+        assert!(matches!(settled.decoded, Some(Ok(_))));
+        assert!(matches!(twins.claim(hash), TwinClaim::Pending(_)));
+
+        // The owner is only slow: the copy is analyzed on its own, unshared.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let copy = pending(&twins, "b.png");
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, Duration::from_millis(20)).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::None));
+        assert!(matches!(settled.decoded, Some(Ok(_))));
+
+        // A cancelled scan stops waiting.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let copy = pending(&twins, "b.png");
+        coord.request_cancel();
+        assert!(settle_twin(copy, &twins, &coord, &budget, false, patience).await.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_waiting_copy_gives_up_before_the_per_file_timeout() {
+        assert!(TWIN_WAIT_PATIENCE < PER_FILE_TIMEOUT);
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[tokio::test]
+    async fn identical_images_all_complete_when_no_analysis_can_be_shared() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (tx, rx) = mpsc::channel(16);
+        // No models: every analysis publishes "not reusable", so each copy in
+        // turn claims the image and analyzes itself.
+        let tagger = Tagger::new(ScanCoordinator::new(), 3, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        for i in 0..6 {
+            tx.send(twin_image(&dir, &format!("copy{i}.png"), &png)).await.unwrap();
+        }
+        drop(tx);
+        let mut rows = Vec::new();
+        while let Some(row) = tokio::time::timeout(Duration::from_secs(20), out.recv()).await.expect("no copy hangs") {
+            rows.push(row);
+        }
+        decoder_join.await.unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|row| !row.failed && !row.reuse_twin && row.phash.is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_moved_file_reaches_the_writer_unread() {
         let (tx, rx) = mpsc::channel(8);
@@ -3990,7 +4179,7 @@ mod tests {
             &ScanCoordinator::new(),
             &PredecodeBudget::new(256 << 20),
             false,
-            &TwinRegistry::new(),
+            Some(&TwinRegistry::new()),
         )
         .expect("not cancelled");
         assert!(item.decoded.is_none(), "a missing frame runtime must not mark the video failed");

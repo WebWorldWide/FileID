@@ -400,6 +400,9 @@ impl DbWriter {
             let mut twin_unavailable = tx
                 .prepare_cached("UPDATE files SET failed = 1, error_message = ?2 WHERE id = ?1")
                 .context("preparing twin unavailable update")?;
+            let mut catalog_revision = tx
+                .prepare_cached(CATALOG_REVISION_SQL)
+                .context("preparing catalog revision")?;
             let mut failure_record = tx
                 .prepare_cached(crate::pipeline::catch_up::RECORD_FAILURE_SQL)
                 .context("preparing failure memory")?;
@@ -602,7 +605,7 @@ impl DbWriter {
                     // The Mac face pipeline records its own file revision when it
                     // extracts Vision faces; a portable one here would mark them stale.
                     if f.vision_faces.is_none() {
-                    tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
+                        catalog_revision.execute(params![file_id, source_revision, f.scanned_unix])?;
                     }
                     for (face_index, face) in f.faces.iter().enumerate() {
                         let mut bbox = serde_json::json!({
@@ -752,7 +755,13 @@ impl DbWriter {
                         twin_clip.execute(params![file_id, twin_id]).with_context(|| format!("twin clip copy for {}", redacted()))?;
                         twin_ocr.execute(params![file_id, twin_id]).with_context(|| format!("twin ocr copy for {}", redacted()))?;
                         let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
-                        tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
+                        // The Mac scan (`vision_faces`) stores faces without vectors
+                        // and leaves the file revision to the Mac face pipeline; its
+                        // copies are stored the same way.
+                        let mac_scan = f.vision_faces.is_some();
+                        if !mac_scan {
+                            catalog_revision.execute(params![file_id, source_revision, f.scanned_unix])?;
+                        }
                         let faces: Vec<TwinFace> = twin_faces
                             .query_map(params![twin_id], |r| {
                                 Ok(TwinFace {
@@ -769,6 +778,7 @@ impl DbWriter {
                             .collect::<rusqlite::Result<Vec<_>>>()
                             .with_context(|| format!("twin faces read for {}", redacted()))?;
                         for face in faces {
+                            let face = if mac_scan { face.without_vector() } else { face };
                             let new_id: i64 = twin_face_insert
                                 .query_row(
                                     params![
@@ -1089,8 +1099,12 @@ const fn const_format_twin_lookup() -> &'static str {
 }
 
 const TWIN_FILES_SQL: &str = r#"
-    UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text
-    FROM (SELECT phash, aesthetic, has_faces, has_text FROM files WHERE id = ?2) AS t
+    UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text,
+        camera_model = COALESCE(t.camera_model, files.camera_model),
+        location_lat = COALESCE(t.location_lat, files.location_lat),
+        location_lon = COALESCE(t.location_lon, files.location_lon)
+    FROM (SELECT phash, aesthetic, has_faces, has_text, camera_model, location_lat, location_lon
+          FROM files WHERE id = ?2) AS t
     WHERE files.id = ?1
 "#;
 
@@ -1132,6 +1146,17 @@ struct TwinFace {
     model: Option<String>,
     processing: Option<String>,
 }
+
+impl TwinFace {
+    /// The face as a scan stores it before any vector is extracted.
+    fn without_vector(self) -> Self {
+        Self { print_data: Vec::new(), embedding: None, model: None, processing: None, ..self }
+    }
+}
+
+const CATALOG_REVISION_SQL: &str = "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) \
+     VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at \
+     WHERE catalog_revisions.revision!=excluded.revision";
 
 /// Convert a slice of f32 to little-endian bytes for BLOB storage.
 /// Matches the macOS GRDB layout exactly (CoreML / ORT both produce
@@ -2768,6 +2793,50 @@ mod twin_reuse_tests {
         assert_eq!((faces, model.as_str()), (1, "fixture-weight-hash"));
         let total_faces: i64 = db.query_row("SELECT count(*) FROM face_prints", [], |r| r.get(0)).unwrap();
         assert_eq!(total_faces, 2, "the twin keeps its own face row");
+    }
+
+    #[test]
+    fn a_copy_takes_the_camera_and_location_its_bytes_share_with_the_twin() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        let mut twin = analyzed("/lib/a.jpg", hash);
+        twin.camera_model = Some("iPhone 15 Pro".to_owned());
+        twin.location_lat = Some(48.2);
+        twin.location_lon = Some(16.4);
+        writer.flush(&mut vec![twin, reused("/lib/b.jpg", hash, "Year_2021")], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let copy: (String, f64, f64) = db
+            .query_row("SELECT camera_model, location_lat, location_lon FROM files WHERE path_text = '/lib/b.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(copy, ("iPhone 15 Pro".to_owned(), 48.2, 16.4));
+        let revisions: i64 = db.query_row("SELECT count(*) FROM catalog_revisions r JOIN files f ON f.id = r.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revisions, 1);
+    }
+
+    #[test]
+    fn a_mac_scan_copy_stores_its_faces_without_vectors_or_a_file_revision() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [12u8; 32];
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.vision_faces = Some(Vec::new());
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash), copy], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let face: (Vec<u8>, Option<Vec<u8>>, Option<String>, Option<String>, Option<String>, String) = db
+            .query_row(
+                "SELECT fp.print_data, fp.arcface_embedding, fp.embedding_model, fp.processing_version, fp.source_revision, fp.bbox \
+                 FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.path_text = '/lib/b.jpg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert!(face.0.is_empty() && face.1.is_none() && face.2.is_none() && face.3.is_none() && face.4.is_none());
+        assert!(!face.5.is_empty(), "the face box is copied");
+        let revisions: i64 = db.query_row("SELECT count(*) FROM catalog_revisions r JOIN files f ON f.id = r.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revisions, 0, "the Mac face pipeline records the file revision itself");
+        let tags: i64 = db.query_row("SELECT count(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 3);
     }
 
     #[test]

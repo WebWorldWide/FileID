@@ -10,10 +10,10 @@
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
-    record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, Arc, DiscoveredFile, Duration,
-    FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering, PreDecoded, TaggedFile, VisionFace,
-    STATS_CLIP_US, STATS_DECODED_FILES, STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US,
-    STATS_VISION_US,
+    parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
+    DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
+    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
+    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
 };
 use crate::apple::scan;
 use crate::pipeline::audio_meta::AudioTags;
@@ -109,15 +109,29 @@ fn stored_text(text: Option<String>) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.chars().take(STORED_TEXT_CHARS).collect())
 }
 
-/// Reads, hashes and decodes one file on a decoder thread.
-pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
+/// Reads, hashes and decodes one file on a decoder thread. A byte-identical
+/// copy of an image that is already analyzed, or being analyzed, is hashed
+/// only: the writer copies the twin's rows (pipeline/twin_reuse.rs).
+pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
+    // `bytes` is present only for a full SHA-256, the one identity worth sharing.
+    let twin = match (content_hash, file.kind, twins, bytes.as_deref()) {
+        (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => twins.claim(hash),
+        _ => TwinClaim::None,
+    };
+    let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
+    // The copy keeps its own capture time for its date and Year tag.
+    let exif = match bytes.as_deref() {
+        Some(bytes) if awaits_twin => Some(parse_exif_fields(bytes).unwrap_or((None, None, None, None))),
+        _ => None,
+    };
     let mut frame = Frame { image: None, audio: AudioTags::default(), large_pdf: false };
     let mut decoded = None;
     let mut doc_text = None;
     if !file.online_only {
         match file.kind {
+            FileKind::Image if awaits_twin => {}
             FileKind::Image => match scan::decode_image(&file.path, file.size_bytes) {
                 Some(image) => frame.image = Some(Arc::new(image)),
                 None => decoded = Some(Err(anyhow::anyhow!(DECODE_FAILED))),
@@ -153,8 +167,8 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
         audio_tags: Vec::new(),
         content_hash,
         legacy_hashes,
-        exif: None,
-        twin: crate::pipeline::twin_reuse::TwinClaim::None,
+        exif,
+        twin,
         budget: None,
         mac: Some(frame),
     }
@@ -220,7 +234,7 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
 /// `Tagging.processFile` for one file.
 pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) -> TaggedFile {
     let started = Instant::now();
-    let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, mac, .. } = predecoded;
+    let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, exif, twin, mac, .. } = predecoded;
     let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
     let mut row = TaggedFile::bare(&file);
     // A cloud placeholder is catalogued from its metadata only (reading it
@@ -231,6 +245,14 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     }
     row.content_hash = content_hash;
     row.legacy_hashes = legacy_hashes;
+    if file.kind == FileKind::Image && matches!(twin, TwinClaim::Ready) {
+        twin_row(&mut row, &file, exif);
+        row.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        STATS_TWIN_REUSED.fetch_add(1, Ordering::Relaxed);
+        record_stage(&STATS_TOTAL_US, started);
+        maybe_emit_stats();
+        return row;
+    }
     match file.kind {
         FileKind::Image => image_row(&mut row, &file, decoded, frame.image, models).await,
         FileKind::Video => {
@@ -280,6 +302,21 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     record_stage(&STATS_TOTAL_US, started);
     maybe_emit_stats();
     row
+}
+
+/// A copy of an analyzed image, as the Swift engine's `Tagging.twinCopy`
+/// builds it: the twin's model output (copied by the writer, with the camera
+/// and location the same bytes carry) under this file's own dates and Year tag.
+fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields>) {
+    let captured = exif.and_then(|(_, _, _, captured)| captured);
+    let created = captured.or(file.created_unix);
+    row.created_unix = created;
+    row.captured_from_exif = captured.is_some();
+    row.tags = extra_tags(created, None).into_iter().map(|tag| (tag, None)).collect();
+    // Marks the row as the Mac scan's for the writer: copied faces stay
+    // without vectors and the file revision is left to the Mac face pipeline.
+    row.vision_faces = Some(Vec::new());
+    row.reuse_twin = true;
 }
 
 /// Document keywords and the BGE embedding, as `Tagging.processDoc` stores them.
@@ -425,6 +462,35 @@ mod tests {
         assert_eq!(tags, vec!["Year_2024".to_string(), "Sony".to_string()]);
         assert!(extra_tags(Some(100.0), Some("Mystery Cam")).is_empty());
         assert!(extra_tags(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_twin_row_keeps_its_own_dates_and_leaves_the_analysis_to_the_writer() {
+        let file = DiscoveredFile {
+            path: "/lib/copy.jpg".into(),
+            kind: FileKind::Image,
+            size_bytes: 10,
+            modified_unix: 5.0,
+            // 2019-07-01T12:00:00Z
+            created_unix: Some(1_561_982_400.0),
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        };
+        let mut row = TaggedFile::bare(&file);
+        // 2024-06-01T12:00:00Z
+        twin_row(&mut row, &file, Some((Some("iPhone 15".into()), Some(1.0), Some(2.0), Some(1_717_243_200.0))));
+        assert!(row.reuse_twin && row.captured_from_exif);
+        assert_eq!(row.created_unix, Some(1_717_243_200.0));
+        assert_eq!(row.tags, vec![("Year_2024".to_string(), None)]);
+        assert!(row.camera_model.is_none() && row.location_lat.is_none(), "camera and location come from the twin row");
+        assert!(!row.tags_evaluated && !row.faces_evaluated && !row.ocr_stage_ran, "nothing of an earlier scan is deleted before the copy");
+        assert_eq!(row.vision_faces, Some(Vec::new()));
+
+        let mut plain = TaggedFile::bare(&file);
+        twin_row(&mut plain, &file, Some((None, None, None, None)));
+        assert!(!plain.captured_from_exif);
+        assert_eq!(plain.tags, vec![("Year_2019".to_string(), None)]);
     }
 
     #[test]
