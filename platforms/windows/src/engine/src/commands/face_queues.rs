@@ -102,9 +102,10 @@ fn centroid<'a>(vectors: impl IntoIterator<Item = &'a [f32]>) -> Option<Vec<f32>
 fn people(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<Vec<Person>> {
     let mut out: Vec<Person> = Vec::new();
     let mut statement = conn.prepare(&format!(
-        "SELECT p.id, {DISPLAY_P} IS NOT NULL, (SELECT COUNT(*) FROM face_prints a WHERE a.person_id=p.id), p.representative_face_id, \
+        "WITH sizes AS (SELECT person_id, COUNT(*) AS faces FROM face_prints WHERE person_id IS NOT NULL GROUP BY person_id) \
+         SELECT p.id, {DISPLAY_P} IS NOT NULL, sizes.faces, p.representative_face_id, \
                 fp.id, COALESCE(fp.face_quality,0), fp.arcface_embedding \
-         FROM face_prints fp JOIN persons p ON p.id=fp.person_id \
+         FROM face_prints fp JOIN persons p ON p.id=fp.person_id JOIN sizes ON sizes.person_id=p.id \
          WHERE COALESCE(p.is_unknown,0)=0 AND COALESCE(fp.excluded,0)=0 AND length(fp.arcface_embedding)=512 \
            AND fp.embedding_model=?1 AND fp.processing_version=?2 ORDER BY p.id, fp.id"
     ))?;
