@@ -149,8 +149,8 @@ impl QueryChannel {
     }
 }
 
-/// The most rows one read returns (the preview's full-library list).
-pub const QUERY_MAX_ROWS: i64 = 20_000;
+/// The most rows one read returns, whatever a caller asks for.
+const QUERY_MAX_ROWS: i64 = 20_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct QuerySpec {
@@ -162,6 +162,9 @@ pub struct QuerySpec {
     /// A location's `RootScope::param`; `None` reads every location.
     pub scope: Option<String>,
     pub channel: QueryChannel,
+    /// A total counted moments ago for this same query. A live reload during
+    /// a scan passes it so the full count is not run again for every batch.
+    pub known_total: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +319,9 @@ impl RespawnBudget {
 }
 
 const THUMB_QUEUE_CAP: usize = 64;
+/// Background decodes (Cleanup tiles, face crops, pickers) waiting at once.
+/// Past this, abandoned work is purged first and then the oldest is dropped.
+const BACKGROUND_QUEUE_CAP: usize = 1024;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
 const MAX_ENGINE_LOG_BYTES: usize = 1024 * 1024;
@@ -674,6 +680,15 @@ impl EngineClient {
         rx
     }
 
+    /// A thumbnail in arrival order that is skipped once `cancel` is set (its
+    /// tile was destroyed), so a rebuilt list never decodes for dead widgets.
+    pub fn request_thumbnail(&self, path: String, dim: i32, video: bool, cancel: CancelToken) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
+        let (reply, rx) = async_channel::bounded(1);
+        self.thumbs.push_background(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: Some(cancel) });
+        rx
+    }
+
     /// Any bounded decode (face crops) on the shared workers, in order.
     pub fn request_decode(
         &self,
@@ -1021,6 +1036,8 @@ fn query_files_on(conn: &rusqlite::Connection, spec: &QuerySpec) -> Result<(Vec<
     // second scan for an exact count.
     let total = if spec.offset <= 0 && (rows.len() as i64) < limit {
         rows.len() as i64
+    } else if let Some(known) = spec.known_total {
+        known.max(rows.len() as i64 + spec.offset.max(0))
     } else {
         conn.query_row(
             &format!("SELECT COUNT(*) FROM files f WHERE {QUERY_FILTER} AND {within}"),
@@ -1066,8 +1083,14 @@ enum ThumbWork {
 impl ThumbWork {
     fn run(self) -> Option<DecodedImage> {
         match self {
-            ThumbWork::Image { path, dim } => image_thumbnail(Path::new(&path), dim),
-            ThumbWork::VideoKeyframe { path, dim } => video_thumbnail(Path::new(&path), dim),
+            ThumbWork::Image { path, dim } => {
+                let path = Path::new(&path);
+                crate::thumb_cache::get_or_render(path, dim, false, || image_thumbnail(path, dim))
+            }
+            ThumbWork::VideoKeyframe { path, dim } => {
+                let path = Path::new(&path);
+                crate::thumb_cache::get_or_render(path, dim, true, || video_thumbnail(path, dim))
+            }
             ThumbWork::Custom(decode) => decode(),
         }
     }
@@ -1164,7 +1187,24 @@ impl ThumbQueue {
             job.reply.send(ThumbReply::Dropped);
             return;
         }
-        self.queues.lock().expect("thumbnail queue poisoned").background.push_back(job);
+        let dropped = {
+            let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
+            queues.background.push_back(job);
+            let mut dropped = Vec::new();
+            if queues.background.len() > BACKGROUND_QUEUE_CAP {
+                let (live, abandoned): (VecDeque<_>, VecDeque<_>) =
+                    std::mem::take(&mut queues.background).into_iter().partition(|job| !job.abandoned());
+                queues.background = live;
+                dropped.extend(abandoned);
+                while queues.background.len() > BACKGROUND_QUEUE_CAP {
+                    dropped.extend(queues.background.pop_front());
+                }
+            }
+            dropped
+        };
+        for job in dropped {
+            job.reply.send(ThumbReply::Dropped);
+        }
         self.ready.notify_one();
     }
 
@@ -1620,6 +1660,34 @@ mod tests {
     }
 
     #[test]
+    fn the_background_queue_is_bounded_and_purges_cancelled_work_first() {
+        let queue = ThumbQueue::new();
+        let mut cancelled = Vec::new();
+        for _ in 0..BACKGROUND_QUEUE_CAP {
+            let (job, rx, cancel) = probe_job(|| None);
+            queue.push_background(job);
+            cancelled.push((rx, cancel));
+        }
+        for (_, cancel) in &cancelled[..10] {
+            cancel.store(true, Ordering::Release);
+        }
+        let (job, _live_rx, _live_cancel) = probe_job(|| None);
+        queue.push_background(job);
+        assert_eq!(queue.queues.lock().unwrap().background.len(), BACKGROUND_QUEUE_CAP - 9);
+        assert!(matches!(cancelled[0].0.try_recv(), Ok(ThumbReply::Dropped)));
+        assert!(cancelled[10].0.try_recv().is_err());
+
+        let mut kept = Vec::new();
+        for _ in 0..BACKGROUND_QUEUE_CAP {
+            let (job, rx, cancel) = probe_job(|| None);
+            queue.push_background(job);
+            kept.push((rx, cancel));
+        }
+        assert_eq!(queue.queues.lock().unwrap().background.len(), BACKGROUND_QUEUE_CAP);
+        assert!(matches!(cancelled[10].0.try_recv(), Ok(ThumbReply::Dropped)));
+    }
+
+    #[test]
     fn a_still_bound_tile_is_not_starved_by_a_fling() {
         let queue = ThumbQueue::new();
         for _ in 0..(THUMB_QUEUE_CAP * 3) {
@@ -1795,5 +1863,10 @@ mod tests {
         assert_eq!(scoped(QuerySpec { limit: 10, kind: Some("image".into()), ..QuerySpec::default() }), (vec![1], 1));
         assert_eq!(scoped(QuerySpec { limit: 10, search: "b.mov".into(), ..QuerySpec::default() }), (vec![2], 1));
         assert_eq!(ids(QuerySpec { limit: 2, ..QuerySpec::default() }), (vec![5, 4], 5));
+        // A total counted a moment ago is reused instead of counting again,
+        // but never reported below the rows actually returned.
+        assert_eq!(ids(QuerySpec { limit: 2, known_total: Some(4), ..QuerySpec::default() }), (vec![5, 4], 4));
+        assert_eq!(ids(QuerySpec { limit: 2, known_total: Some(1), ..QuerySpec::default() }), (vec![5, 4], 2));
+        assert_eq!(ids(QuerySpec { limit: 10, known_total: Some(99), ..QuerySpec::default() }).1, 5);
     }
 }

@@ -78,7 +78,17 @@ struct Shell {
     scan_when_ready: Cell<bool>,
     /// Settings was opened on purpose, so it shows even with no folder yet.
     settings_requested: Cell<bool>,
+    last_refresh: Cell<Option<std::time::Instant>>,
+    refresh_pending: Cell<bool>,
     inspector: crate::motion::SpringRevealer,
+}
+
+/// Progress events repaint the title bar and sidebar at most this often.
+const PROGRESS_REFRESH: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a progress repaint waits so repaints stay `interval` apart.
+fn throttle_wait(since_last: Option<std::time::Duration>, interval: std::time::Duration) -> std::time::Duration {
+    since_last.map_or(std::time::Duration::ZERO, |elapsed| interval.saturating_sub(elapsed))
 }
 
 fn detail_page(has_folder: bool, total_files: u64, settings_requested: bool) -> &'static str {
@@ -224,6 +234,8 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         counting: Cell::new(false),
         scan_when_ready: Cell::new(false),
         settings_requested: Cell::new(false),
+        last_refresh: Cell::new(None),
+        refresh_pending: Cell::new(false),
         inspector,
     });
     let _ = slot.set(Rc::downgrade(&shell));
@@ -614,7 +626,27 @@ impl Shell {
         });
     }
 
+    fn refresh_soon(self: &Rc<Self>) {
+        if self.refresh_pending.get() {
+            return;
+        }
+        let wait = throttle_wait(self.last_refresh.get().map(|at| at.elapsed()), PROGRESS_REFRESH);
+        if wait.is_zero() {
+            self.refresh();
+            return;
+        }
+        self.refresh_pending.set(true);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(wait, move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.refresh_pending.set(false);
+                shell.refresh();
+            }
+        });
+    }
+
     fn refresh(&self) {
+        self.last_refresh.set(Some(std::time::Instant::now()));
         let status = self.status.borrow().clone();
         let path = self
             .folder_path
@@ -640,6 +672,10 @@ impl Shell {
             self.sidebar.set_queue(queue);
             return;
         }
+        let progress_only = matches!(
+            state,
+            EngineState::Progress(_) | EngineState::DeepAnalyzeProgress(_) | EngineState::BatchLanded(_)
+        );
         {
             let mut status = self.status.borrow_mut();
             match state {
@@ -780,7 +816,11 @@ impl Shell {
         if self.scan_when_ready.get() && self.status.borrow().engine_ready {
             self.start_scan();
         }
-        self.refresh();
+        if progress_only {
+            self.refresh_soon();
+        } else {
+            self.refresh();
+        }
     }
 }
 
@@ -1112,6 +1152,15 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn progress_repaints_are_spaced_out() {
+        use std::time::Duration;
+        let interval = Duration::from_millis(200);
+        assert_eq!(throttle_wait(None, interval), Duration::ZERO);
+        assert_eq!(throttle_wait(Some(Duration::from_millis(50)), interval), Duration::from_millis(150));
+        assert_eq!(throttle_wait(Some(Duration::from_millis(900)), interval), Duration::ZERO);
+    }
 
     #[test]
     fn settings_opens_before_the_first_folder_and_first_run_returns_after() {

@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -49,6 +49,16 @@ const MAX_VISIBLE_MEMBERS: usize = 5_000;
 const MAX_VISIBLE_MEMBERS_PER_GROUP: usize = 500;
 const EXACT_READ_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const TILE_THUMB_PX: i32 = 256;
+/// Cards and tiles are built a page at a time; the rest wait for a scroll or
+/// a "Show more" press, so a large result never builds thousands of widgets.
+const GROUPS_PER_PAGE: usize = 20;
+const TILES_PER_PAGE: usize = 24;
+const LOAD_MORE_WITHIN_PX: f64 = 800.0;
+
+/// How many items the next page adds, given how many are built already.
+fn next_page(shown: usize, total: usize, page: usize) -> usize {
+    total.saturating_sub(shown).min(page)
+}
 
 // ─── Data model (app-side mirror of DuplicateGroup / DuplicateMember) ─────────
 
@@ -177,7 +187,11 @@ struct Cleanup {
     restoring: Cell<bool>,
     last_warning: RefCell<Option<String>>,
     last_refresh_error: RefCell<Option<String>>,
-    reload_throttle: Cell<Instant>,
+    gate: super::reload_gate::ReloadGate,
+    shown_groups: Cell<usize>,
+    more_groups: RefCell<Option<gtk::Button>>,
+    scroll_restore: RefCell<Option<glib::SignalHandlerId>>,
+    list_scroll: gtk::ScrolledWindow,
 
     subtitle: gtk::Label,
     actions_box: gtk::Box,
@@ -366,7 +380,11 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         restoring_batch: RefCell::new(None),
         restoring: Cell::new(false),
         last_refresh_error: RefCell::new(None),
-        reload_throttle: Cell::new(Instant::now() - Duration::from_secs(10)),
+        gate: super::reload_gate::ReloadGate::default(),
+        shown_groups: Cell::new(0),
+        more_groups: RefCell::new(None),
+        scroll_restore: RefCell::new(None),
+        list_scroll: list_scroll.clone(),
         subtitle,
         actions_box,
         select_nonkeepers_btn: select_nonkeepers_btn.clone(),
@@ -437,13 +455,8 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         glib::MainContext::default().spawn_local(async move {
             while let Ok(ev) = ev_rx.recv().await {
                 match &*ev {
-                    EngineEvent::BatchLanded(_) => {
-                        if this.reload_throttle.get().elapsed() >= Duration::from_millis(1200) {
-                            this.reload_throttle.set(Instant::now());
-                            this.reload();
-                        }
-                    }
-                    EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.reload(),
+                    EngineEvent::BatchLanded(_) => this.gate.mark_stale(),
+                    EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.library_changed(),
                     EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
                         this.finish_trash(result.clone());
                     }
@@ -477,12 +490,30 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // Initial fill + a fresh read on every tab switch (the startup read can
-    // race the engine's DB open; deletes/scans done elsewhere must show here).
-    this.reload();
+    // Checking for copies re-reads files from disk, so it runs only while
+    // this page is on screen: the first time it is shown, and again when the
+    // library changed while it was away.
     {
         let this = this.clone();
-        root.connect_map(move |_| this.reload());
+        root.connect_map(move |_| {
+            if this.gate.on_map() {
+                this.reload();
+            }
+        });
+    }
+    {
+        let this = this.clone();
+        root.connect_unmap(move |_| this.gate.on_unmap());
+    }
+    {
+        let weak = Rc::downgrade(&this);
+        list_scroll.vadjustment().connect_value_changed(move |adjustment| {
+            let Some(this) = weak.upgrade() else { return };
+            let remaining = adjustment.upper() - adjustment.page_size() - adjustment.value();
+            if remaining < LOAD_MORE_WITHIN_PX && this.more_groups.borrow().is_some() {
+                this.append_groups(GROUPS_PER_PAGE);
+            }
+        });
     }
     this.update_global_summary();
 
@@ -538,13 +569,23 @@ impl Cleanup {
         self.groups.borrow_mut().clear();
         self.last_warning.borrow_mut().take();
         self.last_refresh_error.borrow_mut().take();
+        self.shown_groups.set(0);
+        self.list_scroll.vadjustment().set_value(0.0);
         self.reload();
         self.update_global_summary();
+    }
+
+    /// Something outside this page changed the library.
+    fn library_changed(self: &Rc<Self>) {
+        if self.gate.on_change() {
+            self.reload();
+        }
     }
 
     // ── Reload (DB read + grouping off the main loop) ────────────────────────
 
     fn reload(self: &Rc<Self>) {
+        self.gate.loaded();
         let g = self.query_gen.get().wrapping_add(1);
         self.query_gen.set(g);
         if self.load_inflight.get() {
@@ -627,7 +668,17 @@ impl Cleanup {
 
     // ── Rebuild the visible card list ────────────────────────────────────────
 
+    /// Rebuilds as many cards as were showing and puts the scroll back where
+    /// it was, so a refresh or a selection change never jumps to the top.
     fn rebuild_list(self: &Rc<Self>) {
+        let adjustment = self.list_scroll.vadjustment();
+        let keep = adjustment.value();
+        let want = self.shown_groups.get().max(GROUPS_PER_PAGE);
+        if let Some(handler) = self.scroll_restore.take() {
+            adjustment.disconnect(handler);
+        }
+        self.more_groups.take();
+        self.shown_groups.set(0);
         while let Some(child) = self.list_box.first_child() {
             self.list_box.remove(&child);
         }
@@ -655,9 +706,65 @@ impl Cleanup {
         if let Some(warning) = self.last_warning.borrow().as_deref() {
             self.list_box.append(&build_warning_banner(warning));
         }
-        for g in &visible {
-            let card = self.build_group_card(g);
-            self.list_box.append(&card);
+        drop(skipped);
+        drop(groups);
+        self.append_groups(want);
+        if keep > 0.0 {
+            // The list's height is known only after layout; follow it until
+            // the old position is reachable, for a moment at most.
+            let weak = Rc::downgrade(self);
+            let handler = adjustment.connect_changed(move |adjustment| {
+                let reachable = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                adjustment.set_value(keep.min(reachable));
+                if reachable >= keep
+                    && let Some(this) = weak.upgrade()
+                    && let Some(handler) = this.scroll_restore.take()
+                {
+                    adjustment.disconnect(handler);
+                }
+            });
+            self.scroll_restore.replace(Some(handler));
+            let weak = Rc::downgrade(self);
+            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                if let Some(this) = weak.upgrade()
+                    && let Some(handler) = this.scroll_restore.take()
+                {
+                    this.list_scroll.vadjustment().disconnect(handler);
+                }
+            });
+        }
+    }
+
+    /// Builds the next `count` group cards, then a "show more" row if any remain.
+    fn append_groups(self: &Rc<Self>, count: usize) {
+        if let Some(button) = self.more_groups.take() {
+            self.list_box.remove(&button);
+        }
+        let groups = self.groups.borrow();
+        let skipped = self.skipped.borrow();
+        let visible: Vec<&DupGroup> = groups.iter().filter(|g| !skipped.contains(&g.key)).collect();
+        let start = self.shown_groups.get().min(visible.len());
+        let end = start + next_page(start, visible.len(), count);
+        for group in &visible[start..end] {
+            self.list_box.append(&self.build_group_card(group));
+        }
+        self.shown_groups.set(end);
+        let remaining = visible.len() - end;
+        if remaining > 0 {
+            let button = gtk::Button::builder()
+                .label(format!("Show {} more groups", next_page(end, visible.len(), GROUPS_PER_PAGE)))
+                .tooltip_text(format!("{remaining} more groups are waiting below"))
+                .halign(gtk::Align::Center)
+                .css_classes(["pill"])
+                .build();
+            let weak = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    this.append_groups(GROUPS_PER_PAGE);
+                }
+            });
+            self.list_box.append(&button);
+            self.more_groups.replace(Some(button));
         }
     }
 
@@ -839,10 +946,7 @@ impl Cleanup {
             .build();
         let group_sizes: Rc<Vec<(i64, i64)>> =
             Rc::new(group.members.iter().map(|m| (m.id, m.size)).collect());
-        for m in &group.members {
-            let tile = self.build_tile(m, group_sizes.clone(), sel_lbl.clone(), del_btn.clone());
-            tiles.append(&tile);
-        }
+        self.append_tiles(&tiles, Rc::new(group.members.clone()), 0, &group_sizes, &sel_lbl, &del_btn);
         let tiles_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Never)
@@ -878,6 +982,42 @@ impl Cleanup {
         }
 
         card.upcast()
+    }
+
+    /// Builds one page of a group's tiles from `from`, then a "show more"
+    /// tile when the group has more.
+    fn append_tiles(
+        self: &Rc<Self>,
+        tiles: &gtk::Box,
+        members: Rc<Vec<Member>>,
+        from: usize,
+        group_sizes: &Rc<Vec<(i64, i64)>>,
+        sel_lbl: &gtk::Label,
+        del_btn: &gtk::Button,
+    ) {
+        let end = from + next_page(from, members.len(), TILES_PER_PAGE);
+        for member in &members[from..end] {
+            tiles.append(&self.build_tile(member, group_sizes.clone(), sel_lbl.clone(), del_btn.clone()));
+        }
+        let remaining = members.len() - end;
+        if remaining == 0 {
+            return;
+        }
+        let more = gtk::Button::builder()
+            .label(format!("Show {} more", next_page(end, members.len(), TILES_PER_PAGE)))
+            .tooltip_text(format!("{remaining} more in this group"))
+            .valign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
+        let weak = Rc::downgrade(self);
+        let (tiles_weak, group_sizes, sel_lbl, del_btn) =
+            (tiles.downgrade(), group_sizes.clone(), sel_lbl.clone(), del_btn.clone());
+        more.connect_clicked(move |button| {
+            let (Some(this), Some(tiles)) = (weak.upgrade(), tiles_weak.upgrade()) else { return };
+            tiles.remove(button);
+            this.append_tiles(&tiles, members.clone(), end, &group_sizes, &sel_lbl, &del_btn);
+        });
+        tiles.append(&more);
     }
 
     fn build_select_menu(self: &Rc<Self>, member_ids: Rc<Vec<i64>>) -> gtk::MenuButton {
@@ -1010,14 +1150,19 @@ impl Cleanup {
         // everything else gets an icon).
         if member.kind == "image" || member.kind == "video" {
             let dim = decode_px(&pic, TILE_THUMB_PX);
-            let rx = if member.kind == "video" {
-                self.engine.borrow().request_video_thumbnail(member.path.clone(), dim)
-            } else {
-                self.engine.borrow().request_scaled_thumbnail(member.path.clone(), dim)
-            };
+            // A tile destroyed by a rebuild takes its queued decode with it.
+            let cancel = crate::engine_client::CancelToken::default();
+            let rx = self.engine.borrow().request_thumbnail(
+                member.path.clone(),
+                dim,
+                member.kind == "video",
+                cancel.clone(),
+            );
+            pic.connect_destroy(move |_| cancel.store(true, AtomicOrdering::Release));
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                let Ok(Some(decoded)) = rx.recv().await else {
+                let Some(decoded) = rx.recv().await.ok().and_then(crate::engine_client::ThumbReply::into_image)
+                else {
                     return;
                 };
                 if let Some(p) = pic_weak.upgrade() {
@@ -1412,6 +1557,8 @@ impl Cleanup {
                 .is_some_and(|pending| reported.is_empty() || !reported.is_disjoint(&pending.ids))
         };
         if !belongs_to_pending {
+            // Another page moved files to Trash; these groups may be out of date.
+            self.library_changed();
             return;
         }
         let pending = self
@@ -1587,6 +1734,7 @@ impl Cleanup {
 
     fn finish_restore(self: &Rc<Self>, result: fileid_engine::ipc::BulkActionResult) {
         if !self.restoring.replace(false) {
+            self.library_changed();
             return;
         }
         self.restore_button.set_sensitive(true);
@@ -2225,6 +2373,15 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn cards_and_tiles_are_built_a_page_at_a_time() {
+        assert_eq!(next_page(0, 5_000, TILES_PER_PAGE), TILES_PER_PAGE);
+        assert_eq!(next_page(4_990, 5_000, TILES_PER_PAGE), 10);
+        assert_eq!(next_page(5_000, 5_000, TILES_PER_PAGE), 0);
+        assert_eq!(next_page(7, 3, GROUPS_PER_PAGE), 0);
+        assert_eq!(next_page(0, 3, GROUPS_PER_PAGE), 3);
     }
 
     #[test]

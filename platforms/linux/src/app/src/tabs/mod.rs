@@ -25,6 +25,7 @@ mod moments_timeline;
 mod face_queues;
 mod face_review;
 pub mod people;
+mod reload_gate;
 mod people_actions;
 pub mod restructure;
 mod restructure_map;

@@ -23,6 +23,7 @@ mod spring;
 mod v3;
 mod tabs;
 mod theme;
+mod thumb_cache;
 mod welcome;
 mod window;
 
