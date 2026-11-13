@@ -452,12 +452,7 @@ fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
 /// Cosine on pre-normalized vectors = dot product.
 #[inline]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    let mut s: f32 = 0.0;
-    for i in 0..n {
-        s += a[i] * b[i];
-    }
-    s
+    crate::util::vector_math::dot(a, b)
 }
 
 /// Recursively split a cluster if it fails the variance / mean-cosine

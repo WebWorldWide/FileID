@@ -2261,11 +2261,7 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let mut acc = 0.0f32;
-    for i in 0..a.len() {
-        acc += a[i] * b[i];
-    }
-    acc
+    crate::util::vector_math::dot(a, b)
 }
 
 #[cfg(test)]
