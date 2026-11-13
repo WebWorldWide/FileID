@@ -1297,6 +1297,8 @@ impl Tagger {
 
         let loaded_models: Arc<tokio::sync::OnceCell<Option<WorkerModels>>> = Arc::new(tokio::sync::OnceCell::new());
 
+        let runtime = tokio::runtime::Handle::current();
+        let mut workers_started = 0usize;
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
             let tx = out_tx.clone();
@@ -1308,11 +1310,7 @@ impl Tagger {
             let budget = byte_budget.clone();
             let legacy = self.legacy_hashes;
 
-            tokio::spawn(async move {
-                // Drop per-worker thread priority to LOWEST so foreground
-                // apps stay snappy during scans. tokio worker threads
-                // inherit the parent process priority by default.
-                crate::platform::set_worker_background_priority();
+            let worker = async move {
                 // After every YIELD_AFTER files, sleep briefly to give
                 // foreground apps + DWM breathing room. <1 % cost; keeps
                 // multi-hour scans friendly to an actively-used desktop.
@@ -1363,20 +1361,15 @@ impl Tagger {
                     // machine (a search, a resident model, low free memory)
                     // delays a file but never fails it.
                     let demand = crate::resource_scheduler::Demand { memory_mb: scan_working_mb(&predecoded), cpu: 1, io: 0 };
-                    let (admission_scheduler, admission_coord) = (scheduler.clone(), coord.clone());
-                    let admission = tokio::task::spawn_blocking(move || {
-                        admission_scheduler.reserve_patient(
-                            demand,
-                            crate::resource_scheduler::Priority::Background,
-                            || admission_coord.is_cancelled(),
-                            SCAN_ADMISSION_PATIENCE,
-                        )
-                    })
-                    .await;
+                    let admission = scheduler.reserve_patient(
+                        demand,
+                        crate::resource_scheduler::Priority::Background,
+                        || coord.is_cancelled(),
+                        SCAN_ADMISSION_PATIENCE,
+                    );
                     let (_lease, refused) = match admission {
-                        Ok(Ok(lease)) => (Some(lease), None),
-                        _ if coord.is_cancelled() => break,
-                        Ok(Err(error)) => (None, Some(error.to_string())),
+                        Ok(lease) => (Some(lease), None),
+                        Err(_) if coord.is_cancelled() => break,
                         Err(error) => (None, Some(error.to_string())),
                     };
                     // Bounds async inference after decoding; platform decoder
@@ -1421,6 +1414,10 @@ impl Tagger {
                         }
                     };
                     let mut tagged = tagged;
+                    #[cfg(test)]
+                    if tagged.path.file_name().is_some_and(|name| name == "fileid-test-worker-thread.txt") {
+                        tagged.camera_model = std::thread::current().name().map(str::to_owned);
+                    }
                     if tagged.failed && !tagged.failure_is_transient {
                         tagged.failure_is_transient = transient
                             || coord.is_cancelled()
@@ -1441,7 +1438,27 @@ impl Tagger {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
+            };
+            // Each worker runs on its own thread, driven by the runtime's timers
+            // and wakers: detection, embedding, resizing and tagging are
+            // synchronous CPU and GPU work, and on the runtime's own threads
+            // they stalled IPC, cancel and progress on low-core machines. The
+            // semaphores, per-file timeout, panic isolation and cancellation
+            // are the same future as before.
+            let runtime = runtime.clone();
+            let spawned = std::thread::Builder::new().name(format!("fileid-tag-{worker_idx}")).spawn(move || {
+                // LOWEST priority so foreground apps stay snappy during scans.
+                crate::platform::set_worker_background_priority();
+                runtime.block_on(worker);
             });
+            match spawned {
+                Ok(_) => workers_started += 1,
+                Err(error) => tracing::warn!("fileid-tag-{worker_idx} failed to spawn ({error}); continuing with fewer workers"),
+            }
+        }
+        if workers_started == 0 {
+            tracing::error!("[TAGGING] no analysis worker could start; stopping the scan");
+            self.coordinator.request_cancel();
         }
 
         drop(out_tx);
@@ -4018,6 +4035,25 @@ mod tests {
         assert!(coord.is_cancelled());
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(source.failure().map(|failure| failure.kind), Some("model_load_failed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The runtime here has one thread, and it is the test's: analysis that
+    /// ran on runtime threads would have to run on it.
+    #[tokio::test]
+    async fn files_are_analysed_on_dedicated_threads_not_on_the_runtime() {
+        let dir = std::env::temp_dir().join(format!("fileid-worker-thread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let (mut out, decoder_join) = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty())).spawn(rx);
+        tx.send(text_file(&dir, "fileid-test-worker-thread.txt")).await.unwrap();
+        drop(tx);
+        let row = tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap().unwrap();
+        let thread = row.camera_model.expect("the worker reports its thread");
+        assert!(thread.starts_with("fileid-tag-"), "analysed on {thread}");
+        assert_ne!(Some(thread.as_str()), std::thread::current().name());
+        drop(out);
+        decoder_join.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
