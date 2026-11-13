@@ -9,19 +9,19 @@ public sealed class SettingsEngineStopSafetyTests
     private static readonly string RepoRoot = FindRepoRoot();
 
     [Theory]
-    [InlineData(null, "Engine crashed")]
-    [InlineData("", "Engine crashed")]
-    [InlineData("   ", "Engine crashed")]
-    [InlineData("Engine stopped", "Engine stopped")]
-    [InlineData("Engine crashed three times", "Engine crashed three times")]
+    [InlineData(null, "FileID's helper stopped")]
+    [InlineData("", "FileID's helper stopped")]
+    [InlineData("   ", "FileID's helper stopped")]
+    [InlineData("Engine stopped", "FileID's helper is off")]
+    [InlineData("Engine crashed three times", "FileID's helper stopped")]
     public void CrashedStatusTextIsNeverBlank(string? reason, string expected)
         => Assert.Equal(expected, SidebarEngineStatus.ResolveCrashedStatusText(reason));
 
     [Theory]
-    [InlineData(null, "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log.")]
-    [InlineData("", "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log.")]
-    [InlineData("Engine stopped", "Engine stopped. Restart it from Settings.")]
-    [InlineData("Engine failed", "Engine failed")]
+    [InlineData(null, "FileID's helper stopped unexpectedly. Quit and reopen FileID.")]
+    [InlineData("", "FileID's helper stopped unexpectedly. Quit and reopen FileID.")]
+    [InlineData("Engine stopped", "FileID's helper is off. Turn it back on in Settings.")]
+    [InlineData("Engine failed", "FileID's helper stopped. Quit and reopen FileID. Details: Engine failed")]
     public void CrashedStatusTipExplainsStoppedAndCrashStates(string? reason, string expected)
         => Assert.Equal(expected, SidebarEngineStatus.ResolveCrashedStatusTip(reason));
 

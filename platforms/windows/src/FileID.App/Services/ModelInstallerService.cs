@@ -979,7 +979,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");
-        slot.Fail(error.Message);
+        slot.Fail(EngineErrorText.Plain(error.Message, "The download didn't finish. Check your internet connection and try again."));
     }
 
     private static string[] SentinelIdsFor(ModelSlot slot)

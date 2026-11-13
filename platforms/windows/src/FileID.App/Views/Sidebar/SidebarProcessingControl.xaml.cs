@@ -360,7 +360,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             WarningBanner.Visibility = Visibility.Collapsed;
             return;
         }
-        WarningBannerText.Text = warning.Message;
+        WarningBannerText.Text = EngineErrorText.Text(warning.Kind, warning.Message);
         WarningBanner.Visibility = Visibility.Visible;
     }
 
