@@ -32,7 +32,7 @@ fn composite_hashes(file: &DiscoveredFile, legacy: bool) -> (Option<[u8; 32]>, O
         .map_or((None, None), |(hash, legacy)| (Some(hash), legacy))
 }
 
-fn perf_trace_enabled() -> bool {
+pub(crate) fn perf_trace_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| {
         std::env::var("FILEID_PERF_TRACE")
@@ -60,7 +60,10 @@ use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::Mo
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::pipeline::scan_models::ModelSource;
-use crate::pipeline::twin_reuse::{TwinClaim, TwinRegistry};
+use crate::pipeline::twin_reuse::TwinClaim;
+
+/// The scan's twin registry; decoders park copies in it behind their owner.
+type TwinRegistry = crate::pipeline::twin_reuse::TwinRegistry<PreDecoded>;
 use crate::shell;
 use crate::util::content_hash::LegacyHashes;
 
@@ -455,8 +458,8 @@ pub fn face_is_excluded(
 /// optional — missing weights cause the corresponding stage to no-op so
 /// a partial install doesn't fail the whole scan.
 ///
-/// Each model is a POOL of independent Sessions; workers index by
-/// `worker_idx % pool.len()` so multiple inferences run in parallel
+/// Each model is a POOL of independent Sessions; a worker checks out an idle
+/// one (`models::checkout`) so multiple inferences run in parallel
 /// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
 /// to keep VRAM bounded.
 pub struct ModelStack {
@@ -1548,7 +1551,7 @@ async fn settle_twin(
         let (coord, budget) = (coord.clone(), budget.clone());
         let decoded = tokio::task::spawn_blocking(move || {
             let _thread_guard = DecoderThreadGuard::enter();
-            predecode_one(file, &coord, &budget, legacy, share.as_deref())
+            predecode_one(file, &coord, &budget, legacy, share.as_deref(), false)
         })
         .await;
         predecoded = match decoded {
@@ -1714,10 +1717,35 @@ fn decode_reserved<T>(
     Some((decode(), guard))
 }
 
+/// Runs `future` on the calling thread, parked between wake-ups, until it
+/// finishes or the scan is cancelled (`None`). Needs no runtime: channels and
+/// the coordinator's notifier wake the thread directly.
+fn wait_unless_cancelled<T>(coord: &ScanCoordinator, future: impl std::future::Future<Output = T>) -> Option<T> {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    let mut cancelled = std::pin::pin!(coord.wait_cancelled());
+    loop {
+        if cancelled.as_mut().poll(&mut context).is_ready() {
+            return None;
+        }
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return Some(value);
+        }
+        std::thread::park();
+    }
+}
+
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
 /// blocking JPEG/PNG decode doesn't tie up tokio's runtime threads.
-/// Polls the raw discovery channel so cancellation wakes idle workers, then
-/// pushes into the pre-decoded channel via `send_blocking()`.
+/// Blocks on the raw discovery channel and on the pre-decoded channel; a
+/// cancel wakes it from either.
 fn run_decoder_thread(
     rx: async_channel::Receiver<DiscoveredFile>,
     tx: async_channel::Sender<PreDecoded>,
@@ -1731,17 +1759,8 @@ fn run_decoder_thread(
         if coord.is_cancelled() {
             return;
         }
-        let file = loop {
-            match rx.try_recv() {
-                Ok(file) => break file,
-                Err(async_channel::TryRecvError::Closed) => return,
-                Err(async_channel::TryRecvError::Empty) => {
-                    if coord.is_cancelled() {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
+        let Some(Ok(file)) = wait_unless_cancelled(&coord, rx.recv()) else {
+            return;
         };
         // Trace-gated forensics: a native crash never reaches the log as a
         // Rust panic, so the last "decode start" lines name the in-flight
@@ -1754,7 +1773,7 @@ fn run_decoder_thread(
         );
         let fallback = file.clone();
         let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            predecode_one(file, &coord, &budget, legacy, Some(&twins))
+            predecode_one(file, &coord, &budget, legacy, Some(&twins), true)
         })) {
             Ok(Some(item)) => item,
             Ok(None) => return,
@@ -1766,21 +1785,48 @@ fn run_decoder_thread(
                 PreDecoded::failed(fallback, "the file could not be read (decoder error)")
             }
         };
-        let mut item = item;
-        loop {
-            if coord.is_cancelled() {
+        // A copy waits behind an owner that is still decoding on another
+        // thread; the owner brings its copies along once it is queued. An owner
+        // whose decode panicked (its item no longer says "owner") lets go, so
+        // its copies analyse themselves.
+        let owned = OWNED_TWIN.take();
+        if let Some(hash) = owned.filter(|_| !matches!(item.twin, TwinClaim::Owner)) {
+            twins.publish(hash, false);
+        }
+        let item = match (&item.twin, item.content_hash) {
+            (TwinClaim::Pending(_), Some(hash)) => twins.hold(&hash, item),
+            _ => Some(item),
+        };
+        if let Some(item) = item {
+            let Some(Ok(())) = wait_unless_cancelled(&coord, tx.send(item)) else {
                 return;
-            }
-            match tx.try_send(item) {
-                Ok(()) => break,
-                Err(async_channel::TrySendError::Closed(_)) => return,
-                Err(async_channel::TrySendError::Full(returned)) => {
-                    item = returned;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
+            };
+        }
+        // Only now, with the owner queued ahead of them.
+        for follower in owned.map(|hash| twins.owner_queued(&hash)).unwrap_or_default() {
+            let Some(Ok(())) = wait_unless_cancelled(&coord, tx.send(follower)) else {
+                return;
+            };
         }
     }
+}
+
+thread_local! {
+    /// The image this decoder thread claimed as owner for the file in hand.
+    static OWNED_TWIN: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
+}
+
+/// Claims `hash` for the file being read. A decoder's owner collects its
+/// copies until it is queued; a worker's owner is already running.
+fn claim_twin(twins: &TwinRegistry, hash: [u8; 32], from_decoder: bool) -> TwinClaim {
+    if !from_decoder {
+        return twins.claim(hash);
+    }
+    let claim = twins.claim_queued(hash);
+    if matches!(claim, TwinClaim::Owner) {
+        OWNED_TWIN.set(Some(hash));
+    }
+    claim
 }
 
 /// Reads, hashes and decodes one file for `run_decoder_thread`. `None` means
@@ -1791,6 +1837,7 @@ fn predecode_one(
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
     twins: Option<&TwinRegistry>,
+    from_decoder: bool,
 ) -> Option<PreDecoded> {
     #[cfg(test)]
     assert!(
@@ -1803,7 +1850,7 @@ fn predecode_one(
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if mac::enabled() {
         let _ = (coord, budget);
-        return Some(mac::predecode(file, legacy, twins));
+        return Some(mac::predecode(file, legacy, twins, from_decoder));
     }
     {
         let decode_started = Instant::now();
@@ -1812,6 +1859,9 @@ fn predecode_one(
         let mut content_hash = None;
         let mut legacy_hashes = None;
         let mut exif_data = None;
+        // The file's EXIF block, read once here for the camera, place and date
+        // and handed to the decoder for the orientation and colour space.
+        let mut primary_exif = None;
 
         if !file.online_only {
             match file.kind {
@@ -1834,8 +1884,9 @@ fn predecode_one(
                             // so non-EXIF formats (PNG, GIF, screenshots) record
                             // an explicit no-EXIF result instead of looking
                             // unparsed downstream.
-                            exif_data =
-                                Some(parse_exif_fields(&bytes).unwrap_or((None, None, None, None)));
+                            let read = read_primary_exif(&bytes);
+                            exif_data = Some(read.fields.clone().unwrap_or((None, None, None, None)));
+                            primary_exif = Some(read);
                             // ≤16 MB → full SHA-256 (cross-platform with Swift).
                             content_hash = Some(sha256_bytes(&bytes));
                             legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
@@ -1902,7 +1953,7 @@ fn predecode_one(
                     && !file.online_only
                     && file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
             {
-                twins.claim(hash)
+                claim_twin(twins, hash, from_decoder)
             }
             _ => TwinClaim::None,
         };
@@ -1926,7 +1977,7 @@ fn predecode_one(
                         budget,
                         reservation,
                         coord,
-                        || decode_image_sync(&file.path, file_bytes.as_deref()),
+                        || decode_image_sync_with(&file.path, file_bytes.as_deref(), primary_exif.as_ref()),
                     )?;
                     budget_guard = Some(guard);
                     Some(result)
@@ -2117,6 +2168,15 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
 /// Windows bitmap codecs. The fallback is still per-file and bounded, so a
 /// missing codec only marks that file as undecodable.
 pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    decode_image_sync_with(path, bytes, None)
+}
+
+/// [`decode_image_sync`] with the EXIF the caller already read from `bytes`.
+fn decode_image_sync_with(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    exif: Option<&PrimaryExif>,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let is_raw = path
         .extension()
         .and_then(|s| s.to_str())
@@ -2125,7 +2185,7 @@ pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) ->
         && let Some(out) = decode_raw_preview(path, bytes) {
             return Ok(out);
         }
-    let primary = decode_image_sync_imagecrate(path, bytes);
+    let primary = decode_image_sync_imagecrate(path, bytes, exif);
     if primary.is_ok() {
         return primary;
     }
@@ -2283,13 +2343,25 @@ fn jpeg_scaled_decode_enabled() -> bool {
 /// its long side; native size up to a third above `floor`, DCT-scaled above
 /// that. The caller applies the primary image's orientation. `None` keeps
 /// the existing decode paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
+#[cfg(test)]
 pub(crate) fn decode_mpf_preview(bytes: &[u8], primary_w: u32, primary_h: u32, floor: u32) -> Option<(Vec<u8>, u32, u32)> {
+    decode_mpf_preview_with(bytes, primary_w, primary_h, floor, None)
+}
+
+/// `srgb` is the file's colour-space tag when the caller already read it.
+fn decode_mpf_preview_with(
+    bytes: &[u8],
+    primary_w: u32,
+    primary_h: u32,
+    floor: u32,
+    srgb: Option<bool>,
+) -> Option<(Vec<u8>, u32, u32)> {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_MPF_PREVIEW").map_or(true, |v| v.trim() != "0")) {
         return None;
     }
     let cap = floor.saturating_mul(4) / 3;
-    if primary_w.max(primary_h) < cap || !exif_is_srgb(bytes) {
+    if primary_w.max(primary_h) < cap || !srgb.unwrap_or_else(|| exif_is_srgb(bytes)) {
         return None;
     }
     let preview = super::mpf_preview::largest_preview(bytes)?;
@@ -2395,7 +2467,11 @@ pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>
     Some((rgb, w, h))
 }
 
-fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_image_sync_imagecrate(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    exif: Option<&PrimaryExif>,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
         let mmap;
@@ -2435,9 +2511,10 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         // Any scaled-decode failure falls through to the full decoder.
         // Read the orientation once, from the same bytes both decode paths use.
         // Neither the image crate nor the DCT-scaled path applies it for us.
-        let orientation = exif_orientation(bytes);
+        let orientation = exif.map_or_else(|| exif_orientation(bytes), |exif| exif.orientation);
         if reader.format() == Some(image::ImageFormat::Jpeg) {
-            if let Some((buf, w, h)) = decode_mpf_preview(bytes, pw, ph, JPEG_SCALED_DECODE_FLOOR_EDGE) {
+            let srgb = exif.map(|exif| exif.srgb);
+            if let Some((buf, w, h)) = decode_mpf_preview_with(bytes, pw, ph, JPEG_SCALED_DECODE_FLOOR_EDGE, srgb) {
                 return apply_exif_orientation(buf, w, h, orientation);
             }
             if let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
@@ -2705,10 +2782,8 @@ async fn process_file_predecoded(
                     STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
                     let vision_started = Instant::now();
                     if permit.is_ok() && !coord.is_gpu_dead() {
-                        let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
-                        let arcface_mu = &arcface_pool[worker_idx % arcface_pool.len()];
                         let scrfd_started = Instant::now();
-                        let detections = YuNet::detect_shared(scrfd_mu, &rgb, w, h);
+                        let detections = YuNet::detect_shared(scrfd_pool, worker_idx, &rgb, w, h);
                         perf_trace("scrfd_done", &file.path, scrfd_started.elapsed().as_secs_f64() * 1000.0);
                         let arcface_started = Instant::now();
                         match detections {
@@ -2756,7 +2831,7 @@ async fn process_file_predecoded(
                                     .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
                                     if let Some(crop) = crop {
                                         let embed_result = {
-                                            let mut a = arcface_mu.lock();
+                                            let mut a = crate::models::checkout(arcface_pool, worker_idx);
                                             a.embed(&crop).map(|embedding| (embedding, a.model_version().to_owned()))
                                         };
                                         match embed_result {
@@ -2829,10 +2904,9 @@ async fn process_file_predecoded(
                     let permit = clip_sem.acquire().await;
                     let clip_started = Instant::now();
                     if permit.is_ok() && !coord.is_gpu_dead() {
-                        let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
                         let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
-                            let mut c = clip_mu.lock();
+                            let mut c = crate::models::checkout(clip_pool, worker_idx);
                             c.embed(&resized)
                         };
                         match embed_result {
@@ -2914,8 +2988,7 @@ async fn process_file_predecoded(
                                         Ordering::Relaxed,
                                     );
                                     if permit.is_ok() && !coord.is_gpu_dead() {
-                                        let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
-                                        let mut g = ram_mu.lock();
+                                        let mut g = crate::models::checkout(ram_pool, worker_idx);
                                         Some(g.tag_prepared(chw))
                                     } else {
                                         None
@@ -3365,9 +3438,28 @@ fn apply_exif_orientation(
 pub(crate) type ExifFields = (Option<String>, Option<f64>, Option<f64>, Option<f64>);
 
 pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
+    read_primary_exif(bytes).fields
+}
+
+/// Everything the scan takes from a file's EXIF block, from one parse:
+/// `parse_exif_fields`, `exif_orientation` and `exif_is_srgb` in one.
+struct PrimaryExif {
+    fields: Option<ExifFields>,
+    orientation: Option<image::metadata::Orientation>,
+    srgb: bool,
+}
+
+fn read_primary_exif(bytes: &[u8]) -> PrimaryExif {
     match exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) {
-        Ok(exif) => Some(exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
-        Err(_) => raw_exif_fields(bytes),
+        Ok(exif) => PrimaryExif {
+            fields: Some(exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
+            orientation: exif
+                .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|field| field.value.get_uint(0))
+                .and_then(|raw| image::metadata::Orientation::from_exif(u8::try_from(raw).ok()?)),
+            srgb: exif.get_field(exif::Tag::ColorSpace, exif::In::PRIMARY).and_then(|field| field.value.get_uint(0)) == Some(1),
+        },
+        Err(_) => PrimaryExif { fields: raw_exif_fields(bytes), orientation: None, srgb: false },
     }
 }
 
@@ -3829,7 +3921,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     fn tiny_png() -> Vec<u8> {
         let mut bytes = Vec::new();
         image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40]))
@@ -3845,14 +3936,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = tiny_png();
         let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
-        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         assert!(matches!(owner.twin, TwinClaim::Owner));
         assert!(matches!(owner.decoded, Some(Ok(_))));
-        let copy = predecode_one(twin_image(&dir, "b.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let copy = predecode_one(twin_image(&dir, "b.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         assert!(matches!(copy.twin, TwinClaim::Pending(_)));
         assert!(copy.decoded.is_none() && copy.budget.is_none(), "the waiting copy holds no frame");
         assert_eq!(copy.content_hash, owner.content_hash);
-        let unshared = predecode_one(twin_image(&dir, "c.png", &png), &coord, &budget, false, None).unwrap();
+        let unshared = predecode_one(twin_image(&dir, "c.png", &png), &coord, &budget, false, None, false).unwrap();
         assert!(matches!(unshared.twin, TwinClaim::None));
         assert!(matches!(unshared.decoded, Some(Ok(_))));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3866,7 +3957,7 @@ mod tests {
         let png = tiny_png();
         let (coord, budget) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20));
         let pending = |twins: &Arc<TwinRegistry>, name: &str| {
-            let item = predecode_one(twin_image(&dir, name, &png), &coord, &budget, false, Some(twins)).unwrap();
+            let item = predecode_one(twin_image(&dir, name, &png), &coord, &budget, false, Some(twins), false).unwrap();
             assert!(matches!(item.twin, TwinClaim::Pending(_)));
             item
         };
@@ -3874,7 +3965,7 @@ mod tests {
 
         // The owner finishes: the copy is ready and was never decoded.
         let twins = TwinRegistry::new();
-        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let hash = owner.content_hash.unwrap();
         let copy = pending(&twins, "b.png");
         let publisher = {
@@ -3892,7 +3983,7 @@ mod tests {
         // The owner fails: the copy claims the image, is decoded now, and the
         // copies behind it wait on it instead of on the failed owner.
         let twins = TwinRegistry::new();
-        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         twins.publish(hash, false);
         let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
@@ -3902,7 +3993,7 @@ mod tests {
 
         // The owner is only slow: the copy is analyzed on its own, unshared.
         let twins = TwinRegistry::new();
-        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         let settled = settle_twin(copy, &twins, &coord, &budget, false, Duration::from_millis(20)).await.unwrap();
         assert!(matches!(settled.twin, TwinClaim::None));
@@ -3910,10 +4001,47 @@ mod tests {
 
         // A cancelled scan stops waiting.
         let twins = TwinRegistry::new();
-        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins)).unwrap();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         coord.request_cancel();
         assert!(settle_twin(copy, &twins, &coord, &budget, false, patience).await.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Copies only hash, so they are ready before the owner that is still
+    /// decoding. Queued ahead of it they would occupy every worker, each
+    /// waiting for an owner no worker is free to analyse.
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[test]
+    fn decoders_queue_an_owner_before_the_copies_that_wait_for_it() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
+        // The owner's decoder has claimed the image but not queued it yet.
+        let owner = predecode_one(twin_image(&dir, "owner.png", &png), &coord, &budget, false, Some(&twins), true).unwrap();
+        assert_eq!(OWNED_TWIN.take(), owner.content_hash);
+        let hash = owner.content_hash.unwrap();
+
+        // Another decoder thread finishes two copies meanwhile.
+        let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(4);
+        let (predecoded_tx, predecoded_rx) = async_channel::bounded::<PreDecoded>(8);
+        raw_tx.send_blocking(twin_image(&dir, "copy1.png", &png)).unwrap();
+        raw_tx.send_blocking(twin_image(&dir, "copy2.png", &png)).unwrap();
+        drop(raw_tx);
+        run_decoder_thread(raw_rx, predecoded_tx.clone(), coord.clone(), budget.clone(), false, twins.clone());
+        assert!(predecoded_rx.is_empty(), "the copies are held back");
+
+        // The owner is queued, then the copies it collected.
+        predecoded_tx.send_blocking(owner).unwrap();
+        for follower in twins.owner_queued(&hash) {
+            predecoded_tx.send_blocking(follower).unwrap();
+        }
+        drop(predecoded_tx);
+        let order: Vec<String> = std::iter::from_fn(|| predecoded_rx.recv_blocking().ok())
+            .map(|item| item.file.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(order, ["owner.png", "copy1.png", "copy2.png"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4344,6 +4472,7 @@ mod tests {
             &PredecodeBudget::new(256 << 20),
             false,
             Some(&TwinRegistry::new()),
+            true,
         )
         .expect("not cancelled");
         assert!(item.decoded.is_none(), "a missing frame runtime must not mark the video failed");
@@ -4438,7 +4567,7 @@ mod tests {
         let not_srgb = jpeg_with_mpf_preview(&primary, &preview, false);
         assert!(decode_mpf_preview(&not_srgb, 600, 400, 300).is_none());
         assert!(decode_mpf_preview(&primary, 600, 400, 300).is_none(), "no MPF index, no preview");
-        let (_, w, h) = decode_image_sync_imagecrate(std::path::Path::new("mpf-test.jpg"), Some(&file)).unwrap();
+        let (_, w, h) = decode_image_sync_imagecrate(std::path::Path::new("mpf-test.jpg"), Some(&file), None).unwrap();
         assert_eq!((w, h), (600, 400), "the scan floor is 2048, so this small file still decodes in full");
     }
 
@@ -4473,6 +4602,22 @@ mod tests {
         // A buffer that does not match the claimed dimensions must surface as an
         // error, never a panic in the scan pipeline.
         assert!(apply_exif_orientation(vec![1, 2, 3], 9, 9, Some(Orientation::Rotate90)).is_err());
+    }
+
+    #[test]
+    fn one_exif_read_agrees_with_the_separate_readers_and_decodes_the_same_frame() {
+        let path = std::path::Path::new("oriented.jpg");
+        for bytes in [jpeg_with_orientation(6, 4, Some(6)), jpeg_with_orientation(6, 4, None), tiny_png(), b"not an image".to_vec()] {
+            let read = read_primary_exif(&bytes);
+            assert_eq!(read.orientation, exif_orientation(&bytes));
+            assert_eq!(read.srgb, exif_is_srgb(&bytes));
+            assert_eq!(read.fields, parse_exif_fields(&bytes));
+            let hinted = decode_image_sync_with(path, Some(&bytes), Some(&read)).ok();
+            assert_eq!(hinted, decode_image_sync(path, Some(&bytes)).ok());
+        }
+        let turned = jpeg_with_orientation(6, 4, Some(6));
+        let (_, w, h) = decode_image_sync_with(path, Some(&turned), Some(&read_primary_exif(&turned))).unwrap();
+        assert_eq!((w, h), (4, 6), "the orientation handed down is applied");
     }
 
     fn jpeg_with_orientation(width: u32, height: u32, orientation: Option<u8>) -> Vec<u8> {

@@ -47,14 +47,57 @@ pub enum TwinClaim {
     Pending(Arc<Notify>),
 }
 
-#[derive(Default)]
-pub struct TwinRegistry {
+/// `T` is what a decoder parks for a copy until its owner is queued (see
+/// [`TwinRegistry::hold`]).
+pub struct TwinRegistry<T = ()> {
     map: Mutex<HashMap<ContentHash, State>>,
+    /// Copies held back while their owner is still being decoded. An entry
+    /// exists only between the owner's claim and its hand-over to the workers.
+    held: Mutex<HashMap<ContentHash, Vec<T>>>,
 }
 
-impl TwinRegistry {
+impl<T> Default for TwinRegistry<T> {
+    fn default() -> Self {
+        Self { map: Mutex::new(HashMap::new()), held: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl<T> TwinRegistry<T> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// [`claim`](Self::claim) for a stage that queues its results for workers
+    /// (the decoders). A copy only hashes, so it would reach the workers ahead
+    /// of the owner that is still decoding; with every worker waiting on such
+    /// copies nothing would pick the owner up. An owner claimed here therefore
+    /// collects its copies ([`hold`](Self::hold)) until it has been queued
+    /// ([`owner_queued`](Self::owner_queued)).
+    pub fn claim_queued(&self, hash: ContentHash) -> TwinClaim {
+        let mut held = self.held.lock();
+        let claim = self.claim(hash);
+        if matches!(claim, TwinClaim::Owner) {
+            held.insert(hash, Vec::new());
+        }
+        claim
+    }
+
+    /// Parks a copy's work item behind its owner. Returns the item when the
+    /// owner is already with the workers and the copy can follow at once.
+    pub fn hold(&self, hash: &ContentHash, item: T) -> Option<T> {
+        match self.held.lock().get_mut(hash) {
+            Some(waiting) => {
+                waiting.push(item);
+                None
+            }
+            None => Some(item),
+        }
+    }
+
+    /// The owner of `hash` has been queued (or abandoned): the copies it
+    /// collected, to be queued right behind it.
+    pub fn owner_queued(&self, hash: &ContentHash) -> Vec<T> {
+        self.held.lock().remove(hash).unwrap_or_default()
     }
 
     /// Hashes of images already analyzed in an earlier scan.
@@ -130,6 +173,31 @@ impl TwinRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    type TwinRegistry = super::TwinRegistry<&'static str>;
+
+    #[test]
+    fn copies_are_held_until_their_owner_is_queued() {
+        let registry = TwinRegistry::new();
+        let hash = [9u8; 32];
+        assert!(matches!(registry.claim_queued(hash), TwinClaim::Owner));
+        assert!(matches!(registry.claim_queued(hash), TwinClaim::Pending(_)));
+        assert_eq!(registry.hold(&hash, "copy 1"), None);
+        assert_eq!(registry.hold(&hash, "copy 2"), None);
+        assert_eq!(registry.owner_queued(&hash), vec!["copy 1", "copy 2"]);
+        assert_eq!(registry.hold(&hash, "copy 3"), Some("copy 3"), "the owner is with the workers: follow at once");
+        assert!(registry.owner_queued(&hash).is_empty());
+
+        // An owner claimed by a worker is already running: nothing is held.
+        let other = [10u8; 32];
+        assert!(matches!(registry.claim(other), TwinClaim::Owner));
+        assert_eq!(registry.hold(&other, "copy"), Some("copy"));
+
+        // A later owner of the same image (the first failed) collects again.
+        registry.publish(hash, false);
+        assert!(matches!(registry.claim_queued(hash), TwinClaim::Owner));
+        assert_eq!(registry.hold(&hash, "copy 4"), None);
+        assert_eq!(registry.owner_queued(&hash), vec!["copy 4"]);
+    }
 
     #[tokio::test]
     async fn a_waiter_of_a_failed_owner_is_released_when_another_copy_takes_over() {

@@ -10,7 +10,7 @@
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
-    parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
+    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
     DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
     PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
     STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
@@ -112,12 +112,12 @@ fn stored_text(text: Option<String>) -> Option<String> {
 /// Reads, hashes and decodes one file on a decoder thread. A byte-identical
 /// copy of an image that is already analyzed, or being analyzed, is hashed
 /// only: the writer copies the twin's rows (pipeline/twin_reuse.rs).
-pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>) -> PreDecoded {
+pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>, from_decoder: bool) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
     // `bytes` is present only for a full SHA-256, the one identity worth sharing.
     let twin = match (content_hash, file.kind, twins, bytes.as_deref()) {
-        (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => twins.claim(hash),
+        (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => claim_twin(twins, hash, from_decoder),
         _ => TwinClaim::None,
     };
     let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
@@ -226,8 +226,7 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
     let pool = models.mobileclip_pool.as_ref()?;
     let (rgb, w, h) = image.rgb()?;
     let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
-    let slot = pool.iter().find_map(|m| m.try_lock()).unwrap_or_else(|| pool[0].lock());
-    let mut model = slot;
+    let mut model = crate::models::checkout(pool, 0);
     model.embed(&resized).map_err(|error| tracing::warn!(?error, "MobileCLIP embed failed")).ok()
 }
 

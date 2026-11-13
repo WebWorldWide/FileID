@@ -101,11 +101,11 @@ impl YuNet {
     /// the forward pass: the letterbox resize, the 4.9 MB tensor fill, the
     /// stride decode and NMS run on the caller's thread while other workers
     /// use the session.
-    pub fn detect_shared(model: &parking_lot::Mutex<Self>, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
+    pub fn detect_shared(pool: &[parking_lot::Mutex<Self>], preferred: usize, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
         let Some(input) = Self::prepare(rgb, width, height)? else {
             return Ok(Vec::new());
         };
-        let outputs = model.lock().forward(input.chw)?;
+        let outputs = super::checkout(pool, preferred).forward(input.chw)?;
         Ok(decode_outputs(&outputs, input.scale, width, height))
     }
 
