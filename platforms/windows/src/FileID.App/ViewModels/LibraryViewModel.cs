@@ -319,14 +319,14 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public Task RefreshAsync(CancellationToken ct) => RefreshAsync(ct, liveScan: false);
+    public Task RefreshAsync(CancellationToken ct) => RefreshAsync(liveScan: false, ct);
 
     /// <summary><paramref name="liveScan"/> marks the once-a-second refresh
     /// while a scan is adding files: it re-reads only the first page, puts
     /// the new files in front of what is already listed, and reuses recent
     /// per-kind counts. Every other refresh re-reads the pages already
     /// loaded.</summary>
-    public async Task RefreshAsync(CancellationToken ct, bool liveScan)
+    public async Task RefreshAsync(bool liveScan, CancellationToken ct)
     {
         if (_disposed) return;
         long myGen = Interlocked.Increment(ref _refreshGen);

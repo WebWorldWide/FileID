@@ -240,7 +240,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         DispatcherQueue.TryEnqueue(async () =>
         {
             if (_unloaded) return;
-            try { await ViewModel.RefreshAsync(CancellationToken.None, liveScan: !force); }
+            try { await ViewModel.RefreshAsync(liveScan: !force, CancellationToken.None); }
             catch (Exception ex) { Services.DebugLog.Warn($"Library refresh failed (force={force}): {ex.Message}"); }
         });
     }
