@@ -436,7 +436,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let this = this.clone();
         glib::MainContext::default().spawn_local(async move {
             while let Ok(ev) = ev_rx.recv().await {
-                match ev {
+                match &*ev {
                     EngineEvent::BatchLanded(_) => {
                         if this.reload_throttle.get().elapsed() >= Duration::from_millis(1200) {
                             this.reload_throttle.set(Instant::now());
@@ -445,12 +445,12 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                     EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.reload(),
                     EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
-                        this.finish_trash(result);
+                        this.finish_trash(result.clone());
                     }
                     EngineEvent::BulkActionResult(result)
                         if result.action == "restoreFromTrash" =>
                     {
-                        this.finish_restore(result);
+                        this.finish_restore(result.clone());
                     }
                     EngineEvent::Exited if this.deleting.get() => {
                         this.fail_trash("FileID restarted before the move to Trash finished. Check Trash, then try again.");

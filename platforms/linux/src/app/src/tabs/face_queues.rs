@@ -414,9 +414,9 @@ impl RefreshBar {
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = events.recv().await {
                 let Some(bar) = weak.upgrade() else { return };
-                match event {
-                    EngineEvent::FaceReview(page) => bar.on_page(page),
-                    EngineEvent::CatalogResponse(response) => bar.on_catalog(&response),
+                match &*event {
+                    EngineEvent::FaceReview(page) => bar.on_page(page.clone()),
+                    EngineEvent::CatalogResponse(response) => bar.on_catalog(response),
                     EngineEvent::Ready | EngineEvent::FaceClusteringComplete(_) => bar.request(),
                     EngineEvent::Exited => {
                         bar.listing.borrow_mut().take();
@@ -649,8 +649,8 @@ impl QueuePanel {
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = events.recv().await {
                 let Some(panel) = weak.upgrade() else { return };
-                match event {
-                    EngineEvent::FaceReview(page) => panel.on_page(page),
+                match &*event {
+                    EngineEvent::FaceReview(page) => panel.on_page(page.clone()),
                     EngineEvent::FaceClusteringComplete(_) => panel.reload(),
                     EngineEvent::Exited => {
                         panel.pending.borrow_mut().clear();

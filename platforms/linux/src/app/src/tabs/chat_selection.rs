@@ -129,7 +129,7 @@ impl Strip {
         let note = self.note.downgrade();
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = rx.recv().await {
-                if let EngineState::CatalogResponse(response) = event
+                if let EngineState::CatalogResponse(response) = &*event
                     && response.request_id == wanted
                 {
                     if let Some(note) = note.upgrade() {
@@ -138,6 +138,7 @@ impl Strip {
                         } else {
                             response
                                 .message
+                                .clone()
                                 .unwrap_or_else(|| "The group couldn't be saved. Try again.".into())
                         });
                     }

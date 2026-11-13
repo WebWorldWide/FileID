@@ -301,7 +301,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                 if dialog_weak.upgrade().is_none() {
                     break;
                 }
-                match event {
+                match &*event {
                     EngineState::ModelDownloadProgress(progress) => {
                         if let Some(&index) = by_kind.get(progress.model_kind.as_str()) {
                             let row = &rows[index];

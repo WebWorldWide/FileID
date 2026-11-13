@@ -12,6 +12,8 @@
 mod app_settings;
 mod changes;
 mod engine_client;
+mod engine_errors;
+mod event_queue;
 mod fonts;
 mod lavalamp;
 mod model_license;

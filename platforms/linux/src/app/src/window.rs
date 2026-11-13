@@ -259,7 +259,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(state) = status_rx.recv().await {
             let Some(shell) = weak.upgrade() else { break };
-            shell.on_engine(state);
+            shell.on_engine(&state);
         }
     });
 
@@ -625,11 +625,13 @@ impl Shell {
         }
     }
 
-    fn on_engine(self: &Rc<Self>, state: EngineState) {
+    fn on_engine(self: &Rc<Self>, state: &EngineState) {
         let mut recount = false;
         let mut note: Option<Option<String>> = None;
+        let mut note_detail: Option<String> = None;
+        let mut blocked = false;
         let mut finished_scan = None;
-        if let EngineState::QueueState(queue) = &state {
+        if let EngineState::QueueState(queue) = state {
             self.sidebar.set_queue(queue);
             return;
         }
@@ -651,9 +653,10 @@ impl Shell {
                 EngineState::Progress(progress) => {
                     status.start_requested = false;
                     status.phase = Some(progress.phase);
-                    status.progress = Some(progress);
+                    status.progress = Some(progress.clone());
                 }
                 EngineState::ScanPhase(phase) => {
+                    let phase = *phase;
                     status.phase = Some(phase);
                     if matches!(
                         phase,
@@ -672,10 +675,11 @@ impl Shell {
                 }
                 EngineState::BatchLanded(processed) => {
                     if let Some(progress) = status.progress.as_mut() {
-                        progress.processed = progress.processed.max(processed);
+                        progress.processed = progress.processed.max(*processed);
                     }
                 }
                 EngineState::ScanComplete(processed) => {
+                    let processed = *processed;
                     finished_scan = Some(processed);
                     if let Some(progress) = status.progress.as_mut() {
                         progress.processed = progress.processed.max(processed);
@@ -693,7 +697,7 @@ impl Shell {
                 }
                 EngineState::DeepAnalyzeProgress(progress) => {
                     status.deep_running = true;
-                    status.deep = Some(progress);
+                    status.deep = Some(progress.clone());
                 }
                 EngineState::DeepAnalyzeComplete(done) => {
                     status.deep_running = false;
@@ -709,13 +713,12 @@ impl Shell {
                     if status.scan_running() {
                         status.phase = None;
                     }
-                    let missing = message
-                        .split_once("Missing:")
-                        .map(|(_, kinds)| kinds.trim().to_owned())
-                        .unwrap_or_else(|| "required scan models".to_owned());
-                    note = Some(Some(format!(
-                        "Scan blocked: {missing} Download the missing models in Settings, then try again."
-                    )));
+                    blocked = true;
+                    note = Some(Some(
+                        "FileID needs its AI models before it can scan. Download them in Settings, then press Scan again."
+                            .to_owned(),
+                    ));
+                    note_detail = Some(crate::engine_errors::detail(kind, message, None));
                 }
                 EngineState::Error {
                     kind,
@@ -723,25 +726,27 @@ impl Shell {
                     model_kind,
                 } => {
                     if kind.starts_with("deep_analyze")
-                        && crate::tabs::deep_analyze::error_ends_deep_run(&kind)
+                        && crate::tabs::deep_analyze::error_ends_deep_run(kind)
                     {
                         status.deep_running = false;
                     }
                     if kind == "scan_already_running" || kind == "scan_failed" {
                         status.start_requested = false;
                     }
-                    note = match model_kind {
-                        Some(_) if kind == "prewarm_cancelled" => None,
-                        Some(model) => Some(Some(format!("Model {model}: {message}"))),
-                        None => Some(Some(message)),
-                    };
+                    if !(model_kind.is_some() && kind == "prewarm_cancelled") {
+                        note = Some(Some(crate::engine_errors::sentence(kind, message)));
+                        note_detail = Some(crate::engine_errors::detail(kind, message, model_kind.as_deref()));
+                    }
                 }
                 EngineState::Failed(message) => {
                     status.engine_ready = false;
                     clear_running(&mut status);
-                    note = Some(Some(format!(
-                        "FileID's background helper couldn't start: {message}"
-                    )));
+                    note = Some(Some(if crate::engine_errors::looks_technical(message) {
+                        "FileID's helper couldn't start. Quit and reopen FileID.".to_owned()
+                    } else {
+                        message.clone()
+                    }));
+                    note_detail = Some(message.clone());
                 }
                 EngineState::Exited => {
                     status.engine_ready = false;
@@ -757,9 +762,9 @@ impl Shell {
         if let Some(processed) = finished_scan {
             self.notify_scan_complete(processed);
         }
-        let blocked = matches!(&note, Some(Some(text)) if text.starts_with("Scan blocked"));
         if let Some(note) = note {
-            self.set_note(note);
+            self.sidebar.set_note_detail(note.as_deref(), note_detail.as_deref());
+            self.note.replace(note);
         }
         if blocked {
             self.navigate("settings");

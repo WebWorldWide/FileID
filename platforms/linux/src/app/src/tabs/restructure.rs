@@ -1280,15 +1280,15 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = events.recv().await {
-            match event {
-                EngineState::RestructurePlan(plan) => ui.show_plan(plan),
-                EngineState::RestructureApplyResult(result) => ui.finish(result),
+            match &*event {
+                EngineState::RestructurePlan(plan) => ui.show_plan(plan.clone()),
+                EngineState::RestructureApplyResult(result) => ui.finish(result.clone()),
                 EngineState::Error { kind, message, .. }
-                    if ui.operation.get().is_some() && is_restructure_error(&kind) =>
+                    if ui.operation.get().is_some() && is_restructure_error(kind) =>
                 {
                     ui.operation.set(None);
                     ui.stopping.set(false);
-                    ui.set_notice(Tone::Warning, "Something went wrong", &message);
+                    ui.set_notice(Tone::Warning, "Something went wrong", message);
                     ui.refresh();
                 }
                 EngineState::Exited => {

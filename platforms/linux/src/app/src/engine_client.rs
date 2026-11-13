@@ -6,7 +6,9 @@
 //   * sends `IpcCommand`s as newline-delimited JSON on its stdin — reusing the
 //     engine crate's own serde types so the wire contract can never drift,
 //   * parses bounded `IpcEvent` frames off a reader thread and fans them out to
-//     every UI subscriber on the GTK main context through bounded channels,
+//     every UI subscriber on the GTK main context; each subscriber has its own
+//     queue (`event_queue`), so the pump never waits on a listener,
+//   * writes commands on one ordered writer thread, never on the GTK thread,
 //   * proves readiness with a per-spawn health-check nonce, and respawns the
 //     engine with capped backoff if it dies.
 //
@@ -30,7 +32,7 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Stdio};
+use std::process::{Child, Stdio};
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +80,40 @@ pub enum EngineState {
 }
 
 pub type EngineEvent = EngineState;
+
+pub type EventReceiver = crate::event_queue::EventReceiver<EngineState>;
+type EventSender = crate::event_queue::EventSender<EngineState>;
+
+impl crate::event_queue::Coalesce for EngineState {
+    fn is_progress(&self) -> bool {
+        match self {
+            EngineState::Progress(_)
+            | EngineState::DeepAnalyzeProgress(_)
+            | EngineState::BenchmarkProgress(_)
+            | EngineState::QueueState(_)
+            | EngineState::BatchLanded(_) => true,
+            // A finished download is what listeners wait for; it keeps its place.
+            EngineState::ModelDownloadProgress(progress) => progress.fraction.is_finite() && progress.fraction < 1.0,
+            _ => false,
+        }
+    }
+
+    fn supersedes(&self, older: &Self) -> bool {
+        match (self, older) {
+            (EngineState::Progress(_), EngineState::Progress(_))
+            | (EngineState::DeepAnalyzeProgress(_), EngineState::DeepAnalyzeProgress(_))
+            | (EngineState::QueueState(_), EngineState::QueueState(_))
+            | (EngineState::BatchLanded(_), EngineState::BatchLanded(_)) => true,
+            (EngineState::BenchmarkProgress(new), EngineState::BenchmarkProgress(old)) => {
+                new.request_id == old.request_id && new.model_kind == old.model_kind
+            }
+            (EngineState::ModelDownloadProgress(new), EngineState::ModelDownloadProgress(old)) => {
+                new.model_kind == old.model_kind
+            }
+            _ => false,
+        }
+    }
+}
 
 /// What the reader thread hands the main-context pump. Engine `ready` and
 /// health answers are consumed by the pump; subscribers only ever see a
@@ -282,17 +318,18 @@ impl RespawnBudget {
 const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
-const SUBSCRIBER_EVENT_CAP: usize = 4;
 const MAX_ENGINE_LOG_BYTES: usize = 1024 * 1024;
 /// A stray multi-GB file must not balloon memory; larger files keep the icon.
 const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 pub struct EngineClient {
     child: Option<Child>,
-    stdin: Option<Arc<Mutex<ChildStdin>>>,
+    /// Feeds the writer thread; dropping it closes the engine's stdin once
+    /// every line already queued has been written.
+    stdin: Option<std::sync::mpsc::Sender<String>>,
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
-    subscribers: Vec<Sender<EngineState>>,
+    subscribers: Vec<EventSender>,
     thumbs: Arc<ThumbQueue>,
     preview: Arc<PreviewSlot>,
     query_worker: Arc<QueryWorkerState>,
@@ -307,7 +344,7 @@ pub struct EngineClient {
     shutting_down: Arc<AtomicBool>,
 }
 
-fn prune_closed_subscribers(subscribers: &mut Vec<Sender<EngineState>>) {
+fn prune_closed_subscribers(subscribers: &mut Vec<EventSender>) {
     subscribers.retain(|subscriber| !subscriber.is_closed());
 }
 
@@ -332,18 +369,24 @@ impl EngineClient {
         }
     }
 
-    /// Each call returns a receiver that sees every event from now on.
-    pub fn subscribe(&mut self) -> Receiver<EngineState> {
-        let (tx, rx) = async_channel::bounded(SUBSCRIBER_EVENT_CAP);
+    /// Each call returns a receiver that sees every reply and terminal event
+    /// from now on, and the newest of each kind of progress event.
+    pub fn subscribe(&mut self) -> EventReceiver {
+        let (tx, rx) = crate::event_queue::channel();
         self.subscribers.push(tx);
         rx
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_test_event(&self, event: EngineState) {
+    fn publish(&mut self, event: &Rc<EngineState>) {
+        prune_closed_subscribers(&mut self.subscribers);
         for subscriber in &self.subscribers {
-            deliver_from_main(subscriber, event.clone());
+            subscriber.push(event);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_test_event(&mut self, event: EngineState) {
+        self.publish(&Rc::new(event));
     }
 
     /// True only once a health probe minted for the current spawn generation
@@ -525,14 +568,9 @@ impl EngineClient {
                     }
                     _ => {}
                 }
-                let subscribers = client.borrow().subscribers.clone();
-                drop(client);
-                for subscriber in &subscribers {
-                    let _ = subscriber.send(event.clone()).await;
-                }
-                let Some(client) = weak.upgrade() else { break };
-                prune_closed_subscribers(&mut client.borrow_mut().subscribers);
-                if matches!(event, EngineState::Exited)
+                let event = Rc::new(event);
+                client.borrow_mut().publish(&event);
+                if matches!(*event, EngineState::Exited)
                     && !client.borrow().shutting_down.load(Ordering::Relaxed)
                 {
                     retire_exited_child(&client);
@@ -593,10 +631,11 @@ impl EngineClient {
             payload,
         };
         let line = serde_json::to_string(&command)? + "\n";
-        let stdin = self.stdin.as_ref().context("engine not spawned")?.clone();
-        let mut guard = stdin.lock().expect("engine stdin poisoned");
-        guard.write_all(line.as_bytes())?;
-        guard.flush()?;
+        self.stdin
+            .as_ref()
+            .context("engine not spawned")?
+            .send(line)
+            .map_err(|_| anyhow::anyhow!("engine is not accepting commands"))?;
         if shutdown {
             self.shutting_down.store(true, Ordering::Release);
         }
@@ -678,15 +717,20 @@ fn emit_from_main(raw_tx: &Sender<RawEvent>, event: RawEvent) {
     }
 }
 
-#[cfg(test)]
-fn deliver_from_main(subscriber: &Sender<EngineState>, event: EngineState) {
-    match subscriber.try_send(event) {
-        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
-        Err(async_channel::TrySendError::Full(event)) => {
-            let subscriber = subscriber.clone();
-            glib::idle_add_local_once(move || deliver_from_main(&subscriber, event));
+/// One thread owns the engine's stdin and writes lines in the order they were
+/// queued, so a full pipe never stalls the GTK thread. It ends, closing stdin,
+/// when the sender is dropped or the engine stops reading.
+fn spawn_command_writer(mut stdin: impl Write + Send + 'static) -> std::sync::mpsc::Sender<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in rx {
+            if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
+                tracing::debug!(target: "engine", "engine stopped reading commands");
+                break;
+            }
         }
-    }
+    });
+    tx
 }
 
 fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
@@ -717,7 +761,7 @@ fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
             let stderr = child.stderr.take();
             {
                 let mut client = this.borrow_mut();
-                client.stdin = Some(Arc::new(Mutex::new(stdin)));
+                client.stdin = Some(spawn_command_writer(stdin));
                 client.child = Some(child);
             }
             thread::spawn(move || drain_engine_stdout(BufReader::new(stdout), raw_tx));
@@ -1336,7 +1380,7 @@ mod tests {
             .spawn()
             .unwrap();
         let mut client = EngineClient::new();
-        client.stdin = Some(Arc::new(Mutex::new(child.stdin.take().unwrap())));
+        client.stdin = Some(spawn_command_writer(child.stdin.take().unwrap()));
         client.child = Some(child);
         client.shutdown();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1352,7 +1396,7 @@ mod tests {
     fn requested_shutdown_suppresses_respawn() {
         let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
         let mut client = EngineClient::new();
-        client.stdin = Some(Arc::new(Mutex::new(child.stdin.take().unwrap())));
+        client.stdin = Some(spawn_command_writer(child.stdin.take().unwrap()));
         client.child = Some(child);
         client.send(CommandPayload::Shutdown(fileid_engine::ipc::Empty {})).unwrap();
         assert!(client.shutting_down.load(Ordering::Acquire));
@@ -1370,7 +1414,7 @@ mod tests {
         let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut client = EngineClient::new();
-        client.stdin = Some(Arc::new(Mutex::new(child.stdin.take().unwrap())));
+        client.stdin = Some(spawn_command_writer(child.stdin.take().unwrap()));
         client.child = Some(child);
         client.start_scan(root).unwrap();
         client.stdin.take();
@@ -1538,8 +1582,8 @@ mod tests {
 
     #[test]
     fn closed_one_shot_subscribers_are_pruned() {
-        let (closed_sender, closed_receiver) = async_channel::bounded(1);
-        let (live_sender, _live_receiver) = async_channel::bounded(1);
+        let (closed_sender, closed_receiver) = crate::event_queue::channel();
+        let (live_sender, _live_receiver) = crate::event_queue::channel();
         drop(closed_receiver);
         let mut subscribers = vec![closed_sender, live_sender];
         prune_closed_subscribers(&mut subscribers);
@@ -1549,9 +1593,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn engine_event_channels_are_bounded() {
+    fn the_reader_channel_is_bounded() {
         assert!(RAW_EVENT_CAP > 0 && RAW_EVENT_CAP <= 8);
-        assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);
     }
 
     fn probe_job(run: impl FnOnce() -> Option<DecodedImage> + Send + 'static) -> (ThumbJob, Receiver<ThumbReply>, CancelToken) {

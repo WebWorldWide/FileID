@@ -1267,8 +1267,8 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
         let _strong = strong;
         while let Ok(event) = rx.recv().await {
             let Some(ui) = weak.upgrade() else { return };
-            match event {
-                EngineState::CatalogResponse(r) if super::takes_proposals_model::is_job_push(&r) => {
+            match &*event {
+                EngineState::CatalogResponse(r) if super::takes_proposals_model::is_job_push(r) => {
                     ui.proposals.set_job(&ui, super::takes_proposals_model::job(&r.jobs));
                 }
                 EngineState::CatalogResponse(r) => {
@@ -1279,7 +1279,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     match slot.as_str() {
                         "groups" => {
                             if ok {
-                                ui.render_groups(r.take_groups.unwrap_or_default());
+                                ui.render_groups(r.take_groups.clone().unwrap_or_default());
                             } else {
                                 ui.toast(r.message.as_deref().unwrap_or("Couldn't look for groups."));
                                 if ui.current.borrow().is_none() {
@@ -1288,7 +1288,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                             }
                             ui.groups_finished();
                         }
-                        "score" if ok => ui.render_review(r.take_qualities.unwrap_or_default()),
+                        "score" if ok => ui.render_review(r.take_qualities.clone().unwrap_or_default()),
                         "score" => ui.score_failed(
                             r.message
                                 .as_deref()
@@ -1299,9 +1299,9 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                             ui.request_groups();
                             ui.proposals.request(&ui);
                         }
-                        "proposals" | "grouping" | "grouping-control" => ui.proposals.consume(&ui, &slot, r),
-                        "manual" => ui.manual.consume(&ui, r),
-                        "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs),
+                        "proposals" | "grouping" | "grouping-control" => ui.proposals.consume(&ui, &slot, r.clone()),
+                        "manual" => ui.manual.consume(&ui, r.clone()),
+                        "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs.clone()),
                         "job-control" => {
                             ui.send("jobs", catalog_request("jobs"));
                         }
@@ -1309,10 +1309,10 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     }
                 }
                 EngineState::BulkActionResult(result) if result.action.starts_with("trashFiles") => {
-                    ui.finish_trash(result)
+                    ui.finish_trash(result.clone())
                 }
                 EngineState::BulkActionResult(result) if result.action.starts_with("restoreFromTrash") => {
-                    ui.finish_restore(result)
+                    ui.finish_restore(result.clone())
                 }
                 EngineState::Ready => {
                     ui.request_groups();
@@ -1329,7 +1329,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     ui.groups_finished();
                     ui.proposals.finished_request(&ui);
                     if ui.end_trash().is_some() || ui.root.is_mapped() {
-                        ui.toast(&message);
+                        ui.toast(message);
                     }
                 }
                 EngineState::Exited => {

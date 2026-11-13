@@ -1394,17 +1394,17 @@ fn wire(
     let u = ui.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(ev) = rx.recv().await {
-            match ev {
+            match &*ev {
                 EngineState::Ready => {
                     u.send("capabilities", None);
                     u.send("history", None);
                 }
-                EngineState::ToolResponse(r) => handle_response(&u, r),
+                EngineState::ToolResponse(r) => handle_response(&u, r.clone()),
                 EngineState::Failed(e) => {
                     u.state.borrow_mut().requests.clear();
                     u.state.borrow_mut().preview = None;
                     u.running.replace(None);
-                    u.status.set_label(&e);
+                    u.status.set_label(e);
                     u.update();
                 }
                 EngineState::Exited => {

@@ -646,7 +646,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         glib::MainContext::default().spawn_local(async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
-                match ev {
+                match &*ev {
                     EngineEvent::Spawning => {
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
@@ -670,7 +670,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::ScanComplete(_) => reload(&ui),
                     EngineEvent::FaceClusteringComplete(result) => {
                         ui.face_clustering.borrow_mut().finish_active();
-                        set_status(&ui, face_grouping_status(&result));
+                        set_status(&ui, face_grouping_status(result));
                         reload(&ui);
                         refresh_review_count(&ui);
                     }
@@ -1008,7 +1008,7 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
             let ui = ui.clone();
             glib::MainContext::default().spawn_local(async move {
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result)
                             if result.action == "markPersonsAsUnknown" =>
                         {
@@ -1913,9 +1913,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result) => {
-                            match classify_rename_terminal(&result, pid) {
+                            match classify_rename_terminal(result, pid) {
                                 RenameTerminal::Ignore => continue,
                                 RenameTerminal::Success => {
                                     finish_person_action(&ui, "renamePerson");
@@ -2078,9 +2078,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result) => {
-                            match classify_person_terminal(&result, "markPersonsAsUnknown", pid) {
+                            match classify_person_terminal(result, "markPersonsAsUnknown", pid) {
                                 RenameTerminal::Ignore => continue,
                                 RenameTerminal::Success => {
                                     finish_person_action(&ui, "markPersonsAsUnknown");
@@ -2185,28 +2185,31 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                 return;
             }
             if !matches!(
-                event,
+                *event,
                 EngineEvent::ScanComplete(_) | EngineEvent::FaceClusteringComplete(_)
             ) {
                 continue;
             }
-            let files = read_person_files_async(pid)
-                .recv()
-                .await
-                .unwrap_or_default();
-            let Some(photos) = photos_weak.upgrade() else {
-                return;
-            };
-            let shown: Vec<i64> = (0..photos.n_items())
-                .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
-                .map(|object| object.borrow::<PersonFace>().face_id)
-                .collect();
-            if !person_photos_changed(&shown, &files) {
-                continue;
-            }
-            let items: Vec<glib::BoxedAnyObject> =
-                files.into_iter().map(glib::BoxedAnyObject::new).collect();
-            photos.splice(0, photos.n_items(), &items);
+            let photos_weak = photos_weak.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let files = read_person_files_async(pid)
+                    .recv()
+                    .await
+                    .unwrap_or_default();
+                let Some(photos) = photos_weak.upgrade() else {
+                    return;
+                };
+                let shown: Vec<i64> = (0..photos.n_items())
+                    .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
+                    .map(|object| object.borrow::<PersonFace>().face_id)
+                    .collect();
+                if !person_photos_changed(&shown, &files) {
+                    return;
+                }
+                let items: Vec<glib::BoxedAnyObject> =
+                    files.into_iter().map(glib::BoxedAnyObject::new).collect();
+                photos.splice(0, photos.n_items(), &items);
+            });
         }
     });
 }
@@ -2633,11 +2636,12 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
     let btn = btn.clone();
     glib::MainContext::default().spawn_local(async move {
         let cands = loop {
-            match rx.recv().await {
-                Ok(EngineEvent::MergeSuggestions(result)) => {
+            let Ok(event) = rx.recv().await else { break Vec::new() };
+            match &*event {
+                EngineEvent::MergeSuggestions(result) => {
                     break result
                         .pairs
-                        .into_iter()
+                        .iter()
                         .map(|pair| Candidate {
                             a: pair.source_person_id,
                             b: pair.destination_person_id,
@@ -2647,11 +2651,12 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                         })
                         .collect();
                 }
-                Ok(EngineEvent::Exited) | Err(_) => break Vec::new(),
-                Ok(EngineEvent::Error { kind, message, .. })
+                EngineEvent::Exited => break Vec::new(),
+                EngineEvent::Error { kind, message, .. }
                     if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" =>
                 {
-                    set_status(&ui, format!("Couldn't find merge suggestions: {message}"));
+                    tracing::debug!(target: "people", "merge suggestions failed: {kind}: {message}");
+                    set_status(&ui, "Couldn't look for people to merge. Try again in a moment.".to_owned());
                     btn.set_sensitive(true);
                     btn.set_label("Suggest merges");
                     return;

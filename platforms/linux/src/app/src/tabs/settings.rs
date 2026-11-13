@@ -420,7 +420,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            match &event {
+            match &*event {
                 EngineState::Ready => {
                     connection.set_label("Ready");
                     for row in &rows { row.engine_ready.set(true); row.render(); }

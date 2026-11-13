@@ -811,10 +811,10 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            match event {
+            match &*event {
                 EngineState::Ready => ui.dispatch("history"),
                 EngineState::ChatResponse(response) => {
-                    let deferred = ui.state.borrow_mut().finish(&response);
+                    let deferred = ui.state.borrow_mut().finish(response);
                     if let Some(request) = deferred {
                         send_request(&ui.engine, &ui.state, &ui.status, request);
                     }
@@ -826,13 +826,13 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
                         &response.status,
                     );
                     if current {
-                        ui.render(response);
+                        ui.render(response.clone());
                     }
                 }
                 EngineState::Failed(error) => {
                     ui.state.borrow_mut().interrupted();
                     ui.set_busy(false);
-                    ui.status.set_label(&error);
+                    ui.status.set_label(error);
                 }
                 EngineState::Exited => {
                     ui.state.borrow_mut().interrupted();

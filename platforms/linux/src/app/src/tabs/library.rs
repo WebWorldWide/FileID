@@ -440,7 +440,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
-                match ev {
+                match &*ev {
                     EngineEvent::Ready | EngineEvent::BatchLanded(_) => {
                         if last.elapsed() >= Duration::from_millis(900) {
                             last = Instant::now();
@@ -730,7 +730,7 @@ async fn similar_request(
     request.result_scope = Some("files".into());
     let id = request.request_id.clone();
     let events = engine.borrow_mut().subscribe();
-    let closer = events.clone();
+    let closer = events.closer();
     let sent = engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::CatalogRequest(Box::new(
         fileid_engine::ipc::CatalogRequestPayload { request },
     )));
@@ -740,9 +740,9 @@ async fn similar_request(
     let mut found = None;
     if sent.is_ok() {
         while let Ok(event) = events.recv().await {
-            match event {
+            match &*event {
                 EngineEvent::CatalogResponse(response) if response.request_id == id => {
-                    found = Some(response);
+                    found = Some(response.clone());
                     break;
                 }
                 EngineEvent::Exited => break,
@@ -1387,17 +1387,31 @@ fn open_preview(
                 if closed.get() {
                     break;
                 }
-                if !matches!(event, EngineEvent::ScanComplete(_)) {
+                if !matches!(*event, EngineEvent::ScanComplete(_)) {
                     continue;
                 }
                 let Some(id) = rows.borrow().get(idx.get()).map(|row| row.id) else { continue };
-                let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { continue };
-                if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
-                    continue;
-                }
-                rows.borrow_mut()[idx.get()] = row.clone();
-                dialog.set_title(&row.name);
-                meta_scroll.set_child(Some(&build_meta(&row)));
+                glib::MainContext::default().spawn_local(clone!(
+                    #[strong]
+                    rows,
+                    #[strong]
+                    idx,
+                    #[strong]
+                    closed,
+                    #[weak]
+                    meta_scroll,
+                    #[weak]
+                    dialog,
+                    async move {
+                        let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { return };
+                        if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
+                            return;
+                        }
+                        rows.borrow_mut()[idx.get()] = row.clone();
+                        dialog.set_title(&row.name);
+                        meta_scroll.set_child(Some(&build_meta(&row)));
+                    }
+                ));
             }
         }
     ));

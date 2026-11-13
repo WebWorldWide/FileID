@@ -22,7 +22,7 @@ use fileid_engine::ipc::{
 
 type Engine = Rc<RefCell<EngineClient>>;
 
-struct Subscription(async_channel::Receiver<EngineEvent>);
+struct Subscription(crate::engine_client::EventReceiver);
 
 impl Drop for Subscription {
     fn drop(&mut self) {
@@ -42,21 +42,22 @@ async fn bulk_result(
 ) -> Option<BulkActionResult> {
     let subscription = Subscription(engine.borrow_mut().subscribe());
     engine.borrow_mut().send(payload).ok()?;
-    let closer = subscription.0.clone();
+    let closer = subscription.0.closer();
     glib::timeout_add_seconds_local_once(timeout_secs, move || {
         closer.close();
     });
     loop {
-        match subscription.0.recv().await {
-            Ok(EngineEvent::BulkActionResult(result)) if result.action == action => {
+        let Ok(event) = subscription.0.recv().await else { return None };
+        match &*event {
+            EngineEvent::BulkActionResult(result) if result.action == action => {
                 let reported: HashSet<i64> =
                     result.messages.iter().filter_map(|m| m.file_id).collect();
                 if reported.is_empty() || !reported.is_disjoint(ids) {
-                    return Some(result);
+                    return Some(result.clone());
                 }
             }
-            Ok(EngineEvent::Exited) | Err(_) => return None,
-            Ok(_) => {}
+            EngineEvent::Exited => return None,
+            _ => {}
         }
     }
 }

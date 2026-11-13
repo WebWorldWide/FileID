@@ -320,8 +320,8 @@ impl ReviewPanel {
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = events.recv().await {
                 let Some(panel) = weak.upgrade() else { return };
-                match event {
-                    EngineEvent::FaceReview(page) => panel.on_page(page),
+                match &*event {
+                    EngineEvent::FaceReview(page) => panel.on_page(page.clone()),
                     EngineEvent::FaceClusteringComplete(_) => panel.reload(),
                     EngineEvent::Exited => {
                         panel.pending.borrow_mut().clear();
@@ -689,7 +689,7 @@ pub(super) fn count_waiting(
     }
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = events.recv().await {
-            match event {
+            match &*event {
                 EngineEvent::FaceReview(page) if page.request_id == id => {
                     if page.status == "ok" {
                         done(page.total);

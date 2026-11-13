@@ -190,10 +190,16 @@ impl Sidebar {
     }
 
     pub fn set_note(&self, text: Option<&str>) {
+        self.set_note_detail(text, None);
+    }
+
+    /// `detail` is the technical line (code, model id, raw message); it only
+    /// ever appears in the tooltip.
+    pub fn set_note_detail(&self, text: Option<&str>, detail: Option<&str>) {
         match text {
             Some(text) => {
                 self.note_label.set_text(text);
-                self.note_label.set_tooltip_text(Some(text));
+                self.note_label.set_tooltip_text(Some(detail.unwrap_or(text)));
                 self.note.set_visible(true);
             }
             None => self.note.set_visible(false),
