@@ -361,17 +361,28 @@ impl ScanSession {
         // already current" — NOT an empty/unsupported folder (#21).
         let skip_count = skip_paths.len();
         let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
+        // Windows catalogs a cloud placeholder from its metadata; the content-hash
+        // gate above keeps it out of the skip set so a download is noticed. Hand
+        // discovery those rows so a file that is still a placeholder is not
+        // re-emitted and re-written on every scan.
+        let known_placeholders = if cfg!(windows) && !self.rescan {
+            known_placeholders(&self.db_conn.lock(), root)
+        } else {
+            std::collections::HashMap::new()
+        };
         let discovery = Discovery::new_with_skip_and_exclusions(
             root,
             self.coordinator.clone(),
             skip_paths,
             Arc::new(excl_norm),
-        );
+        )
+        .with_known_placeholders(known_placeholders);
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_heavy = handle.heavy_count.clone();
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
+        let discovered_cloud_only = handle.cloud_only_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_seen_dirs = handle.seen_dirs.clone();
         let discovery_join = handle.join;
@@ -427,6 +438,7 @@ impl ScanSession {
         let coord_for_tick = self.coordinator.clone();
         let root_for_tick = root.to_string_lossy().into_owned();
         let errors_for_tick = discovered_errors.clone();
+        let cloud_only_for_tick = discovered_cloud_only.clone();
         // Clone the discovery counter for the ticker; the original stays
         // in scope so the tagging callback can also read it for Progress
         // event totals.
@@ -496,7 +508,8 @@ impl ScanSession {
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
                     // when a notice is actually delivered. (audit R3-21)
-                    let notice = discovery_notice(count, skip_count, errs, &root_for_tick);
+                    let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
+                    let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick);
                     if let Some(err) = notice {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
@@ -685,7 +698,8 @@ impl ScanSession {
             let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
             let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
             let root_display = root.to_string_lossy().into_owned();
-            let notice = discovery_notice(count, skip_count, errs, &root_display);
+            let cloud_only = discovered_cloud_only.load(std::sync::atomic::Ordering::Relaxed);
+            let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_display);
             if let Some(err) = notice {
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
                     .await;
@@ -966,9 +980,25 @@ fn discovery_notice(
     count: u64,
     skip_count: usize,
     errs: u64,
+    cloud_only: u64,
     root: &str,
 ) -> Option<crate::ipc::EngineError> {
-    let (kind, message) = if count == 0 && skip_count > 0 {
+    let (kind, message) = if cloud_only > 0 {
+        // The Swift engine's `Discovery.shortfallNotice`, word for word.
+        let mut parts = Vec::new();
+        if errs > 0 {
+            parts.push(format!(
+                "{errs} {} couldn't be opened (no permission, or removed during the scan)",
+                if errs == 1 { "item" } else { "items" }
+            ));
+        }
+        parts.push(format!(
+            "{cloud_only} {} stored in iCloud and not downloaded to this Mac, so {} left out",
+            if cloud_only == 1 { "file is" } else { "files are" },
+            if cloud_only == 1 { "it was" } else { "they were" }
+        ));
+        ("discovery_partial", format!("{}. Everything else was scanned.", parts.join("; ")))
+    } else if count == 0 && skip_count > 0 {
         (
             "rescan_no_changes",
             "Nothing changed in these files since the last scan. FileID is finishing a quick check of the folder.".to_string(),
@@ -1092,6 +1122,32 @@ fn reconcile_missing_face_crops_in(
         }
     }
     removed
+}
+
+/// Rows under `root` that were catalogued as cloud placeholders, keyed like the
+/// skip set.
+fn known_placeholders(
+    conn: &Connection,
+    root: &Path,
+) -> std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)> {
+    let lo = root_descendant_prefix(root);
+    let hi = prefix_upper_bound(&lo);
+    let base = crate::pipeline::discovery::KNOWN_PLACEHOLDER_SQL;
+    let sql = if hi.is_some() { format!("{base} AND path_text >= ?1 AND path_text < ?2") } else { base.to_string() };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?));
+    let mut set = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        let rows = match &hi {
+            Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row),
+            None => stmt.query_map([], row),
+        };
+        if let Ok(rows) = rows {
+            for (path, size, modified) in rows.flatten() {
+                set.insert(path_fingerprint_text(&path), (size, modified));
+            }
+        }
+    }
+    set
 }
 
 pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
@@ -1363,6 +1419,43 @@ fn maybe_emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_only_files_are_reported_in_the_swift_engines_words() {
+        let one = discovery_notice(12, 0, 0, 1, "/lib").unwrap();
+        assert_eq!(one.kind, "discovery_partial");
+        assert_eq!(
+            one.message,
+            "1 file is stored in iCloud and not downloaded to this Mac, so it was left out. Everything else was scanned."
+        );
+        let many = discovery_notice(0, 40, 2, 3, "/lib").unwrap();
+        assert_eq!(many.kind, "discovery_partial");
+        assert_eq!(
+            many.message,
+            "2 items couldn't be opened (no permission, or removed during the scan); 3 files are stored in iCloud and not downloaded to this Mac, so they were left out. Everything else was scanned."
+        );
+        assert_eq!(discovery_notice(0, 40, 0, 0, "/lib").unwrap().kind, "rescan_no_changes");
+        assert!(discovery_notice(5, 0, 0, 0, "/lib").is_none());
+    }
+
+    #[test]
+    fn known_placeholders_are_scoped_to_the_root() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (path_text TEXT, kind TEXT, size_bytes INTEGER, modified_at DOUBLE, failed INTEGER, content_hash BLOB);",
+        )
+        .unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let inside = format!("{sep}lib{sep}cloud.jpg");
+        let outside = format!("{sep}library2{sep}cloud.jpg");
+        for path in [&inside, &outside] {
+            conn.execute("INSERT INTO files VALUES (?1, 'image', 7, 3.0, 0, NULL)", [path]).unwrap();
+        }
+        let root = format!("{sep}lib");
+        let known = known_placeholders(&conn, Path::new(&root));
+        assert_eq!(known.len(), 1);
+        assert_eq!(known.get(&path_fingerprint_text(&inside)), Some(&(7, Some(3.0))));
+    }
 
     #[test]
     fn batch_summary_sampling_bounds_ipc_volume() {
