@@ -4751,3 +4751,7 @@ Unlike the Rust engine (the writer copies the twin's rows), the Swift engine hol
 ## 2026-11-12 — Lava lamp drawn at a third of the size, 20 fps
 
 The wax is six soft radial gradients, so drawing the float16 layer at one third of the window's size and stretching it back gives the same picture for a ninth of the pixels; its fastest motion is about a point per frame, so 20 fps replaces 30. The colour mode and blend are unchanged to keep the look. The Detail pane's material under its 80 % fill was removed (it re-blurred the lava every frame while mostly hidden). All three need the owner's eyes; revert `waxDownscale` to 1 or the interval to 1/30 if the wax looks soft or steppy.
+
+## 2026-11-12 — Vision classifier stays on the Neural Engine
+
+The scan review suggested moving `VNClassifyImageRequest` to the GPU to relieve the Neural Engine. Measured on the M1 Pro with the release Swift engine over 499 photos, alternating runs: Neural Engine 17.8 / 16.0 s, GPU 19.5 / 16.7 s, CPU 28.1 s, tags 0.991 Jaccard. No gain, so nothing changes; `FILEID_VISION_CLASSIFY_DEVICE=gpu|cpu` stays as a measurement switch. The machine was heavily loaded during the run, so a quiet rerun could differ by a few percent, not by the 20–35 % the idea needed.

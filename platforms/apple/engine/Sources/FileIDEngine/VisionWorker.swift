@@ -127,6 +127,24 @@ public final class VisionWorker: @unchecked Sendable {
     /// `VNGenerateImageFeaturePrintRequest` inline causes ANE thrash
     /// when many workers are in flight. We persist only the bbox; the
     /// FaceClustering job extracts prints lazily, one file at a time.
+    /// Measurement switch: `FILEID_VISION_CLASSIFY_DEVICE=gpu` (or `cpu`) moves the
+    /// classifier off the Neural Engine, which bounds camera-photo scans.
+    private static let classifyDevice = ProcessInfo.processInfo.environment["FILEID_VISION_CLASSIFY_DEVICE"]?.lowercased()
+
+    private static func applyClassifyDevice(_ request: VNClassifyImageRequest) {
+        guard let wanted = classifyDevice, let stages = try? request.supportedComputeStageDevices else { return }
+        for (stage, devices) in stages {
+            let match = devices.first { device in
+                switch device {
+                case .gpu: return wanted == "gpu"
+                case .cpu: return wanted == "cpu"
+                default: return false
+                }
+            }
+            if let match { request.setComputeDevice(match, for: stage) }
+        }
+    }
+
     public func runPrimaryPass(_ cgImage: CGImage) -> PrimaryPass {
         var pass = PrimaryPass(classifyTags: [], faceCount: 0,
                                faceBBoxes: [], faceQualities: [],
@@ -137,6 +155,7 @@ public final class VisionWorker: @unchecked Sendable {
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         // Per-call request objects — never shared across files (see init note).
         let cReq = VNClassifyImageRequest()
+        Self.applyClassifyDevice(cReq)
         let fReq = VNDetectFaceRectanglesRequest()
         // Quality + landmark request — runs after fReq in the same perform call.
         let qReq = VNDetectFaceCaptureQualityRequest()

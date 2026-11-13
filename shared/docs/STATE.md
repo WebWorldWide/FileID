@@ -13,6 +13,9 @@ Round 3 of the Mac audit. Builds pass; Swift 1,024 tests (193 shared, 137 app, 6
 - **Windows and Linux wording:** the shared engine's user-facing errors and job titles now match the Mac's plain sentences (kinds unchanged; conformance-pinned strings kept; `emit_scope_failure` in `deep_analyze.rs` still forwards raw text because tests pin it).
 - **Speech permission:** left with the helper. It only prompts during Describe Files and Find moments, which the user starts; macOS grants speech per process, so the app cannot ask on the helper's behalf.
 - **Digests refreshed** after a diff audit (no host, session or process launch added): EngineClient.swift, StreamingDownload.swift, and Rust bulk.rs, prewarm.rs, restructure.rs, trash.rs, server.rs, deep_scope.rs. SpotlightIndexer reads its local record with `FileManager.contents(atPath:)`.
+- **Measured on the M1 Pro (release Swift engine, isolated home, CLIP + faces installed, no RAM++; load average was above 150 from other work, so read the ratios, not the absolutes):**
+  - Identical-photo reuse: 120 files (40 photos, three copies each) 5.6 / 5.9 s with `FILEID_TWIN_REUSE=0`, 3.5 / 3.3 s with reuse; all 120 rows (tags, faces, hash, embedding) identical between the two.
+  - Vision classifier device (`FILEID_VISION_CLASSIFY_DEVICE`, new measurement switch), 499 photos, alternating runs: Neural Engine 17.8 / 16.0 s, GPU 19.5 / 16.7 s, CPU 28.1 s; tag Jaccard against the Neural Engine 0.991 (GPU) and 0.995 (CPU); faces and text counts unchanged. **Not adopted:** the GPU is no faster.
 - A flaky app test (`ReadStorePresentationTests`, "database is locked") got a busy timeout on its writer; 12 clean runs.
 
 ## 2026-11-12 — Mac app audit fixes: destructive actions, models, plain language, app and scan waste
