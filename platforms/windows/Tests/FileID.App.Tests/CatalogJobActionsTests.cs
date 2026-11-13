@@ -35,6 +35,47 @@ public sealed class CatalogJobActionsTests
         Assert.Equal(enabled, CatalogJobActions.CanResume(kind, state));
     }
 
+    private static CatalogJob Job(string id, string state, double progress, string? error = null, params long[] files) =>
+        new(id, "timelineSample", files, state, progress, error, 1, 2);
+
+    [Theory]
+    [InlineData("queued", 0.0, "Waiting")]
+    [InlineData("running", 0.45, "Working 45%")]
+    [InlineData("running", 7.0, "Working 100%")]
+    [InlineData("running", double.NaN, "Working 0%")]
+    [InlineData("paused", 0.3, "Paused")]
+    [InlineData("failed", 0.3, "Didn't finish")]
+    [InlineData("cancelled", 0.3, "Stopped")]
+    [InlineData("completed", 1.0, "Done")]
+    [InlineData(null, 0.0, "Waiting")]
+    public void JobStatesReadAsPlainWords(string? state, double progress, string expected)
+    {
+        Assert.Equal(expected, CatalogJobActions.StateWords(state, progress));
+    }
+
+    [Fact]
+    public void JobRowsShowNoIdsStatesOrRawErrors()
+    {
+        var row = CatalogJobActions.RowText(Job("job-7f3a", "failed", 0.5, "decode error 0x80070005 at C:\\Users\\a\\clip.mp4", 11, 12));
+
+        Assert.Equal("Looking through videos · Didn't finish · 2 files\nPress Resume to try again.", row);
+        Assert.DoesNotContain("job-7f3a", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x8007", row, StringComparison.Ordinal);
+        Assert.Equal("Looking through videos · Working 45% · 1 file", CatalogJobActions.RowText(Job("a", "running", 0.45, null, 11)));
+    }
+
+    [Fact]
+    public void AnUnchangedJobListIsLeftAlone()
+    {
+        var shown = new[] { Job("a", "running", 0.451, null, 1), Job("b", "queued", 0, null, 2) };
+
+        Assert.True(CatalogJobActions.SameJobs(shown, new[] { Job("a", "running", 0.454, null, 1), Job("b", "queued", 0, null, 2) }));
+        Assert.False(CatalogJobActions.SameJobs(shown, new[] { Job("a", "running", 0.47, null, 1), Job("b", "queued", 0, null, 2) }));
+        Assert.False(CatalogJobActions.SameJobs(shown, new[] { Job("a", "paused", 0.451, null, 1), Job("b", "queued", 0, null, 2) }));
+        Assert.False(CatalogJobActions.SameJobs(shown, new[] { Job("a", "running", 0.451, null, 1) }));
+        Assert.False(CatalogJobActions.SameJobs(shown, new[] { Job("b", "queued", 0, null, 2), Job("a", "running", 0.451, null, 1) }));
+    }
+
     [Fact]
     public void TimelineEnqueueUsesUniqueCatalogFileIDsNotEvidenceIDs()
     {

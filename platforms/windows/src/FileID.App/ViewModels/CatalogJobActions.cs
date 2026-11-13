@@ -9,6 +9,58 @@ internal static class CatalogJobActions
     public static bool CanResume(string? kind, string? state) =>
         kind is "catalogIndex" or "timelineSample" or TakeProposalPolicy.JobKind or FaceQueuePolicy.JobKind && state is "paused" or "failed" or "cancelled";
 
+    /// <summary>What a job is doing, in plain words.</summary>
+    public static string StateWords(string? state, double progress) => state switch
+    {
+        "queued" => "Waiting",
+        "running" => $"Working {Percent(progress)}%",
+        "paused" => "Paused",
+        "completed" => "Done",
+        "failed" => "Didn't finish",
+        "cancelled" => "Stopped",
+        _ => "Waiting"
+    };
+
+    private static int Percent(double progress) =>
+        double.IsFinite(progress) ? (int)Math.Round(Math.Clamp(progress, 0, 1) * 100) : 0;
+
+    public static string KindWords(string? kind) => kind switch
+    {
+        "catalogIndex" => "Getting search ready",
+        "takeGrouping" => "Finding related tries",
+        "faceRefresh" => "Sorting faces",
+        _ => "Looking through videos"
+    };
+
+    /// <summary>One list row for a job: what it is, how it is going and how
+    /// many files it covers. No ids, internal states or raw error text.</summary>
+    public static string RowText(CatalogJob job)
+    {
+        var files = job.FileIDs.Count;
+        var text = $"{KindWords(job.Kind)} · {StateWords(job.State, job.Progress)}";
+        if (files > 0) text += $" · {files:N0} file{(files == 1 ? "" : "s")}";
+        if (job.State == "failed") text += "\nPress Resume to try again.";
+        return text;
+    }
+
+    /// <summary>True when two job lists would show the same rows and enable
+    /// the same buttons, so the list on screen can be left alone.</summary>
+    public static bool SameJobs(IReadOnlyList<CatalogJob> shown, IReadOnlyList<CatalogJob> next)
+    {
+        if (shown.Count != next.Count) return false;
+        for (var i = 0; i < shown.Count; i++)
+        {
+            var a = shown[i];
+            var b = next[i];
+            if (a.Id != b.Id || a.Kind != b.Kind || a.State != b.State || a.FileIDs.Count != b.FileIDs.Count
+                || StateWords(a.State, a.Progress) != StateWords(b.State, b.Progress))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static IReadOnlyList<long> TimelineFileIDs(IEnumerable<CatalogHit> hits) => hits.Select(hit => hit.FileID).Distinct().Order().ToArray();
     public static CatalogRequest TimelineRequest(IEnumerable<CatalogHit> hits, string? timelineMode = null) =>
         TimelineRequest(TimelineFileIDs(hits), timelineMode);
