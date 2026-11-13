@@ -117,8 +117,12 @@ jobs:
           # reader at a time, so the pool can't be starved. The tests are small
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
+          # Compile the tests outside the alarm: on a cold runner the debug test
+          # build alone took 11m49s of the 12 minutes, so the timer fired with
+          # the tests barely started. The alarm now bounds only the test run.
+          swift build --build-tests
           set +e
-          FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+          FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel --skip-build
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
