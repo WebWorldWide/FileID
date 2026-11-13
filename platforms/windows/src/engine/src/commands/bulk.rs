@@ -241,6 +241,8 @@ pub(crate) async fn handle_apply_tags(
                         payload.tags.len(),
                         payload.file_ids.len()
                     )),
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         }
@@ -269,6 +271,8 @@ pub(crate) async fn handle_apply_tags(
                         file_id: Some(*fid),
                         ok: false,
                         message: Some(format!("not found: {err}")),
+                        reason: None,
+                        operation_id: None,
                     });
                     continue;
                 }
@@ -281,6 +285,8 @@ pub(crate) async fn handle_apply_tags(
                         file_id: Some(*fid),
                         ok: true,
                         message: None,
+                        reason: None,
+                        operation_id: None,
                     });
                 }
                 Err(err) => {
@@ -289,6 +295,8 @@ pub(crate) async fn handle_apply_tags(
                         file_id: Some(*fid),
                         ok: false,
                         message: Some(format!("tag write failed: {err}")),
+                        reason: None,
+                        operation_id: None,
                     });
                 }
             }
@@ -588,7 +596,13 @@ fn commit_rename(
             (false, format!("renamed on disk but DB update failed: {err}"))
         }
     };
-    BulkActionItem { file_id: Some(p.file_id), ok, message: Some(noted(message)) }
+    BulkActionItem {
+        file_id: Some(p.file_id),
+        ok,
+        message: Some(noted(message)),
+        reason: None,
+        operation_id: None,
+    }
 }
 
 /// Closes each rename intent once its outcome is final. A file that moved but
@@ -609,7 +623,7 @@ fn settle_rename_intents(
 }
 
 fn failed_item(file_id: i64, message: String) -> Option<BulkActionItem> {
-    Some(BulkActionItem { file_id: Some(file_id), ok: false, message: Some(message) })
+    Some(BulkActionItem { file_id: Some(file_id), ok: false, message: Some(message), reason: None, operation_id: None })
 }
 
 fn rename_files_blocking(
@@ -1176,6 +1190,8 @@ fn trash_commit_failure_result(
         message: Some(format!(
             "catalog commit failed after Trash; recovery batch: {batch_id}"
         )),
+        reason: None,
+        operation_id: None,
     });
     BulkActionResult {
         action: format!("trashFiles:{batch_id}"),
@@ -1260,6 +1276,8 @@ pub(crate) async fn handle_trash_files(
                                                 "could not capture a volume-qualified file identity; rescan before trashing"
                                                     .into(),
                                             ),
+                                            reason: Some("failed".into()),
+                                            operation_id: None,
                                         });
                                     }
                                 }
@@ -1270,6 +1288,8 @@ pub(crate) async fn handle_trash_files(
                                     file_id: Some(*fid),
                                     ok: false,
                                     message: Some("catalog contains an invalid file size".into()),
+                                    reason: Some("failed".into()),
+                                    operation_id: None,
                                 });
                             }
                         }
@@ -1280,6 +1300,8 @@ pub(crate) async fn handle_trash_files(
                             file_id: Some(*fid),
                             ok: false,
                             message: Some(format!("not found: {error}")),
+                            reason: Some("missing".into()),
+                            operation_id: None,
                         });
                     }
                 }
@@ -1345,6 +1367,8 @@ pub(crate) async fn handle_trash_files(
                                 file_id: Some(candidate.file_id),
                                 ok: true,
                                 message: Some(candidate.path.to_string_lossy().to_string()),
+                                reason: None,
+                                operation_id: None,
                             });
                         }
                         Ok(changed) => {
@@ -1355,6 +1379,8 @@ pub(crate) async fn handle_trash_files(
                                 message: Some(format!(
                                     "moved to Trash, but the catalog identity changed and the update affected {changed} rows; use Undo to restore"
                                 )),
+                                reason: Some("failed".into()),
+                                operation_id: None,
                             });
                         }
                         Err(error) => {
@@ -1365,6 +1391,8 @@ pub(crate) async fn handle_trash_files(
                                 message: Some(format!(
                                     "moved to Trash, but the catalog update failed ({error}); use Undo to restore"
                                 )),
+                                reason: Some("failed".into()),
+                                operation_id: None,
                             });
                         }
                     }
@@ -1376,6 +1404,8 @@ pub(crate) async fn handle_trash_files(
                         file_id: Some(candidate.file_id),
                         ok: false,
                         message: Some("moved to Trash, but its location was not journaled; use Undo to restore".into()),
+                        reason: Some("failed".into()),
+                        operation_id: None,
                     });
                 }
                 CheckedTrashOutcome::Rejected(reason) => {
@@ -1390,6 +1420,8 @@ pub(crate) async fn handle_trash_files(
                         file_id: Some(candidate.file_id),
                         ok: false,
                         message: Some(reason),
+                        reason: Some("changed".into()),
+                        operation_id: None,
                     });
                 }
                 CheckedTrashOutcome::Failed(error) => {
@@ -1398,6 +1430,8 @@ pub(crate) async fn handle_trash_files(
                         file_id: Some(candidate.file_id),
                         ok: false,
                         message: Some(format!("trash failed: {error}")),
+                        reason: Some("failed".into()),
+                        operation_id: None,
                     });
                 }
             }
@@ -1638,10 +1672,16 @@ pub(crate) async fn handle_merge_clusters(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::MergeClustersPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        let src = payload.source_person_id;
-        let dst = payload.destination_person_id;
-        let conn = db.lock();
+    let result = tokio::task::spawn_blocking(move || {
+        merge_clusters(&db.lock(), payload.source_person_id, payload.destination_person_id)
+    })
+    .await;
+
+    emit_bulk_result(&sink, "mergeClusters", result).await;
+}
+
+pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) -> anyhow::Result<BulkActionResult> {
+    {
         let tx = conn.unchecked_transaction()?;
         let source_exists = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
@@ -1662,6 +1702,8 @@ pub(crate) async fn handle_merge_clusters(
                     file_id: None,
                     ok: false,
                     message: Some("One or both people no longer exist; refresh People and try again.".into()),
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         }
@@ -1676,9 +1718,12 @@ pub(crate) async fn handle_merge_clusters(
                     file_id: None,
                     ok: true,
                     message: Some(format!("#{src} is already one cluster; nothing to merge")),
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         }
+        let journal = super::person_merge::begin(&tx, dst, src)?;
         persist_manual_merge_constraint(&tx, src, dst)?;
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
@@ -1736,6 +1781,10 @@ pub(crate) async fn handle_merge_clusters(
             )? == 1,
             "destination person disappeared during representative refresh"
         );
+        let operation_id = match journal {
+            Some(journal) => Some(journal.record(&tx, super::face_review::now())?),
+            None => None,
+        };
         tx.commit()?;
         Ok(BulkActionResult {
             action: "mergeClusters".into(),
@@ -1745,12 +1794,11 @@ pub(crate) async fn handle_merge_clusters(
                 file_id: None,
                 ok: true,
                 message: Some(format!("moved {moved} face prints from #{src} into #{dst}")),
+                reason: None,
+                operation_id,
             }],
         })
-    })
-    .await;
-
-    emit_bulk_result(&sink, "mergeClusters", result).await;
+    }
 }
 
 pub(crate) async fn emit_bulk_result(
@@ -1774,6 +1822,8 @@ pub(crate) async fn emit_bulk_result(
                         file_id: None,
                         ok: false,
                         message: Some(format!("{err}")),
+                        reason: None,
+                        operation_id: None,
                     }],
                 },
             ))))
@@ -1790,6 +1840,8 @@ pub(crate) async fn emit_bulk_result(
                         file_id: None,
                         ok: false,
                         message: Some(format!("bulk action worker failed: {err}")),
+                        reason: None,
+                        operation_id: None,
                     }],
                 },
             ))))
@@ -1839,6 +1891,8 @@ fn save_person_name(
                 file_id: Some(payload.person_id),
                 ok: false,
                 message: Some("This person no longer exists; refresh People and try again.".into()),
+                reason: None,
+                operation_id: None,
             }],
         });
     }
@@ -1851,6 +1905,8 @@ fn save_person_name(
             file_id: Some(payload.person_id),
             ok: true,
             message: display,
+            reason: None,
+            operation_id: None,
         }],
     })
 }
@@ -1941,6 +1997,8 @@ pub(crate) async fn handle_reassign_face(
                     file_id: Some(payload.face_id),
                     ok: false,
                     message: Some("This face no longer exists; refresh People and try again.".into()),
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         };
@@ -1956,6 +2014,8 @@ pub(crate) async fn handle_reassign_face(
                         "Choose either a new person or an existing destination, not both."
                             .into(),
                     ),
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         }
@@ -1985,6 +2045,8 @@ pub(crate) async fn handle_reassign_face(
                         file_id: Some(payload.face_id),
                         ok: false,
                         message: Some("The destination person no longer exists; refresh People and try again.".into()),
+                        reason: None,
+                        operation_id: None,
                     }],
                 });
             }
@@ -2002,6 +2064,8 @@ pub(crate) async fn handle_reassign_face(
                     file_id: Some(payload.face_id),
                     ok: true,
                     message: None,
+                    reason: None,
+                    operation_id: None,
                 }],
             });
         }
@@ -2070,6 +2134,8 @@ pub(crate) async fn handle_reassign_face(
                 file_id: Some(payload.face_id),
                 ok: true,
                 message: destination.map(|id| format!("Assigned to person #{id}.")),
+                reason: None,
+                operation_id: None,
             }],
         })
     })
@@ -2114,6 +2180,8 @@ fn mark_persons_unknown(
                     file_id: Some(*id),
                     ok: false,
                     message: Some("This person no longer exists; refresh People and try again.".into()),
+                    reason: None,
+                    operation_id: None,
                 });
             }
             Ok(_) => {
@@ -2122,6 +2190,8 @@ fn mark_persons_unknown(
                     file_id: Some(*id),
                     ok: true,
                     message: None,
+                    reason: None,
+                    operation_id: None,
                 });
             }
             Err(e) => {
@@ -2130,6 +2200,8 @@ fn mark_persons_unknown(
                     file_id: Some(*id),
                     ok: false,
                     message: Some(e.to_string()),
+                    reason: None,
+                    operation_id: None,
                 });
             }
         }
@@ -2192,6 +2264,8 @@ pub(crate) async fn handle_mark_persons_different(
                     file_id: None,
                     ok: false,
                     message: Some("The suggested face pair is stale; refresh People and try again.".into()),
+                    operation_id: None,
+                    reason: None,
                 }],
             });
         }
@@ -2224,6 +2298,8 @@ pub(crate) async fn handle_mark_persons_different(
                 file_id: None,
                 ok: true,
                 message: None,
+                reason: None,
+                operation_id: None,
             }],
         })
     })
@@ -2740,7 +2816,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             tracing::warn!(?err, "find_merge_suggestions failed");
             sink.send(EngineError::event(
                 "find_merge_suggestions_failed",
-                format!("Find merge suggestions failed: {err}"),
+                "FileID couldn't look for people to merge. Try again.",
             ))
             .await;
         }
@@ -2748,7 +2824,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             tracing::warn!(?err, "find_merge_suggestions spawn failed");
             sink.send(EngineError::event(
                 "find_merge_suggestions_failed",
-                format!("Find merge suggestions worker failed: {err}"),
+                "FileID couldn't look for people to merge. Try again.",
             ))
             .await;
         }
@@ -3034,6 +3110,8 @@ mod tests {
             file_id: Some(42),
             ok: true,
             message: None,
+            reason: None,
+            operation_id: None,
         }];
 
         mark_tag_sidecar_failure(
@@ -3512,6 +3590,8 @@ mod tests {
                 file_id: Some(7),
                 ok: true,
                 message: Some("old path".into()),
+                reason: None,
+                operation_id: None,
             }],
             "disk full",
         );

@@ -46,7 +46,7 @@ pub(crate) fn latch_process_gpu_device_removed() -> bool {
     process_gpu_failure_latch().mark_dead()
 }
 
-pub(crate) const GPU_DEVICE_REMOVED_MESSAGE: &str = "The active GPU device was removed or reset. FileID stopped GPU work to keep the system responsive. Restart the engine before scanning or running AI features again; if this repeats, switch to the CPU execution provider or reduce model concurrency.";
+pub(crate) const GPU_DEVICE_REMOVED_MESSAGE: &str = "The graphics card was disconnected or reset, so FileID stopped using it to keep your computer responsive. Quit and reopen FileID before scanning or using AI features again. If this keeps happening, switch FileID to CPU in Settings.";
 
 #[derive(Clone)]
 pub struct ScanCoordinator {

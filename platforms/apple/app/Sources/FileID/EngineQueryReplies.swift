@@ -68,17 +68,30 @@ final class EngineQueryReplies {
     /// The reply doesn't echo the requested size, so it is read from the JPEG.
     /// Engines never upscale: a frame smaller than every waiting request means
     /// the source itself is that small, which answers all larger requests too.
-    func deliver(_ reply: ThumbnailGenerated) {
-        guard let jpeg = Data(base64Encoded: reply.bytes), let longSide = Self.longSide(of: jpeg) else {
-            thumbnails.resolve(reply.path, with: nil)
+    func deliver(_ reply: ThumbnailGenerated) { deliver(Self.decode(reply)) }
+
+    func deliver(_ decoded: DecodedVideoFrame) {
+        guard let frame = decoded.frame else {
+            thumbnails.resolve(decoded.path, with: nil)
             return
         }
-        let frame = VideoFrameReply(modifiedAt: reply.modifiedAt, jpeg: jpeg)
-        if thumbnails.hasWaiter(for: reply.path, where: { $0 == longSide }) {
-            thumbnails.resolve(reply.path, with: frame) { $0 == longSide }
+        let longSide = decoded.longSide
+        if thumbnails.hasWaiter(for: decoded.path, where: { $0 == longSide }) {
+            thumbnails.resolve(decoded.path, with: frame) { $0 == longSide }
         } else {
-            thumbnails.resolve(reply.path, with: frame) { $0 > longSide }
+            thumbnails.resolve(decoded.path, with: frame) { $0 > longSide }
         }
+    }
+
+    /// The base64 and image-header work, safe on any thread; the engine's
+    /// reader runs it so the main actor only matches the frame to its waiters.
+    nonisolated static func decode(_ reply: ThumbnailGenerated) -> DecodedVideoFrame {
+        guard let jpeg = Data(base64Encoded: reply.bytes), let longSide = longSide(of: jpeg) else {
+            return DecodedVideoFrame(path: reply.path, frame: nil, longSide: 0)
+        }
+        return DecodedVideoFrame(path: reply.path,
+                                 frame: VideoFrameReply(modifiedAt: reply.modifiedAt, jpeg: jpeg),
+                                 longSide: longSide)
     }
 
     nonisolated static func longSide(of jpeg: Data) -> Int? {
@@ -107,6 +120,18 @@ final class EngineQueryReplies {
 struct VideoFrameReply: Sendable {
     let modifiedAt: Double?
     let jpeg: Data
+}
+
+/// `frame` is nil when the reply carried no readable JPEG.
+struct DecodedVideoFrame: Sendable {
+    let path: String
+    let frame: VideoFrameReply?
+    let longSide: Int
+}
+
+struct InboundEvent: Sendable {
+    let event: IPCEvent
+    let videoFrame: DecodedVideoFrame?
 }
 
 /// Pending calls by key. `tag` tells apart waiters on one key that asked for

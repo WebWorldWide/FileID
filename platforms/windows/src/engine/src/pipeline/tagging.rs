@@ -59,6 +59,7 @@ use crate::models::runtime::{active_provider, error_has_device_removed_marker, E
 use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+use crate::pipeline::twin_reuse::{TwinClaim, TwinRegistry};
 use crate::shell;
 use crate::util::content_hash::LegacyHashes;
 
@@ -85,6 +86,11 @@ static STATS_TOTAL_US: AtomicU64 = AtomicU64::new(0);
 // fixed with data rather than guesses.
 static STATS_RAMPLUS_US: AtomicU64 = AtomicU64::new(0);
 static STATS_VISION_WAIT_US: AtomicU64 = AtomicU64::new(0);
+/// Images that copied a byte-identical twin's analysis instead of running
+/// the models (see `twin_reuse`).
+pub static STATS_TWIN_REUSED: AtomicU64 = AtomicU64::new(0);
+/// JPEGs decoded from their embedded MPF preview instead of the full frame.
+pub static STATS_MPF_PREVIEWS: AtomicU64 = AtomicU64::new(0);
 const STATS_PERIOD: u64 = 100;
 
 fn record_stage(stage: &AtomicU64, started: Instant) {
@@ -130,6 +136,8 @@ fn maybe_emit_stats() {
         total_us = total,
         ramplus_us = ramplus,
         vision_wait_us = vision_wait,
+        twin_reused = STATS_TWIN_REUSED.load(Ordering::Relaxed),
+        mpf_previews = STATS_MPF_PREVIEWS.load(Ordering::Relaxed),
         clip_batches = batch_count,
         clip_avg_batch_x10 = avg_batch,
         "[STATS] per-file avg microseconds"
@@ -270,6 +278,11 @@ pub struct TaggedFile {
     /// auto-tags. Set just before the normal return (false if the GPU died), and
     /// left false on the timeout / GPU-dead-bail rows.
     pub tags_evaluated: bool,
+    /// A byte-identical image was already analyzed: the writer copies that
+    /// row's tags, embedding, faces and text instead of this row's (empty)
+    /// results. Stage flags stay false so nothing of a prior scan at this path
+    /// is deleted before the copy.
+    pub reuse_twin: bool,
 }
 
 /// A face from Apple Vision's primary pass, stored the way the Swift engine's
@@ -945,7 +958,19 @@ pub struct Tagger {
     scan_root: Option<std::path::PathBuf>,
     legacy_hashes: bool,
     scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
+    twins: Arc<TwinRegistry>,
 }
+
+/// `FILEID_TWIN_REUSE=0` analyzes every copy itself (the A/B control).
+fn twin_reuse_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FILEID_TWIN_REUSE").map_or(true, |v| v.trim() != "0"))
+}
+
+/// How long a copy waits for the first copy's analysis before analyzing
+/// itself. The owner is ahead of it in the queue, so this only triggers when
+/// the owner's own 60 s per-file timeout fires.
+const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(120);
 
 /// How long one scan file may wait for CPU/memory admission before it is
 /// recorded as failed. Searches, residents and low free memory are transient;
@@ -973,7 +998,18 @@ impl Tagger {
             scan_root: None,
             legacy_hashes: false,
             scheduler: crate::resource_scheduler::ResourceScheduler::shared(),
+            twins: TwinRegistry::new(),
         }
+    }
+
+    /// Content hashes of images an earlier scan analyzed; a byte-identical
+    /// copy found by this scan copies their rows instead of running the models.
+    pub fn with_known_twins(self, hashes: impl IntoIterator<Item = [u8; 32]>) -> Self {
+        let seeded = self.twins.seed(hashes);
+        if seeded > 0 {
+            tracing::info!(seeded, "[TWIN] known image hashes loaded for analysis reuse");
+        }
+        self
     }
 
     #[cfg(test)]
@@ -1136,10 +1172,11 @@ impl Tagger {
             let tx = predecoded_tx.clone();
             let coord = self.coordinator.clone();
             let budget = byte_budget.clone();
+            let twins = self.twins.clone();
             let legacy = self.legacy_hashes;
             let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
-                .spawn(move || run_decoder_thread(rx, tx, coord, budget, legacy));
+                .spawn(move || run_decoder_thread(rx, tx, coord, budget, legacy, twins));
             match spawn_result {
                 Ok(handle) => decoder_handles.push(handle),
                 Err(e) => {
@@ -1200,6 +1237,7 @@ impl Tagger {
             let clip_sem = clip_sem.clone();
             let models = self.models.clone();
             let scheduler = self.scheduler.clone();
+            let twins = self.twins.clone();
 
             tokio::spawn(async move {
                 // Drop per-worker thread priority to LOWEST so foreground
@@ -1227,6 +1265,9 @@ impl Tagger {
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
                     let timeout_created = predecoded.file.created_unix;
+                    let twin_hash = predecoded
+                        .content_hash
+                        .filter(|_| !matches!(predecoded.twin, TwinClaim::None));
                     // Admission waits outside the per-file timeout: a busy
                     // machine (a search, a resident model, low free memory)
                     // delays a file but never fails it.
@@ -1255,7 +1296,7 @@ impl Tagger {
                         Err((message, 0.0))
                     } else {
                         let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
+                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord, &twins),
                         ));
                         match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
                             Ok(Ok(t)) => Ok(t),
@@ -1319,11 +1360,18 @@ impl Tagger {
                                 doc_stage_ran: false,
                                 text_stage_done: false,
                                 tags_evaluated: false,
+                                reuse_twin: false,
                             }
                         }
                     };
+                    let publish = twin_hash.filter(|_| !tagged.reuse_twin).map(|hash| {
+                        (hash, !tagged.failed && tagged.tags_evaluated)
+                    });
                     if tx.send(tagged).await.is_err() {
                         break;
+                    }
+                    if let Some((hash, ok)) = publish {
+                        twins.publish(hash, ok);
                     }
                     files_done += 1;
                     if files_done % YIELD_AFTER == 0 {
@@ -1356,6 +1404,7 @@ pub struct PreDecoded {
     pub content_hash: Option<[u8; 32]>,
     pub legacy_hashes: Option<LegacyHashes>,
     pub exif: Option<ExifFields>,
+    pub twin: TwinClaim,
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
@@ -1383,6 +1432,7 @@ impl PreDecoded {
             content_hash: None,
             legacy_hashes: None,
             exif: None,
+            twin: TwinClaim::None,
             budget: None,
             mac: None,
         }
@@ -1496,6 +1546,7 @@ fn run_decoder_thread(
     coord: ScanCoordinator,
     budget: Arc<PredecodeBudget>,
     legacy: bool,
+    twins: Arc<TwinRegistry>,
 ) {
     let _thread_guard = DecoderThreadGuard::enter();
     loop {
@@ -1525,7 +1576,7 @@ fn run_decoder_thread(
         );
         let fallback = file.clone();
         let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            predecode_one(file, &coord, &budget, legacy)
+            predecode_one(file, &coord, &budget, legacy, &twins)
         })) {
             Ok(Some(item)) => item,
             Ok(None) => return,
@@ -1561,6 +1612,7 @@ fn predecode_one(
     coord: &ScanCoordinator,
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
+    twins: &TwinRegistry,
 ) -> Option<PreDecoded> {
     #[cfg(test)]
     assert!(
@@ -1661,11 +1713,24 @@ fn predecode_one(
         // worker. The guard shrinks to retained RGB bytes after success.
         let mut budget_guard = None;
 
+        // Only a full SHA-256 of an image is an identity worth sharing; a
+        // ready twin needs no frame at all.
+        let twin = match (content_hash, file.kind) {
+            (Some(hash), FileKind::Image)
+                if twin_reuse_enabled()
+                    && !file.online_only
+                    && file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
+            {
+                twins.claim(hash)
+            }
+            _ => TwinClaim::None,
+        };
+
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
         // hydrates the file picks up its content.
-        let mut decoded = if file.online_only {
+        let mut decoded = if file.online_only || matches!(twin, TwinClaim::Ready) {
             None
         } else {
             match file.kind {
@@ -1803,6 +1868,7 @@ fn predecode_one(
             content_hash,
             legacy_hashes,
             exif: exif_data,
+            twin,
             budget: budget_guard,
             mac: None,
         })
@@ -2026,6 +2092,58 @@ fn jpeg_scaled_decode_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0"))
 }
 
+/// A camera JPEG's MPF large preview, decoded in place of the full frame
+/// (the Mac engine's `JPEGPreview.decode` rules): the full image is at least
+/// a third larger than `floor`, the file is tagged sRGB, the preview is
+/// upright, shows the whole frame and is at least two thirds of `floor` on
+/// its long side; native size up to a third above `floor`, DCT-scaled above
+/// that. The caller applies the primary image's orientation. `None` keeps
+/// the existing decode paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
+pub(crate) fn decode_mpf_preview(bytes: &[u8], primary_w: u32, primary_h: u32, floor: u32) -> Option<(Vec<u8>, u32, u32)> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_MPF_PREVIEW").map_or(true, |v| v.trim() != "0")) {
+        return None;
+    }
+    let cap = floor.saturating_mul(4) / 3;
+    if primary_w.max(primary_h) < cap || !exif_is_srgb(bytes) {
+        return None;
+    }
+    let preview = super::mpf_preview::largest_preview(bytes)?;
+    let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(preview), image::ImageFormat::Jpeg)
+        .into_dimensions()
+        .ok()?;
+    if !super::mpf_preview::same_shape(w, h, primary_w, primary_h) || w.max(h) * 3 < floor * 2 {
+        return None;
+    }
+    if exif_orientation(preview).is_some_and(|o| o != image::metadata::Orientation::NoTransforms) {
+        return None;
+    }
+    let decoded = if w.max(h) < cap {
+        let rgb = image::load_from_memory_with_format(preview, image::ImageFormat::Jpeg).ok()?.into_rgb8();
+        let (w, h) = rgb.dimensions();
+        (rgb.into_raw(), w, h)
+    } else {
+        decode_jpeg_scaled_to(preview, floor).or_else(|| {
+            let rgb = image::load_from_memory_with_format(preview, image::ImageFormat::Jpeg).ok()?.into_rgb8();
+            let (w, h) = rgb.dimensions();
+            Some((rgb.into_raw(), w, h))
+        })?
+    };
+    STATS_MPF_PREVIEWS.fetch_add(1, Ordering::Relaxed);
+    Some(decoded)
+}
+
+/// EXIF ColorSpace == 1 (sRGB); false without EXIF or for Adobe RGB and
+/// uncalibrated files, whose embedded preview colour may not match.
+pub(crate) fn exif_is_srgb(bytes: &[u8]) -> bool {
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else {
+        return false;
+    };
+    exif.get_field(exif::Tag::ColorSpace, exif::In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        == Some(1)
+}
+
 /// Keep at least this many pixels on the long edge when DCT-scaling a JPEG.
 /// Detection (640² letterbox), tagging (384²) and CLIP (224²) all downsample
 /// far below it; only SFace's 112² face crops read decode resolution, and a
@@ -2134,10 +2252,14 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         // Read the orientation once, from the same bytes both decode paths use.
         // Neither the image crate nor the DCT-scaled path applies it for us.
         let orientation = exif_orientation(bytes);
-        if reader.format() == Some(image::ImageFormat::Jpeg)
-            && let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
+        if reader.format() == Some(image::ImageFormat::Jpeg) {
+            if let Some((buf, w, h)) = decode_mpf_preview(bytes, pw, ph, JPEG_SCALED_DECODE_FLOOR_EDGE) {
                 return apply_exif_orientation(buf, w, h, orientation);
             }
+            if let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
+                return apply_exif_orientation(buf, w, h, orientation);
+            }
+        }
         let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
@@ -2189,6 +2311,7 @@ async fn process_file_predecoded(
     clip_sem: &Arc<Semaphore>,
     worker_idx: usize,
     coord: &ScanCoordinator,
+    twins: &TwinRegistry,
 ) -> TaggedFile {
     // `_budget` keeps the byte-budget reservation alive while this worker
     // holds the frame; it releases when the function returns.
@@ -2197,7 +2320,7 @@ async fn process_file_predecoded(
         let _ = (vision_sem, clip_sem, worker_idx, coord);
         return mac::process(predecoded, models).await;
     }
-    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, legacy_hashes, exif, budget: _budget, mac: _ } =
+    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, legacy_hashes, exif, twin, budget: _budget, mac: _ } =
         predecoded;
     let file = &file;
     let started = Instant::now();
@@ -2244,6 +2367,7 @@ async fn process_file_predecoded(
         doc_stage_ran: false,
         text_stage_done: false,
         tags_evaluated: false,
+        reuse_twin: false,
     };
 
     // Content identity for rename/move heal. The decoder thread already
@@ -2318,6 +2442,40 @@ async fn process_file_predecoded(
     // tag chips so the user can filter their library by these facts. Each
     // tag carries score=None — these are facts, not model probabilities.
     tagged.tags.extend(audio_tags);
+
+    // A byte-identical image already analyzed (earlier scan, or the copy
+    // ahead of this one in the queue): keep the file's own EXIF, year and
+    // camera chips, and let the writer copy the twin's rows.
+    let reuse = match &twin {
+        TwinClaim::Ready => true,
+        TwinClaim::Pending(notify) => {
+            let hash = content_hash.expect("a pending twin claim carries a hash");
+            tokio::select! {
+                ok = twins.wait(&hash, notify) => ok,
+                _ = tokio::time::sleep(TWIN_WAIT_PATIENCE) => false,
+                _ = coord.wait_cancelled() => false,
+            }
+        }
+        TwinClaim::Owner | TwinClaim::None => false,
+    };
+    if reuse && matches!(file.kind, FileKind::Image) {
+        if let Some((cam, lat, lon, captured)) = exif {
+            tagged.camera_model = cam;
+            tagged.location_lat = lat;
+            tagged.location_lon = lon;
+            if let Some(captured) = captured {
+                tagged.created_unix = Some(captured);
+                tagged.captured_from_exif = true;
+            }
+        }
+        push_enriched_extras(&mut tagged);
+        tagged.reuse_twin = true;
+        tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        STATS_TWIN_REUSED.fetch_add(1, Ordering::Relaxed);
+        record_stage(&STATS_TOTAL_US, started);
+        maybe_emit_stats();
+        return tagged;
+    }
 
     // Once the GPU is marked dead (TDR or device-removed), skip the whole ML
     // pipeline for the rest of this process lifetime. The latch is
@@ -2648,6 +2806,17 @@ async fn process_file_predecoded(
                         match tag_result {
                             Ok(tags) => {
                                 let redacted = crate::platform::redact_path_for_log(&file.path);
+                                // Faces ran and saw nobody: generic people words are
+                                // the detector's say, as on the Mac (TagAgreement).
+                                let tags: Vec<(String, f32)> = if tagged.faces_evaluated && tagged.faces.is_empty() {
+                                    tags.into_iter()
+                                        .filter(|(label, _)| {
+                                            !crate::models::ram_plus::PEOPLE_WORDS.contains(&label.to_ascii_lowercase().as_str())
+                                        })
+                                        .collect()
+                                } else {
+                                    tags
+                                };
                                 let ram_emit_count = tags.len();
                                 let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
                                 for (label, score) in tags {
@@ -2791,7 +2960,7 @@ async fn process_file_predecoded(
     {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         tagged.tags.retain(|(t, _)| seen.insert(t.to_ascii_lowercase()));
-        tagged.tags.truncate(16);
+        tagged.tags.truncate(stored_tag_cap());
     }
 
     tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -2846,6 +3015,19 @@ async fn process_file_predecoded(
         && !file.online_only
         && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
     tagged
+}
+
+/// Persisted tags per file (16 on both engines); `FILEID_TAG_CAP` widens it
+/// for threshold sweeps that need every candidate stored.
+fn stored_tag_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("FILEID_TAG_CAP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| (1..=512).contains(n))
+            .unwrap_or(16)
+    })
 }
 
 /// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
@@ -3681,7 +3863,7 @@ mod tests {
         let budget = PredecodeBudget::new(1024);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false);
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false, TwinRegistry::new());
             let _ = done_tx.send(());
         });
         for index in 0..2 {
@@ -3730,7 +3912,7 @@ mod tests {
                 .unwrap();
         }
         drop(raw_tx);
-        run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), false);
+        run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), false, TwinRegistry::new());
         let failed = predecoded_rx.try_recv().expect("panicking file still reported");
         assert!(matches!(failed.decoded, Some(Err(_))));
         let next = predecoded_rx.try_recv().expect("decoder kept running");
@@ -3762,6 +3944,7 @@ mod tests {
             &ScanCoordinator::new(),
             &PredecodeBudget::new(256 << 20),
             false,
+            &TwinRegistry::new(),
         )
         .expect("not cancelled");
         assert!(item.decoded.is_none(), "a missing frame runtime must not mark the video failed");
@@ -3794,7 +3977,7 @@ mod tests {
                     .unwrap();
             }
             drop(raw_tx);
-            run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), legacy);
+            run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), legacy, TwinRegistry::new());
             assert_eq!(predecoded_rx.len(), files.len());
             while let Ok(item) = predecoded_rx.try_recv() {
                 let size = item.file.size_bytes;
@@ -3815,7 +3998,7 @@ mod tests {
         let budget = PredecodeBudget::new(1024);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false);
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false, TwinRegistry::new());
             let _ = done_tx.send(());
         });
 
@@ -3841,6 +4024,24 @@ mod tests {
     /// carries a TIFF IFD with a Model tag must yield the camera model.
     /// Every downstream consumer (phash, CLIP, RAM++, faces) reads the buffer
     /// this returns, so the transform has to land here rather than per-consumer.
+    #[test]
+    fn mpf_preview_replaces_the_full_decode_under_the_mac_rules() {
+        use crate::pipeline::mpf_preview::test_support::{jpeg_with_mpf_preview, solid_jpeg};
+        let primary = solid_jpeg(600, 400, [200, 30, 30]);
+        let preview = solid_jpeg(300, 200, [30, 200, 30]);
+        let file = jpeg_with_mpf_preview(&primary, &preview, true);
+        let (rgb, w, h) = decode_mpf_preview(&file, 600, 400, 300).expect("preview decodes");
+        assert_eq!((w, h), (300, 200));
+        assert!(rgb[1] > 150 && rgb[0] < 100, "the frame comes from the green preview");
+        assert!(decode_mpf_preview(&file, 600, 400, 2048).is_none(), "a full image under 4/3 of the floor decodes itself");
+        assert!(decode_mpf_preview(&file, 600, 400, 460).is_none(), "a preview under 2/3 of the floor is too small");
+        let not_srgb = jpeg_with_mpf_preview(&primary, &preview, false);
+        assert!(decode_mpf_preview(&not_srgb, 600, 400, 300).is_none());
+        assert!(decode_mpf_preview(&primary, 600, 400, 300).is_none(), "no MPF index, no preview");
+        let (_, w, h) = decode_image_sync_imagecrate(std::path::Path::new("mpf-test.jpg"), Some(&file)).unwrap();
+        assert_eq!((w, h), (600, 400), "the scan floor is 2048, so this small file still decodes in full");
+    }
+
     #[test]
     fn exif_orientation_transforms_the_decoded_frame() {
         use image::metadata::Orientation;
@@ -4185,6 +4386,7 @@ mod tests {
             doc_stage_ran: false,
             text_stage_done: false,
             tags_evaluated: true,
+            reuse_twin: false,
         }
     }
 

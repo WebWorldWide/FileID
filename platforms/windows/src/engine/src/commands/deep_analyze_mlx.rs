@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::deep_analyze::{append_caption_chunk, batch_eta_seconds, emit_scope_failure, fetch_face_names, same_people, scoped_catalog_path};
+use super::deep_analyze::{append_caption_chunk, batch_eta_seconds, emit_scope_failure, fetch_face_names, same_people, scoped_catalog_path, ScopeFailure};
 use super::deep_scope::{DeepScope, ScopeError};
 use crate::apple::vlm::{self, Event, MlxLease, Resident};
 use crate::ipc::{
@@ -211,7 +211,7 @@ pub(crate) async fn run_batch(
     if let Some(scope) = &scope
         && let Err(error) = scope.validate_current_roots()
     {
-        emit_scope_failure(&sink, complete(model_kind, 0, 1, started, cancel.load(Ordering::Relaxed)), error.to_string()).await;
+        emit_scope_failure(&sink, complete(model_kind, 0, 1, started, cancel.load(Ordering::Relaxed)), &ScopeFailure::from_error(&error.into())).await;
         return;
     }
     let mode = if tags_only {
@@ -240,7 +240,7 @@ pub(crate) async fn run_batch(
         if let Some(scope) = &scope
             && let Err(error) = scoped_catalog_path(&db, scope, file_id)
         {
-            emit_scope_failure(&sink, complete(model_kind, processed, failed + 1, started, cancel.load(Ordering::Relaxed)), error.to_string()).await;
+            emit_scope_failure(&sink, complete(model_kind, processed, failed + 1, started, cancel.load(Ordering::Relaxed)), &ScopeFailure::from_error(&error)).await;
             return;
         }
         if skip_existing && already_done(&db, file_id, model_kind, tags_only) {
@@ -301,7 +301,7 @@ pub(crate) async fn run_batch(
                     if cancelled {
                         send_complete(&sink, complete(model_kind, processed, failed, started, true)).await;
                     } else {
-                        emit_scope_failure(&sink, complete(model_kind, processed, failed, started, false), error.to_string()).await;
+                        emit_scope_failure(&sink, complete(model_kind, processed, failed, started, false), &ScopeFailure { message: error.to_string(), detail: format!("{error:#}") }).await;
                     }
                     return;
                 }
@@ -357,7 +357,7 @@ pub(crate) async fn run_batch(
                 .await;
             }
             Err(error) if error.downcast_ref::<ScopeError>().is_some() => {
-                emit_scope_failure(&sink, complete(model_kind, processed, failed + 1, started, false), error.to_string()).await;
+                emit_scope_failure(&sink, complete(model_kind, processed, failed + 1, started, false), &ScopeFailure::from_error(&error)).await;
                 return;
             }
             Err(error) => {

@@ -13,7 +13,7 @@ struct MediaToolRequestPolicyTests {
         #expect(MediaToolChoice.available([]).map(\.0) == ["export"])
         let all = ["trim", "remux", "audio", "proxy", "rotate"].map { capability($0) }
         #expect(MediaToolChoice.available(all).map(\.0) == ["export", "trim", "remux", "audio", "proxy", "rotate"])
-        #expect(MediaToolChoice.available(all).map(\.1) == ["Export", "Trim", "Remux", "Audio", "Proxy", "Rotate"])
+        #expect(MediaToolChoice.available(all).map(\.1) == ["Export", "Trim", "Copy without re-compressing", "Audio", "Small preview copy", "Rotate"])
         let partial = [capability("trim"), capability("remux", available: false), capability("rotate")]
         #expect(MediaToolChoice.available(partial).map(\.0) == ["export", "trim", "rotate"])
     }

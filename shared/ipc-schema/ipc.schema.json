@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.26.0",
+  "version": "1.27.0",
 
   "$defs": {
     "IPCCommand": {
@@ -470,7 +470,7 @@
               "properties": {
                 "requestID": { "$ref": "#/$defs/HealthRequestID" },
                 "personID": { "type": ["integer", "null"], "description": "Only suggestions for this person. Omitted or null lists every person's. merges: suggestions that involve this person; splits: this person's suggestion." },
-                "queue": { "type": "string", "enum": ["faces", "merges", "splits", "refresh"], "description": "Schema 1.25.0. Which queue to read; omitted means faces. merges: suggested merges between existing people, in merges, best score first; splits: people whose faces form two well-separated groups, in splits, most separated first; refresh: the face refresh backlog for the engine's current face model and processing, in refresh (items, merges and splits empty). Every queue is read-only and stored by runFaceClustering." },
+                "queue": { "type": "string", "enum": ["faces", "merges", "splits", "refresh", "mergeUndo"], "description": "Schema 1.25.0. Which queue to read; omitted means faces. merges: suggested merges between existing people, in merges, best score first; splits: people whose faces form two well-separated groups, in splits, most separated first; refresh: the face refresh backlog for the engine's current face model and processing, in refresh (items, merges and splits empty). Every queue is read-only and stored by runFaceClustering. Schema 1.27.0: mergeUndo reports the newest mergeClusters merge from the last 24 hours that undoFaceReview can still undo: total is 1 with operationID, personID (the person kept) and otherPersonID (the person merged in), or 0 when there is none." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
               }
@@ -505,7 +505,7 @@
             "undoFaceReview": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the suggestion is pending again. Refused when the face changed since. Replies faceReview with action undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any of them moved since), merge (the merged person comes back under its id with its name and faces), notSamePerson, dismiss and split (the faces return and the new person is removed); the suggestion is pending again.",
+              "description": "Schema 1.23.0. Undo one resolveFaceReview by its operationID: the face leaves the person (accept) or the new Unknown person (ignore), or the rejection is forgotten (reject), and the suggestion is pending again. Refused when the face changed since. Replies faceReview with action undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any of them moved since), merge (the merged person comes back under its id with its name and faces), notSamePerson, dismiss and split (the faces return and the new person is removed); the suggestion is pending again. Schema 1.27.0: also undoes a mergeClusters merge by the operationID in its bulkActionResult item: the merged person comes back under its id with its name, title, unknown flag and representative face, the faces that still exist and still belong to the kept person move back, a name the kept person took from it is cleared, and verdicts the merge replaced return; refused when none of its faces can move back. operationID lastPersonMerge names the newest such merge from the last 24 hours that is not undone.",
               "required": ["requestID", "operationID"],
               "properties": {
                 "requestID": { "$ref": "#/$defs/HealthRequestID" },
@@ -767,13 +767,13 @@
         "action": { "type": "string", "enum": ["list", "resolve", "undo"] },
         "status": { "type": "string", "enum": ["ok", "refused", "failed"], "description": "refused: the request was understood but the catalog no longer allows it (the suggestion or face changed, or the person is already in the photo); nothing changed." },
         "message": { "type": ["string", "null"], "description": "Plain-language reason when status is not ok." },
-        "operationID": { "type": ["string", "null"], "description": "resolve: the operation to pass to undoFaceReview. undo: the operation undone." },
+        "operationID": { "type": ["string", "null"], "description": "resolve: the operation to pass to undoFaceReview. undo: the operation undone. list of mergeUndo (schema 1.27.0): the merge that can be undone." },
         "faceID": { "type": ["integer", "null"], "description": "resolve and undo: the face changed." },
         "personID": { "type": ["integer", "null"], "description": "resolve: the person the face now belongs to (accept: the suggested person; ignore: the new Unknown person; reject: null)." },
         "total": { "type": "integer", "minimum": 0, "description": "Pending suggestions matching the list filter (for resolve and undo: all pending suggestions)." },
         "offset": { "type": "integer", "minimum": 0 },
         "items": { "type": "array", "items": { "$ref": "#/$defs/FaceReviewItem" }, "description": "list: the page, best score first. Empty for resolve and undo." },
-        "queue": { "type": ["string", "null"], "enum": ["faces", "merges", "splits", "refresh", null], "description": "Schema 1.25.0. list: the queue read. Omitted means faces." },
+        "queue": { "type": ["string", "null"], "enum": ["faces", "merges", "splits", "refresh", "mergeUndo", null], "description": "Schema 1.25.0. list: the queue read. Omitted means faces." },
         "merges": { "type": ["array", "null"], "items": { "$ref": "#/$defs/FaceMergeSuggestion" }, "maxItems": 200, "description": "Schema 1.25.0. list of merges: the page; total counts them." },
         "splits": { "type": ["array", "null"], "items": { "$ref": "#/$defs/FaceSplitSuggestion" }, "maxItems": 200, "description": "Schema 1.25.0. list of splits: the page; total counts them." },
         "refresh": { "anyOf": [{ "$ref": "#/$defs/FaceRefreshStatus" }, { "type": "null" }], "description": "Schema 1.25.0. list of refresh: the backlog." },
@@ -1272,7 +1272,9 @@
                 "properties": {
                   "fileID":  { "type": ["integer", "null"] },
                   "ok":      { "type": "boolean" },
-                  "message": { "type": ["string", "null"] }
+                  "message": { "type": ["string", "null"] },
+                  "reason":  { "type": ["string", "null"], "enum": ["changed", "protected", "missing", "failed", null], "description": "Schema 1.27.0. trashFiles, on a file that was not moved: why, so the app can group refusals without reading message. changed: the file, or the copy being kept, is no longer what was indexed or verified; protected: it is in a read-only or managed-library location; missing: the catalog has no such file; failed: anything else. Omitted on success, by other actions and by engines that do not classify." },
+                  "operationID": { "type": ["string", "null"], "description": "Schema 1.27.0. mergeClusters, on a merge that changed something: the catalog operation (catalog_corrections kind person_merge) to pass to undoFaceReview. Omitted by engines that keep no merge journal." }
                 }
               } }
             }

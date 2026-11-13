@@ -20,17 +20,17 @@ pub(crate) enum ScopeError {
 impl fmt::Display for ScopeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::TooManyFiles => "Select at most 100 files for Deep Analyze.",
+            Self::TooManyFiles => "Select at most 100 files to describe.",
             Self::InvalidFileId => "Selected file IDs must be positive.",
-            Self::TooManyFolders => "Configure at most 100 Deep Analyze exclusion folders.",
-            Self::InvalidFolder => "Exclusions must be absolute directory paths without parent traversal or NUL characters.",
-            Self::UnavailableFolder => "An exclusion folder could not be resolved as an accessible directory. Restore access before whole-library analysis.",
-            Self::InvalidFilePath => "A catalog target does not have a valid absolute path.",
-            Self::UnresolvedFile => "A catalog target could not be resolved safely against the exclusions. Restore access before whole-library analysis.",
-            Self::ExcludedTarget => "A target is now excluded. Analysis stopped before opening it.",
-            Self::Cancelled => "Deep scope planning cancelled.",
+            Self::TooManyFolders => "Describe Files can skip at most 100 folders.",
+            Self::InvalidFolder => "One of the skipped folders isn't a valid folder. Choose it again.",
+            Self::UnavailableFolder => "FileID couldn't reach one of the skipped folders. Reconnect it before describing the whole library.",
+            Self::InvalidFilePath => "FileID doesn't know where one of these files is. Scan the folder again.",
+            Self::UnresolvedFile => "FileID couldn't check a file against the skipped folders. Reconnect the drive before describing the whole library.",
+            Self::ExcludedTarget => "A file is now in a skipped folder. Describe Files stopped before opening it.",
+            Self::Cancelled => "Describe Files was stopped.",
             #[cfg(windows)]
-            Self::PathComparison => "A target path could not be compared safely against the exclusions.",
+            Self::PathComparison => "FileID couldn't check a file against the skipped folders.",
         })
     }
 }

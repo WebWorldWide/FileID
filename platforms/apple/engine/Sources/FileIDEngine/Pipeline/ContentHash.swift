@@ -57,6 +57,19 @@ enum ContentHash {
         return Data(hasher.finalize())
     }
 
+    /// The full-file hash of bytes already in memory: the value `compute(url:size:)`
+    /// stores for a file of at most `fullHashMaxBytes` with the same content.
+    static func compute(bytes: UnsafeRawBufferPointer) -> Data {
+        var hasher = SHA256()
+        var offset = 0
+        while offset < bytes.count {
+            let end = min(bytes.count, offset + chunk)
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[offset..<end]))
+            offset = end
+        }
+        return Data(hasher.finalize())
+    }
+
     /// Read exactly `count` bytes (or until EOF). A single `read(upToCount:)` may
     /// return fewer bytes than asked even mid-file, so loop — mirrors the Windows
     /// engine's `read_fill`.

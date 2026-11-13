@@ -199,14 +199,14 @@ struct MainWindow: View {
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
-                guard let result = engine.lastFaceClustering, result.personCount > 0, activeTab == .library else { return }
-                toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: "Open People", duration: 7) {
+                guard let result = engine.lastFaceClustering, result.personCount > 0 else { return }
+                toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
                     activeTabBinding.wrappedValue = .people
                 }
             }
             .task(id: engine.deepAnalyzeComplete?.processed ?? -1) {
-                guard let done = engine.deepAnalyzeComplete, done.processed > 0, activeTab == .deep else { return }
-                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: "Open Library", duration: 7) {
+                guard let done = engine.deepAnalyzeComplete, done.processed > 0 else { return }
+                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
             }
@@ -238,7 +238,10 @@ struct MainWindow: View {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return }
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                    DispatchQueue.main.async { ToastCenter.shared.show("Drop a folder, not a file.") }
+                    return
+                }
                 guard FileManager.default.isReadableFile(atPath: url.path) else {
                     let folderName = url.lastPathComponent
                     DispatchQueue.main.async {
@@ -307,11 +310,23 @@ struct MainWindow: View {
     }
 
     private func choose(_ url: URL) {
+        // Read the scan state before clearing it: a cleared progress looks idle
+        // and a second scan would start on top of the running one.
+        let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
+        if scanning {
+            guard pickedURL != url else { return }
+            let alert = NSAlert()
+            alert.messageText = "A scan is running. Stop it and scan the new folder?"
+            alert.informativeText = "Files already read are kept. You can scan the first folder again later and it picks up where it stopped."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Stop and Scan \(url.lastPathComponent)")
+            alert.addButton(withTitle: "Keep Scanning")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            engine.cancelScan()
+        }
         if pickedURL != url { engine.clearProgress() }
         pickedURL = url
-        if !(engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false) {
-            engine.startScan(rootURL: url)
-        }
+        engine.startScan(rootURL: url)
     }
 
     // MARK: - Folder persistence

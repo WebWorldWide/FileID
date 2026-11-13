@@ -154,6 +154,7 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
         content_hash,
         legacy_hashes,
         exif: None,
+        twin: crate::pipeline::twin_reuse::TwinClaim::None,
         budget: None,
         mac: Some(frame),
     }
@@ -202,6 +203,7 @@ fn base_row(file: &DiscoveredFile) -> TaggedFile {
         doc_stage_ran: false,
         text_stage_done: false,
         tags_evaluated: false,
+        reuse_twin: false,
     }
 }
 

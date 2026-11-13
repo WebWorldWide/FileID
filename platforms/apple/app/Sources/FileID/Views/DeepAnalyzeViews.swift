@@ -11,6 +11,11 @@ struct DeepAnalyzeModelPickerCard: View {
     let engine: EngineClient
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var catalogPresented = false
+    @State private var requested: String?
+    @State private var failure: (text: String, detail: String)?
+    @State private var removeTarget: AIModelKind?
+    @State private var onDiskBytes: Int64 = 0
+    @State private var diskRefresh = 0
 
     private var ramGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
@@ -39,13 +44,8 @@ struct DeepAnalyzeModelPickerCard: View {
                 ForEach(top3, id: \.rawValue) { kind in
                     modelOptionRow(kind)
                 }
-                if let progress = engine.modelDownloadProgress {
-                    Divider().opacity(0.3)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(progress.message).font(Theme.Font.body(12, .semibold))
-                        ProgressView(value: progress.fraction).tint(Theme.gold)
-                    }
-                }
+                Divider().opacity(0.3)
+                selectedModelActions
                 Divider().opacity(0.3)
                 Button { catalogPresented = true } label: {
                     Label("Browse \(MLXModelCatalog.entries.count) more models", systemImage: "magnifyingglass")
@@ -64,6 +64,114 @@ struct DeepAnalyzeModelPickerCard: View {
         .sheet(isPresented: $catalogPresented) {
             ModelCatalogBrowser(engine: engine, visionOnly: true, initialSelection: settings.activeKind) { settings.activeKind = $0 }
         }
+        .task(id: "\(settings.activeKind.rawValue)|\(ModelInstallStatus.isInstalled(kind: settings.activeKind))|\(diskRefresh)") {
+            let kind = settings.activeKind
+            onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
+        }
+        .onChange(of: settings.activeKind.rawValue) { _, _ in failure = nil }
+        .onChange(of: engine.lastErrorSignal) { _, _ in
+            guard requested != nil, let error = engine.lastError else { return }
+            if error.kind == "prewarm_cancelled" { requested = nil; return }
+            guard ModelFailureText.isModelFailure(error) else { return }
+            failure = (ModelFailureText.plain(error), error.message)
+            requested = nil
+        }
+        .confirmationDialog("Remove this description model?",
+                            isPresented: Binding(get: { removeTarget != nil }, set: { if !$0 { removeTarget = nil } }),
+                            titleVisibility: .visible, presenting: removeTarget) { kind in
+            Button("Remove", role: .destructive) { remove(kind) }
+            Button("Keep", role: .cancel) {}
+        } message: { _ in
+            Text("Frees about \(ByteCountFormatter.string(fromByteCount: onDiskBytes, countStyle: .file)). Describe Files and Chat download it again the next time they need it.")
+        }
+    }
+
+    @ViewBuilder
+    private var selectedModelActions: some View {
+        let kind = settings.activeKind
+        let installed = ModelInstallStatus.isInstalled(kind: kind)
+        let progress = engine.modelDownloadProgress.flatMap { $0.modelKind == kind.rawValue ? $0 : nil }
+        VStack(alignment: .leading, spacing: 8) {
+            if let progress {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(installed || progress.fraction >= 0.99
+                             ? "Getting the selected model ready…"
+                             : "Downloading the selected model… \(Int((progress.fraction * 100).rounded()))%")
+                            .font(Theme.Font.body(12, .semibold)).monospacedDigit()
+                        ProgressView(value: min(max(progress.fraction, 0), 1)).tint(Theme.gold)
+                    }
+                    .help(progress.message)
+                    Button("Cancel") { cancelDownload(kind) }.buttonStyle(.dsSecondary)
+                }
+            } else if installed {
+                HStack(spacing: 8) {
+                    MetaText("The selected model is downloaded · \(ByteCountFormatter.string(fromByteCount: onDiskBytes, countStyle: .file)) on this Mac", size: 11.5)
+                        .help(DescriptionModelStore.folder(for: kind)?.path ?? "")
+                    Spacer()
+                    Button("Remove…") { removeTarget = kind }
+                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
+                        .disabled(engine.deepAnalyzeInFlight || engine.modelDownloadProgress != nil)
+                        .help(engine.deepAnalyzeInFlight ? "Wait until FileID finishes describing files" : "Delete this model's files to free space. Your own files are not touched.")
+                }
+            } else if requested == kind.rawValue {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    MetaText("Starting the download…", size: 11.5)
+                    Spacer()
+                    Button("Cancel") { cancelDownload(kind) }.buttonStyle(.dsSecondary)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    MetaText("The selected model isn't downloaded yet. It downloads once from the internet (huggingface.co).", size: 11.5)
+                    Spacer()
+                    Button { startDownload(kind) } label: {
+                        Label("Download · \(DescriptionModelStore.downloadSizeText(kind))", systemImage: "arrow.down.circle.fill")
+                    }
+                    .buttonStyle(.dsPrimary)
+                    .disabled(!kind.fits(ramGB: ramGB) || engine.modelDownloadProgress != nil)
+                }
+            }
+            if let failure {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    MetaText(failure.text, color: Theme.danger, size: 12).help(failure.detail)
+                    Spacer()
+                    if !installed {
+                        Button("Try again") { startDownload(kind) }.buttonStyle(.dsSecondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func startDownload(_ kind: AIModelKind) {
+        failure = nil
+        if let free = DescriptionModelStore.freeDiskBytes(), !kind.fits(freeDiskBytes: free) {
+            failure = (ModelInstaller.notEnoughSpace(needed: kind.requiredFreeBytes, available: free), "")
+            return
+        }
+        engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
+        if engine.prewarmModel(kind.rawValue) {
+            requested = kind.rawValue
+        } else if ModelLicenseAcceptance.isAccepted(for: kind) {
+            failure = ("FileID's helper isn't running. Quit and reopen FileID, then try again.", "")
+        }
+    }
+
+    private func cancelDownload(_ kind: AIModelKind) {
+        requested = nil
+        engine.cancelPrewarm()
+        engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
+    }
+
+    private func remove(_ kind: AIModelKind) {
+        do {
+            try DescriptionModelStore.remove(kind)
+            failure = nil
+        } catch {
+            failure = ("FileID couldn't remove this model.", error.localizedDescription)
+        }
+        diskRefresh += 1
     }
 
     @ViewBuilder
@@ -117,7 +225,7 @@ private struct ModelOptionRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!fits)
-        .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. Choose a smaller model for this \(Int(ramGB)) GB Mac. FileID checks remaining memory again before loading.")
+        .help(fits ? "License: \(kind.licenseName)" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB of free memory. Choose a smaller model for this \(Int(ramGB)) GB Mac. FileID checks free memory again before it starts.")
     }
 
     @ViewBuilder
@@ -147,8 +255,7 @@ private struct ModelOptionRow: View {
     @ViewBuilder
     private var badgeView: some View {
         if !fits {
-            BadgePill(label: "Needs \(Int(kind.ramBudgetGB)) GB RAM (you have \(Int(ramGB)))",
-                       color: Theme.warning)
+            BadgePill(label: Self.memoryBadge(need: kind.ramBudgetGB, have: ramGB), color: Theme.warning)
         } else if installed {
             BadgePill(label: "Downloaded", color: Theme.delight)
         } else {
@@ -157,9 +264,16 @@ private struct ModelOptionRow: View {
         }
     }
 
+    /// Whole numbers, unless they would read the same ("needs 8, has 8").
+    static func memoryBadge(need: Double, have: Double) -> String {
+        let whole = Int(need.rounded()) != Int(have.rounded())
+        let format = whole ? "%.0f" : "%.1f"
+        return "Needs \(String(format: format, need)) GB of free memory (this Mac has \(String(format: format, have)) GB in total)"
+    }
+
     @ViewBuilder
     private var statsLine: some View {
-        Text(kind.secondsPerImage > 0 ? "Needs ≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB memory · about \(String(format: "%.0f", kind.secondsPerImage)) s a photo · \(kind.licenseName)" : "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · Speed not measured · \(kind.licenseName)")
+        Text("Needs about \(String(format: "%.1f", kind.ramBudgetGB)) GB memory · " + (kind.secondsPerImage > 0 ? "about \(String(format: "%.0f", kind.secondsPerImage)) s a photo" : "speed not measured yet"))
             .font(Theme.Font.mono(10.5))
             .foregroundStyle(Theme.text3)
     }
@@ -216,10 +330,9 @@ struct DeepAnalyzeView: View {
     // actual files. Single in-flight gate + a short result line.
     @State private var applyInFlight = false
     @State private var applyStatus: String? = nil
-    // "Apply all" renames every pending file on disk in one tap with no review
-    // list (unlike BulkRenameSheet). The rename is the irreversible part, so gate
-    // it behind a confirmation that states the count. (HIGH #5)
-    @State private var confirmApplyAll = false
+    @State private var applyConfirm: ApplyConfirm?
+    @State private var confirmDownload = false
+    @State private var runFailure: (text: String, detail: String)?
 
     // Cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
@@ -264,6 +377,9 @@ struct DeepAnalyzeView: View {
                 }
                 statusCard
                 actionsCard
+                if let runFailure, !engine.deepAnalyzeInFlight {
+                    failureCard(runFailure)
+                }
                 // Smart names produced by Deep Analyze stack up here for
                 // bulk apply. Lives in this tab (not Library) because
                 // smart names ARE Deep Analyze's output — putting the
@@ -302,13 +418,20 @@ struct DeepAnalyzeView: View {
         }
         .background(Color.clear, ignoresSafeAreaEdges: [])
         .onAppear { refreshPendingRenameCount(); refreshStatusCounts() }
-        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+        .onChangeWhileActive(of: engine.deepAnalyzeComplete?.processed ?? -1) {
             refreshPendingRenameCount()
             refreshStatusCounts()
         }
-        .onChange(of: store.version) { _, _ in throttledRefresh() }
-        .onChange(of: settings.activeKind.rawValue) { _, _ in
+        .onChangeWhileActive(of: store.version) { throttledRefresh() }
+        .onChangeWhileActive(of: settings.activeKind.rawValue) {
             refreshStatusCounts()   // pending is keyed by active model
+        }
+        .onChange(of: engine.lastErrorSignal) { _, _ in
+            guard let error = engine.lastError, ModelFailureText.isModelFailure(error) else { return }
+            runFailure = (ModelFailureText.plain(error), error.message)
+        }
+        .onChange(of: engine.deepAnalyzeInFlight) { _, running in
+            if running { runFailure = nil }
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
             BulkRenameSheet(engine: engine, store: store)
@@ -329,7 +452,7 @@ struct DeepAnalyzeView: View {
     /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
     /// most one refresh per second so the 3 status COUNT(*) queries
     /// (countFilesWithProposedNames / deepAnalyzePending / namedPersonCount)
-    /// don't fire 1000× — including while this tab is off-screen. Leading
+    /// don't fire 1000×. Leading
     /// edge refreshes at once when the last was ≥1s ago; otherwise a trailing
     /// debounce guarantees a final refresh after the burst settles. Mirrors
     /// LibraryView's batch throttle + search debounce.
@@ -405,39 +528,31 @@ struct DeepAnalyzeView: View {
                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
-                    secondaryApplyButton("Add tags to files", systemImage: "tag",
-                                         disabled: applyInFlight) { runApply(.tags) }
-                    secondaryApplyButton("Add people's names to files", systemImage: "person.crop.square",
-                                         disabled: applyInFlight || !hasNamedAnyone) { runApply(.people) }
-                        .help(hasNamedAnyone ? "Tag each photo with the names of the people in it" : "Name someone on the People page first")
+                    secondaryApplyButton("Add tags to files…", systemImage: "tag",
+                                         disabled: applyInFlight) { prepareApply(.tags) }
+                    secondaryApplyButton("Add people's names to files…", systemImage: "person.crop.square",
+                                         disabled: applyInFlight || !hasNamedAnyone) { prepareApply(.people) }
+                        .help(hasNamedAnyone ? "Tag each photo with the names of the people in it. You confirm first." : "Name someone on the People page first")
                 }
                 Button {
-                    // Rename-on-disk is the destructive step; confirm first when
-                    // there are files to rename. A tag-only apply (no pending
-                    // renames) is additive/reversible, so let it run straight away.
-                    if pendingRenameCount > 0 {
-                        confirmApplyAll = true
-                    } else {
-                        runApply(.all)
-                    }
+                    prepareApply(.all)
                 } label: {
-                    Label(pendingRenameCount > 0 ? "Add tags and rename \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")" : "Add tags and names", systemImage: "checkmark.circle")
+                    Label(pendingRenameCount > 0 ? "Add tags and rename files…" : "Add tags and names…", systemImage: "checkmark.circle")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(DSSecondaryButtonStyle(height: 30))
-                .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names. You confirm first." : "Adds tags and people's names to the files")
+                .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people's names to the files. You confirm first.")
                 .disabled(applyInFlight)
                 .confirmationDialog(
-                    "Rename \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s") to the suggested names?",
-                    isPresented: $confirmApplyAll,
-                    titleVisibility: .visible
-                ) {
-                    Button("Rename \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")", role: .destructive) {
-                        runApply(.all)
-                    }
+                    applyConfirm?.title ?? "",
+                    isPresented: Binding(get: { applyConfirm != nil }, set: { if !$0 { applyConfirm = nil } }),
+                    titleVisibility: .visible,
+                    presenting: applyConfirm
+                ) { confirm in
+                    Button(confirm.button) { runApply(confirm) }
                     Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("The files keep their folders; only their names change. Tags and people are added too. To put the old names back, use Undo last rename at the top of Library.")
+                } message: { confirm in
+                    Text(confirm.message)
                 }
                 if let applyStatus {
                     Text(applyStatus).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
@@ -458,23 +573,101 @@ struct DeepAnalyzeView: View {
 
     enum ApplyScope { case tags, people, all }
 
-    /// Runs the requested apply off the main thread (DB read + FS writes) and
-    /// reports a short summary. `.all` renames to smart names, then writes
-    /// keyword tags + people tags.
-    private func runApply(_ scope: ApplyScope) {
+    /// What one "Save to your files" press will change, counted before asking.
+    struct ApplyConfirm {
+        let scope: ApplyScope
+        var renames: [CatalogWrites.NamedRename] = []
+        var tagged = 0
+        var people = 0
+
+        private static func files(_ n: Int) -> String { "\(n.formatted()) file\(n == 1 ? "" : "s")" }
+
+        var title: String {
+            if !renames.isEmpty { return "Rename \(Self.files(renames.count)) and add tags?" }
+            switch scope {
+            case .tags: return "Add tags to \(Self.files(tagged))?"
+            case .people: return "Add people's names to \(Self.files(people))?"
+            case .all: return "Add tags and names to \(Self.files(max(tagged, people)))?"
+            }
+        }
+        var button: String {
+            if !renames.isEmpty { return "Rename \(Self.files(renames.count)) and add tags" }
+            switch scope {
+            case .tags: return "Add tags to \(Self.files(tagged))"
+            case .people: return "Add names to \(Self.files(people))"
+            case .all: return "Add tags and names"
+            }
+        }
+        var message: String {
+            var parts: [String] = []
+            if !renames.isEmpty {
+                parts.append("\(Self.files(renames.count)) get the suggested name in your Name style. They stay in their folders. To put the old names back, use Undo last rename at the top of Library.")
+            }
+            if tagged > 0 { parts.append("\(Self.files(tagged)) get FileID's tags as Finder tags.") }
+            if people > 0 { parts.append("\(Self.files(people)) get the names of the people in them as Finder tags.") }
+            parts.append("Your own Finder tags are kept. To take a tag off later, remove it in Finder.")
+            return parts.joined(separator: " ")
+        }
+    }
+
+    /// Counts what the press would change, then asks. Renames are worked out
+    /// here, in the saved Name style, so the confirmed count is the real one.
+    private func prepareApply(_ scope: ApplyScope) {
         guard !applyInFlight else { return }
         applyInFlight = true
-        applyStatus = "Applying…"
+        applyStatus = "Counting files…"
         let store = self.store
         Task { @MainActor in
-            var summary: [String] = []
+            var confirm = ApplyConfirm(scope: scope)
+            if scope != .people {
+                confirm.tagged = await Task.detached(priority: .userInitiated) {
+                    store.filesWithKeywordTags().filter { !$0.tags.isEmpty }.count
+                }.value
+            }
+            if scope != .tags {
+                confirm.people = await Task.detached(priority: .userInitiated) {
+                    store.filesWithPersonTags().filter { !$0.names.isEmpty }.count
+                }.value
+            }
             if scope == .all {
-                let pending = await Task.detached(priority: .userInitiated) { store.filesWithProposedNames() }.value
-                let renamed = await CatalogWrites.applyProposedNames(pending, engine: engine, store: store).renamed
-                // Journal THIS batch so Library's "Undo last rename" reverts it,
-                // not some older batch, matching every other rename call site.
-                BulkRenameSheet.saveLastBatch(renamed)
-                if !renamed.isEmpty { summary.append("\(renamed.count) renamed") }
+                let ids = await Task.detached(priority: .userInitiated) {
+                    store.filesWithProposedNames(limit: NameStyle.maxFiles).map(\.id)
+                }.value
+                switch await StyledNames.rows(engine: engine, fileIDs: ids, naming: StyledNames.savedNaming()) {
+                case .rows(let rows):
+                    confirm.renames = NameStyle.renames(rows)
+                case .failed(let why):
+                    applyInFlight = false
+                    applyStatus = why
+                    return
+                }
+            }
+            applyInFlight = false
+            guard confirm.renames.count + confirm.tagged + confirm.people > 0 else {
+                applyStatus = "Nothing to add yet."
+                return
+            }
+            applyStatus = nil
+            applyConfirm = confirm
+        }
+    }
+
+    /// Runs a confirmed apply off the main thread (DB read + FS writes) and
+    /// reports a short summary. `.all` renames first, then writes keyword
+    /// tags + people tags.
+    private func runApply(_ confirm: ApplyConfirm) {
+        guard !applyInFlight else { return }
+        applyInFlight = true
+        applyStatus = "Working…"
+        let store = self.store
+        let scope = confirm.scope
+        Task { @MainActor in
+            var summary: [String] = []
+            if !confirm.renames.isEmpty {
+                let result = await CatalogWrites.applyNames(confirm.renames, engine: engine, store: store)
+                BulkRenameSheet.saveLastBatch(result.renamed)
+                if !result.renamed.isEmpty { summary.append("\(result.renamed.count) renamed") }
+                if result.failed > 0 { summary.append("\(result.failed) couldn't be renamed") }
             }
             if scope == .tags || scope == .all {
                 let n = await Task.detached(priority: .userInitiated) {
@@ -559,13 +752,13 @@ struct DeepAnalyzeView: View {
                     .font(Theme.Font.body(20, .semibold))
                     .foregroundStyle(Theme.warning)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Describing isn't available in this build")
+                    Text("Describe Files isn't available in this copy of FileID")
                         .font(Theme.Font.body(14, .semibold))
-                    Text(engine.deepAnalyzeUnavailableReason ??
-                         "mlx.metallib was not compiled. Run ./run.sh — it will fail with install instructions if cmake or the Metal Toolchain is missing.")
+                    Text("Reinstall FileID to fix it.")
                         .font(Theme.Font.body(13.5))
                         .foregroundStyle(Theme.text3)
                         .fixedSize(horizontal: false, vertical: true)
+                        .help(engine.deepAnalyzeUnavailableReason ?? "mlx.metallib was not compiled into this build.")
                 }
                 Spacer(minLength: 0)
             }
@@ -581,7 +774,8 @@ struct DeepAnalyzeView: View {
 
     private var statusCard: some View {
         let totals = pendingTotals
-        let pendingMins = Double(totals.pending) * settings.activeKind.secondsPerImage / 60.0
+        let perFile = settings.activeKind.secondsPerImage
+        let modelInstalled = ModelInstallStatus.isInstalled(kind: settings.activeKind)
         return Panel {
             PanelHeader("This library")
             VStack(alignment: .leading, spacing: 8) {
@@ -600,14 +794,20 @@ struct DeepAnalyzeView: View {
                     if totals.pending > 0 {
                         GridRow {
                             Text("Time needed").foregroundStyle(Theme.text3)
-                            Text("about \(DurationText.short(pendingMins * 60))")
+                            Text(perFile > 0 ? "about \(DurationText.short(Double(totals.pending) * perFile))" : "Time not measured yet")
                                 .font(Theme.Font.body(13, .medium)).monospacedDigit()
                         }
                     }
                     GridRow {
                         Text("AI model").foregroundStyle(Theme.text3)
-                        Text(settings.activeKind.displayName).font(Theme.Font.body(13, .medium))
-                            .help("Change the description model in Settings")
+                        HStack(spacing: 8) {
+                            Text(settings.activeKind.displayName).font(Theme.Font.body(13, .medium))
+                            MetaText(modelInstalled ? "Downloaded" : "Not downloaded yet · about \(DescriptionModelStore.downloadSizeText(settings.activeKind))",
+                                     color: modelInstalled ? Theme.delight : Theme.text2, size: 11.5)
+                            Button("Change…") { onSwitchTab(.settings) }
+                                .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                                .help("Choose a different description model in Settings")
+                        }
                     }
                 }
                 .font(Theme.Font.body(13))
@@ -617,7 +817,7 @@ struct DeepAnalyzeView: View {
     }
 
     private var runBlocker: String? {
-        if !engine.deepAnalyzeAvailable { return "Describing isn't available in this build." }
+        if !engine.deepAnalyzeAvailable { return "Describe Files isn't available in this copy of FileID. Reinstall FileID to fix it." }
         if !settings.activeKind.fits(ramGB: settings.systemRAMGB) { return "\(settings.activeKind.displayName) needs more memory than this Mac has. Choose a smaller model in Settings." }
         if engine.deepAnalyzeInFlight { return "FileID is already describing files." }
         if pendingTotals.total == 0 { return "Scan a folder first." }
@@ -628,13 +828,59 @@ struct DeepAnalyzeView: View {
     private var runButton: some View {
         let count = skipExisting ? pendingTotals.pending : pendingTotals.total
         return Button {
-            guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
-            engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue, skipExisting: skipExisting)
+            requestRun()
         } label: {
             Label(count > 0 ? "Describe \(count.formatted()) file\(count == 1 ? "" : "s")" : "Describe files", systemImage: "wand.and.stars")
         }
         .disabled(runBlocker != nil)
         .help(runBlocker ?? "Write a description and a suggested name for each file. You can stop at any time.")
+        .confirmationDialog("This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once. Continue?",
+                            isPresented: $confirmDownload, titleVisibility: .visible) {
+            Button("Download and describe") { startRun() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("FileID needs its description model before it can describe files. It downloads once from the internet (huggingface.co) and then works without a connection.")
+        }
+    }
+
+    private func requestRun() {
+        let kind = settings.activeKind
+        if ModelInstallStatus.isInstalled(kind: kind) { startRun(); return }
+        if let free = DescriptionModelStore.freeDiskBytes(), !kind.fits(freeDiskBytes: free) {
+            runFailure = (ModelInstaller.notEnoughSpace(needed: kind.requiredFreeBytes, available: free), "")
+            return
+        }
+        confirmDownload = true
+    }
+
+    private func startRun() {
+        runFailure = nil
+        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
+        engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue, skipExisting: skipExisting)
+    }
+
+    private func failureCard(_ failure: (text: String, detail: String)) -> some View {
+        Panel(padding: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(Theme.Font.body(16, .semibold))
+                    .foregroundStyle(Theme.warning)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Describing didn't start").font(Theme.Font.body(14, .semibold))
+                    Text(failure.text)
+                        .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(failure.detail)
+                    HStack(spacing: 8) {
+                        Button("Try again") { requestRun() }
+                            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                            .disabled(runBlocker != nil)
+                        Button("Dismiss") { runFailure = nil }.buttonStyle(.dsGhost)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     private var actionsCard: some View {
@@ -716,6 +962,9 @@ struct DeepAnalyzeView: View {
     /// through each phase.
     @ViewBuilder
     private var startingCard: some View {
+        let download = engine.modelDownloadProgress.flatMap { progress in
+            progress.fraction < 0.99 && !ModelInstallStatus.isInstalled(kind: settings.activeKind) ? progress : nil
+        }
         Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
@@ -723,8 +972,9 @@ struct DeepAnalyzeView: View {
                         .controlSize(.regular)
                         .tint(Theme.gold)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Getting the AI ready…").font(Theme.Font.body(14, .semibold))
-                        Text(startingSubtitle)
+                        Text(download.map { "Downloading the AI model… \(Int(($0.fraction * 100).rounded()))%" } ?? "Getting the AI ready…")
+                            .font(Theme.Font.body(14, .semibold)).monospacedDigit()
+                        Text(download == nil ? startingSubtitle : "About \(DescriptionModelStore.downloadSizeText(settings.activeKind)), downloaded once. Describing starts by itself when it finishes.")
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                             .contentTransition(.opacity)
@@ -732,13 +982,20 @@ struct DeepAnalyzeView: View {
                                        value: engine.deepAnalyzeStarting?.message)
                     }
                     Spacer()
-                    Button("Stop") {
+                    Button(download == nil ? "Stop" : "Cancel") {
                         engine.deepAnalyzeCancel()
+                        engine.cancelPrewarm()
                     }
                     .buttonStyle(.dsSecondary)
+                    .help(download == nil ? "Stop before describing starts" : "Stop the download. Nothing is described.")
                 }
-                ShimmerView(cornerRadius: 3)
-                    .frame(height: 4)
+                if let download {
+                    ProgressView(value: min(max(download.fraction, 0), 1)).tint(Theme.gold)
+                        .help(download.message)
+                } else {
+                    ShimmerView(cornerRadius: 3)
+                        .frame(height: 4)
+                }
             }
         }
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -837,14 +1094,26 @@ struct DeepAnalyzeButton: View {
     let engine: EngineClient
     let file: FileRow
     @State private var settings = DeepAnalyzeSettings.shared
+    @State private var confirmDownload = false
+    @State private var blocked: String?
+
+    private func describe() {
+        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
+        engine.deepAnalyzeFile(fileID: file.id, modelKind: settings.activeKind.rawValue)
+    }
 
     var body: some View {
         let alreadyDone = file.isFullyAnalyzed(by: settings.activeKind.rawValue)
         let fits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         Button {
             guard fits else { return }
-            guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
-            engine.deepAnalyzeFile(fileID: file.id, modelKind: settings.activeKind.rawValue)
+            let kind = settings.activeKind
+            if ModelInstallStatus.isInstalled(kind: kind) { describe(); return }
+            if let free = DescriptionModelStore.freeDiskBytes(), !kind.fits(freeDiskBytes: free) {
+                blocked = ModelInstaller.notEnoughSpace(needed: kind.requiredFreeBytes, available: free)
+                return
+            }
+            confirmDownload = true
         } label: {
             Label(
                 alreadyDone ? "Describe again" : "Describe",
@@ -859,6 +1128,18 @@ struct DeepAnalyzeButton: View {
         }
         .buttonStyle(.plain)
         .disabled(engine.deepAnalyzeInFlight || !fits)
+        .confirmationDialog("This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once. Continue?",
+                            isPresented: $confirmDownload, titleVisibility: .visible) {
+            Button("Download and describe") { describe() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("FileID needs its description model before it can describe this file. It downloads once from the internet (huggingface.co). You can watch the download on the Describe Files page.")
+        }
+        .alert("The description model can't be downloaded yet", isPresented: Binding(get: { blocked != nil }, set: { if !$0 { blocked = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(blocked ?? "")
+        }
         .help(engine.deepAnalyzeInFlight ? "FileID is already describing files. Try again when it finishes." : fits
               ? "Write a description and a suggested name for this file (uses \(settings.activeKind.displayName))"
               : "\(settings.activeKind.displayName) needs more memory than this Mac has. Choose a smaller description model in Settings.")

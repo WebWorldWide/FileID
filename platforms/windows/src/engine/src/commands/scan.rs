@@ -53,11 +53,10 @@ async fn reject_stranded_decoders(
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
     active: usize,
 ) {
+    tracing::warn!(active, "[SCAN] decoder workers from the previous scan are still stopping");
     sink.send(EngineError::event(
         "decoder_shutdown_incomplete",
-        format!(
-            "{active} decoder worker(s) from the previous scan are still stopping. Wait and retry; restart FileID if they do not exit."
-        ),
+        "FileID is still finishing the last scan. Wait a moment and try again; if it keeps happening, quit and reopen FileID.",
     ))
     .await;
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
@@ -124,7 +123,7 @@ pub(crate) async fn handle_start_scan(
     if already_running {
         sink.send(EngineError::event(
             "scan_already_running",
-            "A scan is already running. Cancel it before starting a new one.",
+            "A scan is already running. Stop it first, or wait for it to finish.",
         ))
         .await;
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
@@ -291,8 +290,7 @@ pub(crate) async fn handle_start_scan(
             sink.send(EngineError::event(
                 "model_load_failed",
                 format!(
-                    "The inference engine couldn't load its models: {err}.\n\
-                     Try reinstalling models from Settings → Local AI.{runtime_hint}"
+                    "FileID couldn't load its AI models. Reinstall them in Settings, under Local AI.{runtime_hint}"
                 ),
             ))
             .await;
@@ -308,12 +306,11 @@ pub(crate) async fn handle_start_scan(
             .await;
             sink.send(EngineError::event(
                 "model_load_timeout",
-                "Loading inference models took longer than 120 seconds. The native \
-                     loader cannot be cancelled safely, so FileID will reject another scan \
-                     until it finishes. Restart the engine before retrying if it remains stuck.\n\nTry:\n\
-                     • Close other memory- or GPU-heavy apps.\n\
-                     • Reinstall the models from Settings → Local AI.\n\
-                     • Pick a smaller Deep Analyze model in Settings → Local AI.",
+                "FileID's AI models took more than two minutes to load. FileID can't start \
+                     another scan until they finish loading; if it stays stuck, quit and reopen FileID.\n\nTry:\n\
+                     • Close other apps that use a lot of memory or graphics power.\n\
+                     • Reinstall the models in Settings, under Local AI.\n\
+                     • Pick a smaller model for Describe Files.",
             ))
             .await;
             let late_result = load_task.await;
@@ -369,13 +366,16 @@ pub(crate) async fn handle_start_scan(
             sink.send(EngineError::event(
                 "model_load_failed",
                 format!(
-                    "These installed AI models failed to load, so the scan was stopped: {}.\n\n\
-                     The model files are likely incomplete or blocked by antivirus. \
-                     Reinstall them from Settings → Local AI, then scan again. \
-                     (The scan was stopped on purpose so your library isn't recorded as \
-                     scanned-with-these-features-missing, which would skip those files \
-                     on future scans.)",
-                    failed_to_load.join(", ")
+                    "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
+                     Their files are probably incomplete or blocked by antivirus. \
+                     Reinstall them in Settings, under Local AI, then scan again. \
+                     (FileID stopped the scan so your files aren't marked as done \
+                     without these features.)",
+                    failed_to_load
+                        .iter()
+                        .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             ))
             .await;
@@ -433,7 +433,7 @@ pub(crate) async fn handle_start_scan(
             .await;
             sink.send(EngineError::new(
                 "scan_failed",
-                format!("Scan failed: {err}"),
+                "FileID couldn't finish scanning this folder. Check that it is still connected, then scan again.",
             )
             .with_path(payload.root_path)
             .into_event())

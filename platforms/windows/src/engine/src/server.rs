@@ -302,13 +302,11 @@ async fn async_main() -> Result<()> {
             .map(platform::redact_path_for_log)
             .collect::<Vec<_>>()
             .join("; ");
-        let msg = format!(
-            "CUDA Toolkit detected but {} DLL search dir registration(s) failed: {}. Scanning will fall back to DirectML.",
-            cuda_dll_failures.len(),
-            dirs
-        );
-        tracing::error!(message = %msg, "[EP] CUDA DLL registration failed");
-        sink.send(EngineError::event("cuda_dll_registration_failed", msg))
+        tracing::error!(failed = cuda_dll_failures.len(), dirs = %dirs, "[EP] CUDA DLL registration failed; falling back to DirectML");
+        sink.send(EngineError::event(
+            "cuda_dll_registration_failed",
+            "FileID couldn't turn on the NVIDIA speed-up, so scanning will use the standard graphics path instead.",
+        ))
         .await;
     }
 
@@ -336,10 +334,7 @@ async fn async_main() -> Result<()> {
             tracing::error!(%detail, "database failed PRAGMA quick_check");
             sink.send(EngineError::new(
                 "db_integrity_check_failed",
-                format!(
-                    "The library database failed an integrity check ({detail}). It may be \
-                     corrupted. Open Settings and wipe the library, then run a scan to rebuild it."
-                ),
+                "FileID's library file looks damaged. Open Settings and choose Start over, then scan again to rebuild it.",
             )
             .with_path(db_path.display().to_string())
             .into_event())
@@ -591,7 +586,7 @@ async fn async_main() -> Result<()> {
             tracing::error!("active mutation did not quiesce before shutdown deadline");
             sink.send(EngineError::event(
                 "shutdown_quiescence_timeout",
-                "FileID could not finish cancelling active work before shutdown. Recovery journals remain available and the WAL was left intact.",
+                "FileID couldn't finish stopping its work before closing. Your library is safe, and unfinished work will be recovered the next time you open FileID.",
             ))
             .await;
             None
@@ -608,7 +603,7 @@ async fn async_main() -> Result<()> {
         tracing::error!(%error, "Native cleanup failed at shutdown");
         sink.send(EngineError::event(
             "native_cleanup_failed_at_shutdown",
-            error.to_string(),
+            "FileID couldn't close one of its AI helpers. If your computer feels slow after quitting FileID, restart it.",
         )).await;
     }
 
@@ -624,7 +619,7 @@ async fn async_main() -> Result<()> {
             tracing::warn!(?err, "WAL checkpoint at shutdown failed");
             sink.send(EngineError::event(
                 "checkpoint_failed_at_shutdown",
-                "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.",
+                "FileID couldn't finish tidying its library before closing. Your data is safe.",
             ))
             .await;
         }
@@ -896,7 +891,7 @@ impl Drop for FaceClusterActiveGuard {
 async fn emit_scan_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "scan_already_running",
-        "A scan is already running or queued. Cancel it before starting a new one.",
+        "A scan is already running. Stop it first, or wait for it to finish.",
     ))
     .await;
 }
@@ -904,7 +899,7 @@ async fn emit_scan_busy(sink: &Sink) {
 async fn emit_face_clustering_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "face_clustering_busy",
-        "Face clustering is already running.",
+        "FileID is already grouping faces.",
     ))
     .await;
 }
@@ -912,7 +907,7 @@ async fn emit_face_clustering_busy(sink: &Sink) {
 async fn emit_restructure_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "restructure_already_running",
-        "A restructure apply or undo is already running — wait for it to finish or cancel it first.",
+        "Organize Folders is already moving files. Wait for it to finish.",
     ))
     .await;
 }
@@ -920,7 +915,7 @@ async fn emit_restructure_busy(sink: &Sink) {
 async fn emit_deep_analyze_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "deep_analyze_already_running",
-        "A Deep Analyze pass is already running — wait for it to finish or cancel it first.",
+        "Describe Files is already running. Wait for it to finish, or stop it first.",
     ))
     .await;
 }
@@ -1044,7 +1039,7 @@ async fn emit_handler_panic(sink: &Sink) {
     tracing::error!("panic in IPC command handler; engine continuing");
     sink.send(EngineError::event(
         "command_handler_panic",
-        "an internal error interrupted a command; the engine kept running",
+        "Something went wrong inside FileID's helper, but it is still running. Try that again.",
     ))
     .await;
 }
@@ -1079,11 +1074,15 @@ fn bulk_rejection_event(action: &str, file_ids: &[i64], message: &str) -> IpcEve
                     file_id: Some(*file_id),
                     ok: false,
                     message: Some(message.into()),
+                    reason: None,
+                    operation_id: None,
                 })
                 .chain(file_ids.is_empty().then(|| ipc::BulkActionItem {
                     file_id: None,
                     ok: false,
                     message: Some(message.into()),
+                    reason: None,
+                    operation_id: None,
                 }))
                 .collect(),
         },
@@ -1157,7 +1156,7 @@ impl Dispatcher {
     {
         let Some(db) = &self.db else {
             emit_db_unavailable(&self.sink, action).await;
-            let message = format!("{phrase} because the library database is unavailable.");
+            let message = format!("{phrase} because FileID couldn't open its library. Quit and reopen FileID.");
             self.sink.send(bulk_rejection_event(action, ids, &message)).await;
             return;
         };
@@ -1177,7 +1176,7 @@ impl Dispatcher {
     {
         let Some(db) = &self.db else {
             emit_db_unavailable(&self.sink, command).await;
-            let message = format!("{phrase} because the library database is unavailable.");
+            let message = format!("{phrase} because FileID couldn't open its library. Quit and reopen FileID.");
             self.sink.send(EngineError::event(kind, message)).await;
             return;
         };
@@ -1195,7 +1194,7 @@ impl Dispatcher {
             .is_err()
         {
             emit_restructure_busy(&self.sink).await;
-            let message = format!("{phrase} because another restructure operation is already running.");
+            let message = format!("{phrase} because Organize Folders is already moving files.");
             self.sink.send(EngineError::event(kind, message)).await;
             return;
         }
@@ -1288,7 +1287,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             tracing::warn!(%err, "ipc decode failed");
             sink.send(EngineError::event(
                 "command_decode_failed",
-                format!("Command frame could not be decoded: {err}"),
+                "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
             ))
             .await;
             return;
@@ -1398,7 +1397,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 emit_db_unavailable(sink, "planRestructure").await;
                 sink.send(EngineError::event(
                     "plan_restructure_db_unavailable",
-                    "Could not compute a restructure plan because the library database is unavailable.",
+                    "FileID couldn't open its library, so Organize Folders can't make a plan. Quit and reopen FileID.",
                 ))
                 .await;
                 return;
@@ -1413,7 +1412,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 scan_state,
                 EngineError::event(
                     "plan_restructure_library_busy",
-                    "Could not compute a restructure plan because the library is busy.",
+                    "Organize Folders can't make a plan while the scan is paused. Resume or stop the scan, then try again.",
                 ),
                 async move {
                     let _cancel_guard = cancel_guard;
@@ -1429,11 +1428,11 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             .await;
         }
         CommandPayload::ApplyRestructure(payload) => {
-            d.restructure_mutation("applyRestructure", "apply_restructure", "Could not apply the restructure", payload, commands::restructure::handle_apply_restructure)
+            d.restructure_mutation("applyRestructure", "apply_restructure", "Organize Folders couldn't move the files", payload, commands::restructure::handle_apply_restructure)
                 .await;
         }
         CommandPayload::UndoRestructure(payload) => {
-            d.restructure_mutation("undoRestructure", "undo_restructure", "Could not undo the restructure", payload, commands::restructure::handle_undo_restructure)
+            d.restructure_mutation("undoRestructure", "undo_restructure", "Organize Folders couldn't undo the move", payload, commands::restructure::handle_undo_restructure)
                 .await;
         }
         CommandPayload::GrantFolderAccess(payload) => commands::folder_access::grant(sink, payload).await,
@@ -1521,7 +1520,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
                 sink.send(EngineError::event(
                     "find_merge_suggestions_failed",
-                    "Merge suggestions are unavailable because the library database could not be opened.",
+                    "FileID couldn't open its library, so it can't suggest people to merge.",
                 ))
                 .await;
                 return;
@@ -1544,17 +1543,17 @@ async fn handle_line(d: &Dispatcher, line: &str) {
         }
         CommandPayload::DeepAnalyzeFile(payload) => {
             let model_kind = payload.model_kind.clone();
-            d.deep_analyze_arm("deepAnalyzeFile", model_kind, "Deep Analyze 1 file", payload, commands::deep_analyze::handle_deep_analyze_file)
+            d.deep_analyze_arm("deepAnalyzeFile", model_kind, "Describe 1 file", payload, commands::deep_analyze::handle_deep_analyze_file)
                 .await;
         }
         CommandPayload::DeepAnalyzeFolder(payload) => {
             let model_kind = payload.model_kind.clone();
-            d.deep_analyze_arm("deepAnalyzeFolder", model_kind, "Deep Analyze folder", payload, commands::deep_analyze::handle_deep_analyze_folder)
+            d.deep_analyze_arm("deepAnalyzeFolder", model_kind, "Describe a folder", payload, commands::deep_analyze::handle_deep_analyze_folder)
                 .await;
         }
         CommandPayload::DeepAnalyzeAll(payload) => {
             let model_kind = payload.model_kind.clone();
-            d.deep_analyze_arm("deepAnalyzeAll", model_kind, "Deep Analyze entire library", payload, commands::deep_analyze::handle_deep_analyze_all)
+            d.deep_analyze_arm("deepAnalyzeAll", model_kind, "Describe the whole library", payload, commands::deep_analyze::handle_deep_analyze_all)
                 .await;
         }
         CommandPayload::DeepAnalyzeCancel(_) => {
@@ -1571,7 +1570,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "runFaceClustering").await;
                 sink.send(face_clustering_rejection_event(
-                    "Face clustering could not start because the library database is unavailable.",
+                    "FileID couldn't open its library, so it can't group faces. Quit and reopen FileID.",
                 ))
                 .await;
                 return;
@@ -1593,7 +1592,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             }
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let terminal_active = face_cluster_active.clone();
-            let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Cluster faces");
+            let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Group faces");
             let sink_c = sink.clone();
             let db_c = db.clone();
             spawn_mutation_with_rejection(
@@ -1601,7 +1600,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 sink,
                 scan_state,
                 face_clustering_rejection_event(
-                    "Face clustering could not start while the library scan is paused.",
+                    "FileID can't group faces while the scan is paused. Resume or stop the scan, then try again.",
                 ),
                 async move {
                     let _guard = guard;
@@ -1645,7 +1644,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             spawn_guarded(sink, commands::thumbnail::handle_generate_video_thumbnail(sink.clone(), payload));
         }
         CommandPayload::PurgeExcluded(payload) => {
-            d.dispatch_mutation(action, &ids, "Excluded files could not be purged", payload, commands::scan::handle_purge_excluded).await;
+            d.dispatch_mutation(action, &ids, "Excluded folders could not be removed from your library", payload, commands::scan::handle_purge_excluded).await;
         }
         CommandPayload::ListFaceReview(payload) => {
             spawn_guarded(sink, commands::face_review::handle_list(sink.clone(), db.cloned(), payload));
@@ -1666,32 +1665,27 @@ async fn handle_line(d: &Dispatcher, line: &str) {
 fn db_open_error_event(err: &anyhow::Error, db_path: &std::path::Path) -> IpcEvent {
     let path = db_path.display().to_string();
     if let Some(newer) = err.downcast_ref::<db::migrations::NewerThanEngine>() {
+        tracing::error!(%newer, "database schema is newer than this engine");
         return EngineError::new(
             "db_newer_than_engine",
-            format!("{newer}. Update FileID, or wipe the library to rescan."),
+            "This library was made by a newer version of FileID. Update FileID to open it.",
         )
         .with_path(path)
         .into_event();
     }
     let message = if err.downcast_ref::<db::ReadOnlyDatabase>().is_some() {
-        format!(
-            "The database at {path} is read-only, so the engine cannot scan. Make the file and its folder writable, then restart FileID."
-        )
+        "FileID's library file is read-only, so it can't scan. Make the FileID data folder writable, then restart FileID."
     } else {
-        format!(
-            "Could not open or migrate the database at {path}. The engine cannot scan. Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl for the underlying error."
-        )
+        "FileID couldn't open its library, so it can't scan. Quit and reopen FileID; if it keeps happening, reinstall FileID."
     };
     EngineError::new("db_open_failed", message).with_path(path).into_event()
 }
 
 async fn emit_db_unavailable(sink: &Sink, command: &str) {
+    tracing::warn!(command, "command refused: the database did not open at startup");
     sink.send(EngineError::event(
         "db_unavailable",
-        format!(
-            "Cannot run '{command}': the engine couldn't open the SQLite database \
-             at startup. Check %LOCALAPPDATA%\\FileID\\logs\\ for the open error."
-        ),
+        "FileID couldn't open its library, so this can't run. Quit and reopen FileID.",
     ))
     .await;
 }
@@ -1897,13 +1891,13 @@ mod tests {
             .context("applying migrations");
         let (kind, message) = kind_and_message(newer);
         assert_eq!(kind, "db_newer_than_engine");
-        assert!(message.contains("v99") && message.contains("Update FileID"), "{message}");
+        assert_eq!(message, "This library was made by a newer version of FileID. Update FileID to open it.");
         let (kind, message) = kind_and_message(anyhow::Error::from(db::ReadOnlyDatabase));
         assert_eq!(kind, "db_open_failed");
         assert!(message.contains("read-only"), "{message}");
         let (kind, message) = kind_and_message(anyhow::anyhow!("file is not a database"));
         assert_eq!(kind, "db_open_failed");
-        assert!(message.starts_with("Could not open or migrate the database at /state/fileid.sqlite."), "{message}");
+        assert!(message.starts_with("FileID couldn't open its library, so it can't scan."), "{message}");
     }
 
     #[tokio::test]

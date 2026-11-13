@@ -104,7 +104,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
         return;
     }
     let result = tokio::task::spawn_blocking(move || {
-        let db = database.context("The catalog database is unavailable")?;
+        let db = database.context("FileID couldn't open its library. Quit and reopen FileID.")?;
         run_action(&mut Db::Shared(&db), &request, |source, target, published| {
             crate::util::file_move::move_no_clobber(source, target, published)
         })

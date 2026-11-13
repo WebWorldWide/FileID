@@ -3,6 +3,7 @@
 // writer, so each edit is an engine command and this awaits its
 // bulkActionResult. ReadStore only reads.
 import Foundation
+import Observation
 import FileIDShared
 
 @MainActor
@@ -20,16 +21,19 @@ enum CatalogWrites {
         guard engine.send(command) else {
             return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: notReady)])
         }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if engine.bulkActionResultSignal != seen {
-                seen = engine.bulkActionResultSignal
-                if let result = engine.bulkActionResult, result.action == action,
-                   id == nil || result.messages.allSatisfy({ $0.fileID == nil }) || result.messages.contains(where: { $0.fileID == id }) {
-                    return result
-                }
-            }
-            try? await Task.sleep(for: .milliseconds(15))
+        func mine(_ result: BulkActionResult) -> Bool {
+            result.action == action
+                && (id == nil || result.messages.allSatisfy({ $0.fileID == nil }) || result.messages.contains(where: { $0.fileID == id }))
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(timeout)
+        while clock.now < deadline {
+            guard let result = await engine.bulkActionResult(after: seen, prefix: action, timeout: deadline - clock.now) else { break }
+            // A second reply can land before this resumes; check the newest too.
+            let latest = engine.bulkActionResult
+            seen = engine.bulkActionResultSignal
+            if mine(result) { return result }
+            if let latest, mine(latest) { return latest }
         }
         return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: noAnswer)])
     }
@@ -63,26 +67,44 @@ enum CatalogWrites {
     /// Merges each source into `target` (the engine keeps `target` and moves a
     /// source's typed name onto it when `target` has none). Returns the
     /// target's photo count, or nil when nothing merged.
-    static func merge(_ engine: EngineClient, store: ReadStore, target: Int64, sources: [Int64]) async -> Int? {
+    static func merge(_ engine: EngineClient, store: ReadStore, target: Int64, sources: [Int64],
+                      progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int? {
         var seen = Set<Int64>()
         let sources = sources.filter { $0 != target && seen.insert($0).inserted }
-        let merged = await mergeBatch(engine, store: store, plan: [(target: target, sources: sources)])
+        let merged = await mergeBatch(engine, store: store, plan: [(target: target, sources: sources)],
+                                      progress: progress, shouldStop: shouldStop)
         guard merged > 0 else { return nil }
         return await Task.detached(priority: .userInitiated) { store.personFileCount(id: target) }.value ?? 0
     }
 
+    typealias MergeProgress = @MainActor (_ current: Int, _ total: Int) -> Void
+    typealias MergeStop = @MainActor () -> Bool
+
     /// Runs a `ReadStore.mergeBatchPlan`. Returns how many people were merged away.
-    static func mergeBatch(_ engine: EngineClient, store: ReadStore, plan: [(target: Int64, sources: [Int64])]) async -> Int {
-        var merged = 0
+    /// `progress` is told which merge is starting; `shouldStop` is asked
+    /// between merges. Stopping is a flag rather than task cancellation
+    /// because a merge already sent must be waited for, not abandoned.
+    static func mergeBatch(_ engine: EngineClient, store: ReadStore, plan: [(target: Int64, sources: [Int64])],
+                           progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int {
+        let total = plan.reduce(0) { sum, group in sum + group.sources.filter { $0 != group.target }.count }
+        var merged = 0, started = 0
+        var operations: [String] = []
         outer: for group in plan {
             for source in group.sources where source != group.target {
+                if shouldStop?() == true { break outer }
+                started += 1
+                progress?(started, total)
                 let result = await request(engine, .mergeClusters(sourcePersonID: source, destinationPersonID: group.target),
                                            action: "mergeClusters", id: source, timeout: 120)
-                if result.succeeded == 1 { merged += 1 }
+                if result.succeeded == 1 {
+                    merged += 1
+                    if let operation = result.messages.first?.operationID { operations.append(operation) }
+                }
                 if !answered(result) { break outer }
             }
         }
         if !plan.isEmpty { store.notifyChanged() }
+        if !operations.isEmpty { await MergeUndoModel.shared.offer(engine, store: store, operations: operations) }
         return merged
     }
 
@@ -162,42 +184,6 @@ enum CatalogWrites {
         return ia.isEqual(ib)
     }
 
-    /// Renames files to the suggested names the user saw. Paths are re-read
-    /// first so a file that moved since the list loaded is renamed where it is.
-    static func applyProposedNames(_ files: [FileRow], engine: EngineClient, store: ReadStore) async -> ReadStore.BulkRenameResult {
-        guard !files.isEmpty else { return ReadStore.BulkRenameResult(renamed: [], failed: 0, firstError: nil) }
-        let (planned, missing) = await Task.detached(priority: .userInitiated) { () -> ((plans: [RenamePlan], unnamed: Int), Int) in
-            let current = Dictionary(store.files(forFileIDs: files.map(\.id)).map { ($0.id, $0.pathText) },
-                                     uniquingKeysWith: { first, _ in first })
-            let fresh = files.compactMap { file in
-                current[file.id].map { RenameCandidate(fileID: file.id, path: $0, proposed: file.vlmProposedName) }
-            }
-            return (planRenames(fresh), files.count - fresh.count)
-        }.value
-        var renamed: [ReadStore.RenameOutcome] = []
-        var failed = planned.unnamed + missing
-        var firstError: String?
-        let plans = planned.plans
-        for start in stride(from: 0, to: plans.count, by: renameChunk) {
-            let chunk = Array(plans[start..<min(start + renameChunk, plans.count)])
-            let result = await request(engine, .renameFiles(renames: chunk.map { RenameEntry(fileID: $0.fileID, newName: $0.target.lastPathComponent) }),
-                                       action: "renameFiles", id: chunk[0].fileID, timeout: 60 + Double(chunk.count) / 4)
-            let byID = Dictionary(chunk.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
-            let landed = result.messages.filter(\.ok).compactMap(\.fileID).compactMap { byID[$0] }
-            renamed += await Task.detached(priority: .userInitiated) {
-                landed.map { ReadStore.RenameOutcome(fileID: $0.fileID, oldPath: $0.oldPath, newPath: $0.target.path) }
-            }.value
-            failed += chunk.count - landed.count
-            if firstError == nil { firstError = result.messages.first { !$0.ok }?.message }
-            if !answered(result) {
-                failed += plans.count - start - chunk.count
-                break
-            }
-        }
-        if !renamed.isEmpty { store.notifyChanged() }
-        return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
-    }
-
     struct NamedRename: Sendable, Equatable {
         let fileID: Int64
         let newName: String
@@ -260,14 +246,6 @@ enum CatalogWrites {
         return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
     }
 
-    /// One file's suggested-name rename. Returns its path afterwards (the old
-    /// one when it already had the name), or nil when the rename failed.
-    static func applyProposedName(_ file: FileRow, engine: EngineClient, store: ReadStore) async -> URL? {
-        let result = await applyProposedNames([file], engine: engine, store: store)
-        if let landed = result.renamed.first { return URL(fileURLWithPath: landed.newPath) }
-        return result.failed == 0 ? file.url : nil
-    }
-
     /// Why a recorded rename can't be put back, or nil when it can: the file
     /// moved or changed since, or its old name is taken by another file.
     nonisolated static func undoBlocker(_ outcome: ReadStore.RenameOutcome, catalogPath: String?) -> String? {
@@ -321,5 +299,64 @@ enum CatalogWrites {
         let request = NameStyle.unlearnRequest(id: "names-unlearn-" + UUID().uuidString, edits: split.forget)
         guard let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" else { return }
         if let data = try? JSONEncoder().encode(split.keep) { UserDefaults.standard.set(data, forKey: NameStyle.learnedEditsKey) }
+    }
+}
+
+/// Undo for People merges. The helper keeps a record of each merge; this
+/// offers the batch just made in a toast and tracks the newest merge that
+/// can still be undone for the People header.
+@MainActor
+@Observable
+final class MergeUndoModel {
+    static let shared = MergeUndoModel()
+    static let failed = "The merge couldn't be undone. Try again in a moment."
+
+    private(set) var operationID: String?
+    private(set) var busy = false
+
+    func refresh(_ engine: EngineClient) async {
+        let page = await engine.faceReview { .listFaceReview(requestID: $0, personID: nil, offset: nil, limit: nil, queue: "mergeUndo") }
+        operationID = page?.status == "ok" && (page?.total ?? 0) > 0 ? page?.operationID : nil
+    }
+
+    func offer(_ engine: EngineClient, store: ReadStore, operations: [String]) async {
+        await refresh(engine)
+        let text = operations.count == 1 ? "Merged into one person." : "Finished \(operations.count) merges."
+        ToastCenter.shared.show(text, actionLabel: "Undo", duration: 10) {
+            Task { @MainActor in
+                let result = await self.undo(engine, store: store, operations: operations)
+                ToastCenter.shared.show(Self.summary(result, of: operations.count), duration: 6)
+            }
+        }
+    }
+
+    static func summary(_ result: (undone: Int, message: String?), of total: Int) -> String {
+        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(total) merges undone." }
+        if result.undone > 0 { return "\(result.undone) of \(total) merges undone. \(result.message ?? failed)" }
+        return result.message ?? failed
+    }
+
+    /// Undoes the newest merge first, so a chain of merges unwinds in order.
+    func undo(_ engine: EngineClient, store: ReadStore, operations: [String]) async -> (undone: Int, message: String?) {
+        guard !busy else { return (0, nil) }
+        busy = true
+        defer { busy = false }
+        var undone = 0
+        var message: String?
+        for operation in operations.reversed() {
+            guard let page = await engine.faceReview({ .undoFaceReview(requestID: $0, operationID: operation) }) else {
+                message = CatalogWrites.notReady
+                break
+            }
+            if page.status == "ok" { undone += 1 } else if message == nil { message = page.message }
+        }
+        store.notifyChanged()
+        await refresh(engine)
+        return (undone, message)
+    }
+
+    func undoLatest(_ engine: EngineClient, store: ReadStore) async -> (undone: Int, message: String?) {
+        guard let operationID else { return (0, nil) }
+        return await undo(engine, store: store, operations: [operationID])
     }
 }

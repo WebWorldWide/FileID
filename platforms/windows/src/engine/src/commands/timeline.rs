@@ -316,20 +316,20 @@ pub(crate) fn enqueue(
     )?;
     tx.commit()?;
     let speech = match installed_speech_model() {
-        Some(_) => " Speech is transcribed on this device in 30-second passages after the visual pass.",
-        None => " Install a speech model from the model catalog to add searchable transcripts.",
+        Some(_) => " What people say is added too, on this computer.",
+        None => " To make what people say searchable, install a speech model.",
     };
     let message = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
         // The Swift engine's wording: Apple Speech needs no model install.
         if mode == Some("moments") {
-            "Queued significant-moment drafts from overlapping frame sequences and on-device speech. Review every proposal; sampled frames can still miss actions or hidden outcomes.".to_owned()
+            "FileID will look through these videos for the moments that matter, using the picture and any speech. Check each suggestion: quick actions can be missed.".to_owned()
         } else {
-            "Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed. When on-device speech recognition is available, timestamped transcript passages are added.".to_owned()
+            "FileID will look at one moment in every ten seconds of these videos, plus the start. Very quick events can be missed. If speech recognition is on, what people say is added too.".to_owned()
         }
     } else if mode == Some("moments") {
-        format!("Queued significant-moment drafts from overlapping frame sequences. Review every proposal; sampled frames can still miss actions or hidden outcomes.{speech}")
+        format!("FileID will look through these videos for the moments that matter. Check each suggestion: quick actions can be missed.{speech}")
     } else {
-        format!("Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed.{speech}")
+        format!("FileID will look at one moment in every ten seconds of these videos, plus the start. Very quick events can be missed.{speech}")
     };
     let mut response = super::catalog::response(&request.request_id, "ok", Some(message));
     response.jobs = super::catalog::jobs(conn)?;

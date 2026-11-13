@@ -7,7 +7,7 @@ enum FaceReviewText {
     static let empty = "No suggestions to review."
     static let undo = "Undo"
     static let undoLabel = "Undo the last review"
-    static let unreachable = "FileID couldn't reach the engine. Try again in a moment."
+    static let unreachable = "FileID's helper didn't answer. Try again in a moment."
 
     static func name(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -16,18 +16,29 @@ enum FaceReviewText {
 
     static func percent(_ score: Double) -> Int { Int((score * 100).rounded()) }
 
+    /// Words for a match score; the number itself only goes in a tooltip.
+    static func likelihood(_ score: Double) -> String {
+        if score >= 0.55 { return "very likely" }
+        if score >= 0.50 { return "probably" }
+        return "might be"
+    }
+
+    static func scoreHelp(_ score: Double) -> String { "Match strength: \(percent(score))%" }
+
     static func reason(_ item: FaceReviewItem) -> String {
         let person = name(item.personName)
         switch item.reason {
         case "uncertain":
-            return "Might be \(person), but the match is weak (\(percent(item.score))%)."
+            return "This might be \(person), but it's hard to tell."
         case "ambiguous":
             guard item.runnerUpName != nil || item.runnerUpPersonID != nil else {
                 return "Could be \(person), but it's a close call."
             }
             return "Could be \(person) or \(name(item.runnerUpName)); both look about as close."
         default:
-            return "Looks like \(person) (\(percent(item.score))% match)."
+            if item.score >= 0.55 { return "This is very likely \(person)." }
+            if item.score >= 0.50 { return "This is probably \(person)." }
+            return "This might be \(person)."
         }
     }
 
@@ -36,6 +47,11 @@ enum FaceReviewText {
     static func acceptLabel(_ item: FaceReviewItem) -> String { "Accept: this is \(name(item.personName))" }
     static func rejectLabel(_ item: FaceReviewItem) -> String { "Not \(name(item.personName))" }
     static let ignoreLabel = "Ignore this face"
+    static let acceptHelp = "Add this face to this person."
+    static func rejectHelp(_ item: FaceReviewItem) -> String {
+        "This face is someone else. FileID won't suggest \(name(item.personName)) for it again, but may suggest another person."
+    }
+    static let ignoreHelp = "This face is a stranger or doesn't matter. FileID hides it and stops suggesting people for it."
     static func rowLabel(_ item: FaceReviewItem) -> String { "\(reason(item)) In \(fileName(item))." }
     static func header(_ count: Int) -> String { "\(title), \(count) waiting" }
     static let lowQuality = "Small or blurry face"

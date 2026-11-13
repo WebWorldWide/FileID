@@ -380,7 +380,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                 failed += batch_raced;
                 if batch_raced > 0 && warnings.len() < 5 {
                     warnings.push(format!(
-                        "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+                        "{batch_raced} empty file(s) changed while FileID was reading the folder. Scan again to pick them up."
                     ));
                 }
                 sel = conn
@@ -484,7 +484,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             failed += batch_raced;
             if batch_raced > 0 && warnings.len() < 5 {
                 warnings.push(format!(
-                    "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+                    "{batch_raced} empty file(s) changed while FileID was reading the folder. Scan again to pick them up."
                 ));
             }
             sel = conn
@@ -516,7 +516,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     failed += batch_raced;
     if batch_raced > 0 && warnings.len() < 5 {
         warnings.push(format!(
-            "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+            "{batch_raced} empty file(s) changed while FileID was reading the folder. Scan again to pick them up."
         ));
     }
     if failed == 0 {
