@@ -24,7 +24,8 @@ use crate::ipc::{
 };
 use crate::pipeline::dbwriter::{BatchStats, DbWriter};
 use crate::pipeline::discovery::{path_fingerprint_text, Discovery, SkipFingerprint};
-use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
+use crate::pipeline::scan_models::ModelSource;
+use crate::pipeline::tagging::{Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub struct ScanSession {
     db_conn: Arc<Mutex<Connection>>,
     worker_count: usize,
     sink: Sink,
-    models: Arc<ModelStack>,
+    models: Arc<ModelSource>,
     /// When true, skip the incremental-rescan skip set and reprocess
     /// every file. Plumbed from `StartScanPayload::rescan`.
     rescan: bool,
@@ -101,7 +102,7 @@ impl ScanSession {
         db_conn: Arc<Mutex<Connection>>,
         worker_count: usize,
         sink: Sink,
-        models: Arc<ModelStack>,
+        models: Arc<ModelSource>,
         rescan: bool,
         excluded_paths: Vec<String>,
     ) -> Self {
@@ -549,7 +550,7 @@ impl ScanSession {
             let conn = self.db_conn.lock();
             crate::pipeline::twin_reuse::known_image_hashes(&conn).unwrap_or_default()
         };
-        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
+        let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
             .with_legacy_hashes(writer.rename_heal_enabled())
             .with_known_twins(known_twins);
@@ -642,6 +643,12 @@ impl ScanSession {
             }
             (Err(err), _, _, _) | (_, _, Err(err), _) => Err(err),
             (_, Err(err), _, _) | (_, _, _, Err(err)) => Err(err),
+        };
+        // The models could not be loaded: nothing was analysed, and the caller
+        // reports the reason instead of a cancelled scan.
+        let pipeline_outcome = match self.models.failure() {
+            Some(failure) => Err(anyhow::Error::new(failure)),
+            None => pipeline_outcome,
         };
         let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
             Ok(result) => result,

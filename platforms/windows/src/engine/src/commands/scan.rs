@@ -14,6 +14,7 @@ use crate::ipc::{
     self, sink::Sink, EngineError, EventPayload, IpcEvent, ScanPhase, ScanProgress, Wrap,
 };
 use crate::models;
+use crate::pipeline::scan_models::{self, ModelLoadFailure, ModelSource};
 use crate::pipeline::tagging::ModelStack;
 use crate::platform;
 use crate::scan_session::ScanSession;
@@ -80,6 +81,150 @@ async fn reject_gpu_device_removed(
     ))))
     .await;
     *scan_state.lock() = None;
+}
+
+/// A model load that outlived its timeout, with the crash breadcrumb armed for it.
+type LateLoader = Arc<Mutex<Option<(tokio::task::JoinHandle<ModelStack>, models::ep_guard::ArmGuard)>>>;
+
+/// Loads the scan's models, or hands back the stack the last scan left loaded.
+///
+/// Each model is a pool of N Sessions (one per worker slot) so ML inference
+/// parallelizes across the GPU command queue instead of serializing on a
+/// single Mutex; ORT session create can take 100-500 ms per model, so the load
+/// runs on a blocking thread.
+///
+/// Timeout is 120 s (not 30 s): on the FIRST launch the CLIP scene-label
+/// matrix is text-encoded inside load_default, which on a slow EP (DirectML
+/// / CPU) takes 20+ s on its own — a 30 s budget tripped a false "model file
+/// corrupted" on real 4 GB-VRAM hardware. The matrix is disk-cached after the
+/// first build (scene_vocab.rs), so later launches load in a few seconds;
+/// 120 s still catches a genuinely hung or corrupt model file.
+async fn load_scan_models(
+    coord: ScanCoordinator,
+    key: scan_models::StackKey,
+    worker_count: usize,
+    runtime_available: bool,
+    missing_models: Vec<&'static str>,
+    late_loader: LateLoader,
+) -> Result<Arc<ModelStack>, ModelLoadFailure> {
+    if let Some(stack) = scan_models::resident(&key) {
+        tracing::info!("[SCAN] models are still loaded from the last scan");
+        return Ok(stack);
+    }
+    // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
+    // is where a bad GPU pack DLL crashes the process). A timed-out blocking load
+    // keeps both this guard and the scan reservation until the loader really exits.
+    // Arm the override-aware EP that will actually attempt the first native
+    // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
+    // active_provider() which ignores the override — see runtime::armed_provider.
+    //
+    // The guard disarms on drop too, so a GRACEFUL shutdown that aborts this
+    // task mid-load (before the `.await` returns) still clears the breadcrumb —
+    // otherwise the next launch would false-poison this healthy EP. A real
+    // native crash skips the drop (process gone) and keeps the breadcrumb.
+    let armed_ep = models::runtime::armed_provider();
+    let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
+    let started = std::time::Instant::now();
+    let load_result = wait_for_blocking(
+        tokio::task::spawn_blocking(move || ModelStack::load_for_scan(worker_count, runtime_available)),
+        Duration::from_secs(120),
+    )
+    .await;
+    let models = match load_result {
+        BlockingWait::Completed(Ok(m)) => {
+            drop(ep_guard);
+            Arc::new(m)
+        }
+        BlockingWait::Completed(Err(err)) => {
+            drop(ep_guard);
+            tracing::error!(?err, "model stack load panicked");
+            // macOS: a dylib that resolved at pre-flight but fails to load is
+            // almost always the wrong architecture or older than the required
+            // ONNX Runtime 1.22 (`ort` hard-panics on a lower minor version) —
+            // point at the one-time runtime reinstall in addition to the models.
+            #[cfg(target_os = "macos")]
+            let runtime_hint = "\nOn macOS this can also mean the ONNX Runtime is the wrong \
+                                architecture or older than 1.22 — reinstall it with \
+                                `fileid runtime install`.";
+            #[cfg(not(target_os = "macos"))]
+            let runtime_hint = "";
+            return Err(ModelLoadFailure::new(
+                "model_load_failed",
+                format!("FileID couldn't load its AI models. Reinstall them in Settings, under Local AI.{runtime_hint}"),
+            ));
+        }
+        BlockingWait::TimedOut(load_task) => {
+            tracing::error!("model stack load timed out after 120s; retaining scan reservation until the blocking loader exits");
+            *late_loader.lock() = Some((load_task, ep_guard));
+            return Err(ModelLoadFailure::new(
+                "model_load_timeout",
+                "FileID's AI models took more than two minutes to load. FileID can't start \
+                     another scan until they finish loading; if it stays stuck, quit and reopen FileID.\n\nTry:\n\
+                     • Close other apps that use a lot of memory or graphics power.\n\
+                     • Reinstall the models in Settings, under Local AI.\n\
+                     • Pick a smaller model for Describe Files.",
+            ));
+        }
+    };
+    tracing::info!(seconds = started.elapsed().as_secs_f64(), "[SCAN] models loaded");
+
+    if coord.is_gpu_dead() {
+        return Err(ModelLoadFailure::new("gpu_device_removed", crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE));
+    }
+
+    // A model that IS installed (missing ones were reported above) but whose
+    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
+    // file, or an EP bind failure on every provider) must ABORT the scan — not
+    // silently skip its stage. A skipped stage still writes every file row with
+    // failed=0 and a fresh scanned_at; the incremental skip-set
+    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
+    // re-tried on later default scans — the face / image-embedding stage stays
+    // permanently empty even after the model is repaired (a real "face scanning
+    // is totally broken, and stays broken" trap). Aborting (mirroring the
+    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
+    // re-processes them once the model loads. The workers wait for this result
+    // before they analyse anything, so no file is written without its stages.
+    if runtime_available {
+        let failed_to_load = models_that_failed_to_load(&models, &missing_models);
+        if !failed_to_load.is_empty() {
+            tracing::error!(
+                models = ?failed_to_load,
+                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
+            );
+            return Err(ModelLoadFailure::new(
+                "model_load_failed",
+                format!(
+                    "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
+                     Their files are probably incomplete or blocked by antivirus. \
+                     Reinstall them in Settings, under Local AI, then scan again. \
+                     (FileID stopped the scan so your files aren't marked as done \
+                     without these features.)",
+                    failed_to_load
+                        .iter()
+                        .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+    }
+    scan_models::keep(key, models.clone());
+    Ok(models)
+}
+
+fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> Vec<&'static str> {
+    let mut failed_to_load = Vec::new();
+    if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") && !models.apple_scan {
+        failed_to_load.push("face detection + recognition");
+    }
+    if models.mobileclip_pool.is_none()
+        && models.mobileclip_batch.is_none()
+        && !models.apple_clip
+        && !missing_models.contains(&"mobileclip_s2")
+    {
+        failed_to_load.push("image embedding");
+    }
+    failed_to_load
 }
 
 #[cfg(target_os = "macos")]
@@ -232,158 +377,20 @@ pub(crate) async fn handle_start_scan(
     // (The real coordinator was reserved into scan_state above, before the
     // first .await — no placeholder swap, so no pause/cancel can be lost #20.)
 
-    // Load ML model weights once per session. Heavy enough to belong on a
-    // blocking thread (ORT session create can take 100-500ms per model).
-    // Each model is a pool of N Sessions (one per worker slot) so ML
-    // inference parallelizes across the GPU command queue instead of
-    // serializing on a single Mutex.
-    //
-    // Timeout is 120 s (not 30 s): on the FIRST launch the CLIP scene-label
-    // matrix is text-encoded inside load_default, which on a slow EP (DirectML
-    // / CPU) takes 20+ s on its own — a 30 s budget tripped a false "model file
-    // corrupted" on real 4 GB-VRAM hardware. The matrix is disk-cached after the
-    // first build (scene_vocab.rs), so later launches load in a few seconds;
-    // 120 s still catches a genuinely hung or corrupt model file.
+    // The models load when the scan first has a file to analyse, alongside the
+    // walk, and stay loaded between scans (pipeline/scan_models.rs). A rescan
+    // that finds nothing new loads nothing.
     let models_worker_count = platform::default_worker_cap() as usize;
-    // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
-    // is where a bad GPU pack DLL crashes the process). A timed-out blocking load
-    // keeps both this guard and the scan reservation until the loader really exits.
-    // Arm the override-aware EP that will actually attempt the first native
-    // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
-    // active_provider() which ignores the override — see runtime::armed_provider.
-    //
-    // The guard disarms on drop too, so a GRACEFUL shutdown that aborts this
-    // task mid-load (before the `.await` returns) still clears the breadcrumb —
-    // otherwise the next launch would false-poison this healthy EP. A real
-    // native crash skips the drop (process gone) and keeps the breadcrumb.
-    let armed_ep = models::runtime::armed_provider();
-    let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
-    let load_result = wait_for_blocking(
-        tokio::task::spawn_blocking(move || {
-            ModelStack::load_for_scan(models_worker_count, runtime_available)
-        }),
-        Duration::from_secs(120),
-    )
-    .await;
-    let models = match load_result {
-        BlockingWait::Completed(Ok(m)) => {
-            drop(ep_guard);
-            Arc::new(m)
+    let stack_key = scan_models::StackKey::current(models_worker_count, runtime_available);
+    let evictions_before = scan_models::evictions();
+    let late_loader: LateLoader = Arc::new(Mutex::new(None));
+    let models = ModelSource::lazy({
+        let (coord, key, late) = (coord.clone(), stack_key.clone(), late_loader.clone());
+        let missing: Vec<&'static str> = missing_models.clone();
+        move || -> scan_models::LoadFuture {
+            Box::pin(load_scan_models(coord, key, models_worker_count, runtime_available, missing, late))
         }
-        BlockingWait::Completed(Err(err)) => {
-            drop(ep_guard);
-            tracing::error!(?err, "model stack load panicked");
-            // macOS: a dylib that resolved at pre-flight but fails to load is
-            // almost always the wrong architecture or older than the required
-            // ONNX Runtime 1.22 (`ort` hard-panics on a lower minor version) —
-            // point at the one-time runtime reinstall in addition to the models.
-            #[cfg(target_os = "macos")]
-            let runtime_hint = "\nOn macOS this can also mean the ONNX Runtime is the wrong \
-                                architecture or older than 1.22 — reinstall it with \
-                                `fileid runtime install`.";
-            #[cfg(not(target_os = "macos"))]
-            let runtime_hint = "";
-            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-                ScanPhase::Failed,
-            ))))
-            .await;
-            sink.send(EngineError::event(
-                "model_load_failed",
-                format!(
-                    "FileID couldn't load its AI models. Reinstall them in Settings, under Local AI.{runtime_hint}"
-                ),
-            ))
-            .await;
-            *scan_state.lock() = None;
-            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
-            return;
-        }
-        BlockingWait::TimedOut(load_task) => {
-            tracing::error!("model stack load timed out after 120s; retaining scan reservation until the blocking loader exits");
-            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-                ScanPhase::Failed,
-            ))))
-            .await;
-            sink.send(EngineError::event(
-                "model_load_timeout",
-                "FileID's AI models took more than two minutes to load. FileID can't start \
-                     another scan until they finish loading; if it stays stuck, quit and reopen FileID.\n\nTry:\n\
-                     • Close other apps that use a lot of memory or graphics power.\n\
-                     • Reinstall the models in Settings, under Local AI.\n\
-                     • Pick a smaller model for Describe Files.",
-            ))
-            .await;
-            let late_result = load_task.await;
-            drop(ep_guard);
-            match late_result {
-                Ok(_) => tracing::warn!("[SCAN] timed-out model loader eventually exited"),
-                Err(err) => tracing::warn!(?err, "[SCAN] timed-out model loader eventually failed"),
-            }
-            *scan_state.lock() = None;
-            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_timeout");
-            return;
-        }
-    };
-
-    if coord.is_gpu_dead() {
-        reject_gpu_device_removed(&sink, &scan_state).await;
-        tracing::warn!("[SCAN] model load observed a process GPU failure");
-        return;
-    }
-
-    // A model that IS installed (missing ones were reported above) but whose
-    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
-    // file, or an EP bind failure on every provider) must ABORT the scan — not
-    // silently skip its stage. A skipped stage still writes every file row with
-    // failed=0 and a fresh scanned_at; the incremental skip-set
-    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
-    // re-tried on later default scans — the face / image-embedding stage stays
-    // permanently empty even after the model is repaired (a real "face scanning
-    // is totally broken, and stays broken" trap). Aborting (mirroring the
-    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
-    // re-processes them once the model loads.
-    if runtime_available {
-        let mut failed_to_load: Vec<&str> = Vec::new();
-        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") && !models.apple_scan {
-            failed_to_load.push("face detection + recognition");
-        }
-        if models.mobileclip_pool.is_none()
-            && models.mobileclip_batch.is_none()
-            && !models.apple_clip
-            && !missing_models.contains(&"mobileclip_s2")
-        {
-            failed_to_load.push("image embedding");
-        }
-        if !failed_to_load.is_empty() {
-            tracing::error!(
-                models = ?failed_to_load,
-                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
-            );
-            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-                ScanPhase::Failed,
-            ))))
-            .await;
-            sink.send(EngineError::event(
-                "model_load_failed",
-                format!(
-                    "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
-                     Their files are probably incomplete or blocked by antivirus. \
-                     Reinstall them in Settings, under Local AI, then scan again. \
-                     (FileID stopped the scan so your files aren't marked as done \
-                     without these features.)",
-                    failed_to_load
-                        .iter()
-                        .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ))
-            .await;
-            *scan_state.lock() = None;
-            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
-            return;
-        }
-    }
+    });
 
     // The single largest live allocation during a scan is the set of full
     // decoded RGB frames each in-flight worker future owns. On a low-RAM box
@@ -406,6 +413,7 @@ pub(crate) async fn handle_start_scan(
     );
     let root = PathBuf::from(payload.root_path.clone());
 
+    let models_for_keep = models.clone();
     let outcome = match session.run(&root, |_| {}).await {
         Ok(first) if first.changed_during_scan => {
             ScanSession::new(
@@ -425,6 +433,29 @@ pub(crate) async fn handle_start_scan(
     };
     let result = match outcome {
         Ok(result) => result,
+        Err(err) if err.downcast_ref::<ModelLoadFailure>().is_some() => {
+            let failure = err.downcast_ref::<ModelLoadFailure>().expect("checked by the guard").clone();
+            tracing::warn!(kind = failure.kind, "[SCAN] handle_start_scan exiting: the models did not load");
+            if failure.kind == "gpu_device_removed" {
+                reject_gpu_device_removed(&sink, &scan_state).await;
+            } else {
+                sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Failed)))).await;
+                sink.send(EngineError::event(failure.kind, failure.message)).await;
+            }
+            // A loader that outlived its two minutes keeps the scan slot (and
+            // its crash breadcrumb) until it really exits.
+            let late = late_loader.lock().take();
+            if let Some((load_task, ep_guard)) = late {
+                let late_result = load_task.await;
+                drop(ep_guard);
+                match late_result {
+                    Ok(_) => tracing::warn!("[SCAN] timed-out model loader eventually exited"),
+                    Err(err) => tracing::warn!(?err, "[SCAN] timed-out model loader eventually failed"),
+                }
+            }
+            *scan_state.lock() = None;
+            return;
+        }
         Err(err) => {
             tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
@@ -442,6 +473,14 @@ pub(crate) async fn handle_start_scan(
             return;
         }
     };
+
+    // Keep the stack for the next scan, unless another model asked for the
+    // memory while this scan ran.
+    if let Some(stack) = models_for_keep.loaded()
+        && scan_models::evictions() == evictions_before
+    {
+        scan_models::keep(stack_key, stack);
+    }
 
     tracing::info!(
         processed = result.processed,

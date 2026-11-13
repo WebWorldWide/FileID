@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod tagging;
 pub mod twin_reuse;
 pub mod catch_up;
+pub mod scan_models;
 pub mod batch_clip;
 pub mod dbwriter;
 pub mod face_clustering;

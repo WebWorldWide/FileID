@@ -59,6 +59,7 @@ use crate::models::runtime::{active_provider, error_has_device_removed_marker, E
 use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+use crate::pipeline::scan_models::ModelSource;
 use crate::pipeline::twin_reuse::{TwinClaim, TwinRegistry};
 use crate::shell;
 use crate::util::content_hash::LegacyHashes;
@@ -1016,7 +1017,7 @@ impl Drop for DecoderThreadGuard {
 pub struct Tagger {
     coordinator: ScanCoordinator,
     worker_count: usize,
-    models: Arc<ModelStack>,
+    models: Arc<ModelSource>,
     scan_root: Option<std::path::PathBuf>,
     legacy_hashes: bool,
     scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
@@ -1072,6 +1073,11 @@ fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
 
 impl Tagger {
     pub fn new(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelStack>) -> Self {
+        Self::with_model_source(coordinator, worker_count, ModelSource::ready(models))
+    }
+
+    /// A tagger whose models load when the first file that needs them arrives.
+    pub fn with_model_source(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelSource>) -> Self {
         Self {
             coordinator,
             worker_count: worker_count.max(1),
@@ -1164,7 +1170,9 @@ impl Tagger {
         // multi-consumer async-channel so the decoder pool can fan out.
         let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
         let coordinator_pump = self.coordinator.clone();
+        let models_for_pump = self.models.clone();
         tokio::spawn(async move {
+            let mut models_requested = false;
             loop {
                 let file = tokio::select! {
                     value = input.recv() => match value {
@@ -1173,6 +1181,16 @@ impl Tagger {
                     },
                     _ = coordinator_pump.wait_cancelled() => break,
                 };
+                // The first file with work to do starts the model load, so it
+                // overlaps the walk and the first decodes. A scan with nothing
+                // to analyse never gets here.
+                if !models_requested && !file.moved_from_known_row {
+                    models_requested = true;
+                    let models = models_for_pump.clone();
+                    tokio::spawn(async move {
+                        models.get().await;
+                    });
+                }
                 tokio::select! {
                     result = raw_tx.send(file) => {
                         if result.is_err() {
@@ -1277,46 +1295,14 @@ impl Tagger {
             }
         });
 
-        // Derive the GPU-inference concurrency caps from the active EP. On
-        // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
-        // to the VRAM-clamped pool size so the semaphore doesn't throttle below
-        // the number of loaded Sessions. Cap source is the pool size the models
-        // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
-        // `resolve_pool_size` call, whose live memory-tier probe can flip
-        // between load and here (loading the sessions consumes the RAM the
-        // probe measures) and silently issue 1 permit against a 4-session pool.
-        let active_ep = crate::models::runtime::active_provider();
-        let ep_pool_size = self.models.pool_size.max(1);
-        // When the pool clamps to a SINGLE session, every vision permit-holder
-        // serializes on that one parking_lot Mutex across the GPU forward, so the
-        // extra permits just park OS threads instead of running. Issue exactly 1
-        // permit so excess workers await the ASYNC semaphore (yielding the tokio
-        // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
-        // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
-        // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
-        let vision_cap = if ep_pool_size == 1 {
-            1
-        } else {
-            ep_vision_concurrency(active_ep, ep_pool_size)
-        };
-        let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
-        tracing::info!(
-            ep = active_ep.as_str(),
-            pool_size = ep_pool_size,
-            vision_cap,
-            clip_cap,
-            "[TAGGING] EP-aware inference concurrency caps"
-        );
-        let vision_sem = Arc::new(Semaphore::new(vision_cap));
-        let clip_sem = Arc::new(Semaphore::new(clip_cap));
+        let loaded_models: Arc<tokio::sync::OnceCell<Option<WorkerModels>>> = Arc::new(tokio::sync::OnceCell::new());
 
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
             let tx = out_tx.clone();
             let coord = self.coordinator.clone();
-            let vision_sem = vision_sem.clone();
-            let clip_sem = clip_sem.clone();
-            let models = self.models.clone();
+            let source = self.models.clone();
+            let worker_models_cell = loaded_models.clone();
             let scheduler = self.scheduler.clone();
             let twins = self.twins.clone();
             let budget = byte_budget.clone();
@@ -1350,6 +1336,17 @@ impl Tagger {
                         }
                         continue;
                     }
+                    // The models load on the first file that needs them. If they
+                    // cannot, no file is written as analysed: the scan stops and
+                    // reports why.
+                    let loaded = worker_models_cell
+                        .get_or_init(|| async { source.get().await.map(worker_models) })
+                        .await
+                        .clone();
+                    let Some(WorkerModels { models, vision_sem, clip_sem }) = loaded else {
+                        coord.request_cancel();
+                        break;
+                    };
                     // A copy of an image another worker is analyzing waits here,
                     // holding no frame, no admission and no per-file timer.
                     let Some(predecoded) =
@@ -1449,6 +1446,52 @@ impl Tagger {
 
         drop(out_tx);
         (out_rx, decoder_join)
+    }
+}
+
+/// The loaded stack with the inference limits that fit it.
+#[derive(Clone)]
+struct WorkerModels {
+    models: Arc<ModelStack>,
+    vision_sem: Arc<Semaphore>,
+    clip_sem: Arc<Semaphore>,
+}
+
+fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
+    // Derive the GPU-inference concurrency caps from the active EP. On
+    // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
+    // to the VRAM-clamped pool size so the semaphore doesn't throttle below
+    // the number of loaded Sessions. Cap source is the pool size the models
+    // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
+    // `resolve_pool_size` call, whose live memory-tier probe can flip
+    // between load and here (loading the sessions consumes the RAM the
+    // probe measures) and silently issue 1 permit against a 4-session pool.
+    let active_ep = crate::models::runtime::active_provider();
+    let ep_pool_size = models.pool_size.max(1);
+    // When the pool clamps to a SINGLE session, every vision permit-holder
+    // serializes on that one parking_lot Mutex across the GPU forward, so the
+    // extra permits just park OS threads instead of running. Issue exactly 1
+    // permit so excess workers await the ASYNC semaphore (yielding the tokio
+    // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
+    // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
+    // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
+    let vision_cap = if ep_pool_size == 1 {
+        1
+    } else {
+        ep_vision_concurrency(active_ep, ep_pool_size)
+    };
+    let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
+    tracing::info!(
+        ep = active_ep.as_str(),
+        pool_size = ep_pool_size,
+        vision_cap,
+        clip_cap,
+        "[TAGGING] EP-aware inference concurrency caps"
+    );
+    WorkerModels {
+        models,
+        vision_sem: Arc::new(Semaphore::new(vision_cap)),
+        clip_sem: Arc::new(Semaphore::new(clip_cap)),
     }
 }
 
@@ -3887,6 +3930,94 @@ mod tests {
         decoder_join.await.unwrap();
         assert_eq!(rows.len(), 6);
         assert!(rows.iter().all(|row| !row.failed && !row.reuse_twin && row.phash.is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn counting_source(loads: Arc<AtomicUsize>, fail: bool) -> Arc<ModelSource> {
+        ModelSource::lazy(move || {
+            Box::pin(async move {
+                loads.fetch_add(1, Ordering::SeqCst);
+                if fail {
+                    Err(crate::pipeline::scan_models::ModelLoadFailure::new("model_load_failed", "broken weights"))
+                } else {
+                    Ok(Arc::new(ModelStack::empty()))
+                }
+            })
+        })
+    }
+
+    fn text_file(dir: &std::path::Path, name: &str) -> DiscoveredFile {
+        let path = dir.join(name);
+        std::fs::write(&path, "garden notes").unwrap();
+        DiscoveredFile {
+            path,
+            kind: FileKind::Doc,
+            size_bytes: 12,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn models_load_only_when_a_file_needs_analysing() {
+        let dir = std::env::temp_dir().join(format!("fileid-lazy-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Nothing to analyse (an unchanged library, or only moved files): no load.
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        let mut moved = text_file(&dir, "moved.txt");
+        moved.moved_from_known_row = true;
+        moved.file_ref = Some(3);
+        tx.send(moved).await.unwrap();
+        drop(tx);
+        let row = tokio::time::timeout(Duration::from_secs(5), out.recv()).await.unwrap().unwrap();
+        assert!(row.heal_only);
+        assert!(tokio::time::timeout(Duration::from_secs(5), out.recv()).await.unwrap().is_none());
+        decoder_join.await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        // Files to analyse: one load, shared by every worker.
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        for i in 0..5 {
+            tx.send(text_file(&dir, &format!("note{i}.txt"))).await.unwrap();
+        }
+        drop(tx);
+        let mut rows = 0;
+        while let Some(row) = tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap() {
+            assert!(!row.failed);
+            rows += 1;
+        }
+        decoder_join.await.unwrap();
+        assert_eq!((rows, loads.load(Ordering::SeqCst)), (5, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_model_load_stops_the_scan_without_writing_any_file() {
+        let dir = std::env::temp_dir().join(format!("fileid-lazy-models-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let source = counting_source(loads.clone(), true);
+        let coord = ScanCoordinator::new();
+        let (tx, rx) = mpsc::channel(8);
+        let (mut out, decoder_join) = Tagger::with_model_source(coord.clone(), 2, source.clone()).spawn(rx);
+        for i in 0..4 {
+            tx.send(text_file(&dir, &format!("note{i}.txt"))).await.unwrap();
+        }
+        assert!(tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap().is_none());
+        drop(tx);
+        decoder_join.await.unwrap();
+        assert!(coord.is_cancelled());
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(source.failure().map(|failure| failure.kind), Some("model_load_failed"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
