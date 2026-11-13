@@ -49,6 +49,12 @@ enum ScanImageFixtures {
         private let lock = NSLock()
         private var value = 0
         func bump() { lock.lock(); value += 1; lock.unlock() }
+        func bumpIfBelow(_ limit: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard value < limit else { return false }
+            value += 1
+            return true
+        }
         var count: Int { lock.lock(); defer { lock.unlock() }; return value }
     }
 
@@ -279,9 +285,9 @@ struct ScanDecodeAheadTests {
             isCancelled: { false },
             isPaused: {
                 // Counted, not timed: on a busy machine the first poll can come late.
-                if paused.count < 5 {
+                // Decoder and worker poll at once, so the count and the bump are one step.
+                if paused.bumpIfBelow(5) {
                     #expect(processed.count == 0)
-                    paused.bump()
                     return true
                 }
                 return false
