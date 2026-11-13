@@ -13,7 +13,7 @@ Two binaries, newline-delimited JSON over stdin/stdout:
 - `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (convergence Stage 0; C interface in `adapters/include/fileid_apple.h`). The app starts `fileidd` only with `defaults write com.fileid.app engine.backend rust`; bundle it with `FILEID_WITH_RUST_ENGINE=1 scripts/assemble_app.sh`.
 - `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
 
-Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v33**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
+Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v34**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
 
 ## Tabs
 
@@ -24,11 +24,11 @@ Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via
 | Cleanup | Duplicate groups via phash | `CleanupView.swift` |
 | Deep Analyze | On-device VLM captions / smart renames (MLX) | `DeepAnalyzeViews.swift`, `engine/.../DeepAnalyze.swift` |
 | Restructure | Folder reorg — Sankey + recommendation rows + drill-down | `RestructureView.swift`, `Restructure/` |
-| Settings | AI models, engine info, logs, privacy | `ReviewSettingsViews.swift` |
+| Settings | AI models, engine info, logs, privacy | `SettingsView.swift` |
 
 ## AI models (commercial-clean target)
 
-Under `~/Library/Application Support/FileID/Models/`; VLMs use Documents in Developer ID builds and the app container in App Store builds. The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
+Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface` (an existing `~/Documents/huggingface/models` from older Developer ID installs stays in use). The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
 - **Faces** — SFace embedder (Apache, 128-d ONNX via the CoreML EP) + 5-point alignment; detection stays Apple Vision.
 - **CLIP** — OpenAI/OpenCLIP ViT-B/32 (MIT) image + text, 512-d.
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.

@@ -9,7 +9,7 @@ struct SankeyFlowView: View {
     let proposals: [RestructureView.Proposal]
     var onTapSource: (String) -> Void = { _ in }
     var onTapDestination: (String) -> Void = { _ in }
-    /// Tapping "+ N more folders" / "+ N more buckets" — the parent
+    /// Tapping either "+ N more folders" rollup — the parent
     /// scopes the drill-down to the long-tail list rather than the
     /// literal rollup label.
     var onTapSourceRollup: ([String]) -> Void = { _ in }
@@ -677,7 +677,7 @@ struct SankeyFlowView: View {
             let count = tailDsts.reduce(0) { $0 + $1.count }
             destinations.append(Node(
                 id: otherDestID,
-                label: "+ \(tailDsts.count) more bucket\(tailDsts.count == 1 ? "" : "s")",
+                label: "+ \(tailDsts.count) more folder\(tailDsts.count == 1 ? "" : "s")",
                 identityKey: otherDestID,
                 count: count,
                 icon: "ellipsis.circle",

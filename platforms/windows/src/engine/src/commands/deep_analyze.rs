@@ -166,7 +166,7 @@ pub(crate) async fn handle_deep_analyze_file(
         DeepAnalyzeStarting {
             model_kind: payload.model_kind.clone(),
             phase: DeepAnalyzeStartingPhase::LoadingModel,
-            message: format!("Captioning file #{}…", payload.file_id),
+            message: "Describing 1 file…".to_string(),
         },
     ))))
     .await;
@@ -174,7 +174,8 @@ pub(crate) async fn handle_deep_analyze_file(
     let backend = match single_file_backend(&payload.model_kind, &cancel).await {
         Ok(backend) => backend,
         Err(err) => {
-            sink.send(EngineError::event("llama_cpp_missing", format!("{err:#}")))
+            tracing::warn!(?err, "[VLM] no usable runtime for a single-file pass");
+            sink.send(EngineError::event("llama_cpp_missing", "Describe Files can't run because its AI runtime isn't installed or isn't working. Install it again in Settings, under Performance."))
             .await;
             // Always send a terminal Complete so the UI clears the
             // "Loading model…" card instead of stranding forever (#6).
@@ -282,7 +283,8 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
         }
         Err(err) => {
-            sink.send(EngineError::event("deep_analyze_failed", format!("{err}")))
+            tracing::warn!(?err, "[VLM] single-file pass failed");
+            sink.send(EngineError::event("deep_analyze_failed", "FileID couldn't describe this file. Try again."))
             .await;
             // Terminal Complete on the analyze failure too, mirroring the batch
             // handler's convention so the card clears / Analyze-All re-enables (#6).
@@ -384,7 +386,7 @@ pub(crate) async fn handle_deep_analyze_all(
             emit_scope_failure(&sink, DeepAnalyzeComplete {
                 processed: 0, failed: 1, total_seconds: 0.0,
                 model_kind: payload.model_kind.clone(), cancelled: cancel.load(Ordering::Relaxed),
-            }, error.to_string()).await;
+            }, &ScopeFailure::from_error(&error)).await;
             return;
         }
     };
@@ -530,10 +532,36 @@ fn scoped_catalog_path(
     Ok(scope.source_path(id, std::path::Path::new(&path))?.ok_or(ScopeError::ExcludedTarget)?)
 }
 
-async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message: String) {
+pub(crate) const STOPPED_BY_HELPER: &str =
+    "Describe Files stopped because FileID's helper ran into a problem. Try again, and reopen FileID if it keeps happening.";
+
+/// Why a Describe Files run stopped: `message` is the sentence the app shows,
+/// `detail` the internal error, which only goes to the log.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScopeFailure {
+    pub(crate) message: String,
+    pub(crate) detail: String,
+}
+
+impl ScopeFailure {
+    pub(crate) fn internal(detail: impl Into<String>) -> Self {
+        Self { message: STOPPED_BY_HELPER.to_owned(), detail: detail.into() }
+    }
+
+    /// A scope refusal is already written for the user; anything else is internal.
+    pub(crate) fn from_error(error: &anyhow::Error) -> Self {
+        match error.downcast_ref::<ScopeError>() {
+            Some(scope) => Self { message: scope.to_string(), detail: scope.to_string() },
+            None => Self::internal(format!("{error:#}")),
+        }
+    }
+}
+
+async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, failure: &ScopeFailure) {
+    tracing::warn!(detail = %failure.detail, model = %complete.model_kind, "[DEEP-ANALYZE] run stopped");
     sink.send(EngineError::new(
         "deep_analyze_failed",
-        message,
+        failure.message.clone(),
     )
     .with_model(complete.model_kind.clone())
     .into_event()).await;
@@ -543,34 +571,35 @@ async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message:
 pub(crate) async fn emit_batch_terminal_after_cleanup(
     sink: &Sink,
     mut complete: DeepAnalyzeComplete,
-    message: Option<String>,
+    failure: Option<ScopeFailure>,
     cleanup: impl std::future::Future<Output = anyhow::Result<()>>,
-) {
+) -> Option<ScopeFailure> {
     let cleanup_started = Instant::now();
-    let message = match cleanup.await {
-        Ok(()) => message,
-        Err(error) => Some(match message {
-            Some(reason) => format!("{reason}; native cleanup failed: {error:#}"),
-            None => format!("Native cleanup failed: {error:#}"),
+    let failure = match cleanup.await {
+        Ok(()) => failure,
+        Err(error) => Some(match failure {
+            Some(reason) => ScopeFailure { detail: format!("{}; native cleanup failed: {error:#}", reason.detail), ..reason },
+            None => ScopeFailure::internal(format!("Native cleanup failed: {error:#}")),
         }),
     };
     complete.total_seconds += cleanup_started.elapsed().as_secs_f64();
-    if let Some(message) = message {
-        emit_scope_failure(sink, complete, message).await;
+    if let Some(failure) = &failure {
+        emit_scope_failure(sink, complete, failure).await;
     } else {
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
     }
+    failure
 }
 
 async fn finalize_batch(
     sink: &Sink,
     server: &mut Option<crate::models::resident_service::ResidentLease>,
     complete: DeepAnalyzeComplete,
-    message: Option<String>,
+    failure: Option<ScopeFailure>,
 ) {
     let server = server.take();
-    let keep = message.is_none() && !complete.cancelled;
-    emit_batch_terminal_after_cleanup(sink, complete, message, async move {
+    let keep = failure.is_none() && !complete.cancelled;
+    emit_batch_terminal_after_cleanup(sink, complete, failure, async move {
         match server { Some(server) => server.finish(keep).await, None => Ok(()) }
     }).await;
 }
@@ -598,7 +627,7 @@ async fn run_deep_analyze_batch(
             emit_scope_failure(&sink, DeepAnalyzeComplete {
                 processed: 0, failed: 1, total_seconds: 0.0,
                 model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-            }, error.to_string()).await;
+            }, &ScopeFailure::from_error(&error.into())).await;
             return;
         }
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
@@ -627,9 +656,7 @@ async fn run_deep_analyze_batch(
     if weights.is_none() {
         sink.send(EngineError::new(
             "vlm_model_missing",
-            format!(
-                "The {model_kind} model isn't installed yet. Install it from the Deep Analyze tab, then try again."
-            ),
+            "That AI model isn't installed yet. Install it on the Describe Files page, then try again.",
         )
         .with_model(model_kind.to_string())
         .into_event())
@@ -647,7 +674,7 @@ async fn run_deep_analyze_batch(
             emit_scope_failure(&sink, DeepAnalyzeComplete {
                 processed: 0, failed: 1, total_seconds: discovery_started_at.elapsed().as_secs_f64(),
                 model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-            }, format!("Native CLI discovery refused: {error:#}")).await;
+            }, &ScopeFailure::internal(format!("Native CLI discovery refused: {error:#}"))).await;
             return;
         }
         Err(_) => None,
@@ -660,7 +687,7 @@ async fn run_deep_analyze_batch(
         DeepAnalyzeStarting {
             model_kind: model_kind.to_string(),
             phase: DeepAnalyzeStartingPhase::LoadingModel,
-            message: format!("Analyzing {} file(s)…", file_ids.len()),
+            message: format!("Describing {} file(s)…", file_ids.len()),
         },
     ))))
     .await;
@@ -692,15 +719,13 @@ async fn run_deep_analyze_batch(
                                 emit_scope_failure(&sink, DeepAnalyzeComplete {
                                     processed: 0, failed: 1, total_seconds: 0.0,
                                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                                }, message).await;
+                                }, &ScopeFailure::internal(message)).await;
                                 return;
                             }
                             tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
                             sink.send(EngineError::event(
                                 "vlm_server_payload_rejected",
-                                format!(
-                                    "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
-                                ),
+                                "Describe Files is using a slower method for this run because the fast one didn't start.",
                             ))
                             .await;
                             None
@@ -714,7 +739,7 @@ async fn run_deep_analyze_batch(
                         emit_scope_failure(&sink, DeepAnalyzeComplete {
                             processed: 0, failed: 1, total_seconds: 0.0,
                             model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                        }, err.to_string()).await;
+                        }, &ScopeFailure::from_error(&err)).await;
                         return;
                     }
                     tracing::warn!(?err, "[VLM-SERVER] unavailable; falling back to per-file CLI");
@@ -751,9 +776,7 @@ async fn run_deep_analyze_batch(
     if server.is_none() && runner.is_none() {
         sink.send(EngineError::event(
             "llama_cpp_missing",
-            "The llama.cpp runtime isn't usable for image analysis (no working \
-                      llama-server.exe or llama-mtmd-cli.exe). Update it from \
-                      Settings -> Performance -> 'Install llama.cpp runtime'.",
+            "Describe Files can't run because its AI runtime isn't installed or isn't working. Install it again in Settings, under Performance.",
         ))
         .await;
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
@@ -784,7 +807,7 @@ async fn run_deep_analyze_batch(
                 finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
                     processed, failed: failed + 1, total_seconds: started_at.elapsed().as_secs_f64(),
                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                }, Some(error.to_string())).await;
+                }, Some(ScopeFailure::from_error(&error))).await;
                 return;
             }
 
@@ -949,7 +972,7 @@ async fn run_deep_analyze_batch(
                     finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
                         processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                         model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                    }, (!cancel.load(Ordering::Relaxed)).then(|| error.to_string())).await;
+                    }, (!cancel.load(Ordering::Relaxed)).then(|| ScopeFailure::from_error(&error))).await;
                     return;
                 }
             }
@@ -1048,7 +1071,7 @@ async fn run_deep_analyze_batch(
                     finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
                         processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                         model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                    }, Some(err.to_string())).await;
+                    }, Some(ScopeFailure::from_error(&err))).await;
                     return;
                 }
                 tracing::warn!(?err, file_id, "deep analyze file failed");
@@ -1077,7 +1100,7 @@ async fn run_deep_analyze_batch(
                             emit_scope_failure(&sink, DeepAnalyzeComplete {
                                 processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                                 model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                            }, message).await;
+                            }, &ScopeFailure::internal(message)).await;
                             return;
                         }
                     };
@@ -1087,14 +1110,14 @@ async fn run_deep_analyze_batch(
                                 emit_scope_failure(&sink, DeepAnalyzeComplete {
                                     processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                                }, cleanup.to_string()).await;
+                                }, &ScopeFailure::internal(format!("{cleanup:#}"))).await;
                                 return;
                             }
                         if !crate::models::native_process::ProcessTracker::shared().allows_fallback() {
                             emit_scope_failure(&sink, DeepAnalyzeComplete {
                                 processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                                 model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
-                            }, "Native fallback blocked by failed, unconfirmed or closed cleanup".to_owned()).await;
+                            }, &ScopeFailure::internal("Native fallback blocked by failed, unconfirmed or closed cleanup")).await;
                             return;
                         }
                         tracing::warn!(

@@ -86,4 +86,17 @@ public class ThumbnailDiskCacheTests
         Assert.NotEqual(at384, ThumbnailDiskCache.Key(Clip, 1_700_000_001.0, 384));
         Assert.Equal(plain, ThumbnailDiskCache.Key(Clip, 1_700_000_000.0, null));
     }
+
+    [Fact]
+    public void ImageThumbnailsAreKeyedByTheSizeTheyWereAskedFor()
+    {
+        const string Photo = @"C:\Photos\beach.jpg";
+        var legacy = ThumbnailDiskCache.Key(Photo, 1_700_000_000.0);
+        var at384 = ThumbnailDiskCache.Key(Photo, 1_700_000_000.0, null, 384);
+
+        Assert.Equal(legacy, ThumbnailDiskCache.Key(Photo, 1_700_000_000.0, null, ThumbnailDiskCache.LegacyImagePixelSize));
+        Assert.NotEqual(legacy, at384);
+        Assert.NotEqual(at384, ThumbnailDiskCache.Key(Photo, 1_700_000_000.0, null, 512));
+        Assert.NotEqual(at384, ThumbnailDiskCache.Key(Photo, 1_700_000_000.0, 384));
+    }
 }

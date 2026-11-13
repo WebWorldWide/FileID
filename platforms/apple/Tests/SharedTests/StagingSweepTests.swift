@@ -1,6 +1,8 @@
 // Parts orphaned in .fileid-staging by a dead process
 // are reclaimed on the next download, without ever touching entries an
 // in-flight download (this process, or a live sibling process) owns.
+// Finished pieces of a hash-pinned download are the exception: a later
+// launch reuses them, so they go only when stale or unreadable.
 import Testing
 import Foundation
 @testable import FileIDShared
@@ -100,6 +102,68 @@ struct StagingSweepTests {
         #expect(!exists(stale))
         #expect(exists(mine))
         #expect(exists(live))
+    }
+
+    @Test("a fresh resumable folder survives the sweep")
+    func freshResumableKept() throws {
+        let dir = try makeStagingDir()
+        defer { cleanup(dir) }
+        let staging = try #require(openResumable(dir))
+        try Data(count: 4).write(to: staging.pieceURL(0))
+        staging.unlock()
+        sweepStaleStagingEntries(in: dir, currentPID: 1000, isProcessAlive: { _ in false })
+        #expect(exists(staging.pieceURL(0)))
+    }
+
+    @Test("a resumable folder untouched for longer than the limit is removed")
+    func staleResumableRemoved() throws {
+        let dir = try makeStagingDir()
+        defer { cleanup(dir) }
+        let staging = try #require(openResumable(dir))
+        try Data(count: 4).write(to: staging.pieceURL(0))
+        staging.unlock()
+        try age(staging.folder, by: 8 * 24 * 60 * 60)
+        sweepStaleStagingEntries(in: dir, currentPID: 1000, isProcessAlive: { _ in false })
+        #expect(!exists(staging.folder))
+    }
+
+    @Test("a resumable folder a download is using survives even when old")
+    func lockedResumableKept() throws {
+        let dir = try makeStagingDir()
+        defer { cleanup(dir) }
+        let staging = try #require(openResumable(dir))
+        defer { staging.unlock() }
+        try Data(count: 4).write(to: staging.pieceURL(0))
+        try age(staging.folder, by: 8 * 24 * 60 * 60)
+        sweepStaleStagingEntries(in: dir, currentPID: 1000, isProcessAlive: { _ in false })
+        #expect(exists(staging.pieceURL(0)))
+    }
+
+    @Test("a resumable folder without a readable manifest is removed")
+    func resumableWithoutManifestRemoved() throws {
+        let dir = try makeStagingDir()
+        defer { cleanup(dir) }
+        let folder = dir.appendingPathComponent("resume-0000000000000000-0000000000000000", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try touch(folder, "piece-0")
+        sweepStaleStagingEntries(in: dir, currentPID: 1000, isProcessAlive: { _ in true })
+        #expect(!exists(folder))
+    }
+
+    private func openResumable(_ dir: URL) -> ResumableStaging? {
+        ResumableStaging.open(
+            stagingDir: dir, dest: dir.deletingLastPathComponent().appendingPathComponent("model.bin"),
+            sha256: String(repeating: "ab", count: 32), totalBytes: 8, pieceBytes: 4, pieceCount: 2)
+    }
+
+    private func age(_ folder: URL, by seconds: TimeInterval) throws {
+        let fm = FileManager.default
+        let then = Date().addingTimeInterval(-seconds)
+        for name in try fm.contentsOfDirectory(atPath: folder.path) {
+            try fm.setAttributes([.modificationDate: then],
+                                 ofItemAtPath: folder.appendingPathComponent(name).path)
+        }
+        try fm.setAttributes([.modificationDate: then], ofItemAtPath: folder.path)
     }
 
     @Test("missing staging dir is a no-op")

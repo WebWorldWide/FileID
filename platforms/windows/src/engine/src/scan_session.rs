@@ -519,9 +519,14 @@ impl ScanSession {
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
         let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
+        let known_twins = {
+            let conn = self.db_conn.lock();
+            crate::pipeline::twin_reuse::known_image_hashes(&conn).unwrap_or_default()
+        };
         let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
-            .with_legacy_hashes(writer.rename_heal_enabled());
+            .with_legacy_hashes(writer.rename_heal_enabled())
+            .with_known_twins(known_twins);
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
             tokio::task::JoinHandle<()>,
@@ -644,7 +649,7 @@ impl ScanSession {
             sink.send(crate::ipc::EngineError::new(
                 "discovery_partial",
                 format!(
-                        "{zero_byte_rejected} file(s) changed after zero-byte discovery; their catalog rows were preserved for the next scan."
+                        "{zero_byte_rejected} file(s) changed while FileID was scanning them. They will be picked up on the next scan."
                     ),
             )
             .with_path(root.to_string_lossy().into_owned())
@@ -964,7 +969,7 @@ fn discovery_notice(
     let (kind, message) = if count == 0 && skip_count > 0 {
         (
             "rescan_no_changes",
-            "No files required content reprocessing; catalog reconciliation will still complete.".to_string(),
+            "Nothing changed in these files since the last scan. FileID is finishing a quick check of the folder.".to_string(),
         )
     } else if count == 0 {
         (

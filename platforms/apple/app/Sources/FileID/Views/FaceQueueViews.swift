@@ -23,7 +23,11 @@ struct FaceQueueList: View {
             }
         }
         .animation(reduceMotion ? nil : queueSpring, value: model.changes)
-        .task(id: previewIDs) { crops = store.faceCrops(previewIDs) }
+        .task(id: previewIDs) {
+            let ids = previewIDs
+            let loaded = await Task.detached(priority: .userInitiated) { [store] in store.faceCrops(ids) }.value
+            if !Task.isCancelled { crops = loaded }
+        }
     }
 
     @ViewBuilder
@@ -102,18 +106,22 @@ private struct FaceMergeRow: View {
             Text(FaceQueueText.mergeReason(item))
                 .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
+                .help(FaceReviewText.scoreHelp(item.score))
             MetaText("\(FaceQueueText.faces(item.otherFaceCount)) · \(FaceQueueText.faces(item.faceCount))", size: 11)
         }
     }
 
     private var actions: some View {
         HStack(spacing: 8) {
-            Button("Dismiss") { Task { await model.resolve(item, "dismiss") } }
+            Button(FaceQueueText.skip) { Task { await model.resolve(item, "dismiss") } }
                 .buttonStyle(.dsGhost).accessibilityLabel(FaceQueueText.dismissMergeLabel(item))
+                .help(FaceQueueText.skipHelp)
             Button("Not the same person") { Task { await model.resolve(item, "notSamePerson") } }
                 .buttonStyle(.dsSecondary).accessibilityLabel(FaceQueueText.notSameLabel(item))
+                .help(FaceQueueText.notSameHelp)
             Button("Merge") { Task { await model.resolve(item, "merge") } }
                 .buttonStyle(.dsPrimary).tint(Theme.gold).accessibilityLabel(FaceQueueText.mergeLabel(item))
+                .help(FaceQueueText.mergeHelp)
         }
         .disabled(model.busy)
     }
@@ -152,10 +160,12 @@ private struct FaceSplitRow: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
-            Button("Dismiss") { Task { await model.resolve(item, "dismiss") } }
+            Button(FaceQueueText.skip) { Task { await model.resolve(item, "dismiss") } }
                 .buttonStyle(.dsGhost).accessibilityLabel(FaceQueueText.dismissSplitLabel(item))
+                .help(FaceQueueText.skipHelp)
             Button("Split into two") { Task { await model.resolve(item, "split") } }
                 .buttonStyle(.dsPrimary).tint(Theme.gold).accessibilityLabel(FaceQueueText.splitLabel(item))
+                .help(FaceQueueText.splitHelp)
         }
         .disabled(model.busy)
     }
@@ -166,12 +176,18 @@ struct FaceRefreshRow: View {
 
     var body: some View {
         if let line = model.line {
-            HStack(spacing: 10) {
-                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(Theme.gold).accessibilityHidden(true)
-                Text(line).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
-                    .accessibilityLabel(line)
-                Spacer(minLength: 8)
-                controls
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(Theme.gold).accessibilityHidden(true)
+                    Text(line).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                        .accessibilityLabel(line)
+                    Spacer(minLength: 8)
+                    controls
+                }
+                if let explanation = model.explanation {
+                    MetaText(explanation, color: Theme.text3, size: 11.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .disabled(model.busy)
             .transition(.opacity)

@@ -30,8 +30,8 @@ private func page(_ action: String, status: String = "ok", total: Int = 0, offse
 @Suite("Face review wording")
 struct FaceReviewTextTests {
     @Test func reasonsUseTheSharedSentences() {
-        #expect(FaceReviewText.reason(item(1)) == "Looks like Alex (62% match).")
-        #expect(FaceReviewText.reason(item(1, score: 0.474, reason: "uncertain")) == "Might be Alex, but the match is weak (47%).")
+        #expect(FaceReviewText.reason(item(1)) == "This is very likely Alex.")
+        #expect(FaceReviewText.reason(item(1, score: 0.474, reason: "uncertain")) == "This might be Alex, but it's hard to tell.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2, runnerName: "Sam")) == "Could be Alex or Sam; both look about as close.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2)) == "Could be Alex or an unnamed person; both look about as close.")
         #expect(FaceReviewText.reason(item(1, name: nil, reason: "ambiguous")) == "Could be an unnamed person, but it's a close call.")
@@ -43,7 +43,7 @@ struct FaceReviewTextTests {
         #expect(FaceReviewText.faceLabel(row) == "Face in IMG_7.jpg")
         #expect(FaceReviewText.acceptLabel(item(7)) == "Accept: this is Alex")
         #expect(FaceReviewText.rejectLabel(item(7)) == "Not Alex")
-        #expect(FaceReviewText.rowLabel(item(7)) == "Looks like Alex (62% match). In IMG_7.jpg.")
+        #expect(FaceReviewText.rowLabel(item(7)) == "This is very likely Alex. In IMG_7.jpg.")
         #expect(FaceReviewText.header(3) == "Review suggestions, 3 waiting")
         #expect(FaceReviewText.percent(0.625) == 63)
     }

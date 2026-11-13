@@ -25,4 +25,9 @@ enum AppSettings {
     static let fastTextReadingKey = "scan.fastTextReading"
     static let fastTextReadingDefault = false
     static let fastTextReadingEngineValue = "latin"
+
+    /// Spotlight gets file names, tags and descriptions after a scan, so ⌘Space
+    /// finds them. Off removes what FileID added.
+    static let spotlightKey = "privacy.spotlight"
+    static let spotlightDefault = true
 }

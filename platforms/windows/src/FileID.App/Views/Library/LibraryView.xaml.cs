@@ -23,7 +23,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private int _trashInFlight;
-    private readonly ThumbnailService _thumbnails = new();
+    private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
     // whenever a new BatchSummary lands, but throttled so a fast scan
@@ -142,7 +142,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 case nameof(EngineClient.Phase):
                     if (EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
                     {
-                        Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
+                        Services.DebugLog.Info($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
                         RequestLibraryRefresh(force: true);
                         DispatcherQueue.TryEnqueue(RefreshOfflineRoots);
                     }
@@ -154,7 +154,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     if (batchIndex == _lastSeenBatchIndex) return;
                     _lastSeenBatchIndex = batchIndex;
                     if (DateTime.UtcNow - _lastReloadAt < LibraryReloadThrottle) return;
-                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
+                    Services.DebugLog.Info($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
                     RequestLibraryRefresh(force: false);
                     break;
                 case nameof(EngineClient.DeepAnalyzeProgress):
@@ -240,7 +240,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         DispatcherQueue.TryEnqueue(async () =>
         {
             if (_unloaded) return;
-            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            try { await ViewModel.RefreshAsync(CancellationToken.None, liveScan: !force); }
             catch (Exception ex) { Services.DebugLog.Warn($"Library refresh failed (force={force}): {ex.Message}"); }
         });
     }
@@ -249,12 +249,13 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     {
         if (UndoButton == null) return;
         var stack = UndoStack.Instance;
-        if (stack.CanUndo)
+        var label = stack.TopLabelOn(ChangePage.Library);
+        if (stack.CanUndoOn(ChangePage.Library))
         {
             UndoButton.Visibility = Visibility.Visible;
-            UndoButtonText.Text = string.IsNullOrEmpty(stack.TopLabel)
+            UndoButtonText.Text = string.IsNullOrEmpty(label)
                 ? "Undo"
-                : $"Undo {stack.TopLabel}";
+                : $"Undo {label}";
         }
         else
         {
@@ -290,7 +291,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try
         {
             UndoButton.IsEnabled = false;
-            var label = await UndoStack.Instance.UndoAsync();
+            var label = await UndoStack.Instance.UndoAsync(ChangePage.Library);
             DebugLog.Info(string.IsNullOrEmpty(label) ? "Undo: nothing to undo" : $"Undo applied: {label}");
             await ViewModel.RefreshAsync(CancellationToken.None);
         }
@@ -352,7 +353,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Step 3: only AFTER ViewModel has cancelled its disposal CTS,
         // tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
-        try { _thumbnails.Dispose(); } catch { /* swallow */ }
         // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
         // in-flight reads use its connection — so the SQLite connection +
         // SemaphoreSlim are released instead of leaking per tab nav.
@@ -505,7 +505,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
             if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
-            if (!UndoStack.Instance.CanUndo) return;
+            if (!UndoStack.Instance.CanUndoOn(ChangePage.Library)) return;
             OnUndoLastClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -680,7 +680,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // bloat on large libraries). Must run while still attached — the
         // Thumbnail setter no-ops once IsDetached is set just below.
         tile.ClearThumbnailForRecycle();
-        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={tile.Path}");
+        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={Services.PathRedactor.Redact(tile.Path)}");
         // mark detached so a late-arriving thumbnail render
         // doesn't bind into a stale tile.
         tile.IsDetached = true;
@@ -714,7 +714,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null)
             {
-                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={tile.Path}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={Services.PathRedactor.Redact(tile.Path)}");
                 // Hand off from shimmer to a broken-image placeholder so the
                 // tile doesn't shimmer forever. Setter is UI-thread-affined
                 // because it raises PropertyChanged; route through the
@@ -731,7 +731,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             if (ct.IsCancellationRequested || tile.IsDetached)
             {
-                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={tile.Path} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={Services.PathRedactor.Redact(tile.Path)} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
                 return;
             }
             var enqueued = DispatcherQueue.TryEnqueue(() =>
@@ -747,16 +747,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // Pixel dims confirm the bitmap actually carries content. If a
                 // tile is still blank after this, px>0 here means the problem is
                 // layout (image row collapsed), not a 0-pixel decode.
-                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path} px={bmp.PixelWidth}x{bmp.PixelHeight}");
+                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={Services.PathRedactor.Redact(tile.Path)} px={bmp.PixelWidth}x{bmp.PixelHeight}");
             });
             if (!enqueued)
             {
-                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={tile.Path}");
+                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={Services.PathRedactor.Redact(tile.Path)}");
             }
         }
         catch (Exception ex)
         {
-            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={tile.Path} ex={ex.GetType().Name}");
+            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={Services.PathRedactor.Redact(tile.Path)} ex={ex.GetType().Name}");
         }
         finally
         {
@@ -1249,7 +1249,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                         return await EngineClient.Instance.RestoreFromTrashAsync(batchId);
                     }
                     catch { return false; }
-                });
+                },
+                ChangePage.Library);
 
             FileID.IpcSchema.BulkActionResult? result = null;
             try
@@ -1261,21 +1262,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                     "trashFiles",
                     () => EngineClient.Instance.TrashFilesAsync(ids),
-                    TimeSpan.FromSeconds(30),
+                    BulkActionTimeout.ForTrash(ids.Length),
                     beforeSend: beforeSend);
             }
             catch (TimeoutException ex)
             {
                 Services.DebugLog.Warn("Trash timed out: " + ex.Message);
                 await ShowAlertAsync(
-                    "Trash didn't confirm",
-                    "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+                    "Couldn't confirm the move",
+                    "FileID couldn't tell whether the files reached the Recycle Bin. Look in the Recycle Bin, then scan again before retrying.");
                 return;
             }
             catch (Exception ex)
             {
                 Services.DebugLog.Warn("Trash failed: " + ex.Message);
-                await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+                await ShowAlertAsync("Couldn't move the files", $"The selected files weren't moved to the Recycle Bin. {ex.Message}");
                 return;
             }
 
@@ -1299,12 +1300,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // a real total failure — surface it + refresh, matching the sibling flows.
             if (result.Failed > 0 || result.Succeeded == 0)
             {
-                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                var why = Services.TrashFailureText.Summary(result);
                 var body = result.Succeeded == 0 && result.Failed == 0
-                    ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
-                    : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
-                await ShowAlertAsync("Some files couldn't be recycled", body);
+                    ? (why.Length > 0 ? $"Nothing was moved. {why}" : "Nothing was moved. Your files are unchanged. Try again in a moment.")
+                    : $"{result.Succeeded:N0} moved to the Recycle Bin. {why}";
+                await ShowAlertAsync("Some files weren't moved", body);
                 RequestLibraryRefresh(force: true);
             }
         }

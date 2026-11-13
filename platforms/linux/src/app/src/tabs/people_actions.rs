@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fileid_engine::ipc::{BulkActionResult, CommandPayload};
+use fileid_engine::ipc::{BulkActionResult, CommandPayload, FaceReviewPage, UndoFaceReviewPayload};
 use gtk::glib;
 
 use crate::engine_client::{EngineClient, EngineEvent, read_db};
@@ -54,6 +54,31 @@ pub(super) async fn send_and_collect(
         }
     }
     Some(results)
+}
+
+/// Asks the engine to undo a merge it journaled (`undoFaceReview` with the
+/// merge's operation). `None` when the command could not be sent, the engine
+/// restarted or it stayed silent for `timeout_secs`.
+pub(super) async fn undo_merge_operation(
+    engine: &Rc<RefCell<EngineClient>>,
+    operation: String,
+    timeout_secs: u32,
+) -> Option<FaceReviewPage> {
+    let subscription = Subscription(engine.borrow_mut().subscribe());
+    let request_id = super::face_review::request_id();
+    let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload { request_id: request_id.clone(), operation_id: operation });
+    engine.borrow_mut().send(payload).ok()?;
+    let closer = subscription.0.clone();
+    glib::timeout_add_seconds_local_once(timeout_secs, move || {
+        closer.close();
+    });
+    loop {
+        match subscription.0.recv().await {
+            Ok(EngineEvent::FaceReview(page)) if page.request_id == request_id => return Some(page),
+            Ok(EngineEvent::Exited) | Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
 }
 
 pub(super) fn first_failure(results: &[BulkActionResult]) -> Option<String> {
@@ -148,6 +173,8 @@ mod tests {
             file_id: Some(1),
             ok,
             message: message.map(str::to_owned),
+            reason: None,
+            operation_id: None,
         }
     }
 

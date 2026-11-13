@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
@@ -287,6 +287,9 @@ impl DbWriter {
         // Face/crop positions to extract by move only after commit. The JPEG
         // encode + fs::write stays outside the transaction and writer lock.
         let mut deferred_crops: Vec<DeferredFaceCrop> = Vec::new();
+        // (twin face id, new face id) crop files to copy after commit.
+        let mut crop_copies: Vec<(i64, i64)> = Vec::new();
+        let mut reused_twins = 0u32;
 
         // Rename/move heal candidates are resolved BEFORE the writer lock:
         // `heal_candidate_moved()` does a blocking `symlink_metadata()` stat (is
@@ -370,6 +373,24 @@ impl DbWriter {
             let mut doc_text_delete = tx
                 .prepare_cached("DELETE FROM doc_text WHERE file_id = ?1")
                 .context("preparing doc_text delete")?;
+            let mut twin_lookup = tx
+                .prepare_cached(TWIN_LOOKUP_SQL)
+                .context("preparing twin lookup")?;
+            let mut twin_children = tx
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM tags WHERE file_id = ?1 AND source = 'auto')                      OR EXISTS (SELECT 1 FROM clip_embeddings WHERE file_id = ?1)",
+                )
+                .context("preparing twin children check")?;
+            let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
+            let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
+            let mut twin_clip = tx.prepare_cached(TWIN_CLIP_SQL).context("preparing twin clip copy")?;
+            let mut twin_ocr = tx.prepare_cached(TWIN_OCR_SQL).context("preparing twin ocr copy")?;
+            let mut twin_faces = tx.prepare_cached(TWIN_FACES_SQL).context("preparing twin faces read")?;
+            let mut twin_face_insert =
+                tx.prepare_cached(TWIN_FACE_INSERT_SQL).context("preparing twin face copy")?;
+            let mut twin_unavailable = tx
+                .prepare_cached("UPDATE files SET failed = 1, error_message = ?2 WHERE id = ?1")
+                .context("preparing twin unavailable update")?;
             for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -633,6 +654,89 @@ impl DbWriter {
                     }
                 }
 
+                // A byte-identical image analyzed before: copy the twin row's
+                // tags, embedding, text and faces, keeping this file's own
+                // year and camera chips. With no twin row (the file was only
+                // touched, or the twin vanished) a row that already has its own
+                // results keeps them; a bare one is retried next scan.
+                if f.reuse_twin {
+                    let twin: Option<i64> = match f.content_hash.as_ref() {
+                        Some(hash) => twin_lookup
+                            .query_row(params![hash.as_slice(), file_id], |r| r.get(0))
+                            .optional()
+                            .with_context(|| format!("twin lookup for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                        None => None,
+                    };
+                    let redacted = || crate::platform::redact_path_for_log(&f.path);
+                    if let Some(twin_id) = twin {
+                        let stale_face_ids: Vec<i64> = face_delete
+                            .query_map(params![file_id], |r| r.get::<_, i64>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .with_context(|| format!("twin face delete for {}", redacted()))?;
+                        crop_ids_to_prune.extend(stale_face_ids);
+                        tag_delete.execute(params![file_id]).with_context(|| format!("twin tag delete for {}", redacted()))?;
+                        ocr_text_delete.execute(params![file_id]).with_context(|| format!("twin ocr delete for {}", redacted()))?;
+                        twin_files.execute(params![file_id, twin_id]).with_context(|| format!("twin files copy for {}", redacted()))?;
+                        twin_tags.execute(params![file_id, twin_id]).with_context(|| format!("twin tags copy for {}", redacted()))?;
+                        for (tag, score) in &f.tags {
+                            let trimmed = tag.trim();
+                            if trimmed.is_empty() { continue; }
+                            tag_insert
+                                .execute(params![file_id, trimmed, score.map(|s| s as f64)])
+                                .with_context(|| format!("twin extra tag for {}", redacted()))?;
+                        }
+                        twin_clip.execute(params![file_id, twin_id]).with_context(|| format!("twin clip copy for {}", redacted()))?;
+                        twin_ocr.execute(params![file_id, twin_id]).with_context(|| format!("twin ocr copy for {}", redacted()))?;
+                        let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                        tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
+                        let faces: Vec<TwinFace> = twin_faces
+                            .query_map(params![twin_id], |r| {
+                                Ok(TwinFace {
+                                    id: r.get(0)?,
+                                    print_data: r.get(1)?,
+                                    bbox: r.get(2)?,
+                                    embedding: r.get(3)?,
+                                    quality: r.get(4)?,
+                                    excluded: r.get(5)?,
+                                    model: r.get(6)?,
+                                    processing: r.get(7)?,
+                                })
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .with_context(|| format!("twin faces read for {}", redacted()))?;
+                        for face in faces {
+                            let new_id: i64 = twin_face_insert
+                                .query_row(
+                                    params![
+                                        file_id,
+                                        face.print_data,
+                                        face.bbox,
+                                        face.embedding,
+                                        face.quality,
+                                        face.excluded,
+                                        face.model,
+                                        face.processing,
+                                        face.model.as_ref().map(|_| source_revision.as_str()),
+                                    ],
+                                    |r| r.get(0),
+                                )
+                                .with_context(|| format!("twin face copy for {}", redacted()))?;
+                            crop_copies.push((face.id, new_id));
+                        }
+                        reused_twins += 1;
+                    } else {
+                        let has_results: bool = twin_children
+                            .query_row(params![file_id], |r| r.get(0))
+                            .with_context(|| format!("twin children check for {}", redacted()))?;
+                        if !has_results {
+                            twin_unavailable
+                                .execute(params![file_id, "the identical file's analysis was not available; it will be analyzed on the next scan"])
+                                .with_context(|| format!("twin unavailable for {}", redacted()))?;
+                            *failed += 1;
+                        }
+                    }
+                }
+
                 if f.failed {
                     *failed += 1;
                 }
@@ -709,6 +813,13 @@ impl DbWriter {
             if let Err(err) = save_face_crop(face_id, crop) {
                 tracing::warn!(?err, face_id, "face crop write failed");
             }
+        }
+        // After the twins' own crops exist: a copy's twin may sit in this batch.
+        for (twin_face_id, face_id) in crop_copies {
+            copy_face_crop(twin_face_id, face_id);
+        }
+        if reused_twins > 0 {
+            tracing::info!(reused_twins, files_in_batch, "[TWIN] copied analysis from byte-identical images");
         }
 
         let wall = started.elapsed().as_secs_f64();
@@ -877,6 +988,64 @@ const INSERT_FACE_SQL: &str = r#"
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#;
 
+// Twin reuse (see pipeline/twin_reuse.rs): ?1 is the new row, ?2 the twin.
+const TWIN_LOOKUP_SQL: &str = const_format_twin_lookup();
+
+const fn const_format_twin_lookup() -> &'static str {
+    concat!(
+        "SELECT id FROM files WHERE content_hash = ?1 AND id != ?2 AND ",
+        "kind = 'image' AND failed = 0 AND content_hash IS NOT NULL AND length(content_hash) = 32 ",
+        "AND (EXISTS (SELECT 1 FROM tags t WHERE t.file_id = files.id AND t.source = 'auto') ",
+        "OR EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id)) ",
+        "ORDER BY id LIMIT 1"
+    )
+}
+
+const TWIN_FILES_SQL: &str = r#"
+    UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text
+    FROM (SELECT phash, aesthetic, has_faces, has_text FROM files WHERE id = ?2) AS t
+    WHERE files.id = ?1
+"#;
+
+const TWIN_TAGS_SQL: &str = r#"
+    INSERT OR REPLACE INTO tags (file_id, tag, source, score)
+    SELECT ?1, tag, 'auto', score FROM tags
+    WHERE file_id = ?2 AND source = 'auto' AND tag NOT LIKE 'Year\_%' ESCAPE '\'
+"#;
+
+const TWIN_CLIP_SQL: &str = r#"
+    INSERT INTO clip_embeddings (file_id, embedding, model)
+    SELECT ?1, embedding, model FROM clip_embeddings WHERE file_id = ?2
+    ON CONFLICT(file_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model
+"#;
+
+const TWIN_OCR_SQL: &str = r#"
+    INSERT INTO ocr_text (file_id, text, source, handwritten)
+    SELECT ?1, text, source, handwritten FROM ocr_text WHERE file_id = ?2 AND source = 'ocr'
+"#;
+
+const TWIN_FACES_SQL: &str = r#"
+    SELECT id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version
+    FROM face_prints WHERE file_id = ?1 ORDER BY id
+"#;
+
+const TWIN_FACE_INSERT_SQL: &str = r#"
+    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version, source_revision)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    RETURNING id
+"#;
+
+struct TwinFace {
+    id: i64,
+    print_data: Vec<u8>,
+    bbox: String,
+    embedding: Option<Vec<u8>>,
+    quality: Option<f64>,
+    excluded: Option<i64>,
+    model: Option<String>,
+    processing: Option<String>,
+}
+
 /// Convert a slice of f32 to little-endian bytes for BLOB storage.
 /// Matches the macOS GRDB layout exactly (CoreML / ORT both produce
 /// host-endian f32 → we always normalize to LE on the way to disk so a
@@ -1019,6 +1188,13 @@ fn save_face_crop(face_id: i64, crop_rgb_112: Vec<u8>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Best-effort copy of a twin's crop JPEG for a face row copied from it.
+fn copy_face_crop(twin_face_id: i64, face_id: i64) {
+    if let Ok(dir) = crate::paths::faces_dir() {
+        let _ = std::fs::copy(dir.join(format!("{twin_face_id}.jpg")), dir.join(format!("{face_id}.jpg")));
+    }
+}
+
 /// Best-effort removal of a face crop JPEG (face_crops/<face_id>.jpg) orphaned
 /// by a faces_evaluated re-process. Silent on any error — a leftover crop is
 /// cosmetic disk use, never a correctness issue.
@@ -1129,6 +1305,7 @@ mod tests {
             doc_stage_ran: false,
             text_stage_done: false,
             tags_evaluated: true,
+            reuse_twin: false,
         }
     }
 
@@ -2337,4 +2514,160 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+}
+
+#[cfg(test)]
+mod twin_reuse_tests {
+    use super::*;
+    use crate::pipeline::discovery::FileKind;
+    use crate::pipeline::tagging::DetectedFace;
+    use std::path::PathBuf;
+
+    fn image(path: &str, hash: [u8; 32]) -> TaggedFile {
+        TaggedFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: Some(1_600_000_000.0),
+            captured_from_exif: false,
+            scanned_unix: 1_700_000_100.0,
+            has_faces: false,
+            faces: vec![],
+            has_text: false,
+            ocr_text: None,
+            phash: None,
+            aesthetic: None,
+            image_width: 0,
+            image_height: 0,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+            file_ref: None,
+            content_hash: Some(hash),
+            legacy_hashes: None,
+            text_embedding: None,
+            doc_text: None,
+            tags: vec![],
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
+            text_stage_done: false,
+            tags_evaluated: false,
+            reuse_twin: false,
+        }
+    }
+
+    fn analyzed(path: &str, hash: [u8; 32]) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.phash = Some(42);
+        file.aesthetic = Some(0.5);
+        file.has_faces = true;
+        file.has_text = true;
+        file.ocr_text = Some("FileID OCR 12345".to_owned());
+        file.image_width = 640;
+        file.image_height = 480;
+        let mut clip = vec![0.0f32; 512];
+        clip[0] = 1.0;
+        file.clip_embedding = Some(clip);
+        let mut embedding = vec![0.0f32; 128];
+        embedding[3] = 1.0;
+        file.faces.push(DetectedFace {
+            bbox: [10.0, 20.0, 30.0, 40.0],
+            embedding,
+            embedding_model: Some("fixture-weight-hash".to_owned()),
+            roll: 0.0,
+            yaw: 0.1,
+            pitch: 0.2,
+            quality: 0.9,
+            excluded: false,
+            crop_rgb_112: None,
+        });
+        file.tags = vec![("dog".to_owned(), Some(0.9)), ("park".to_owned(), Some(0.7)), ("Year_2020".to_owned(), None)];
+        file.faces_evaluated = true;
+        file.ocr_stage_ran = true;
+        file.tags_evaluated = true;
+        file
+    }
+
+    fn reused(path: &str, hash: [u8; 32], year: &str) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.reuse_twin = true;
+        file.tags = vec![(year.to_owned(), None)];
+        file
+    }
+
+    #[test]
+    fn a_copy_takes_over_its_twins_rows_and_keeps_its_own_year() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [9u8; 32];
+        let mut buffer = vec![analyzed("/lib/a.jpg", hash), reused("/lib/backup/a.jpg", hash, "Year_2021")];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+
+        let db = conn.lock();
+        let copy_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = '/lib/backup/a.jpg'", [], |r| r.get(0)).unwrap();
+        let (phash, has_faces, has_text, failed): (i64, i64, i64, i64) = db
+            .query_row("SELECT phash, has_faces, has_text, failed FROM files WHERE id = ?1", params![copy_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        assert_eq!((phash, has_faces, has_text, failed), (42, 1, 1, 0));
+        let mut tags: Vec<String> = db
+            .prepare("SELECT tag FROM tags WHERE file_id = ?1 ORDER BY tag").unwrap()
+            .query_map(params![copy_id], |r| r.get(0)).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        tags.sort();
+        assert_eq!(tags, vec!["Year_2021", "dog", "park"]);
+        let clip: Vec<u8> = db.query_row("SELECT embedding FROM clip_embeddings WHERE file_id = ?1", params![copy_id], |r| r.get(0)).unwrap();
+        assert_eq!(clip.len(), 512 * 4);
+        let text: String = db.query_row("SELECT text FROM ocr_text WHERE file_id = ?1", params![copy_id], |r| r.get(0)).unwrap();
+        assert_eq!(text, "FileID OCR 12345");
+        let (faces, model): (i64, String) = db
+            .query_row("SELECT count(*), max(embedding_model) FROM face_prints WHERE file_id = ?1", params![copy_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((faces, model.as_str()), (1, "fixture-weight-hash"));
+        let total_faces: i64 = db.query_row("SELECT count(*) FROM face_prints", [], |r| r.get(0)).unwrap();
+        assert_eq!(total_faces, 2, "the twin keeps its own face row");
+    }
+
+    #[test]
+    fn a_copy_of_an_earlier_scan_is_served_from_the_catalog() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [5u8; 32];
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock()).unwrap();
+        assert_eq!(known, vec![hash]);
+
+        writer.flush(&mut vec![reused("/lib/b.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let db = conn.lock();
+        let tags: i64 = db.query_row("SELECT count(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 3);
+    }
+
+    #[test]
+    fn a_copy_without_a_twin_row_is_retried_next_scan_unless_it_has_results() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [7u8; 32];
+        writer.flush(&mut vec![reused("/lib/lonely.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let failed: i64 = conn.lock().query_row("SELECT failed FROM files WHERE path_text = '/lib/lonely.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(failed, 1);
+
+        // The same path touched (new mtime, same bytes) keeps the results it already has.
+        writer.flush(&mut vec![analyzed("/lib/own.jpg", hash)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let mut touched = reused("/lib/own.jpg", hash, "Year_2020");
+        touched.modified_unix += 10.0;
+        writer.flush(&mut vec![touched], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let db = conn.lock();
+        let (failed, tags): (i64, i64) = db
+            .query_row("SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((failed, tags), (0, 3));
+    }
 }

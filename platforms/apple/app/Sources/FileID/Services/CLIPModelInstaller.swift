@@ -53,6 +53,11 @@ final class CLIPModelInstaller: ModelInstalling {
 
     static var modelsRoot: URL { AppSupportPath.models }
 
+    static var modelDirectories: [URL] {
+        [modelsRoot.appendingPathComponent("mobileclip_image", isDirectory: true),
+         modelsRoot.appendingPathComponent("clip_text", isDirectory: true)]
+    }
+
     static let approxDownloadBytes: Int64 = {
         let ids = Set(["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"])
         return ModelManifest.artifacts
@@ -85,16 +90,15 @@ final class CLIPModelInstaller: ModelInstalling {
         recomputePresentFiles()
         var totalSize: Int64 = 0
         var firstMissing: String?
-        for f in Self.requiredFiles {
-            if presentFilePaths.contains(f.path) {
-                totalSize += directorySize(f)
-            } else if firstMissing == nil {
-                firstMissing = f.lastPathComponent
-            }
+        for f in Self.requiredFiles where !presentFilePaths.contains(f.path) && firstMissing == nil {
+            firstMissing = f.lastPathComponent
         }
-        if let missing = firstMissing {
-            status = .missing(reason: "Missing: \(missing)")
+        if firstMissing != nil {
+            if status.inProgress, task != nil { return }
+            if case .installFailed = status { return }
+            status = .missing(reason: ModelInstaller.notDownloaded)
         } else {
+            for dir in Self.modelDirectories { totalSize += ModelInstaller.diskSize(of: dir) }
             status = .installed(sizeBytes: totalSize)
         }
     }
@@ -141,7 +145,7 @@ final class CLIPModelInstaller: ModelInstalling {
     }
 
     func uninstall() async {
-        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         guard !uninstalling else { return }
         uninstalling = true
         defer { uninstalling = false }
@@ -149,16 +153,13 @@ final class CLIPModelInstaller: ModelInstalling {
         activeTask?.cancel()
         await activeTask?.value
         task = nil
-        let dirs = [
-            Self.modelsRoot.appendingPathComponent("mobileclip_image", isDirectory: true),
-            Self.modelsRoot.appendingPathComponent("clip_text", isDirectory: true),
-        ]
-        for d in dirs {
+        for d in Self.modelDirectories {
             try? FileManager.default.removeItem(at: d)
         }
         // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
         // and falls back to keyword-only search. (Install→Remove leaked it true.)
         textEncoderReady = false
+        status = .unknown
         refreshStatus()
     }
 
@@ -170,14 +171,14 @@ final class CLIPModelInstaller: ModelInstalling {
     /// Files stage into a sibling dir and atomic-promote on full
     /// success — a partial install never poisons the production tree.
     private func runHubFetch() async {
-        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         installing = true
         defer { installing = false }
         Self.sweepOrphanedStagingRoots()
         let approxBytes = Self.approxDownloadBytes
         try? FileManager.default.createDirectory(at: Self.modelsRoot, withIntermediateDirectories: true)
         if let free = ModelInstaller.freeDiskBytes(at: Self.modelsRoot), free < approxBytes * 2 {
-            status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
+            status = .installFailed(ModelInstaller.notEnoughSpace(needed: approxBytes * 2, available: free))
             return
         }
 
@@ -215,14 +216,14 @@ final class CLIPModelInstaller: ModelInstalling {
         do {
             try promoteStaged(stagedPlan.map { (staged: $0.staged, finalDest: $0.finalDest) })
         } catch {
-            status = .installFailed("Couldn't promote staged files: \(error.localizedDescription)")
+            status = .installFailed("FileID couldn't save the downloaded files. Try again.")
             recomputePresentFiles()
             return
         }
 
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
-                status = .installFailed("Missing after install: \(f.lastPathComponent).")
+                status = .installFailed("The download didn't finish. Try again.")
                 recomputePresentFiles()
                 return
             }
@@ -384,7 +385,7 @@ final class CLIPModelInstaller: ModelInstalling {
     }
 
     private func runExtract(zipAt zipURL: URL, deleteZipAfter: Bool) async {
-        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         status = .extracting
         let modelsRoot = Self.modelsRoot
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
@@ -757,26 +758,5 @@ final class CLIPModelInstaller: ModelInstalling {
         let message: String
         init(_ message: String) { self.message = message }
         var errorDescription: String? { message }
-    }
-
-    // MARK: - Utilities
-
-    private func directorySize(_ url: URL) -> Int64 {
-        var total: Int64 = 0
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
-        if !isDir.boolValue {
-            if let v = try? url.resourceValues(forKeys: [.fileSizeKey]),
-               let s = v.fileSize { return Int64(s) }
-            return 0
-        }
-        if let en = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-            for case let f as URL in en {
-                if let v = try? f.resourceValues(forKeys: [.fileSizeKey]),
-                   let s = v.fileSize { total += Int64(s) }
-            }
-        }
-        return total
     }
 }

@@ -7,11 +7,14 @@ struct ChatWorkbench: View {
     @Bindable var engine: EngineClient
     var onClose: (() -> Void)? = nil
     @FocusState private var inputFocused: Bool
+    @Environment(\.pageActive) private var pageActive
     @AppStorage("chatConversationID") private var conversationID = ""
     @AppStorage("chatDraft") private var input = ""
     @AppStorage("chatUseModel") private var useModel = true
-    @AppStorage("chatModelKind") private var chatModelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
+    /// Empty means "follow the Describe Files model"; set only when the user picks one in Chat.
+    @AppStorage("chatModelKind") private var chatModelKind = ""
     @State private var modelsPresented = false
+    @State private var confirmClear = false
     @State private var messages: [ChatMessage] = []
     @State private var hits: [CatalogHit] = []
     @State private var actions: [ChatAction] = []
@@ -27,9 +30,14 @@ struct ChatWorkbench: View {
     @State private var chosen: Set<Int64> = []
     @State private var selectionNote: String?
     @State private var scopedRequest = ""
+    @AppStorage(ChatActionRunner.lastTrashBatchKey) private var lastTrashBatch = ""
+    @State private var puttingBack = false
 
     private var isPage: Bool { onClose == nil }
-    private var modelName: String { AIModelKind(rawValue: chatModelKind)?.displayName ?? "Local model" }
+    private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
+    private var followsDescribe: Bool { chatModelKind.isEmpty || chatModelKind == describeKind }
+    private var activeModelKind: String { followsDescribe ? describeKind : chatModelKind }
+    private var modelName: String { AIModelKind(rawValue: activeModelKind)?.displayName ?? "Local model" }
     private static let lookingIn = ["Names", "Tags", "Descriptions", "Chapters", "Text in files"]
 
     var body: some View {
@@ -57,6 +65,9 @@ struct ChatWorkbench: View {
             control("history")
         }
         .onDisappear { player?.pause() }
+        // After the page stack has released the old page's focus.
+        .onPageVisibility(shown: { DispatchQueue.main.async { inputFocused = true } },
+                          hidden: { inputFocused = false; player?.pause() })
         .onChange(of: engine.latestChatResponse) { _, response in
             guard let response, response.conversationID == conversationID, !ignored.contains(response.requestID) else { return }
             if response.requestID == historyRequest, busy { return }
@@ -70,7 +81,13 @@ struct ChatWorkbench: View {
             }
         }
         .sheet(isPresented: $modelsPresented) {
-            ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: chatModelKind)) { chatModelKind = $0.rawValue }
+            ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: activeModelKind)) { chatModelKind = $0.rawValue }
+        }
+        .confirmationDialog("Clear this conversation?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear conversation", role: .destructive) { control("clear") }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The questions and answers here are deleted and can't be brought back. Your files are not touched.")
         }
     }
 
@@ -127,9 +144,17 @@ struct ChatWorkbench: View {
                 .accessibilityLabel("Looking in names, tags, descriptions, chapters and text in files")
             }
             Spacer(minLength: 8)
-            Button("Clear") { control("clear") }
+            if !lastTrashBatch.isEmpty {
+                Button { putBackLastTrash() } label: { Label("Put back", systemImage: "arrow.uturn.backward") }
+                    .buttonStyle(.dsGhost)
+                    .disabled(puttingBack)
+                    .help("Put back the last files Chat moved to Trash")
+                    .accessibilityLabel("Put back the last files Chat moved to Trash")
+                    .transition(.opacity)
+            }
+            Button("Clear") { confirmClear = true }
                 .buttonStyle(.dsGhost)
-                .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted.")
+                .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted, after you confirm.")
                 .disabled(messages.isEmpty && hits.isEmpty)
                 // The ghost style insets its label 6 pt; cancel it so the text meets the page edge.
                 .padding(.trailing, onClose == nil ? -6 : 0)
@@ -140,6 +165,24 @@ struct ChatWorkbench: View {
         }
         .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, isPage ? 0 : 10)
         .frame(minHeight: isPage ? Theme.Metrics.paneHeaderHeight : nil)
+    }
+
+    private func putBackLastTrash() {
+        let batch = lastTrashBatch
+        guard !batch.isEmpty, !puttingBack else { return }
+        puttingBack = true
+        Task {
+            let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+            puttingBack = false
+            if lastTrashBatch == batch,
+               undone.restored > 0 || undone.message?.contains("unknown or already restored") == true {
+                withAnimation(Theme.springStandard) { lastTrashBatch = "" }
+            }
+            if undone.restored > 0 { ChatHandoff.shared.store?.notifyChanged() }
+            ToastCenter.shared.show(undone.restored > 0
+                ? "Put back \(undone.restored.formatted()) \(undone.restored == 1 ? "copy" : "copies") where \(undone.restored == 1 ? "it was" : "they were")"
+                : (undone.message ?? "Nothing was put back. Check the Trash."))
+        }
     }
 
     private var emptyState: some View {
@@ -217,7 +260,7 @@ struct ChatWorkbench: View {
                 if busy {
                     Button("Stop") { control("cancel") }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
-                        .keyboardShortcut(".", modifiers: .command)
+                        .keyboardShortcut(pageActive ? KeyboardShortcut(".", modifiers: .command) : nil)
                         .help("Stop the answer (⌘.)")
                 } else {
                     Button("Send", action: send)
@@ -232,12 +275,21 @@ struct ChatWorkbench: View {
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
                 Button { modelsPresented = true } label: {
-                    Label(modelName, systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
+                    Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
                 }
                 .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
                 .disabled(!useModel)
-                .help(useModel ? "Choose the local AI model that writes answers" : "Turn on Summarize with local AI to choose a model")
-                .accessibilityLabel("Chat model: \(modelName)")
+                .help(useModel ? "Choose the AI that writes answers. Now using \(modelName)." : "Turn on Summarize with local AI to choose a model")
+                .accessibilityLabel("Choose the AI model for Chat")
+                if useModel {
+                    MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
+                        .help(modelName)
+                    if !followsDescribe {
+                        Button("Use the same one") { chatModelKind = "" }
+                            .buttonStyle(.dsGhost)
+                            .help("Go back to the AI chosen in Describe Files")
+                    }
+                }
                 Spacer(minLength: 0)
             }
             if !busy && !message.isEmpty && message != messages.last(where: { $0.role != "user" })?.text {
@@ -370,7 +422,7 @@ struct ChatWorkbench: View {
             let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
             guard activeRequest == requestID else { return }
             let request = ChatRequest(requestID: requestID, conversationID: conversationID, action: "send", text: text, useModel: useModel,
-                                      modelKind: chatModelKind, context: handoff.context, queryVector: vector,
+                                      modelKind: activeModelKind, context: handoff.context, queryVector: vector,
                                       embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, scopeFileIDs: scope)
             if engine.send(.chatRequest(request: request)) { input = ""; openedSource = nil }
             else { busy = false; message = "FileID is still getting ready. Try again in a moment." }
@@ -418,7 +470,7 @@ private func sourceMeta(_ hit: CatalogHit) -> String {
     var parts: [String] = []
     if let seconds = hit.startSeconds { parts.append(DurationText.clock(seconds)) }
     if let page = hit.page { parts.append("Page \(page)") }
-    if hit.kind == "sampledFrame" { parts.append("Video frame, not checked") }
+    if hit.kind == "sampledFrame" { parts.append("From a video frame (not reviewed)") }
     return parts.joined(separator: " · ")
 }
 

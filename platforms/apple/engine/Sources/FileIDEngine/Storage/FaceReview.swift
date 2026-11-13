@@ -335,6 +335,7 @@ enum FaceReview {
         case "merges": return try FaceQueues.listMerges(db, requestID: requestID, personID: personID, offset: offset, limit: limit)
         case "splits": return try FaceQueues.listSplits(db, requestID: requestID, personID: personID, offset: offset, limit: limit)
         case "refresh": return try FaceRefreshJob.statusPage(db, requestID: requestID)
+        case PersonMergeJournal.queue: return try PersonMergeJournal.list(db, requestID: requestID)
         default:
             return FaceReviewPage(requestID: requestID, action: "list", status: "refused", message: queueRefusal, total: 0, offset: 0)
         }
@@ -498,10 +499,12 @@ enum FaceReview {
 
     static func undo(_ db: GRDB.Database, requestID: String, operationID: String,
                      now: Double = Date().timeIntervalSince1970) throws -> FaceReviewPage {
+        let operationID = operationID == PersonMergeJournal.lastToken
+            ? try PersonMergeJournal.latest(db, now: now)?.id ?? operationID : operationID
         guard let row = try Row.fetchOne(db, sql: """
                 SELECT c.kind, c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id
                 WHERE o.id=? AND o.state='completed'
-                  AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review')
+                  AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review','person_merge')
                 """, arguments: [operationID]),
               let before = parse(row["before_json"]), let after = parse(row["after_json"]) else {
             return try refused(requestID, "undo", nothingToUndoMessage, db: db)
@@ -512,6 +515,8 @@ enum FaceReview {
         case "face_review_bulk": reply = try undoAcceptAll(db, requestID: requestID, before: before, after: after, now: now)
         case "face_merge_review", "face_split_review":
             reply = try FaceQueues.undo(db, requestID: requestID, before: before, after: after, now: now)
+        case PersonMergeJournal.kind:
+            reply = try PersonMergeJournal.undo(db, requestID: requestID, before: before, after: after, now: now)
         default: reply = try undoFace(db, requestID: requestID, before: before, after: after, now: now)
         }
         guard reply.status == "ok" else { return reply }

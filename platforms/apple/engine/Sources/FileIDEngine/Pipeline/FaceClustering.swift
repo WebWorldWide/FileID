@@ -817,7 +817,7 @@ public enum FaceClustering {
                 let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
                 await sink.emit(.error(EngineError(
                     kind: "face_cluster_no_model",
-                    message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install SFace (\(size))."
+                    message: "The face recognition model isn't installed. Open Settings to download it (\(size))."
                 )))
             } else {
                 // A model IS on disk but load() couldn't bind it (execution
@@ -827,7 +827,7 @@ public enum FaceClustering {
                                      error: "Face embedder installed but load() failed (loadOK=\(loadOK)); execution-provider/runtime error.")
                 await sink.emit(.error(EngineError(
                     kind: "face_cluster_embedder_load_failed",
-                    message: "Face-recognition model is installed but failed to load (execution-provider/runtime error). See logs."
+                    message: "The face recognition model couldn't start. Quit and reopen FileID. If it keeps happening, download the model again in Settings."
                 )))
             }
             let personCount = await currentPersonCount(database: database)
@@ -1073,7 +1073,7 @@ public enum FaceClustering {
         } catch {
             JSONLog.shared.error(ev: "face_cluster_persist_failed", error: "\(error)")
             await sink.emit(.error(EngineError(kind: "face_cluster_persist_failed",
-                message: "Face evidence changed or could not be saved. Refresh People and try again.")))
+                message: "FileID couldn't save the face groups. Open People and try again.")))
             let personCount = await currentPersonCount(database: database)
             return FaceClusteringResult(personCount: personCount, faceCount: decoded.count,
                 unmatchedFaces: unmatched, durationSeconds: Date().timeIntervalSince(started),
@@ -1915,7 +1915,7 @@ public enum FaceClustering {
             JSONLog.shared.error(ev: "face_print_persist_failed", error: "\(error)")
             await sink.emit(.error(EngineError(
                 kind: "face_print_persist_failed",
-                message: "Could not persist extracted prints: \(error)"
+                message: "FileID couldn't save the faces it found. Try again."
             )))
             return nil
         }

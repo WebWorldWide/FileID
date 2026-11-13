@@ -68,7 +68,20 @@ const DEFAULT_PRECISION_FLOOR: f32 = 0.62;
 const SUPPRESSED_TAGS: &[&str] = &[
     "image", "photo", "photograph", "photography", "picture", "face", "catch",
     "stand", "sit", "lay", "pose", "wear",
+    // Measured on the Mac (2026-10-21, 100 owner photos): colours, body parts and
+    // "person/play/game" were 93 of 790 tags and never helped search. On the
+    // private 499-photo set (2026-11-12) dropping them, with `refine_tags`,
+    // moved held-out subject F1 0.537 -> 0.548 by freeing slots.
+    "person", "people", "hair", "head", "hand", "play", "game", "make", "fill", "dark",
+    "blue", "red", "white", "black", "green", "brown", "yellow", "pink", "gray", "grey", "purple",
 ];
+
+/// Generic people words; at most one survives per image (the most likely),
+/// and none when face detection ran and found no face (`tagging.rs`).
+pub const PEOPLE_WORDS: &[&str] = &["man", "woman", "boy", "girl", "child", "couple"];
+
+/// A broader tag dropped when its more specific partner is also present.
+const REDUNDANT_WITH: &[(&str, &str)] = &[("goggles", "sunglasses")];
 
 /// Built-in suppress check (case-insensitive). [`is_suppressed`] also folds in
 /// the per-instance sidecar set.
@@ -225,6 +238,11 @@ impl RamPlusTagger {
             }
 
         let suppress_extra = load_suppress_sidecar(tag_list);
+        let max_tags = std::env::var("FILEID_RAMPLUS_MAX_TAGS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| (1..=512).contains(n))
+            .unwrap_or(DEFAULT_MAX_TAGS);
 
         let mut model = Self {
             session,
@@ -235,7 +253,7 @@ impl RamPlusTagger {
             precision_floor,
             suppress_extra,
             supports_dynamic_batch,
-            max_tags: DEFAULT_MAX_TAGS,
+            max_tags,
         };
 
         let warmup_started = std::time::Instant::now();
@@ -399,10 +417,11 @@ impl RamPlusTagger {
             })
             .collect();
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
-        hits.truncate(self.max_tags);
-        hits.into_iter()
-            .map(|(i, p)| (self.tags[i].clone(), p))
-            .collect()
+        let mut named: Vec<(String, f32)> =
+            hits.into_iter().map(|(i, p)| (self.tags[i].clone(), p)).collect();
+        refine_tags(&mut named);
+        named.truncate(self.max_tags);
+        named
     }
 
     /// Bilinear resize to 384×384 + ImageNet normalize into a (1,3,384,384)
@@ -426,6 +445,36 @@ impl RamPlusTagger {
         Ok(image::imageops::resize(&src, INPUT_SIZE, INPUT_SIZE, image::imageops::FilterType::Triangle)
             .into_raw())
     }
+}
+
+/// Collapse redundancy before the cap so freed slots go to useful tags
+/// (the Mac's `RamPlusService.refine`): "bat" goes when "baseball bat" is
+/// present (a one-word tag that is the last word of another tag), the
+/// `REDUNDANT_WITH` pairs collapse, and only the strongest people word
+/// survives. `hits` is sorted by score, highest first.
+pub fn refine_tags(hits: &mut Vec<(String, f32)>) {
+    let names: HashSet<String> = hits.iter().map(|(t, _)| t.to_ascii_lowercase()).collect();
+    let heads: HashSet<&str> = names
+        .iter()
+        .filter_map(|name| name.rsplit_once(' ').map(|(_, head)| head))
+        .collect();
+    let mut kept_people_word = false;
+    hits.retain(|(tag, _)| {
+        let name = tag.to_ascii_lowercase();
+        if !name.contains(' ') && heads.contains(name.as_str()) {
+            return false;
+        }
+        if REDUNDANT_WITH.iter().any(|(broad, partner)| *broad == name && names.contains(*partner)) {
+            return false;
+        }
+        if PEOPLE_WORDS.contains(&name.as_str()) {
+            if kept_people_word {
+                return false;
+            }
+            kept_people_word = true;
+        }
+        true
+    });
 }
 
 fn fill_imagenet_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: usize) {
@@ -525,6 +574,22 @@ mod tests {
     }
 
     #[test]
+    fn refine_drops_head_words_redundant_pairs_and_extra_people_words() {
+        let mut hits = vec![
+            ("baseball bat".to_owned(), 0.9),
+            ("boy".to_owned(), 0.85),
+            ("bat".to_owned(), 0.8),
+            ("sunglasses".to_owned(), 0.75),
+            ("man".to_owned(), 0.7),
+            ("goggles".to_owned(), 0.65),
+            ("Baseball".to_owned(), 0.64),
+        ];
+        refine_tags(&mut hits);
+        let names: Vec<&str> = hits.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(names, vec!["baseball bat", "boy", "sunglasses", "Baseball"]);
+    }
+
+    #[test]
     fn sigmoid_monotone() {
         assert!(sigmoid(-10.0) < 0.01);
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
@@ -547,12 +612,15 @@ mod tests {
         assert!(is_suppressed_builtin("lay"));
         assert!(is_suppressed_builtin("pose"));
         assert!(is_suppressed_builtin("wear"));
-        // Content words + emotion/activity tags survive.
+        // Generic people words, body parts and colours (Mac parity).
+        assert!(is_suppressed_builtin("person"));
+        assert!(is_suppressed_builtin("play"));
+        assert!(is_suppressed_builtin("Blue"));
+        // Content words + emotion tags survive.
         assert!(!is_suppressed_builtin("graduation"));
         assert!(!is_suppressed_builtin("mountain"));
-        assert!(!is_suppressed_builtin("person"));
         assert!(!is_suppressed_builtin("smile"));
-        assert!(!is_suppressed_builtin("play"));
+        assert!(!is_suppressed_builtin("boy"));
     }
 
     #[test]

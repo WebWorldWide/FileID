@@ -618,6 +618,67 @@ public class LibraryMergeTests
         Assert.Equal(300, LibraryViewModel.RefreshWindow(sameListing: false, 900));
     }
 
+    private static readonly long[] HeadPrependIds = { 9, 8, 1, 2, 3 };
+    private static readonly long[] HeadReorderIds = { 3, 9, 1, 2 };
+
+    [Fact]
+    public void MergeHeadPage_PutsNewFilesInFrontWithOneEventAndKeepsLoadedPages()
+    {
+        var a = Tile(1);
+        var items = new BatchObservableCollection<FileTile>();
+        items.AppendRange(new[] { a, Tile(2), Tile(3) });
+        var events = new List<System.Collections.Specialized.NotifyCollectionChangedEventArgs>();
+        items.CollectionChanged += (_, e) => events.Add(e);
+
+        var added = LibraryViewModel.MergeHeadPage(items, new[] { Tile(9), Tile(8), Tile(1, proposed: "renamed"), Tile(2) });
+
+        Assert.Equal(2, added);
+        var only = Assert.Single(events);
+        Assert.Equal(System.Collections.Specialized.NotifyCollectionChangedAction.Add, only.Action);
+        Assert.Equal(0, only.NewStartingIndex);
+        Assert.Equal(2, only.NewItems!.Count);
+        Assert.Equal(HeadPrependIds, items.Select(t => t.Id).ToArray());
+        Assert.Same(a, items[2]);
+        Assert.Equal("renamed", a.ProposedName);
+    }
+
+    [Fact]
+    public void MergeHeadPage_NothingNewRaisesNoEvent()
+    {
+        var items = new BatchObservableCollection<FileTile>();
+        items.AppendRange(new[] { Tile(1), Tile(2), Tile(3) });
+        var events = 0;
+        items.CollectionChanged += (_, _) => events++;
+
+        Assert.Equal(0, LibraryViewModel.MergeHeadPage(items, new[] { Tile(1), Tile(2) }));
+        Assert.Equal(0, events);
+    }
+
+    [Fact]
+    public void MergeHeadPage_RescannedFileMovesToTheFrontAndNothingIsLost()
+    {
+        var c = Tile(3);
+        var items = new BatchObservableCollection<FileTile>();
+        items.AppendRange(new[] { Tile(1), Tile(2), c });
+
+        var added = LibraryViewModel.MergeHeadPage(items, new[] { Tile(3), Tile(9), Tile(1) });
+
+        Assert.Equal(1, added);
+        Assert.Equal(HeadReorderIds, items.Select(t => t.Id).ToArray());
+        Assert.Same(c, items[0]);
+    }
+
+    [Fact]
+    public void MergeHeadPage_NoSharedFileAsksForAReload()
+    {
+        var items = new BatchObservableCollection<FileTile>();
+        items.AppendRange(new[] { Tile(1), Tile(2) });
+
+        Assert.Equal(-1, LibraryViewModel.MergeHeadPage(items, new[] { Tile(8), Tile(9) }));
+        Assert.Equal(2, items.Count);
+        Assert.Equal(-1, LibraryViewModel.MergeHeadPage(new BatchObservableCollection<FileTile>(), new[] { Tile(8) }));
+    }
+
     [Fact]
     public void WithoutKnownIds_SkipsTilesAlreadyShownAndRepeatsInPage()
     {

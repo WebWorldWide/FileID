@@ -321,7 +321,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     protected override void OnOpened()
     {
-        _thumbs ??= new ThumbnailService();
+        _thumbs = ThumbnailService.Shared;
         Engine.PropertyChanged += OnEngineChanged;
         if (AppViewModel.Instance.TakeBestTakesCandidates() is { Count: > 0 } handed) OpenWithCandidates(handed);
         _jobPoll.Start();
@@ -341,7 +341,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         StopPlayer(_left);
         StopPlayer(_right);
         StopCards();
-        _thumbs?.Dispose();
         _thumbs = null;
     }
 
@@ -350,7 +349,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             OnProposalEngineChanged(e);
             if (e.PropertyName != nameof(EngineClient.Phase) || Engine.Phase != ScanPhase.Completed) return;
-            DebugLog.Debug($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=Completed");
+            DebugLog.Info($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=Completed");
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (!Lifetime.IsCancellationRequested) Run(ct => LoadGroupsAsync(keepCurrent: true, ct));
@@ -1378,7 +1377,8 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             }
             if (result.Succeeded == 0)
             {
-                var reason = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message ?? "Nothing was moved.";
+                var why = TrashFailureText.Summary(result);
+                var reason = why.Length > 0 ? why : "Nothing was moved.";
                 await UI(() => ShowToast($"Couldn't move to Trash. {reason}", null, PlainToastWindow), ct);
                 return;
             }
@@ -1387,6 +1387,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             var movedIds = result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value).ToArray() ?? Array.Empty<long>();
             var moved = movedIds.Length == 0 ? doomed.Length : TakeReviewPolicy.MovedShots(doomed, movedIds);
             var text = TakeReviewPolicy.MovedText(group, moved, result.Failed);
+            if (result.Failed > 0 && TrashFailureText.Summary(result) is { Length: > 0 } left) text = $"{TakeReviewPolicy.MovedText(group, moved, 0)}. {left}";
             var batch = result.Action.Contains(':', StringComparison.Ordinal) ? result.Action[(result.Action.IndexOf(':', StringComparison.Ordinal) + 1)..] : null;
             var reopen = TakeReviewPolicy.KeptTogether(group, qualities, keep, "reopen");
             await UI(() => ShowToast(

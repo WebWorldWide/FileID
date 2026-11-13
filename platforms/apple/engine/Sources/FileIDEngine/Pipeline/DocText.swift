@@ -108,9 +108,15 @@ enum DocText {
     private static func pdfText(_ url: URL, maxChars: Int) -> String? {
         guard let pdf = PDFDocument(url: url) else { return nil }
         var acc = ""
+        // UTF-16 length is O(1); `acc.count` re-walked the whole string every page.
+        // One character is at most a few UTF-16 units, so 4x never stops short.
+        var length = 0
         for i in 0..<pdf.pageCount {
-            if acc.count >= maxChars { break }
-            if let s = pdf.page(at: i)?.string { acc += s + "\n" }
+            if length >= maxChars * 4 { break }
+            if let s = pdf.page(at: i)?.string {
+                acc += s + "\n"
+                length += s.utf16.count + 1
+            }
         }
         return acc.isEmpty ? nil : acc
     }

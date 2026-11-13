@@ -118,7 +118,7 @@ internal static class TagChangeJournal
         var groups = GroupByTagSet(confirmedFileIds, priorUserTags);
         if (groups.Count == 0) return;
 
-        UndoStack.Instance.Push(label, async () =>
+        UndoStack.Instance.Push(label, ChangePage.Library, async () =>
         {
             var confirmed = await RestoreGroupsConfirmedAsync(
                 groups,
