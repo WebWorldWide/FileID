@@ -26,7 +26,7 @@ internal static class WorkflowAutoTabRouter
             if (e.PropertyName == nameof(EngineClient.LastFaceClustering))
             {
                 if (EngineClient.Instance.LastFaceClustering is null) return;
-                DebugLog.Debug($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
                 var active = AppViewModel.Instance.ActiveTab;
                 if (active.Id == SidebarTab.Library.Id)
                 {
@@ -37,7 +37,7 @@ internal static class WorkflowAutoTabRouter
             else if (e.PropertyName == nameof(EngineClient.DeepAnalyzeComplete))
             {
                 if (EngineClient.Instance.DeepAnalyzeComplete is null) return;
-                DebugLog.Debug($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
                 var active = AppViewModel.Instance.ActiveTab;
                 if (active.Id == SidebarTab.DeepAnalyze.Id)
                 {

@@ -845,13 +845,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             }
             if (e.PropertyName == nameof(EngineClient.LastError))
             {
-                DebugLog.Debug($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
                 HandleEngineError(EngineClient.Instance.LastError);
                 return;
             }
             if (e.PropertyName == nameof(EngineClient.Info))
             {
-                DebugLog.Debug($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
                 var info = EngineClient.Instance.Info;
                 if (info is not null)
                 {
@@ -954,7 +954,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             : SlotForErrorPath(error.Path);
         if (slot is null)
         {
-            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={error.Path ?? "<null>"})");
+            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={PathRedactor.Redact(error.Path)})");
             return;
         }
         // OpenVINO is an OPTIONAL Intel accelerator that auto-installs in the

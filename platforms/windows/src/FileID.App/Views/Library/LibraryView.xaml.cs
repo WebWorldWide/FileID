@@ -142,7 +142,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 case nameof(EngineClient.Phase):
                     if (EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
                     {
-                        Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
+                        Services.DebugLog.Info($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
                         RequestLibraryRefresh(force: true);
                         DispatcherQueue.TryEnqueue(RefreshOfflineRoots);
                     }
@@ -154,7 +154,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     if (batchIndex == _lastSeenBatchIndex) return;
                     _lastSeenBatchIndex = batchIndex;
                     if (DateTime.UtcNow - _lastReloadAt < LibraryReloadThrottle) return;
-                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
+                    Services.DebugLog.Info($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
                     RequestLibraryRefresh(force: false);
                     break;
                 case nameof(EngineClient.DeepAnalyzeProgress):
@@ -680,7 +680,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // bloat on large libraries). Must run while still attached — the
         // Thumbnail setter no-ops once IsDetached is set just below.
         tile.ClearThumbnailForRecycle();
-        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={tile.Path}");
+        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={Services.PathRedactor.Redact(tile.Path)}");
         // mark detached so a late-arriving thumbnail render
         // doesn't bind into a stale tile.
         tile.IsDetached = true;
@@ -714,7 +714,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null)
             {
-                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={tile.Path}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={Services.PathRedactor.Redact(tile.Path)}");
                 // Hand off from shimmer to a broken-image placeholder so the
                 // tile doesn't shimmer forever. Setter is UI-thread-affined
                 // because it raises PropertyChanged; route through the
@@ -731,7 +731,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             if (ct.IsCancellationRequested || tile.IsDetached)
             {
-                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={tile.Path} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={Services.PathRedactor.Redact(tile.Path)} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
                 return;
             }
             var enqueued = DispatcherQueue.TryEnqueue(() =>
@@ -747,16 +747,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // Pixel dims confirm the bitmap actually carries content. If a
                 // tile is still blank after this, px>0 here means the problem is
                 // layout (image row collapsed), not a 0-pixel decode.
-                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path} px={bmp.PixelWidth}x{bmp.PixelHeight}");
+                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={Services.PathRedactor.Redact(tile.Path)} px={bmp.PixelWidth}x{bmp.PixelHeight}");
             });
             if (!enqueued)
             {
-                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={tile.Path}");
+                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={Services.PathRedactor.Redact(tile.Path)}");
             }
         }
         catch (Exception ex)
         {
-            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={tile.Path} ex={ex.GetType().Name}");
+            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={Services.PathRedactor.Redact(tile.Path)} ex={ex.GetType().Name}");
         }
         finally
         {

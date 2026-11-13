@@ -329,7 +329,7 @@ internal sealed class ThumbnailService : IDisposable
         {
             if (_disposed) return;
             if (e.PropertyName != nameof(EngineClient.LastThumbnailGenerated)) return;
-            DebugLog.Debug($"[ENGINE-SUB:ThumbnailService] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:ThumbnailService] {e.PropertyName}");
             var evt = EngineClient.Instance.LastThumbnailGenerated;
             if (evt is null) return;
 

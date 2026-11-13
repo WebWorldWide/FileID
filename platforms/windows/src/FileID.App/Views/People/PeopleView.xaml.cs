@@ -90,7 +90,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 return;
             }
             if (e.PropertyName != nameof(FileID.ViewModels.EngineClient.LastFaceClustering)) return;
-            DebugLog.Debug($"[ENGINE-SUB:PeopleView] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:PeopleView] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(async () =>
             {
                 if (_unloaded) return;

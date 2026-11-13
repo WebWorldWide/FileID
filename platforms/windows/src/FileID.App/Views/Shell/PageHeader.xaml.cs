@@ -47,7 +47,7 @@ public sealed partial class PageHeader : UserControl
             if (e.PropertyName is nameof(EngineClient.DeepAnalyzeProgress)
                               or nameof(EngineClient.Phase))
             {
-                DebugLog.Debug($"[ENGINE-SUB:PageHeader] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:PageHeader] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncMeta);
             }
         });

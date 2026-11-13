@@ -174,19 +174,19 @@ public sealed partial class RestructureView : UserControl
             switch (e.PropertyName)
             {
                 case nameof(EngineClient.LastRestructurePlan):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
                     break;
                 case nameof(EngineClient.LastRestructureApplyResult):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
                     break;
                 case nameof(EngineClient.CanUndoRestructure):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncUndoAffordance(); });
                     break;
                 case nameof(EngineClient.LastError):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineError(); });
                     break;
                 case nameof(EngineClient.SpawnGeneration):

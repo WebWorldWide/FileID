@@ -350,7 +350,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             OnProposalEngineChanged(e);
             if (e.PropertyName != nameof(EngineClient.Phase) || Engine.Phase != ScanPhase.Completed) return;
-            DebugLog.Debug($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=Completed");
+            DebugLog.Info($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=Completed");
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (!Lifetime.IsCancellationRequested) Run(ct => LoadGroupsAsync(keepCurrent: true, ct));

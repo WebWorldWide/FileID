@@ -97,7 +97,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             if (_disposed) return;
             if (e.PropertyName == nameof(EngineClient.State))
             {
-                DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
                 // any State transition (respawn / crash / shutdown)
                 // invalidates pending embeddings — the engine that received
                 // the embedTextQuery is now gone. Bump the generation +
@@ -120,7 +120,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
                 return;
             }
             if (e.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
-            DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
             var emb = EngineClient.Instance.LastClipTextEmbedding;
             if (emb is null) return;
             if (_inflight.TryRemove(emb.QueryId, out var tcs))

@@ -46,7 +46,7 @@ public sealed partial class SidebarEngineStatus : UserControl
                               or nameof(EngineClient.CrashReason)
                               or nameof(EngineClient.LastError))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarEngineStatus] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarEngineStatus] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
             }
         });

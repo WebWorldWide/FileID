@@ -56,7 +56,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 case nameof(ViewModels.EngineClient.Phase):
                     if (ViewModels.EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
                     {
-                        Services.DebugLog.Debug($"[ENGINE-SUB:CleanupView] {e.PropertyName}=Completed");
+                        Services.DebugLog.Info($"[ENGINE-SUB:CleanupView] {e.PropertyName}=Completed");
                         RequestCleanupRefresh();
                     }
                     break;
@@ -67,7 +67,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                     if (batchIndex == _lastSeenBatchIndex) return;
                     _lastSeenBatchIndex = batchIndex;
                     if (DateTime.UtcNow - _lastReloadAt < CleanupReloadThrottle) return;
-                    Services.DebugLog.Debug($"[ENGINE-SUB:CleanupView] {e.PropertyName} batch={batchIndex}");
+                    Services.DebugLog.Info($"[ENGINE-SUB:CleanupView] {e.PropertyName} batch={batchIndex}");
                     RequestCleanupRefresh();
                     break;
             }

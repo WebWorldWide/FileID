@@ -277,7 +277,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         => DebugLog.SafeRun("CatalogWorkbench.OnAppScopeChanged", () =>
         {
             if (e.PropertyName != nameof(AppViewModel.Scope)) return;
-            DebugLog.Debug($"[ENGINE-SUB:CatalogWorkbench] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:CatalogWorkbench] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(SearchInChosenLocation);
         });
 

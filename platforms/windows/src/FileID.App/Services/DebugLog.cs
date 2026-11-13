@@ -1,7 +1,8 @@
 ﻿// DebugLog — local-only structured logging for the C# app side.
 //
 // Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log. Survives across
-// launches (truncates only when > 10 MB to bound disk usage). NEVER
+// launches (truncates only when > 10 MB to bound disk usage). Debug lines
+// need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled. NEVER
 // transmits — this is enforced by the CI binary scan privacy gate.
 //
 // PRIVACY: every log call site that includes a user file path MUST wrap
@@ -16,18 +17,38 @@ namespace FileID.Services;
 internal static class DebugLog
 {
     private const long MaxLogBytes = 10 * 1024 * 1024;
+    private const string TruncationMarker = "[log truncated; oversized]\n";
     private static readonly object s_writeLock = new();
+    private static readonly UTF8Encoding s_utf8 = new(encoderShouldEmitUTF8Identifier: false);
+    private static FileStream? s_stream;
+    private static string? s_streamPath;
+    private static long s_streamBytes;
+    private static long s_reopenAfterTick;
     private static bool s_traceEnabled;
-    // Writes are intentionally SYNCHRONOUS. An async/batched sink loses the
-    // last <200 ms of lines on a NATIVE fast-fail — exactly the [APPLY:N]/[ENGINE-SUB] tail this
-    // log exists to capture (CLAUDE.md marks it load-bearing). Any future
-    // off-thread sink MUST preserve per-line durability (e.g. a persistent
-    // flushed StreamWriter), verified on hardware. Do not re-batch naively.
+    private static bool s_debugEnabled = ReadDebugSwitch();
+    // One persistent, unbuffered handle: each line is a single synchronous
+    // write to the OS, so it survives a NATIVE fast-fail (the OS keeps what
+    // was written when the process dies) without the per-line open, stat and
+    // close the old File.AppendAllText path paid on the UI thread. A queued
+    // background writer was rejected on purpose: it loses the last lines on a
+    // fast-fail, exactly the [APPLY:N]/[ENGINE-SUB] tail this log exists to
+    // capture (CLAUDE.md marks it load-bearing).
 
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
     public static void Error(string message) => Write("ERROR", message);
-    public static void Debug(string message) => Write("DEBUG", message);
+    public static void Debug(string message)
+    {
+        if (DebugEnabled) Write("DEBUG", message);
+    }
+    /// <summary>Debug lines are skipped unless FILEID_DEBUG_LOG=1 (or
+    /// "true") is set for the app process. Info and above always write, so
+    /// the [APPLY:N]/[ENGINE-SUB] forensic lines must stay at Info.</summary>
+    public static bool DebugEnabled
+    {
+        get => Volatile.Read(ref s_debugEnabled);
+        set => Volatile.Write(ref s_debugEnabled, value);
+    }
     public static bool TraceEnabled
     {
         get => Volatile.Read(ref s_traceEnabled);
@@ -36,6 +57,20 @@ internal static class DebugLog
     public static void Trace(string message)
     {
         if (TraceEnabled) Write("TRACE", message);
+    }
+
+    private static bool ReadDebugSwitch()
+    {
+        try
+        {
+            var value = Environment.GetEnvironmentVariable("FILEID_DEBUG_LOG");
+            return string.Equals(value, "1", StringComparison.Ordinal)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Handler-wrap helper. UI click handlers that call IPC or
@@ -71,28 +106,36 @@ internal static class DebugLog
     {
         try
         {
-            AppPaths.EnsureDirectories();
-            var path = AppPaths.AppLogPath;
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
-            // Synchronous + flushed: a native fast-fail must not lose the last
-            // forensic line (see the field note above). The oversize-truncation
-            // check + rewrite MUST share s_writeLock with the append — when run
-            // outside the lock they race a concurrent locked append and, once the
-            // log passes the cap, silently drop the very forensic tail this log
-            // exists to capture.
+            var bytes = s_utf8.GetBytes(line);
+            // The oversize check, the truncation and the append share
+            // s_writeLock so a concurrent append can never land between the
+            // truncate and the marker and lose the forensic tail.
             lock (s_writeLock)
             {
-                // Bound disk usage by truncating when oversized.
-                if (File.Exists(path))
+                var stream = EnsureStreamLocked();
+                if (stream is null)
                 {
-                    var info = new FileInfo(path);
-                    if (info.Length > MaxLogBytes)
-                    {
-                        File.WriteAllText(path, "[log truncated; oversized]\n");
-                    }
+                    return;
                 }
-                File.AppendAllText(path, line, Encoding.UTF8);
+                try
+                {
+                    if (s_streamBytes > MaxLogBytes)
+                    {
+                        stream.SetLength(0);
+                        stream.Position = 0;
+                        var marker = s_utf8.GetBytes(TruncationMarker);
+                        stream.Write(marker, 0, marker.Length);
+                        s_streamBytes = marker.Length;
+                    }
+                    stream.Write(bytes, 0, bytes.Length);
+                    s_streamBytes += bytes.Length;
+                }
+                catch
+                {
+                    CloseStreamLocked();
+                }
             }
         }
         catch
@@ -100,6 +143,93 @@ internal static class DebugLog
             // Logging must never throw upstream. Disk-full / permission /
             // antivirus quarantine all silently swallowed.
         }
+    }
+
+    private static FileStream? EnsureStreamLocked()
+    {
+        var path = AppPaths.AppLogPath;
+        if (s_stream is not null && string.Equals(s_streamPath, path, StringComparison.Ordinal))
+        {
+            return s_stream;
+        }
+        // After a failed open (folder locked, disk full) wait before trying
+        // again so a broken log never costs a syscall storm per line.
+        var now = Environment.TickCount64;
+        if (s_stream is null && now < Volatile.Read(ref s_reopenAfterTick))
+        {
+            return null;
+        }
+        CloseStreamLocked();
+        try
+        {
+            AppPaths.EnsureDirectories();
+            // bufferSize 1 disables FileStream's own buffer: every Write is
+            // handed straight to the OS.
+            var stream = new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.Write,
+                FileShare.ReadWrite,
+                bufferSize: 1,
+                FileOptions.None);
+            stream.Seek(0, SeekOrigin.End);
+            s_stream = stream;
+            s_streamPath = path;
+            s_streamBytes = stream.Length;
+            return stream;
+        }
+        catch
+        {
+            Volatile.Write(ref s_reopenAfterTick, now + 2000);
+            return null;
+        }
+    }
+
+    private static void CloseStreamLocked()
+    {
+        var stream = s_stream;
+        s_stream = null;
+        s_streamPath = null;
+        s_streamBytes = 0;
+        if (stream is null)
+        {
+            return;
+        }
+        try { stream.Dispose(); } catch { /* best-effort */ }
+    }
+
+    /// <summary>Closes the log handle (nothing is buffered, so there is
+    /// nothing to flush). The next line reopens it.</summary>
+    public static void Close()
+    {
+        try
+        {
+            lock (s_writeLock)
+            {
+                CloseStreamLocked();
+            }
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
+    private static string[] ReadLogTail(int maxLines)
+    {
+        const int TailBytes = 256 * 1024;
+        using var fs = new FileStream(
+            AppPaths.AppLogPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (fs.Length > TailBytes)
+        {
+            fs.Seek(-TailBytes, SeekOrigin.End);
+        }
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        var lines = reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return lines.Length <= maxLines ? lines : lines[^maxLines..];
     }
 
     /// <summary>
@@ -147,11 +277,9 @@ internal static class DebugLog
             {
                 if (File.Exists(AppPaths.AppLogPath))
                 {
-                    var lines = File.ReadAllLines(AppPaths.AppLogPath, Encoding.UTF8);
-                    var start = Math.Max(0, lines.Length - 50);
-                    for (int i = start; i < lines.Length; i++)
+                    foreach (var tailLine in ReadLogTail(50))
                     {
-                        sb.Append(lines[i]);
+                        sb.Append(tailLine.TrimEnd('\r'));
                         sb.Append('\n');
                     }
                 }

@@ -77,7 +77,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         => Services.DebugLog.SafeRun("SuggestedMergesSheet.OnEngineChanged", () =>
         {
             if (e.PropertyName != nameof(EngineClient.LastMergeSuggestions)) return;
-            Services.DebugLog.Debug($"[ENGINE-SUB:SuggestedMergesSheet] {e.PropertyName}");
+            Services.DebugLog.Info($"[ENGINE-SUB:SuggestedMergesSheet] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(Render);
         });
 
