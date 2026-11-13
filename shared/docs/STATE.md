@@ -4,6 +4,11 @@
 
 - `TrashJournal.reconcile` now also walks the valid entries of `trash_log.json` (HMAC-checked with the shared key, never modified) and drops catalog rows of files provably in the Trash (original path gone, Trash entry found by recorded path or inode), the same rules as for its own journal. It no longer returns early when its own journal is empty. `RustTrashLog.verifiedBatches` is shared with `find`.
 - Test `reconcileReadsTheRustLogAfterAKill` (Rust-format log, batch killed midway, forged entry, restart on the same catalog, test Trash folder only).
+## 2026-11-12 — NEXT.md leftovers checked against the code (`agent/left-verify`, docs only)
+
+- Ticked: the Stage 1 leftovers (merged the two duplicate lines; the app-hosted scan writes no `rust-align112-v1` faces), and the Convergence item (Stage 10 bundles the pinned official ORT 1.22.0 dylib).
+- Narrowed: Stage 2 (the Swift test Trash root is done; the startup reconcile still reads only `trash-journal.json`) and Stage 6 (the `ffi.rs` digest and the SFace ORT 1.22 measurement are done; only the group-shot re-label remains).
+- `check_current_docs.py` passes. No engine runs; no code changed.
 
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
