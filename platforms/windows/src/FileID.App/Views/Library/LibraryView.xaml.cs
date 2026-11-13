@@ -23,7 +23,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private int _trashInFlight;
-    private readonly ThumbnailService _thumbnails = new();
+    private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
     // whenever a new BatchSummary lands, but throttled so a fast scan
@@ -352,7 +352,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Step 3: only AFTER ViewModel has cancelled its disposal CTS,
         // tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
-        try { _thumbnails.Dispose(); } catch { /* swallow */ }
         // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
         // in-flight reads use its connection — so the SQLite connection +
         // SemaphoreSlim are released instead of leaking per tab nav.

@@ -48,7 +48,7 @@ internal sealed class ThumbnailService : IDisposable
     internal static Channel<ThumbnailRequest> CreateRequestChannel() =>
         Channel.CreateBounded<ThumbnailRequest>(new BoundedChannelOptions(QueueCapacity)
         {
-            SingleReader = true,
+            SingleReader = false,
             SingleWriter = false,
             FullMode = BoundedChannelFullMode.DropOldest,
         }, dropped => dropped.Completion.TrySetResult(null));
@@ -84,15 +84,22 @@ internal sealed class ThumbnailService : IDisposable
     /// surface). Sizing each entry by its decoded cost and capping the total at
     /// ~128 MB holds the working set bounded across a 50K-file scroll; LRU evicts
     /// the coldest thumbnails and a miss just re-decodes (no correctness hit).</summary>
-    private const long DecodedBytesPerEntry = (long)ThumbnailRequestPx * ThumbnailRequestPx * 4;
     private const long L1CacheByteBudget = 128L * 1024 * 1024;
-    private readonly MemoryCache _cache = new(new MemoryCacheOptions
-    {
-        SizeLimit = L1CacheByteBudget,
-    });
+    private const long L1CacheByteBudgetHighDpi = 256L * 1024 * 1024;
+    /// <summary>Shell and disk work runs on this many drains at once; every
+    /// BitmapImage is still built on the UI dispatcher.</summary>
+    internal const int WorkerCount = 3;
+    private readonly long _decodedBytesPerEntry;
+    private readonly int _requestPx;
+    private readonly MemoryCache _cache;
     private readonly Channel<ThumbnailRequest> _queue;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Task _worker;
+    private static ThumbnailService? s_shared;
+
+    /// <summary>The one app-lifetime service every page uses, so the decoded
+    /// cache survives tab switches. First touched on the UI thread (the
+    /// constructor captures that dispatcher). Pages must not dispose it.</summary>
+    internal static ThumbnailService Shared => s_shared ??= new ThumbnailService();
     private static long _renderedOk;
     private static long _renderedFailed;
     private static long _droppedDispatcher;
@@ -146,9 +153,16 @@ internal sealed class ThumbnailService : IDisposable
         // capture the UI dispatcher at ctor time. Service is
         // expected to be constructed on the UI thread.
         _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        _videoPixelSize = VideoPixelSize(_uiDispatcher?.HasThreadAccess == true
+        var scale = _uiDispatcher?.HasThreadAccess == true
             ? FileID.App.HostWindow?.Content?.XamlRoot?.RasterizationScale ?? 1
-            : 1);
+            : 1;
+        _videoPixelSize = VideoPixelSize(scale);
+        _requestPx = ImagePixelSize(scale);
+        _decodedBytesPerEntry = (long)_requestPx * _requestPx * 4;
+        _cache = new MemoryCache(new MemoryCacheOptions
+        {
+            SizeLimit = _requestPx > TilePx ? L1CacheByteBudgetHighDpi : L1CacheByteBudget,
+        });
         // Bigger queue: a fast scroll on a 256-px tile grid generates
         // 50+ requests/sec. The previous 64-slot cap dropped older
         // requests within ~1 second of fast scrolling. 256 absorbs
@@ -157,10 +171,13 @@ internal sealed class ThumbnailService : IDisposable
         // attach a fault sink so a DrainAsync exception leaves a
         // forensic trail instead of becoming an UnobservedTaskException
         // at GC time.
-        _worker = Task.Run(() => DrainAsync(_cts.Token));
-        _ = _worker.ContinueWith(
-            t => DebugLog.Error("ThumbnailService worker faulted: " + t.Exception),
-            TaskContinuationOptions.OnlyOnFaulted);
+        for (var i = 0; i < WorkerCount; i++)
+        {
+            var worker = Task.Run(() => DrainAsync(_cts.Token));
+            _ = worker.ContinueWith(
+                t => DebugLog.Error("ThumbnailService worker faulted: " + t.Exception),
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
         // Out-of-process video keyframes: the engine replies with a
         // `thumbnailGenerated` event (surfaced as LastThumbnailGenerated). We
         // L2-write it, decode it on the UI thread, and complete the tile's
@@ -207,7 +224,7 @@ internal sealed class ThumbnailService : IDisposable
                 // No ConfigureAwait(false): the returned BitmapImage is a
                 // UI-thread DispatcherObject, so keep the continuation (and the
                 // caller's, which sets tile.Thumbnail) on the UI thread.
-                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _videoPixelSize, _uiDispatcher, linked.Token);
+                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _videoPixelSize, _requestPx, _uiDispatcher, linked.Token);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
@@ -215,7 +232,7 @@ internal sealed class ThumbnailService : IDisposable
                     {
                         Size = VideoExtensions.Contains(Path.GetExtension(req.Path))
                             ? (long)_videoPixelSize * _videoPixelSize * 4
-                            : DecodedBytesPerEntry,
+                            : _decodedBytesPerEntry,
                         SlidingExpiration = TimeSpan.FromMinutes(15),
                     });
                     req.Completion.TrySetResult(bmp);
@@ -462,13 +479,31 @@ internal sealed class ThumbnailService : IDisposable
     }
 
     /// <summary>
-    /// Shell-thumbnail request size. 192-px matches macOS ThumbnailService.swift
-    /// (the shell uses the same IThumbnailProvider chain as Explorer — Office /
-    /// raw / .heic all work). Do NOT add per-window DPI scaling here: the WinRT
-    /// `GetWindowHandle` interop is UI-thread-affined and, called from this
-    /// worker-thread drain, poisoned later `SetSourceAsync` calls.
+    /// Base size for video keyframes (<see cref="VideoPixelSize"/>). 192-px
+    /// matches macOS ThumbnailService.swift.
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
+
+    /// <summary>Library tile width in device-independent pixels.</summary>
+    internal const int TilePx = 256;
+    private static readonly int[] s_imagePixelBuckets = { 256, 384, 512, 768 };
+
+    /// <summary>Physical pixels asked of the shell and decoded for an image
+    /// tile: the tile size times the display scale, rounded up to a bucket so
+    /// the disk cache holds a handful of sizes, not one per scale. The scale
+    /// is read once on the UI thread at construction: reading it from a
+    /// worker drain (the WinRT window interop is UI-thread-affined) poisoned
+    /// later `SetSourceAsync` calls.</summary>
+    internal static int ImagePixelSize(double scale)
+    {
+        var factor = double.IsFinite(scale) && scale > 0 ? scale : 1;
+        var wanted = TilePx * factor;
+        foreach (var bucket in s_imagePixelBuckets)
+        {
+            if (wanted <= bucket) return bucket;
+        }
+        return s_imagePixelBuckets[^1];
+    }
 
     /// <summary>Long side asked of the engine's video keyframe (schema 1.20
     /// <c>maxPixelSize</c>): the tile size times the display scale, capped at
@@ -545,6 +580,7 @@ internal sealed class ThumbnailService : IDisposable
         string path,
         double? modifiedAt,
         int videoPixelSize,
+        int requestPx,
         Microsoft.UI.Dispatching.DispatcherQueue? uiDispatcher,
         CancellationToken ct)
     {
@@ -571,7 +607,7 @@ internal sealed class ThumbnailService : IDisposable
 
         // 0) Disk cache — survives app restart.
         int? diskVideoSize = VideoExtensions.Contains(ext) ? videoPixelSize : null;
-        var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct, diskVideoSize)
+        var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct, diskVideoSize, requestPx)
             .ConfigureAwait(false);
         if (diskHit != null)
         {
@@ -615,19 +651,19 @@ internal sealed class ThumbnailService : IDisposable
             using var thumb = await file
                 .GetThumbnailAsync(
                     Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
-                    ThumbnailRequestPx,
-                    Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale)
+                    (uint)requestPx,
+                    Windows.Storage.FileProperties.ThumbnailOptions.ResizeThumbnail)
                 .AsTask(ct)
                 .ConfigureAwait(false);
             if (thumb != null && thumb.Size > 0)
             {
                 var bytes = await ReadAllBytesAsync(thumb, ct).ConfigureAwait(false);
                 if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] SHELL_OK file={PathRedactor.Redact(path)} bytes={bytes.Length}");
-                var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
+                var bmp = await RenderFromBytesOnDispatcherAsync(bytes, requestPx, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
                     if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=shell");
-                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, bytes);
+                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, bytes, null, requestPx);
                     Interlocked.Increment(ref _renderedOk);
                     return bmp;
                 }
@@ -659,12 +695,12 @@ internal sealed class ThumbnailService : IDisposable
             try
             {
                 var fileBytes = await ReadFallbackFileBytesAsync(path, ct).ConfigureAwait(false);
-                var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, dispatcher, ct).ConfigureAwait(false);
+                var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, requestPx, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
                     if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] IMG_FB_OK file={PathRedactor.Redact(path)}");
                     if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=image-fallback");
-                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, fileBytes);
+                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, fileBytes, null, requestPx);
                     Interlocked.Increment(ref _fallbackUsed);
                     Interlocked.Increment(ref _renderedOk);
                     return bmp;
@@ -718,12 +754,13 @@ internal sealed class ThumbnailService : IDisposable
     /// for mid-scan files.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,
+        int decodePx,
         Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
         CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<BitmapImage?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        var ok = TryEnqueueWithRetry(dispatcher, () => RunBytesSetSource(bytes, tcs, ct));
+        var ok = TryEnqueueWithRetry(dispatcher, () => RunBytesSetSource(bytes, decodePx, tcs, ct));
         if (!ok)
         {
             Interlocked.Increment(ref _droppedDispatcher);
@@ -734,6 +771,7 @@ internal sealed class ThumbnailService : IDisposable
 
     private static async void RunBytesSetSource(
         byte[] bytes,
+        int decodePx,
         TaskCompletionSource<BitmapImage?> tcs,
         CancellationToken ct)
     {
@@ -753,14 +791,14 @@ internal sealed class ThumbnailService : IDisposable
                 writer.DetachStream();
             }
             stream.Seek(0);
-            var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
+            var bmp = new BitmapImage { DecodePixelWidth = decodePx };
             await bmp.SetSourceAsync(stream).AsTask(ct);
-            if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} px={ThumbnailRequestPx}");
+            if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} px={decodePx}");
             tcs.TrySetResult(bmp);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"[THUMB] DECODE_FAIL ex={ex.GetType().Name} msg={ex.Message} bytes={bytes.Length} px={ThumbnailRequestPx}");
+            DebugLog.Warn($"[THUMB] DECODE_FAIL ex={ex.GetType().Name} msg={ex.Message} bytes={bytes.Length} px={decodePx}");
             tcs.TrySetResult(null);
         }
         finally
@@ -789,6 +827,7 @@ internal sealed class ThumbnailService : IDisposable
     public void Dispose()
     {
         _disposed = true;
+        if (ReferenceEquals(s_shared, this)) s_shared = null;
         try { EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
         // Release any tiles still waiting on an engine video keyframe so the
         // awaiting RequestAsync callers don't hang on shutdown. (_cts.Cancel

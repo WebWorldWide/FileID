@@ -300,7 +300,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
         AppViewModel.Instance.PropertyChanged += OnAppScopeChanged;
         UseMomentsQuery();
-        _thumbs ??= new ThumbnailService();
+        _thumbs = ThumbnailService.Shared;
         _poll.Start();
         _ = PollAsync();
         if (_evidence.Player is not null) _playhead.Start();
@@ -312,7 +312,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
         _poll.Stop();
         _playhead.Stop();
-        _thumbs?.Dispose();
         _thumbs = null;
     }
 

@@ -28,7 +28,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private static readonly TimeSpan CleanupReloadThrottle = TimeSpan.FromSeconds(1);
     // Per-tile shell thumbnails (macOS CopyTile parity) — loaded lazily via the
     // members repeater's ElementPrepared, cancelled on recycle, like LibraryView.
-    private readonly ThumbnailService _thumbnails = new();
+    private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<DuplicateMember, CancellationTokenSource> _inflightThumbs = new();
 
     public CleanupView()
@@ -219,7 +219,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
         _inflightThumbs.Clear();
-        try { _thumbnails.Dispose(); } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 

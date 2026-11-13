@@ -329,10 +329,16 @@ internal sealed class NameStyleCard : UserControl
     {
         var selection = SelectionRegistry.Instance.LibrarySelection;
         if (selection.Count > 0) return NameStylePolicy.FileIds(selection, Array.Empty<long>());
-        using var store = new ReadStore(AppPaths.DbPath);
-        await store.OpenAsync(ct).ConfigureAwait(true);
-        var pending = await store.PendingProposedRenamesAsync(NameStylePolicy.MaxFiles, ct).ConfigureAwait(true);
-        return NameStylePolicy.FileIds(Array.Empty<long>(), pending.Select(p => p.Id).ToArray());
+        // Microsoft.Data.Sqlite's async calls run synchronously, so the read
+        // has to leave the UI thread explicitly.
+        var pendingIds = await Task.Run(async () =>
+        {
+            using var store = new ReadStore(AppPaths.DbPath);
+            await store.OpenAsync(ct).ConfigureAwait(false);
+            var pending = await store.PendingProposedRenamesAsync(NameStylePolicy.MaxFiles, ct).ConfigureAwait(false);
+            return pending.Select(p => p.Id).ToArray();
+        }, ct).ConfigureAwait(true);
+        return NameStylePolicy.FileIds(Array.Empty<long>(), pendingIds);
     }
 
     private async Task PreviewAsync()

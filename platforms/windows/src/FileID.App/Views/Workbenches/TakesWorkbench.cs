@@ -321,7 +321,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     protected override void OnOpened()
     {
-        _thumbs ??= new ThumbnailService();
+        _thumbs = ThumbnailService.Shared;
         Engine.PropertyChanged += OnEngineChanged;
         if (AppViewModel.Instance.TakeBestTakesCandidates() is { Count: > 0 } handed) OpenWithCandidates(handed);
         _jobPoll.Start();
@@ -341,7 +341,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         StopPlayer(_left);
         StopPlayer(_right);
         StopCards();
-        _thumbs?.Dispose();
         _thumbs = null;
     }
 
