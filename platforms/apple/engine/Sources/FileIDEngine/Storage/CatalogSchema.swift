@@ -354,4 +354,7 @@ CREATE UNIQUE INDEX face_queue_dismissals_key ON face_queue_dismissals(kind,file
 CREATE TABLE face_refresh_backlog (face_id INTEGER NOT NULL REFERENCES face_prints(id) ON DELETE CASCADE,embedding_model TEXT NOT NULL,processing_version TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','done','missing','offline','failed')),attempts INTEGER NOT NULL DEFAULT 0,reason TEXT,updated_at REAL NOT NULL,PRIMARY KEY(face_id,embedding_model,processing_version));
 CREATE INDEX face_refresh_backlog_state ON face_refresh_backlog(embedding_model,processing_version,state,face_id);
 """#
+    static let v34 = #"""
+CREATE TABLE scan_catchup (file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,stages INTEGER NOT NULL CHECK(stages BETWEEN 1 AND 7),size_bytes INTEGER NOT NULL,modified_at REAL,vision TEXT,face_count INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL);
+"""#
 }

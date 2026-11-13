@@ -47,6 +47,9 @@ public struct TaggedFile: Sendable {
     public var faceYaws: [Double?]           // radians, parallel to faceBBoxes; nil = missing
     public var facePitches: [Double?]        // radians, parallel to faceBBoxes; nil = missing
     public var faceMinDimPx: [Double]        // min(w,h) absolute source px, parallel to faceBBoxes
+    /// The stored hold decision of each face, for a row copied from the catalog:
+    /// pose and pixel size are not stored, so the gate cannot be recomputed.
+    var faceExcluded: [Bool]?
     public var ocrText: String?              // empty/nil if no text or skipped
     /// Extracted document/PDF text — the SAME text fed to BGE — persisted into the
     /// `doc_text` table so the v15 AFTER INSERT trigger fills `doc_fts` for full-text
@@ -73,6 +76,9 @@ public struct TaggedFile: Sendable {
     public var ocrCarefulMs: Double = 0
     /// The OCR text came from Vision's accurate tier reading handwriting.
     public var ocrHandwritten = false
+    /// Work the scan still owes this file (RAM++ tags, careful text read);
+    /// written to `scan_catchup` with the row and settled by `ScanCatchUp`.
+    var catchUp: ScanCatchUp.Marker?
 
     // CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
@@ -90,6 +96,9 @@ public struct TaggedFile: Sendable {
     // timeout (empty result) cannot wipe a file's previously-persisted auto-tags,
     // OCR text + FTS, or — critically — manual person_id assignments on a
     // rescan. Default FALSE: the safe, no-delete state for any partial row.
+    /// Set by discovery's moved-file shortcut: the row is only re-bound to this
+    /// path (rename/move heal). Nothing was analysed, so nothing else is written.
+    var healOnly = false
     public var tagsEvaluated: Bool
     public var facesEvaluated: Bool
     public var ocrStageRan: Bool
@@ -337,13 +346,13 @@ public actor DBWriter {
             let userMessage: String
             switch primary {
             case .SQLITE_IOERR:
-                userMessage = "The database is no longer reachable mid-scan (SQLite I/O error). This usually means another FileID process held the .sqlite file. Quit FileID completely (⌘Q), then re-run ./run.sh — it now kills stale processes before wiping."
+                userMessage = "FileID lost access to its library during the scan. Quit FileID completely (⌘Q), reopen it and scan again."
             case .SQLITE_BUSY, .SQLITE_LOCKED:
-                userMessage = "Another FileID process is holding the database. Quit FileID (⌘Q) and re-run ./run.sh."
+                userMessage = "Another copy of FileID is using the library. Quit FileID completely (⌘Q), reopen it and scan again."
             case .SQLITE_FULL:
-                userMessage = "Disk full — free space and re-run."
+                userMessage = "Your disk is full. Free up some space, then scan again."
             default:
-                userMessage = "Batch \(self.batchIndex) write failed: \(error)"
+                userMessage = "FileID couldn't save some scan results."
             }
             self.consecutiveCommitFailures += 1
             if self.abortedForWriteFailure {
@@ -354,7 +363,7 @@ public actor DBWriter {
                 await self.coordinator.requestCancel()
                 await sink.emit(.error(EngineError(
                     kind: "db_write_failed",
-                    message: userMessage + " Scan stopped — nothing was being saved."
+                    message: userMessage + " The scan stopped because results weren't being saved."
                 )))
             } else {
                 await sink.emit(.error(EngineError(
@@ -533,6 +542,20 @@ public actor DBWriter {
                     SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
                     """),
                 arguments: [file.url.path])
+        }
+
+        if file.healOnly {
+            if let existing {
+                let fileID: Int64 = existing["id"]
+                try db.cachedStatement(sql: "UPDATE files SET scanned_at = ? WHERE id = ?")
+                    .execute(arguments: [Date().timeIntervalSince1970, fileID])
+            } else {
+                // The old path came back or the new one was taken between the walk
+                // and this write. No row is made from an unanalysed file; the next
+                // scan sees it as new.
+                JSONLog.shared.info(ev: "rename_heal_deferred", path: redactPathForLog(file.url.path))
+            }
+            return
         }
 
         // A failure on a file that scanned before (transient decode error, NAS
@@ -725,6 +748,22 @@ public actor DBWriter {
             }
         }
 
+        // 2b. What the scan still owes this file. A full analysis replaces any
+        // earlier marker, in the same transaction as the tags it describes.
+        if file.tagsEvaluated || file.ocrStageRan {
+            if let owed = file.catchUp, owed.stages & ScanCatchUp.owedMask != 0 {
+                try db.cachedStatement(sql: """
+                    INSERT OR REPLACE INTO scan_catchup
+                      (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                    """).execute(arguments: [fileID, owed.stages, Int(file.sizeBytes), newModified, owed.vision,
+                                             owed.faceCount, Date().timeIntervalSince1970])
+            } else {
+                try db.cachedStatement(sql: "DELETE FROM scan_catchup WHERE file_id = ?")
+                    .execute(arguments: [fileID])
+            }
+        }
+
         // 3. OCR text. The ocr_fts external-content index is maintained by the
         // AFTER INSERT/DELETE/UPDATE sync triggers (fts_sync_triggers
         // migration), so we only touch ocr_text here. Gate the delete-then-insert
@@ -801,9 +840,10 @@ public actor DBWriter {
                     // fails OPEN on the size gate — quality/area/pose still apply.
                     let minDimPx: Double = i < file.faceMinDimPx.count
                         ? file.faceMinDimPx[i] : Double.greatestFiniteMagnitude
-                    let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                                   pitch: pitch, bboxArea: bboxArea,
-                                                   bboxMinDimPx: minDimPx)
+                    let stored = file.faceExcluded.flatMap { i < $0.count ? $0[i] : nil }
+                    let excluded = stored ?? Self.isExcluded(quality: quality, yaw: yaw,
+                                                             pitch: pitch, bboxArea: bboxArea,
+                                                             bboxMinDimPx: minDimPx)
                     try db.cachedStatement(sql: """
                         INSERT INTO face_prints
                           (file_id, print_data, bbox, face_quality, excluded)
@@ -837,7 +877,7 @@ public actor DBWriter {
     /// skip-set's content_hash carve-out (scan_session.rs), which likewise
     /// keeps a file whose derived data is still missing IN the pipeline.
     static let skipSetClipBackfillExclusionSQL = """
-        NOT (files.kind IN ('image','video') AND NOT EXISTS (
+        NOT ((files.kind = 'image' OR (files.kind = 'video' AND files.text_stage_done = 0)) AND NOT EXISTS (
             SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id
               AND model = '\(CLIPEmbeddingSpace.modelID)' AND length(embedding) = 2048))
         """
@@ -907,6 +947,7 @@ public actor DBWriter {
         newPathSearch: String, oldPathExists: [String: Bool], db: GRDB.Database
     ) throws -> Int64? {
         let refInt = fileRef.map { Int64(bitPattern: $0) }
+        let contentHash = healHash(contentHash, size: newSize)
         let candidates = try Row.fetchAll(
             db.cachedStatement(sql: """
                 SELECT id, path_text,
@@ -916,6 +957,7 @@ public actor DBWriter {
                   AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
                        OR (content_hash IS NOT NULL AND content_hash = ?3))
                 ORDER BY by_ref DESC
+                LIMIT \(healCandidateLimit)
                 """),
             arguments: [newPath, refInt, contentHash, newSize])
         for row in candidates {
@@ -950,6 +992,16 @@ public actor DBWriter {
         return nil
     }
 
+    /// Thousands of empty or near-empty files share one content hash, so matching
+    /// a move by hash there costs a probe per look-alike per file (quadratic) and
+    /// proves nothing. Those files heal by inode only.
+    static let healHashMinimumBytes: Int64 = 4096
+    static let healCandidateLimit = 16
+
+    static func healHash(_ hash: Data?, size: Int64) -> Data? {
+        size >= healHashMinimumBytes ? hash : nil
+    }
+
     /// Old-path-gone probe for the rename-heal gate. `lstat` (not `stat`) so a
     /// dangling symlink still counts as PRESENT and is never treated as a move,
     /// mirroring the Windows `symlink_metadata` gate.
@@ -970,15 +1022,24 @@ public actor DBWriter {
     private func healOldPathExistence(_ batchFiles: [TaggedFile]) async -> [String: Bool] {
         let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
             var paths: Set<String> = []
+            let atPath = try db.cachedStatement(sql: "SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?)")
+            let lookup = try db.cachedStatement(sql: """
+                SELECT path_text,
+                       (?2 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4) AS by_ref
+                FROM files
+                WHERE path_text != ?1
+                  AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
+                       OR (content_hash IS NOT NULL AND content_hash = ?3))
+                ORDER BY by_ref DESC
+                LIMIT \(Self.healCandidateLimit)
+                """)
             for file in batchFiles {
-                guard file.fileRef != nil || file.contentHash != nil else { continue }
+                let hash = Self.healHash(file.contentHash, size: file.sizeBytes)
+                guard file.fileRef != nil || hash != nil else { continue }
+                // The heal only runs for a path with no row yet.
+                if try Bool.fetchOne(atPath, arguments: [file.url.path]) == true { continue }
                 let refInt = file.fileRef.map { Int64(bitPattern: $0) }
-                let rows = try Row.fetchAll(db, sql: """
-                    SELECT path_text FROM files
-                    WHERE path_text != ?1
-                      AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
-                           OR (content_hash IS NOT NULL AND content_hash = ?3))
-                    """, arguments: [file.url.path, refInt, file.contentHash, file.sizeBytes])
+                let rows = try Row.fetchAll(lookup, arguments: [file.url.path, refInt, hash, file.sizeBytes])
                 for row in rows { paths.insert(row["path_text"]) }
             }
             return paths

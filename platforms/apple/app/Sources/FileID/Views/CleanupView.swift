@@ -26,17 +26,23 @@ struct CleanupView: View {
     @State private var exactPreviewPartial = false
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
-    /// Single-flight guard: the per-group/header "Delete" buttons have no
-    /// confirmation, so a rapid double-tap would otherwise trash the same files
-    /// twice (the 2nd fails "already in Trash" → a confusing "1 failed").
+    @State private var exactCapped = false
+    /// Single-flight guard: a rapid double-tap on the confirmation would
+    /// otherwise trash the same files twice (the 2nd fails "already in Trash").
     @State private var deleting = false
     @State private var confirmDelete: Bool = false
+    /// The one group a per-group "Move to Trash" button asked about; nil means the header button (every visible group).
+    @State private var confirmGroup: DuplicateGroup?
 
     /// Initialized lazily on first reload to non-keepers per group.
     @State private var selection: Set<Int64> = []
-    @State private var skippedGroups: Set<Int64> = []
+    @State private var skippedGroups: Set<Int64> = CleanupSession.skipped["exact"] ?? []
     @State private var reloadTask: Task<Void, Never>?
+    @State private var lastScanTimeReload = Date.distantPast
     @State private var reloadPending = false
+    @Environment(\.pageActive) private var pageActive
+    /// Files changed, or a comparison was cut short, while another page was shown.
+    @State private var staleWhileHidden = false
 
     /// Mirrors LibraryView: true while the engine is discovering, tagging, or
     /// post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz
@@ -88,44 +94,52 @@ struct CleanupView: View {
             store.openIfPossible()
             reload()
         }
-        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-            if new != lastSeenBatchIndex {
-                lastSeenBatchIndex = new
-                store.notifyChanged()
-                // Exact mode's reload() runs a live full-file SHA-256 pass over up
-                // to ExactDuplicateVerifier.candidateCap candidates; the digest
-                // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
-                // keeps the whole candidate set hot and contends with the engine's
-                // scan reads on the same drive for the entire scan. Defer the exact
-                // re-verify to scan completion (the lastTerminalEventAt handler
-                // below). Similar mode's perceptual index is cheap and drive-light,
-                // so it keeps refreshing live. (reload storm)
-                if isSimilar || !scanActive { reload() }
-            }
+        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
+            if pageActive { scanBatchArrived() } else { staleWhileHidden = true }
         }
+        .onDisappear { reloadTask?.cancel() }
         // Exact mode skips its per-batch reload during a live scan, so the final
         // verified set — and the last batch the scan-active skip drops — is computed
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's
         // terminal reload; single-flight reload() coalesces if one is in flight.
         .onChange(of: engine.lastTerminalEventAt) { _, _ in
+            guard pageActive else { staleWhileHidden = true; return }
             store.notifyChanged()
             reload()
         }
+        // Leaving stops an unfinished comparison, as it did when the page was
+        // rebuilt on every visit; coming back runs it again only if it was cut
+        // short or files changed meanwhile.
+        .onPageVisibility(shown: {
+            guard staleWhileHidden else { return }
+            staleWhileHidden = false
+            lastSeenBatchIndex = engine.lastBatch?.batchIndex ?? -1
+            store.notifyChanged()
+            reload()
+        }, hidden: {
+            if reloadTask != nil {
+                reloadTask?.cancel()
+                reloadPending = false
+                staleWhileHidden = true
+            }
+        })
         .onChange(of: confirmDelete) { _, presented in
             // Dialog dismissed (confirm, cancel, or click-away): apply any scan
             // batches we deferred while it was open, re-deriving keepers.
             if !presented { reload() }
         }
+        .onChange(of: skippedGroups) { _, new in CleanupSession.skipped[mode] = new }
         .onChange(of: mode) { _, _ in
             // Switching modes starts from a clean slate — nothing carries over,
             // and Similar mode must begin with NOTHING pre-selected for deletion.
             selection.removeAll()
-            skippedGroups.removeAll()
+            skippedGroups = CleanupSession.skipped[mode] ?? []
             status = nil
             statusWarning = false
             exactPreviewPartial = false
             exactCandidateCount = 0
             exactSkipped = 0
+            exactCapped = false
             groups = []
             reload()
         }
@@ -190,14 +204,16 @@ struct CleanupView: View {
                 .disabled(totalSelected == 0)
                 .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
                 .confirmationDialog(
-                    "Move \(totalSelected) file\(totalSelected == 1 ? "" : "s") to Trash?",
+                    "Move \(confirmCount) file\(confirmCount == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
                     titleVisibility: .visible
                 ) {
                     Button("Move to Trash", role: .destructive) {
-                        Task { await trashSelected(across: visibleGroups) }
+                        let targets = confirmGroup.map { [$0] } ?? visibleGroups
+                        confirmGroup = nil
+                        Task { await trashSelected(across: targets) }
                     }
-                    Button("Cancel", role: .cancel) { }
+                    Button("Cancel", role: .cancel) { confirmGroup = nil }
                 } message: {
                     Text(confirmDeleteMessage)
                 }
@@ -222,7 +238,7 @@ struct CleanupView: View {
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
-            result += " · more may exist"
+            if exactCapped { result += " · more may exist" }
             if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }
         }
         return result
@@ -252,7 +268,9 @@ struct CleanupView: View {
             EmptyStateView(
                 icon: "exclamationmark.magnifyingglass",
                 title: "No extra copies found so far",
-                message: "FileID checked part of this library (\(exactCandidateCount) files of the same size) and found no exact copies. Rescan later to check the rest."
+                message: exactCapped
+                    ? "FileID compared the most likely files and found no exact copies. It checks a limited number at a time, so a very large library may still hold some."
+                    : "No exact copies among the files FileID could read. \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, for example because a drive is disconnected."
             )
         } else if isSimilar {
             EmptyStateView(
@@ -295,7 +313,7 @@ struct CleanupView: View {
                               ? "exclamationmark.triangle.fill" : "info.circle")
                             .foregroundStyle(exactPreviewPartial ? Theme.warning : Theme.delight)
                         Text(exactPreviewPartial
-                             ? "**Some files weren't checked yet.** Every group below is an exact copy, checked byte by byte, but more copies may exist. Rescan later to check the rest."
+                             ? partialNotice(shown: visible.count)
                              : "Each group is the same file saved more than once, checked byte by byte. FileID marks one copy **KEEP**; click any other copy to choose it, then press Move to Trash. You can undo it right after.")
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
@@ -318,7 +336,7 @@ struct CleanupView: View {
                         onSelectAllExceptKeeper: { setGroupNonKeepers(group) },
                         onInvert: { invertGroup(group) },
                         onSkip: { skippedGroups.insert(group.id) },
-                        onDeleteGroup: { Task { await trashSelectedInGroup(group) } }
+                        onDeleteGroup: { confirmGroup = group; confirmDelete = true }
                     )
                 }
                 if let s = status {
@@ -387,12 +405,41 @@ struct CleanupView: View {
     // MARK: - Trash actions
 
     private var confirmDeleteMessage: String {
-        let mb = totalSelectedSize
-        return "Moves the selected copies to Trash. Frees about \(mb). You can undo it right after, or put them back from the Trash later."
+        let bytes = confirmGroup.map { group in
+            group.files.reduce(Int64(0)) { $0 + (selection.contains($1.id) ? $1.sizeBytes : 0) }
+        }
+        let size = bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? totalSelectedSize
+        var message = "Moves the selected \(isSimilar ? "photos" : "copies") to Trash. Frees about \(size). You can undo it right after, or put them back from the Trash later."
+        if autoTagOn {
+            message += " Kept files get the Finder tag “\(AppSettings.cleanupAutoTagName)”. You can turn that off in Settings."
+        }
+        return message
+    }
+
+    private var autoTagOn: Bool {
+        UserDefaults.standard.object(forKey: AppSettings.cleanupAutoTagKey) == nil
+            ? AppSettings.cleanupAutoTagDefault
+            : UserDefaults.standard.bool(forKey: AppSettings.cleanupAutoTagKey)
+    }
+
+    private func partialNotice(shown: Int) -> LocalizedStringKey {
+        let unread = exactSkipped > 0
+            ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, so \(exactSkipped == 1 ? "it wasn't" : "they weren't") checked."
+            : ""
+        if exactCapped {
+            return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(unread)"
+        }
+        return "**Some files couldn't be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
     }
 
     private func confirmDeleteSelected() {
+        confirmGroup = nil
         confirmDelete = true
+    }
+
+    private var confirmCount: Int {
+        guard let group = confirmGroup else { return selectionTotals(in: visibleGroups).count }
+        return group.files.filter { selection.contains($0.id) }.count
     }
 
     private func trashSelectedInGroup(_ g: DuplicateGroup) async {
@@ -409,14 +456,17 @@ struct CleanupView: View {
         var work: [DuplicateTrashItem] = []
         var keeperTagsByVictim: [Int64: [URL]] = [:]
         var verificationRejected = 0
+        var keepOneSkipped = 0
         for group in groupsToScan {
             let trashed = group.files.filter { selection.contains($0.id) }
             let kept = group.files.filter { !selection.contains($0.id) }
-            let exactKeeper = group.isSimilar ? nil : kept.first?.url
-            if !group.isSimilar && exactKeeper == nil {
-                verificationRejected += trashed.count
+            // Every group keeps at least one file, look-alikes included: the
+            // tab removes extra copies, never the last version of a photo.
+            if kept.isEmpty && !trashed.isEmpty {
+                keepOneSkipped += trashed.count
                 continue
             }
+            let exactKeeper = group.isSimilar ? nil : kept.first?.url
             for file in trashed {
                 work.append(DuplicateTrashItem(
                     id: file.id, url: file.url, size: file.sizeBytes,
@@ -438,6 +488,7 @@ struct CleanupView: View {
         let freedBytes = outcome.trashed.reduce(Int64(0)) { $0 + $1.size }
         verificationRejected += outcome.verificationFailed
         let trashFailures = outcome.failed
+        let protectedCount = outcome.protectedLocation
         let freed = ByteCountFormatter.string(fromByteCount: freedBytes, countStyle: .file)
         var keeperURLSet = Set<URL>()
         for id in trashedIDs {
@@ -447,9 +498,6 @@ struct CleanupView: View {
 
         // auto-tag keepers (Settings toggle, default on). Useful so
         // the user can find "files I deduped this session" in Finder.
-        let autoTagOn = UserDefaults.standard.object(forKey: AppSettings.cleanupAutoTagKey) == nil
-            ? AppSettings.cleanupAutoTagDefault
-            : UserDefaults.standard.bool(forKey: AppSettings.cleanupAutoTagKey)
         let shouldTag = autoTagOn && !keeperURLsToTag.isEmpty
 
         // Run the chunked DELETE (+ person reconciliation) and the per-keeper
@@ -477,13 +525,19 @@ struct CleanupView: View {
         var summary = "Moved \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
             + " to Trash · freed \(freed)"
             + tagSummary
+        if keepOneSkipped > 0 {
+            summary += " · \(keepOneSkipped) skipped: every file in a group was chosen, and each group keeps at least one"
+        }
         if verificationRejected > 0 {
             summary += " · \(verificationRejected) skipped because the file changed since the scan"
+        }
+        if protectedCount > 0 {
+            summary += " · \(protectedCount) left alone because \(protectedCount == 1 ? "it is" : "they are") in a protected location, such as a Photos library"
         }
         if trashFailures > 0 {
             summary += " · \(trashFailures) couldn't be moved to Trash"
         }
-        statusWarning = verificationRejected > 0 || trashFailures > 0
+        statusWarning = verificationRejected > 0 || trashFailures > 0 || keepOneSkipped > 0 || protectedCount > 0
         status = summary
         store.notifyChanged()
         reload()
@@ -502,6 +556,29 @@ struct CleanupView: View {
             : (undone.message ?? "Nothing was put back. Check the Trash.")
         store.notifyChanged()
         reload()
+    }
+
+    private func scanBatchArrived() {
+        let new = engine.lastBatch?.batchIndex ?? -1
+        guard new != lastSeenBatchIndex else { return }
+        lastSeenBatchIndex = new
+        store.notifyChanged()
+        // Exact mode's reload() runs a live full-file SHA-256 pass over up
+        // to ExactDuplicateVerifier.candidateCap candidates; the digest
+        // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
+        // keeps the whole candidate set hot and contends with the engine's
+        // scan reads on the same drive for the entire scan. Defer the exact
+        // re-verify to scan completion (the lastTerminalEventAt handler).
+        // Similar mode's perceptual index is cheap and drive-light,
+        // so it keeps refreshing live. (reload storm)
+        if !scanActive {
+            reload()
+        } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
+            // Look-alike grouping compares every pair of photos; once per
+            // batch it kept a core busy for the whole scan.
+            lastScanTimeReload = Date()
+            reload()
+        }
     }
 
     private func reload() {
@@ -530,6 +607,8 @@ struct CleanupView: View {
                 let newExactPartial: Bool
                 let newExactCandidateCount: Int
                 let newExactSkipped: Int
+                var newExactCapped = false
+                var stopped = false
                 if isSimilar {
                     newGroups = await store.similarImageGroupsAsync()
                     newExactPartial = false
@@ -541,6 +620,18 @@ struct CleanupView: View {
                     newExactPartial = snapshot.partial
                     newExactCandidateCount = snapshot.candidateCount
                     newExactSkipped = snapshot.skipped
+                    newExactCapped = snapshot.capped
+                    stopped = snapshot.cancelled
+                }
+                // Cancelled when the tab went away: drop the unfinished result. A
+                // reload asked for since then (the tab came back) starts a fresh task.
+                if stopped || Task.isCancelled {
+                    reloadTask = nil
+                    if reloadPending {
+                        reloadPending = false
+                        reload()
+                    }
+                    return
                 }
                 // A newer reload landed while this query ran — its result is stale;
                 // loop and re-query rather than assigning it.
@@ -552,6 +643,7 @@ struct CleanupView: View {
                 exactPreviewPartial = newExactPartial
                 exactCandidateCount = newExactCandidateCount
                 exactSkipped = newExactSkipped
+                exactCapped = newExactCapped
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
                 // Selection is stored by file id, but a mid-scan re-rank can change
@@ -600,7 +692,7 @@ private struct GroupCard: View {
                 HStack(spacing: 10) {
                     SectionLabel(group.isSimilar ? "Look-alikes · \(group.totalFileCount) photos" : "Same file · \(group.totalFileCount) copies")
                     if group.isSimilar {
-                        BadgePill(label: "perceptual match", color: Theme.warning)
+                        BadgePill(label: "Looks the same", color: Theme.warning)
                             .help("These look nearly the same but are not identical. Check each before removing.")
                     }
                     Text("\(ByteCountFormatter.string(fromByteCount: group.totalBytes, countStyle: .file)) total · \(ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)) freed if you keep one")
@@ -647,6 +739,7 @@ private struct GroupCard: View {
                             CopyTile(
                                 file: file,
                                 isKeeper: idx == 0,
+                                isSimilar: group.isSimilar,
                                 isSelected: selection.contains(file.id),
                                 hovering: hoveredFile == file.id,
                                 onToggle: {
@@ -676,6 +769,12 @@ private struct GroupCard: View {
     }
 }
 
+/// Groups the user skipped, kept for the session so they stay hidden across tab switches.
+@MainActor
+enum CleanupSession {
+    static var skipped: [String: Set<Int64>] = [:]
+}
+
 /// The copies row in a duplicate group. One hover tracker for the row picks the
 /// thumbnail under the pointer, instead of one tracker per copy.
 enum CopyStrip {
@@ -694,8 +793,13 @@ enum CopyStrip {
 private struct CopyTile: View {
     let file: FileRow
     let isKeeper: Bool
+    let isSimilar: Bool
     let isSelected: Bool
     let hovering: Bool
+
+    private var folder: String {
+        (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+    }
     let onToggle: () -> Void
 
     private var borderColor: Color {
@@ -727,7 +831,7 @@ private struct CopyTile: View {
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([file.url])
                     }
-                    Button("Quick Look") {
+                    Button("Open") {
                         NSWorkspace.shared.open(file.url)
                     }
                 }
@@ -737,6 +841,12 @@ private struct CopyTile: View {
                 .lineLimit(1).truncationMode(.middle)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .padding(.top, 2)
+            Text(folder)
+                .font(Theme.Font.body(11.5))
+                .foregroundStyle(Theme.text2)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(width: CopyStrip.tile, alignment: .leading)
+                .help(folder)
             HStack(spacing: 4) {
                 Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                 Spacer(minLength: 4)
@@ -762,7 +872,7 @@ private struct CopyTile: View {
     private var accessibilityDescription: String {
         let mb = ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file)
         let role = isKeeper ? "Keeper. " : ""
-        return "\(role)\(file.url.lastPathComponent), \(mb)"
+        return "\(role)\(file.url.lastPathComponent), in \(folder), \(mb)"
     }
 
     private var thumbContent: some View {
@@ -775,7 +885,9 @@ private struct CopyTile: View {
             if isKeeper {
                 BadgePill(label: "KEEP", color: Theme.delight, onImage: true)
                     .padding(6)
-                    .help("FileID suggests keeping this copy, usually the largest or sharpest one. The others are copies of it.")
+                    .help(isSimilar
+                          ? "FileID suggests keeping this photo: the best-looking one, then the largest file, then the oldest. Check the others before removing them."
+                          : "FileID suggests keeping this copy: the oldest one, then the one in the shortest folder path. Every copy here is identical, so any of them is safe to keep.")
             }
             // Top-right checkbox.
             Button(action: onToggle) {

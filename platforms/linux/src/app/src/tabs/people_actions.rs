@@ -6,12 +6,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fileid_engine::ipc::{BulkActionResult, CommandPayload};
+use fileid_engine::ipc::{BulkActionResult, CommandPayload, FaceReviewPage, UndoFaceReviewPayload};
 use gtk::glib;
 
 use crate::engine_client::{EngineClient, EngineEvent, read_db};
 
-struct Subscription(async_channel::Receiver<EngineEvent>);
+struct Subscription(crate::engine_client::EventReceiver);
 
 impl Drop for Subscription {
     fn drop(&mut self) {
@@ -39,21 +39,48 @@ pub(super) async fn send_and_collect(
     if sent == 0 {
         return None;
     }
-    let closer = subscription.0.clone();
+    let closer = subscription.0.closer();
     glib::timeout_add_seconds_local_once(timeout_secs, move || {
         closer.close();
     });
     let mut results = Vec::new();
     while results.len() < sent {
-        match subscription.0.recv().await {
-            Ok(EngineEvent::BulkActionResult(result)) if result.action == action => {
-                results.push(result)
+        let Ok(event) = subscription.0.recv().await else { break };
+        match &*event {
+            EngineEvent::BulkActionResult(result) if result.action == action => {
+                results.push(result.clone())
             }
-            Ok(EngineEvent::Exited) | Err(_) => break,
-            Ok(_) => {}
+            EngineEvent::Exited => break,
+            _ => {}
         }
     }
     Some(results)
+}
+
+/// Asks the engine to undo a merge it journaled (`undoFaceReview` with the
+/// merge's operation). `None` when the command could not be sent, the engine
+/// restarted or it stayed silent for `timeout_secs`.
+pub(super) async fn undo_merge_operation(
+    engine: &Rc<RefCell<EngineClient>>,
+    operation: String,
+    timeout_secs: u32,
+) -> Option<FaceReviewPage> {
+    let subscription = Subscription(engine.borrow_mut().subscribe());
+    let request_id = super::face_review::request_id();
+    let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload { request_id: request_id.clone(), operation_id: operation });
+    engine.borrow_mut().send(payload).ok()?;
+    let closer = subscription.0.closer();
+    glib::timeout_add_seconds_local_once(timeout_secs, move || {
+        closer.close();
+    });
+    loop {
+        let Ok(event) = subscription.0.recv().await else { return None };
+        match &*event {
+            EngineEvent::FaceReview(page) if page.request_id == request_id => return Some(page.clone()),
+            EngineEvent::Exited => return None,
+            _ => {}
+        }
+    }
 }
 
 pub(super) fn first_failure(results: &[BulkActionResult]) -> Option<String> {
@@ -121,6 +148,28 @@ pub(super) fn move_status(
     line
 }
 
+pub(super) const MERGE_CONFIRM_HEADING: &str = "Merge these people?";
+pub(super) const MERGE_CONFIRM_BODY: &str = "You can undo this right after.";
+
+/// Every People merge asks first; `merge` runs only on the Merge answer.
+pub(super) fn confirm_merge(anchor: &impl gtk::prelude::IsA<gtk::Widget>, merge: impl FnOnce() + 'static) {
+    use adw::prelude::*;
+    let dialog = adw::AlertDialog::new(Some(MERGE_CONFIRM_HEADING), Some(MERGE_CONFIRM_BODY));
+    dialog.add_responses(&[("cancel", "Cancel"), ("merge", "Merge")]);
+    dialog.set_response_appearance("merge", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let merge = RefCell::new(Some(merge));
+    dialog.connect_response(None, move |_, response| {
+        if response == "merge"
+            && let Some(merge) = merge.borrow_mut().take()
+        {
+            merge();
+        }
+    });
+    dialog.present(Some(anchor));
+}
+
 pub(super) fn undo_merge_label(source_name: &str, destination_name: &str) -> String {
     format!("Split {source_name} back out of {destination_name}")
 }
@@ -148,6 +197,8 @@ mod tests {
             file_id: Some(1),
             ok,
             message: message.map(str::to_owned),
+            reason: None,
+            operation_id: None,
         }
     }
 

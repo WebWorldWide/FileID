@@ -421,7 +421,7 @@ impl CatalogIndex {
             if mode == "semantic" {
                 "Visual similarity results."
             } else {
-                "Keyword, catalog evidence, and visual similarity results."
+                "Matches by name, text and what's in the picture."
             }
             .into(),
         );

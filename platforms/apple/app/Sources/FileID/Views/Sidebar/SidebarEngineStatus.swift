@@ -2,6 +2,7 @@ import SwiftUI
 
 struct EngineStatusRow: View {
     let state: EngineClient.ConnectionState
+    var onRestart: (() -> Void)? = nil
     var body: some View {
         switch state {
         case .starting:
@@ -13,13 +14,19 @@ struct EngineStatusRow: View {
             Label("Ready", systemImage: "checkmark.circle.fill")
                 .font(Theme.ChromeFont.body(13.5, .semibold))
                 .foregroundStyle(Theme.delight)
-                .help("\(info.workerCap) workers · \(Int(info.physicalMemoryGB)) GB RAM · pid \(info.pid)")
+                .help("FileID is ready. Working on up to \(info.workerCap) files at a time with \(Int(info.physicalMemoryGB)) GB of memory.")
         case .crashed(let reason):
-            Label(reason, systemImage: "xmark.octagon.fill")
-                .help("FileID's background helper stopped. It restarts on its own; if this stays, quit and reopen FileID.")
-                .font(Theme.ChromeFont.body(12))
-                .foregroundStyle(Theme.danger)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 6) {
+                Label("FileID's helper stopped", systemImage: "xmark.octagon.fill")
+                    .font(Theme.ChromeFont.body(12.5, .semibold))
+                    .foregroundStyle(Theme.danger)
+                    .help(reason)
+                if let onRestart {
+                    Button("Restart") { onRestart() }
+                        .buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .help("Start the helper again. If it keeps stopping, quit and reopen FileID.")
+                }
+            }
         }
     }
 }

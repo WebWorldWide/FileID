@@ -8,13 +8,14 @@ struct Detail: View {
     let store: ReadStore
     let toolsSession: ToolsSession
     let activeTab: MainWindow.Tab
+    @AppStorage(AppSettings.spotlightKey) private var spotlightEnabled: Bool = AppSettings.spotlightDefault
     @Binding var pickedURL: URL?
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
     var pickFolder: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
-            if pickedURL == nil && store.totalFiles == 0 {
+            if pickedURL == nil && store.totalFiles == 0 && activeTab != .settings {
                 EmptyState(onPickFolder: pickFolder)
             } else {
                 pageHeader
@@ -23,14 +24,21 @@ struct Detail: View {
             }
         }
         .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
-        .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
-            if new == .completed {
+            if new == .completed, spotlightEnabled {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
             }
         }
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+            guard spotlightEnabled else { return }
             Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+        }
+        .onChange(of: spotlightEnabled) { _, on in
+            if on {
+                Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+            } else {
+                SpotlightIndexer.wipe()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -64,25 +72,70 @@ struct Detail: View {
         .overlay(alignment: .bottom) { Hairline() }
     }
 
-    @ViewBuilder
     private var tabContent: some View {
-        Group {
-            switch activeTab {
-            case .library:     LibraryView(engine: engine, store: store)
-            case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
-            case .moments:     CatalogWorkbench(engine: engine, store: store, onSwitchTab: onSwitchTab, inline: true)
-            case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
-            case .chat:        ChatWorkbench(engine: engine)
-            case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
-            case .cleanup:     CleanupView(engine: engine, store: store)
-            case .restructure: RestructureView(store: store, engine: engine, selectedRoot: pickedURL)
-            case .tools:       ToolsWorkbench(engine: engine, session: toolsSession, inline: true)
-            case .settings:    SettingsTab(engine: engine, store: store)
+        PageStack(engine: engine, store: store, toolsSession: toolsSession, activeTab: activeTab,
+                  pickedURL: pickedURL, onSwitchTab: onSwitchTab, pickFolder: pickFolder)
+    }
+}
+
+// MARK: - Kept-alive pages
+
+/// Every visited page stays mounted (up to `limit`); only the active one is
+/// visible, clickable and reachable by keyboard or VoiceOver.
+private struct PageStack: View {
+    let engine: EngineClient
+    let store: ReadStore
+    let toolsSession: ToolsSession
+    let activeTab: MainWindow.Tab
+    let pickedURL: URL?
+    let onSwitchTab: (MainWindow.Tab) -> Void
+    let pickFolder: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var kept = KeptPages<MainWindow.Tab>(limit: PageStack.limit, transient: PageStack.transient)
+    @State private var focus = PageAreaFocus()
+
+    static let limit = 4
+    /// Settings is cheap to rebuild and re-reads its state on every visit.
+    static let transient: Set<MainWindow.Tab> = [.settings]
+
+    var body: some View {
+        let mounted = kept.visiting(activeTab)
+        ZStack {
+            ForEach(MainWindow.Tab.allCases.filter(mounted.contains)) { tab in
+                let active = tab == activeTab
+                page(tab)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .environment(\.pageActive, active)
+                    .disabled(!active)
+                    .opacity(active ? 1 : 0)
+                    .allowsHitTesting(active)
+                    .accessibilityHidden(!active)
+                    .zIndex(active ? 1 : 0)
+                    .transition(.opacity)
             }
         }
-        .id(activeTab)
-        .transition(.opacity)
-        .animation(.easeInOut(duration: 0.18), value: activeTab)
+        .background { PageAreaProbe(focus: focus).allowsHitTesting(false).accessibilityHidden(true) }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: activeTab)
+        .onChange(of: activeTab, initial: true) { old, new in
+            if old != new { focus.release() }
+            kept.visit(new)
+        }
+    }
+
+    @ViewBuilder
+    private func page(_ tab: MainWindow.Tab) -> some View {
+        switch tab {
+        case .library:     LibraryView(engine: engine, store: store, pickedURL: pickedURL, onSwitchTab: onSwitchTab, pickFolder: pickFolder)
+        case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
+        case .moments:     CatalogWorkbench(engine: engine, store: store, onSwitchTab: onSwitchTab, inline: true)
+        case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
+        case .chat:        ChatWorkbench(engine: engine)
+        case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
+        case .cleanup:     CleanupView(engine: engine, store: store)
+        case .restructure: RestructureView(store: store, engine: engine, selectedRoot: pickedURL)
+        case .tools:       ToolsWorkbench(engine: engine, session: toolsSession, inline: true)
+        case .settings:    SettingsTab(engine: engine, store: store)
+        }
     }
 }
 

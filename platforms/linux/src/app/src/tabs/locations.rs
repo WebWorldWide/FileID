@@ -223,11 +223,11 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
         while let Ok(event) = rx.recv().await {
             let Some(this) = weak.upgrade() else { break };
             let waiting = !this.request.borrow().is_empty();
-            match event {
+            match &*event {
                 EngineState::ScanComplete(_) if this.list.is_mapped() => this.refresh(),
                 EngineState::RootsList(list) if waiting && list.request_id == *this.request.borrow() => {
                     this.request.borrow_mut().clear();
-                    this.render(Some(list.roots));
+                    this.render(Some(list.roots.clone()));
                 }
                 EngineState::Error { kind, .. }
                     if waiting && (kind == "list_roots_failed" || kind == "invalid_list_roots_request") =>

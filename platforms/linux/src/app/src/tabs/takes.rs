@@ -421,18 +421,14 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     review.add_controller(enter);
 
     let weak = Rc::downgrade(&ui);
-    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped()
+    crate::v3::while_on_screen(&ui.root, std::time::Duration::from_secs(2), move || {
+        if let Some(ui) = weak.upgrade()
             && ui.manual.wants_jobs()
             && ui.engine.borrow().is_ready()
             && !ui.requests.borrow().busy("jobs")
         {
             ui.send("jobs", catalog_request("jobs"));
         }
-        glib::ControlFlow::Continue
     });
 
     super::takes_groups::wire(&ui);
@@ -1113,13 +1109,12 @@ impl Ui {
         let Some(pending) = self.end_trash() else {
             return;
         };
+        let refused: Vec<&fileid_engine::ipc::BulkActionItem> =
+            result.messages.iter().filter(|item| !item.ok).collect();
+        let why = super::cleanup::trash_failure_details(&refused);
         if result.succeeded == 0 {
-            let reason = result
-                .messages
-                .iter()
-                .find_map(|item| item.message.clone())
-                .unwrap_or_else(|| "Nothing was moved.".to_owned());
-            self.toast(&format!("Couldn't move to Trash. {reason}"));
+            let why = if why.is_empty() { "Nothing was moved.".to_owned() } else { why };
+            self.toast(&format!("Couldn't move to Trash. {why}"));
             return;
         }
         let reopen = (pending.kept_tries >= 2).then(|| pending.kept_files.clone());
@@ -1133,7 +1128,10 @@ impl Ui {
             self.send("keep-rest", request);
         }
         let moved = model::moved_tries(&pending.doomed, &result);
-        let text = model::moved_message(&pending.group, moved, result.failed);
+        let mut text = model::moved_message(&pending.group, moved, result.failed);
+        if result.failed > 0 && !why.is_empty() {
+            text.push_str(&format!(" ({why})"));
+        }
         let batch = result
             .action
             .split_once(':')
@@ -1267,8 +1265,8 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
         let _strong = strong;
         while let Ok(event) = rx.recv().await {
             let Some(ui) = weak.upgrade() else { return };
-            match event {
-                EngineState::CatalogResponse(r) if super::takes_proposals_model::is_job_push(&r) => {
+            match &*event {
+                EngineState::CatalogResponse(r) if super::takes_proposals_model::is_job_push(r) => {
                     ui.proposals.set_job(&ui, super::takes_proposals_model::job(&r.jobs));
                 }
                 EngineState::CatalogResponse(r) => {
@@ -1279,7 +1277,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     match slot.as_str() {
                         "groups" => {
                             if ok {
-                                ui.render_groups(r.take_groups.unwrap_or_default());
+                                ui.render_groups(r.take_groups.clone().unwrap_or_default());
                             } else {
                                 ui.toast(r.message.as_deref().unwrap_or("Couldn't look for groups."));
                                 if ui.current.borrow().is_none() {
@@ -1288,7 +1286,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                             }
                             ui.groups_finished();
                         }
-                        "score" if ok => ui.render_review(r.take_qualities.unwrap_or_default()),
+                        "score" if ok => ui.render_review(r.take_qualities.clone().unwrap_or_default()),
                         "score" => ui.score_failed(
                             r.message
                                 .as_deref()
@@ -1299,9 +1297,9 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                             ui.request_groups();
                             ui.proposals.request(&ui);
                         }
-                        "proposals" | "grouping" | "grouping-control" => ui.proposals.consume(&ui, &slot, r),
-                        "manual" => ui.manual.consume(&ui, r),
-                        "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs),
+                        "proposals" | "grouping" | "grouping-control" => ui.proposals.consume(&ui, &slot, r.clone()),
+                        "manual" => ui.manual.consume(&ui, r.clone()),
+                        "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs.clone()),
                         "job-control" => {
                             ui.send("jobs", catalog_request("jobs"));
                         }
@@ -1309,10 +1307,10 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     }
                 }
                 EngineState::BulkActionResult(result) if result.action.starts_with("trashFiles") => {
-                    ui.finish_trash(result)
+                    ui.finish_trash(result.clone())
                 }
                 EngineState::BulkActionResult(result) if result.action.starts_with("restoreFromTrash") => {
-                    ui.finish_restore(result)
+                    ui.finish_restore(result.clone())
                 }
                 EngineState::Ready => {
                     ui.request_groups();
@@ -1329,7 +1327,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     ui.groups_finished();
                     ui.proposals.finished_request(&ui);
                     if ui.end_trash().is_some() || ui.root.is_mapped() {
-                        ui.toast(&message);
+                        ui.toast(message);
                     }
                 }
                 EngineState::Exited => {

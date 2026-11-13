@@ -30,12 +30,66 @@ use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
     texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
-    QUERY_MAX_ROWS,
 };
 use std::sync::atomic::Ordering;
 
 const QUERY_LIMIT: i64 = 600;
 const LIVE_RELOAD_MAX: i64 = 3000;
+/// While a scan runs, the grid follows it this often, and only at the top.
+const LIVE_RELOAD_EVERY: Duration = Duration::from_millis(1500);
+/// A total counted this recently is reused by the next live reload.
+const COUNT_FRESH_FOR: Duration = Duration::from_secs(5);
+/// Scrolled further than this, new files are offered instead of inserted.
+const AT_TOP_PX: f64 = 48.0;
+/// The preview fetches its next page this many files before the end.
+const PREVIEW_PAGE_AHEAD: usize = 8;
+
+/// What a library change does to the grid while the page is on screen.
+#[derive(Debug, PartialEq, Eq)]
+enum LiveStep {
+    Reload,
+    OfferNewFiles,
+    Wait,
+}
+
+/// New files are inserted only when the user is at the top of the grid;
+/// further down they are offered, so the photos being looked at never move.
+fn live_step(at_top: bool, throttled: bool, finished: bool) -> LiveStep {
+    match (at_top, throttled && !finished) {
+        (true, false) => LiveStep::Reload,
+        (true, true) => LiveStep::Wait,
+        (false, _) => LiveStep::OfferNewFiles,
+    }
+}
+
+/// Events after which the grid may show something out of date.
+fn changes_library(event: &EngineEvent) -> bool {
+    matches!(
+        event,
+        EngineEvent::Ready
+            | EngineEvent::BatchLanded(_)
+            | EngineEvent::ScanComplete(_)
+            | EngineEvent::BulkActionResult(_)
+            | EngineEvent::RestructureApplyResult(_)
+            | EngineEvent::DeepAnalyzeFileDone(_)
+            | EngineEvent::DeepAnalyzeComplete(_)
+            | EngineEvent::FaceClusteringComplete(_)
+            | EngineEvent::ToolResponse(_)
+    )
+}
+
+/// The preview's snapshot can grow when the grid handed over full pages.
+fn preview_can_page(loaded: usize) -> bool {
+    loaded > 0 && loaded.is_multiple_of(QUERY_LIMIT as usize)
+}
+
+/// Appends the rows of `page` not already in `rows`; false when none were new.
+fn append_new_rows(rows: &mut Vec<FileRow>, page: Vec<FileRow>) -> bool {
+    let known: HashSet<i64> = rows.iter().map(|row| row.id).collect();
+    let before = rows.len();
+    rows.extend(page.into_iter().filter(|row| !known.contains(&row.id)));
+    rows.len() > before
+}
 const TILE_THUMB_PX: i32 = 256;
 const PREVIEW_PX: i32 = 2400;
 
@@ -210,6 +264,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .spacing(12)
         .build();
     title_row.append(&count_label);
+    let new_files = gtk::Button::builder()
+        .label("New files · show")
+        .tooltip_text("More files have been read. Go to the top to see them.")
+        .visible(false)
+        .css_classes(["pill", "gold-accent"])
+        .build();
+    title_row.append(&new_files);
     let select_all = crate::v3::ghost("Select all");
     select_all.set_tooltip_text(Some("Select every file shown (Ctrl+click adds one, Shift+click a range)"));
     select_all.connect_clicked(clone!(
@@ -247,8 +308,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
 
     // Reusable reload closure shared by search + pills + scan events.
+    let gate = Rc::new(super::reload_gate::ReloadGate::default());
+    let live_ctx: Rc<RefCell<Option<Rc<ReloadCtx>>>> = Rc::new(RefCell::new(None));
     let reload: Rc<dyn Fn()> = {
         let ctx = Rc::new(ReloadCtx {
+            gate: gate.clone(),
+            new_files: new_files.clone(),
+            counted_at: Cell::new(None),
             engine: engine.clone(),
             model: model.clone(),
             count_label: count_label.clone(),
@@ -272,8 +338,19 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 load_more(&near_end);
             }
         });
-        Rc::new(move || run_reload(&ctx))
+        live_ctx.replace(Some(ctx.clone()));
+        Rc::new(move || run_reload(&ctx, false))
     };
+    new_files.connect_clicked(clone!(
+        #[weak]
+        scroller,
+        #[strong]
+        reload,
+        move |_| {
+            scroller.vadjustment().set_value(0.0);
+            reload();
+        }
+    ));
 
     let pills = build_pills(kind_filter.clone(), reload.clone());
     {
@@ -437,29 +514,50 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         pane,
         #[strong]
         refresh_offline,
+        #[strong]
+        gate,
+        #[strong]
+        live_ctx,
+        #[weak]
+        scroller,
+        #[weak]
+        new_files,
         async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
-                match ev {
-                    EngineEvent::Ready | EngineEvent::BatchLanded(_) => {
-                        if last.elapsed() >= Duration::from_millis(900) {
-                            last = Instant::now();
-                            reload();
+                if !changes_library(&ev) {
+                    continue;
+                }
+                // Off screen the grid only notes that it is out of date.
+                if !gate.is_mapped() {
+                    gate.mark_stale();
+                    continue;
+                }
+                let finished = matches!(*ev, EngineEvent::ScanComplete(_));
+                let scanning = matches!(*ev, EngineEvent::BatchLanded(_));
+                let at_top = scroller.vadjustment().value() <= AT_TOP_PX;
+                match live_step(at_top, scanning && last.elapsed() < LIVE_RELOAD_EVERY, finished) {
+                    LiveStep::Reload => {
+                        last = Instant::now();
+                        match live_ctx.borrow().as_ref() {
+                            Some(ctx) if scanning => run_reload(ctx, true),
+                            _ => reload(),
                         }
                     }
-                    EngineEvent::ScanComplete(_) => {
-                        reload();
-                        refresh_pane_details(&pane);
-                        refresh_offline();
+                    LiveStep::OfferNewFiles => {
+                        gate.mark_stale();
+                        new_files.set_visible(true);
                     }
-                    _ => {}
+                    LiveStep::Wait => {}
+                }
+                if finished {
+                    refresh_pane_details(&pane);
+                    refresh_offline();
                 }
             }
         }
     ));
 
-    // Initial fill.
-    reload();
     refresh_offline();
 
     let root = gtk::Box::builder()
@@ -476,14 +574,35 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content_row.append(&content_stack);
     content_row.append(&pane.revealer);
     root.append(&content_row);
-    // Re-read on every tab switch: the startup read can race the engine's DB
-    // open, and renames/deletes done from other tabs must show on return.
+    // The grid is read the first time the page is shown, and again on a later
+    // visit only when something changed while it was away; a user scrolled
+    // down keeps their place and is offered the new files instead.
     {
         let reload = reload.clone();
-        root.connect_map(move |_| {
-            reload();
-            refresh_offline();
-        });
+        let gate = gate.clone();
+        let refresh_offline = refresh_offline.clone();
+        root.connect_map(clone!(
+            #[weak]
+            scroller,
+            #[weak]
+            new_files,
+            move |_| {
+                let first = !gate.has_loaded();
+                if gate.on_map() {
+                    if first || scroller.vadjustment().value() <= AT_TOP_PX {
+                        reload();
+                    } else {
+                        gate.mark_stale();
+                        new_files.set_visible(true);
+                    }
+                }
+                refresh_offline();
+            }
+        ));
+    }
+    {
+        let gate = gate.clone();
+        root.connect_unmap(move |_| gate.on_unmap());
     }
     root.upcast()
 }
@@ -530,6 +649,10 @@ fn load_more(ctx: &Rc<ReloadCtx>) {
 }
 
 struct ReloadCtx {
+    gate: Rc<super::reload_gate::ReloadGate>,
+    new_files: gtk::Button,
+    /// When the total for the current query was last counted.
+    counted_at: Cell<Option<Instant>>,
     engine: Rc<RefCell<EngineClient>>,
     model: gio::ListStore,
     count_label: gtk::Label,
@@ -559,7 +682,11 @@ fn reload_limit(same_query: bool, loaded: u32) -> i64 {
     }
 }
 
-fn run_reload(ctx: &Rc<ReloadCtx>) {
+/// `live` is a reload driven by scan batches: it may reuse a total counted
+/// moments ago instead of counting the whole library again.
+fn run_reload(ctx: &Rc<ReloadCtx>, live: bool) {
+    ctx.gate.loaded();
+    ctx.new_files.set_visible(false);
     let g = ctx.query_gen.get().wrapping_add(1);
     ctx.query_gen.set(g);
     let seed = ctx.similar.borrow().clone();
@@ -572,12 +699,18 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
     let same_query = ctx.last_query.borrow().as_ref() == Some(&query);
     let limit = reload_limit(same_query, ctx.model.n_items());
     ctx.last_query.replace(Some(query));
+    let known_total = (live && same_query && ctx.counted_at.get().is_some_and(|at| at.elapsed() < COUNT_FRESH_FOR))
+        .then(|| ctx.total.get());
+    if known_total.is_none() {
+        ctx.counted_at.set(Some(Instant::now()));
+    }
     let spec = QuerySpec {
         search: ctx.search_text.borrow().clone(),
         kind: ctx.kind_filter.borrow().clone(),
         limit,
         offset: 0,
         scope: super::library_scope::current_param(),
+        known_total,
         ..QuerySpec::default()
     };
     ctx.has_more.set(false);
@@ -730,19 +863,16 @@ async fn similar_request(
     request.result_scope = Some("files".into());
     let id = request.request_id.clone();
     let events = engine.borrow_mut().subscribe();
-    let closer = events.clone();
+    let _deadline = events.deadline(Duration::from_secs(10));
     let sent = engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::CatalogRequest(Box::new(
         fileid_engine::ipc::CatalogRequestPayload { request },
     )));
-    let timeout = glib::timeout_add_seconds_local_once(10, move || {
-        closer.close();
-    });
     let mut found = None;
     if sent.is_ok() {
         while let Ok(event) = events.recv().await {
-            match event {
+            match &*event {
                 EngineEvent::CatalogResponse(response) if response.request_id == id => {
-                    found = Some(response);
+                    found = Some(response.clone());
                     break;
                 }
                 EngineEvent::Exited => break,
@@ -750,8 +880,6 @@ async fn similar_request(
             }
         }
     }
-    timeout.remove();
-    events.close();
     found
 }
 
@@ -1276,17 +1404,54 @@ fn open_preview(
         }
     ));
 
+    // The preview starts with the rows the grid has loaded and reads the next
+    // page only as the user nears the end of them.
+    let more = Rc::new(Cell::new(preview_can_page(rows.borrow().len())));
     let update_nav: Rc<dyn Fn()> = {
         let rows = rows.clone();
         let idx = idx.clone();
         let counter = counter.clone();
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
+        let more = more.clone();
         Rc::new(move || {
             let (pos, len) = (idx.get(), rows.borrow().len());
-            counter.set_label(&format!("{} of {}", pos + 1, len));
+            let open_ended = if more.get() { "+" } else { "" };
+            counter.set_label(&format!("{} of {}{open_ended}", pos + 1, len));
             prev_btn.set_sensitive(pos > 0);
             next_btn.set_sensitive(pos + 1 < len);
+        })
+    };
+    let fetch_more: Rc<dyn Fn()> = {
+        let fetching = Rc::new(Cell::new(false));
+        let (engine, rows, more, update_nav) = (engine.clone(), rows.clone(), more.clone(), update_nav.clone());
+        Rc::new(move || {
+            if !more.get() || fetching.replace(true) {
+                return;
+            }
+            let page = engine.borrow().query_files(QuerySpec {
+                search: query.0.clone(),
+                kind: query.1.clone(),
+                limit: QUERY_LIMIT,
+                offset: rows.borrow().len() as i64,
+                channel: QueryChannel::Preview,
+                scope: super::library_scope::current_param(),
+                known_total: Some(0),
+            });
+            let (rows, more, update_nav, fetching) = (rows.clone(), more.clone(), update_nav.clone(), fetching.clone());
+            glib::MainContext::default().spawn_local(async move {
+                let page = page.recv().await;
+                fetching.set(false);
+                let grew = match page {
+                    Ok(Ok((page, _))) => {
+                        let full = page.len() as i64 >= QUERY_LIMIT;
+                        append_new_rows(&mut rows.borrow_mut(), page) && full
+                    }
+                    _ => false,
+                };
+                more.set(grew);
+                update_nav();
+            });
         })
     };
 
@@ -1328,12 +1493,16 @@ fn open_preview(
         let rows = rows.clone();
         let idx = idx.clone();
         let load = load.clone();
+        let fetch_more = fetch_more.clone();
         Rc::new(move |delta| {
             let len = rows.borrow().len() as i64;
             let next = idx.get() as i64 + delta;
             if (0..len).contains(&next) {
                 idx.set(next as usize);
                 load();
+            }
+            if idx.get() + PREVIEW_PAGE_AHEAD >= rows.borrow().len() {
+                fetch_more();
             }
         })
     };
@@ -1387,51 +1556,38 @@ fn open_preview(
                 if closed.get() {
                     break;
                 }
-                if !matches!(event, EngineEvent::ScanComplete(_)) {
+                if !matches!(*event, EngineEvent::ScanComplete(_)) {
                     continue;
                 }
                 let Some(id) = rows.borrow().get(idx.get()).map(|row| row.id) else { continue };
-                let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { continue };
-                if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
-                    continue;
-                }
-                rows.borrow_mut()[idx.get()] = row.clone();
-                dialog.set_title(&row.name);
-                meta_scroll.set_child(Some(&build_meta(&row)));
+                glib::MainContext::default().spawn_local(clone!(
+                    #[strong]
+                    rows,
+                    #[strong]
+                    idx,
+                    #[strong]
+                    closed,
+                    #[weak]
+                    meta_scroll,
+                    #[weak]
+                    dialog,
+                    async move {
+                        let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { return };
+                        if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
+                            return;
+                        }
+                        rows.borrow_mut()[idx.get()] = row.clone();
+                        dialog.set_title(&row.name);
+                        meta_scroll.set_child(Some(&build_meta(&row)));
+                    }
+                ));
             }
         }
     ));
 
-    let full = engine.borrow().query_files(QuerySpec {
-        search: query.0,
-        kind: query.1,
-        limit: QUERY_MAX_ROWS,
-        offset: 0,
-        channel: QueryChannel::Preview,
-        scope: super::library_scope::current_param(),
-    });
-    glib::MainContext::default().spawn_local(clone!(
-        #[strong]
-        rows,
-        #[strong]
-        idx,
-        #[strong]
-        update_nav,
-        async move {
-            let Ok(Ok((library, _))) = full.recv().await else {
-                return;
-            };
-            let current_id = rows.borrow().get(idx.get()).map(|row| row.id);
-            let Some(position) = current_id.and_then(|id| library.iter().position(|row| row.id == id)) else {
-                return;
-            };
-            if library.len() > rows.borrow().len() {
-                rows.replace(library);
-                idx.set(position);
-                update_nav();
-            }
-        }
-    ));
+    if idx.get() + PREVIEW_PAGE_AHEAD >= rows.borrow().len() {
+        fetch_more();
+    }
 
     dialog.connect_closed(clone!(
         #[weak]
@@ -1622,6 +1778,55 @@ fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &ThumbCacheKey
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_files_are_inserted_only_at_the_top_of_the_grid() {
+        assert_eq!(live_step(true, false, false), LiveStep::Reload);
+        assert_eq!(live_step(true, true, false), LiveStep::Wait);
+        assert_eq!(live_step(true, true, true), LiveStep::Reload);
+        assert_eq!(live_step(false, false, false), LiveStep::OfferNewFiles);
+        assert_eq!(live_step(false, false, true), LiveStep::OfferNewFiles);
+    }
+
+    #[test]
+    fn progress_noise_never_marks_the_grid_out_of_date() {
+        assert!(changes_library(&EngineEvent::BatchLanded(4)));
+        assert!(changes_library(&EngineEvent::ScanComplete(4)));
+        assert!(changes_library(&EngineEvent::Ready));
+        assert!(!changes_library(&EngineEvent::Spawning));
+        assert!(!changes_library(&EngineEvent::Scanning));
+        assert!(!changes_library(&EngineEvent::Exited));
+    }
+
+    #[test]
+    fn the_preview_pages_from_loaded_rows_without_repeats() {
+        assert!(!preview_can_page(0));
+        assert!(!preview_can_page(60));
+        assert!(preview_can_page(QUERY_LIMIT as usize));
+        assert!(preview_can_page(2 * QUERY_LIMIT as usize));
+        let row = |id: i64| FileRow {
+            id,
+            path: format!("/p/{id}.jpg"),
+            name: format!("{id}.jpg"),
+            kind: "image".into(),
+            extension: "jpg".into(),
+            size_bytes: 1,
+            created_at: None,
+            modified_at: None,
+            has_faces: false,
+            has_text: false,
+            file_ref: None,
+            content_hash: None,
+            description: None,
+            proposed_name: None,
+            caption_inherited: false,
+        };
+        let mut rows = vec![row(3), row(2)];
+        assert!(append_new_rows(&mut rows, vec![row(2), row(1)]));
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [3, 2, 1]);
+        assert!(!append_new_rows(&mut rows, vec![row(3), row(1)]));
+        assert_eq!(rows.len(), 3);
+    }
 
     #[test]
     fn live_reload_keeps_loaded_pages_until_the_query_changes() {

@@ -23,7 +23,7 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     assert!(response
         .message
         .unwrap()
-        .contains("Install a speech model from the model catalog"));
+        .contains("install a speech model"));
     assert_eq!(response.jobs.len(), 1);
     let (kind, ids, recipe, state): (String, String, String, String) = conn
         .query_row(

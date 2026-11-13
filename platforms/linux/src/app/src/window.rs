@@ -76,7 +76,23 @@ struct Shell {
     current: Cell<&'static str>,
     counting: Cell<bool>,
     scan_when_ready: Cell<bool>,
+    /// Settings was opened on purpose, so it shows even with no folder yet.
+    settings_requested: Cell<bool>,
+    last_refresh: Cell<Option<std::time::Instant>>,
+    refresh_pending: Cell<bool>,
     inspector: crate::motion::SpringRevealer,
+}
+
+/// Progress events repaint the title bar and sidebar at most this often.
+const PROGRESS_REFRESH: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a progress repaint waits so repaints stay `interval` apart.
+fn throttle_wait(since_last: Option<std::time::Duration>, interval: std::time::Duration) -> std::time::Duration {
+    since_last.map_or(std::time::Duration::ZERO, |elapsed| interval.saturating_sub(elapsed))
+}
+
+fn detail_page(has_folder: bool, total_files: u64, settings_requested: bool) -> &'static str {
+    if !has_folder && total_files == 0 && !settings_requested { "first-run" } else { "pages" }
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -217,6 +233,9 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         current: Cell::new("library"),
         counting: Cell::new(false),
         scan_when_ready: Cell::new(false),
+        settings_requested: Cell::new(false),
+        last_refresh: Cell::new(None),
+        refresh_pending: Cell::new(false),
         inspector,
     });
     let _ = slot.set(Rc::downgrade(&shell));
@@ -231,6 +250,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .and_then(|id| shell::page(&id))
         .map_or("library", |page| page.id);
     shell.navigate(initial);
+    shell.settings_requested.set(false);
     shell.refresh();
     shell.count_files();
     let weak = Rc::downgrade(&shell);
@@ -259,7 +279,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(state) = status_rx.recv().await {
             let Some(shell) = weak.upgrade() else { break };
-            shell.on_engine(state);
+            shell.on_engine(&state);
         }
     });
 
@@ -389,6 +409,7 @@ impl Shell {
     fn navigate(&self, id: &'static str) {
         let Some(page) = shell::page(id) else { return };
         let changed = self.current.replace(page.id) != page.id;
+        self.settings_requested.set(page.id == "settings");
         self.stack.set_visible_child_name(page.id);
         crate::app_settings::remember_active_tab(page.id);
         if let Some(area) = page.area {
@@ -605,7 +626,27 @@ impl Shell {
         });
     }
 
+    fn refresh_soon(self: &Rc<Self>) {
+        if self.refresh_pending.get() {
+            return;
+        }
+        let wait = throttle_wait(self.last_refresh.get().map(|at| at.elapsed()), PROGRESS_REFRESH);
+        if wait.is_zero() {
+            self.refresh();
+            return;
+        }
+        self.refresh_pending.set(true);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(wait, move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.refresh_pending.set(false);
+                shell.refresh();
+            }
+        });
+    }
+
     fn refresh(&self) {
+        self.last_refresh.set(Some(std::time::Instant::now()));
         let status = self.status.borrow().clone();
         let path = self
             .folder_path
@@ -614,25 +655,27 @@ impl Shell {
             .map(|path| path.to_string_lossy().into_owned());
         self.title_bar.update(&status, path.as_deref());
         self.sidebar.update(&status);
-        let page = if status.folder.is_none() && status.total_files == 0 {
-            "first-run"
-        } else {
-            "pages"
-        };
+        let page = detail_page(status.folder.is_some(), status.total_files, self.settings_requested.get());
         crate::motion::show_child(&self.detail, page);
         for (id, header) in &self.headers {
             header.set_meta(&status.page_meta(id));
         }
     }
 
-    fn on_engine(self: &Rc<Self>, state: EngineState) {
+    fn on_engine(self: &Rc<Self>, state: &EngineState) {
         let mut recount = false;
         let mut note: Option<Option<String>> = None;
+        let mut note_detail: Option<String> = None;
+        let mut blocked = false;
         let mut finished_scan = None;
-        if let EngineState::QueueState(queue) = &state {
+        if let EngineState::QueueState(queue) = state {
             self.sidebar.set_queue(queue);
             return;
         }
+        let progress_only = matches!(
+            state,
+            EngineState::Progress(_) | EngineState::DeepAnalyzeProgress(_) | EngineState::BatchLanded(_)
+        );
         {
             let mut status = self.status.borrow_mut();
             match state {
@@ -651,9 +694,10 @@ impl Shell {
                 EngineState::Progress(progress) => {
                     status.start_requested = false;
                     status.phase = Some(progress.phase);
-                    status.progress = Some(progress);
+                    status.progress = Some(progress.clone());
                 }
                 EngineState::ScanPhase(phase) => {
+                    let phase = *phase;
                     status.phase = Some(phase);
                     if matches!(
                         phase,
@@ -672,10 +716,11 @@ impl Shell {
                 }
                 EngineState::BatchLanded(processed) => {
                     if let Some(progress) = status.progress.as_mut() {
-                        progress.processed = progress.processed.max(processed);
+                        progress.processed = progress.processed.max(*processed);
                     }
                 }
                 EngineState::ScanComplete(processed) => {
+                    let processed = *processed;
                     finished_scan = Some(processed);
                     if let Some(progress) = status.progress.as_mut() {
                         progress.processed = progress.processed.max(processed);
@@ -693,7 +738,7 @@ impl Shell {
                 }
                 EngineState::DeepAnalyzeProgress(progress) => {
                     status.deep_running = true;
-                    status.deep = Some(progress);
+                    status.deep = Some(progress.clone());
                 }
                 EngineState::DeepAnalyzeComplete(done) => {
                     status.deep_running = false;
@@ -709,13 +754,12 @@ impl Shell {
                     if status.scan_running() {
                         status.phase = None;
                     }
-                    let missing = message
-                        .split_once("Missing:")
-                        .map(|(_, kinds)| kinds.trim().to_owned())
-                        .unwrap_or_else(|| "required scan models".to_owned());
-                    note = Some(Some(format!(
-                        "Scan blocked: {missing} Download the missing models in Settings, then try again."
-                    )));
+                    blocked = true;
+                    note = Some(Some(
+                        "FileID needs its AI models before it can scan. Download them in Settings, then press Scan again."
+                            .to_owned(),
+                    ));
+                    note_detail = Some(crate::engine_errors::detail(kind, message, None));
                 }
                 EngineState::Error {
                     kind,
@@ -723,25 +767,27 @@ impl Shell {
                     model_kind,
                 } => {
                     if kind.starts_with("deep_analyze")
-                        && crate::tabs::deep_analyze::error_ends_deep_run(&kind)
+                        && crate::tabs::deep_analyze::error_ends_deep_run(kind)
                     {
                         status.deep_running = false;
                     }
                     if kind == "scan_already_running" || kind == "scan_failed" {
                         status.start_requested = false;
                     }
-                    note = match model_kind {
-                        Some(_) if kind == "prewarm_cancelled" => None,
-                        Some(model) => Some(Some(format!("Model {model}: {message}"))),
-                        None => Some(Some(message)),
-                    };
+                    if !(model_kind.is_some() && kind == "prewarm_cancelled") {
+                        note = Some(Some(crate::engine_errors::sentence(kind, message)));
+                        note_detail = Some(crate::engine_errors::detail(kind, message, model_kind.as_deref()));
+                    }
                 }
                 EngineState::Failed(message) => {
                     status.engine_ready = false;
                     clear_running(&mut status);
-                    note = Some(Some(format!(
-                        "FileID's background helper couldn't start: {message}"
-                    )));
+                    note = Some(Some(if crate::engine_errors::looks_technical(message) {
+                        "FileID's helper couldn't start. Quit and reopen FileID.".to_owned()
+                    } else {
+                        message.clone()
+                    }));
+                    note_detail = Some(message.clone());
                 }
                 EngineState::Exited => {
                     status.engine_ready = false;
@@ -757,9 +803,9 @@ impl Shell {
         if let Some(processed) = finished_scan {
             self.notify_scan_complete(processed);
         }
-        let blocked = matches!(&note, Some(Some(text)) if text.starts_with("Scan blocked"));
         if let Some(note) = note {
-            self.set_note(note);
+            self.sidebar.set_note_detail(note.as_deref(), note_detail.as_deref());
+            self.note.replace(note);
         }
         if blocked {
             self.navigate("settings");
@@ -770,7 +816,11 @@ impl Shell {
         if self.scan_when_ready.get() && self.status.borrow().engine_ready {
             self.start_scan();
         }
-        self.refresh();
+        if progress_only {
+            self.refresh_soon();
+        } else {
+            self.refresh();
+        }
     }
 }
 
@@ -1102,6 +1152,23 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn progress_repaints_are_spaced_out() {
+        use std::time::Duration;
+        let interval = Duration::from_millis(200);
+        assert_eq!(throttle_wait(None, interval), Duration::ZERO);
+        assert_eq!(throttle_wait(Some(Duration::from_millis(50)), interval), Duration::from_millis(150));
+        assert_eq!(throttle_wait(Some(Duration::from_millis(900)), interval), Duration::ZERO);
+    }
+
+    #[test]
+    fn settings_opens_before_the_first_folder_and_first_run_returns_after() {
+        assert_eq!(detail_page(false, 0, false), "first-run");
+        assert_eq!(detail_page(false, 0, true), "pages");
+        assert_eq!(detail_page(true, 0, false), "pages");
+        assert_eq!(detail_page(false, 12, false), "pages");
+    }
 
     #[test]
     fn only_text_editing_keys_defer_to_a_focused_field() {
