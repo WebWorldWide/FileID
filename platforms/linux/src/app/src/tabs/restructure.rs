@@ -420,6 +420,7 @@ impl Ui {
         self.notice.add_css_class(tone.css());
         self.notice_title.set_text(title);
         self.notice_body.set_text(body);
+        self.notice_body.set_tooltip_text(None);
         self.notice.set_visible(true);
     }
 
@@ -1288,7 +1289,13 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                 {
                     ui.operation.set(None);
                     ui.stopping.set(false);
-                    ui.set_notice(Tone::Warning, "Something went wrong", message);
+                    ui.set_notice(
+                        Tone::Warning,
+                        crate::engine_errors::title(kind),
+                        &crate::engine_errors::text(kind, message),
+                    );
+                    ui.notice_body
+                        .set_tooltip_text(Some(&crate::engine_errors::detail(kind, message, None)));
                     ui.refresh();
                 }
                 EngineState::Exited => {

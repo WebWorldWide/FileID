@@ -4,12 +4,13 @@
 // replaces an unread one of the same kind; replies and terminal events are
 // never dropped or reordered.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 pub trait Coalesce {
     /// False for replies and terminal events, which always keep their place.
@@ -114,6 +115,28 @@ impl<T> Closer<T> {
     }
 }
 
+/// A one-shot listener's time limit. Dropping it (the answer arrived, the
+/// task ended) cancels the timer; a timer that already fired is left alone,
+/// because removing a finished GLib source is an error.
+pub struct Deadline {
+    source: Rc<Cell<Option<glib::SourceId>>>,
+    fired: Rc<Cell<bool>>,
+}
+
+impl Deadline {
+    pub fn fired(&self) -> bool {
+        self.fired.get()
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        if let Some(source) = self.source.take() {
+            source.remove();
+        }
+    }
+}
+
 fn close<T>(shared: &RefCell<Shared<T>>) {
     let waker = {
         let mut shared = shared.borrow_mut();
@@ -141,6 +164,27 @@ impl<T: Coalesce> EventReceiver<T> {
 
     pub fn closer(&self) -> Closer<T> {
         Closer { shared: Rc::downgrade(&self.shared) }
+    }
+
+    /// Closes this receiver after `timeout` unless the returned guard is
+    /// dropped first, so a listener waiting for one answer cannot wait forever.
+    pub fn deadline(&self, timeout: Duration) -> Deadline
+    where
+        T: 'static,
+    {
+        let source = Rc::new(Cell::new(None));
+        let fired = Rc::new(Cell::new(false));
+        let closer = self.closer();
+        let id = glib::timeout_add_local_once(timeout, {
+            let (source, fired) = (source.clone(), fired.clone());
+            move || {
+                source.set(None);
+                fired.set(true);
+                closer.close();
+            }
+        });
+        source.set(Some(id));
+        Deadline { source, fired }
     }
 
     #[cfg(test)]

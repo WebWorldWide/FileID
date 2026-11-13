@@ -730,13 +730,10 @@ async fn similar_request(
     request.result_scope = Some("files".into());
     let id = request.request_id.clone();
     let events = engine.borrow_mut().subscribe();
-    let closer = events.closer();
+    let _deadline = events.deadline(Duration::from_secs(10));
     let sent = engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::CatalogRequest(Box::new(
         fileid_engine::ipc::CatalogRequestPayload { request },
     )));
-    let timeout = glib::timeout_add_seconds_local_once(10, move || {
-        closer.close();
-    });
     let mut found = None;
     if sent.is_ok() {
         while let Ok(event) = events.recv().await {
@@ -750,8 +747,6 @@ async fn similar_request(
             }
         }
     }
-    timeout.remove();
-    events.close();
     found
 }
 

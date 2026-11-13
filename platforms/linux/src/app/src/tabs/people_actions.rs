@@ -148,6 +148,28 @@ pub(super) fn move_status(
     line
 }
 
+pub(super) const MERGE_CONFIRM_HEADING: &str = "Merge these people?";
+pub(super) const MERGE_CONFIRM_BODY: &str = "You can undo this right after.";
+
+/// Every People merge asks first; `merge` runs only on the Merge answer.
+pub(super) fn confirm_merge(anchor: &impl gtk::prelude::IsA<gtk::Widget>, merge: impl FnOnce() + 'static) {
+    use adw::prelude::*;
+    let dialog = adw::AlertDialog::new(Some(MERGE_CONFIRM_HEADING), Some(MERGE_CONFIRM_BODY));
+    dialog.add_responses(&[("cancel", "Cancel"), ("merge", "Merge")]);
+    dialog.set_response_appearance("merge", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let merge = RefCell::new(Some(merge));
+    dialog.connect_response(None, move |_, response| {
+        if response == "merge"
+            && let Some(merge) = merge.borrow_mut().take()
+        {
+            merge();
+        }
+    });
+    dialog.present(Some(anchor));
+}
+
 pub(super) fn undo_merge_label(source_name: &str, destination_name: &str) -> String {
     format!("Split {source_name} back out of {destination_name}")
 }

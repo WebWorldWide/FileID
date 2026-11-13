@@ -15,6 +15,7 @@ mod library_pane;
 mod library_selection;
 pub mod library_scope;
 mod locations;
+mod merge_ledger;
 mod model_catalog;
 mod naming;
 mod offline_roots;

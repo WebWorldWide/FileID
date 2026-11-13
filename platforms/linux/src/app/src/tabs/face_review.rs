@@ -688,6 +688,7 @@ pub(super) fn count_waiting(
         return;
     }
     glib::MainContext::default().spawn_local(async move {
+        let _deadline = events.deadline(std::time::Duration::from_secs(30));
         while let Ok(event) = events.recv().await {
             match &*event {
                 EngineEvent::FaceReview(page) if page.request_id == id => {

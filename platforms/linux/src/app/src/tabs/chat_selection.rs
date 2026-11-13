@@ -128,6 +128,7 @@ impl Strip {
         self.note.set_label("Saving the group…");
         let note = self.note.downgrade();
         glib::MainContext::default().spawn_local(async move {
+            let deadline = rx.deadline(std::time::Duration::from_secs(30));
             while let Ok(event) = rx.recv().await {
                 if let EngineState::CatalogResponse(response) = &*event
                     && response.request_id == wanted
@@ -142,8 +143,13 @@ impl Strip {
                                 .unwrap_or_else(|| "The group couldn't be saved. Try again.".into())
                         });
                     }
-                    break;
+                    return;
                 }
+            }
+            if deadline.fired()
+                && let Some(note) = note.upgrade()
+            {
+                note.set_label("The group wasn't saved in time. Try again in a moment.");
             }
         });
     }

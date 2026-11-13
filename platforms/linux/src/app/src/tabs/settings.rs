@@ -46,6 +46,9 @@ enum Transfer {
     Installed,
     Cancelled,
     Failed(String),
+    /// The helper reported an error: plain `text` on screen, the code and
+    /// raw message in the tooltip.
+    Refused { text: String, detail: String },
 }
 
 struct ModelRow {
@@ -113,7 +116,7 @@ impl ModelRow {
                 0.0,
                 false,
             ),
-            Transfer::Failed(message) => (
+            Transfer::Failed(message) | Transfer::Refused { text: message, .. } => (
                 message.clone(),
                 "Retry",
                 self.engine_ready.get() && self.model.is_some(),
@@ -123,7 +126,10 @@ impl ModelRow {
             ),
         };
         self.status.set_label(&status);
-        self.status.set_tooltip_text(Some(&status));
+        self.status.set_tooltip_text(Some(match &*transfer {
+            Transfer::Refused { detail, .. } => detail,
+            _ => &status,
+        }));
         match &*transfer {
             Transfer::Downloading { fraction, .. } if *fraction > 0.0 => self
                 .progress
@@ -191,7 +197,7 @@ impl ModelRow {
         }
         if !matches!(
             *self.transfer.borrow(),
-            Transfer::Missing | Transfer::Cancelled | Transfer::Failed(_)
+            Transfer::Missing | Transfer::Cancelled | Transfer::Failed(_) | Transfer::Refused { .. }
         ) {
             return;
         }
@@ -211,7 +217,10 @@ impl ModelRow {
                 fraction: 0.0,
                 message: "Queued. Waiting for FileID to get ready…".to_owned(),
             },
-            Err(err) => Transfer::Failed(format!("Could not start download: {err}")),
+            Err(err) => Transfer::Refused {
+                text: "FileID is still getting ready. Try again in a moment.".to_owned(),
+                detail: format!("Could not start download: {err}"),
+            },
         };
         self.render();
     }
@@ -232,7 +241,10 @@ impl ModelRow {
             });
         *self.transfer.borrow_mut() = match result {
             Ok(()) => Transfer::Cancelling,
-            Err(err) => Transfer::Failed(format!("Could not cancel download: {err}")),
+            Err(err) => Transfer::Refused {
+                text: "The download couldn't be stopped. Try again in a moment.".to_owned(),
+                detail: format!("Could not cancel download: {err}"),
+            },
         };
         self.render();
     }
@@ -268,7 +280,10 @@ impl ModelRow {
         } else if kind == "model_download_disk_full" {
             Transfer::Failed("Not enough disk space for the model and temporary download files. Free space in the Linux models directory, then Retry.".to_owned())
         } else {
-            Transfer::Failed(message.to_owned())
+            Transfer::Refused {
+                text: crate::engine_errors::sentence(kind, message),
+                detail: crate::engine_errors::detail(kind, message, Some(self.kind)),
+            }
         };
         self.render();
     }
@@ -434,11 +449,12 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                 }
                 EngineState::Failed(message) => {
-                    connection.set_label(&format!("FileID's background helper stopped: {message}"));
+                    connection.set_label("FileID's helper stopped. Quit and reopen FileID.");
+                    connection.set_tooltip_text(Some(message));
                     for row in &rows {
                         row.engine_ready.set(false);
                         if matches!(*row.transfer.borrow(), Transfer::Downloading { .. } | Transfer::Cancelling) {
-                            row.on_error("engine_disconnected", "FileID's background helper stopped during the download. Quit and reopen FileID, then Retry.");
+                            row.on_error("engine_disconnected", "FileID's helper stopped during the download. Quit and reopen FileID, then Retry.");
                         } else {
                             row.render();
                         }

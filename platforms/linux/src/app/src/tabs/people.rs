@@ -41,6 +41,8 @@ const CARD_THUMB_PX: i32 = 256;
 const PHOTO_THUMB_PX: i32 = 240;
 const PERSON_FILE_LIMIT: i64 = 500;
 const PERSON_THUMB_CACHE_CAP: usize = 256;
+const PERSON_SAVE_TIMEOUT_SECS: u64 = 30;
+const MERGE_SUGGESTIONS_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -686,6 +688,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_view(&ui);
                     }
                     EngineEvent::Exited => {
+                        abandon_merges(&ui);
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
                                 &ui,
@@ -695,7 +698,12 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_view(&ui);
                     }
                     EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
-                        let confirmed = ui.merge_journal.borrow_mut().pop_front();
+                        let Some(entry) = super::merge_ledger::entry_for(&ev)
+                            .filter(|entry| entry.owner == super::merge_ledger::Owner::People)
+                        else {
+                            continue;
+                        };
+                        let confirmed = take_journaled(&mut ui.merge_journal.borrow_mut(), entry.source, entry.destination);
                         let operation = result.messages.iter().find_map(|item| item.operation_id.clone());
                         if let Some(record) = confirmed
                             && result.failed == 0
@@ -1007,6 +1015,7 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
             set_status(ui, "Saving…".to_string());
             let ui = ui.clone();
             glib::MainContext::default().spawn_local(async move {
+                let deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
                     match &*event {
                         EngineEvent::BulkActionResult(result)
@@ -1047,6 +1056,14 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                         }
                         _ => {}
                     }
+                }
+                if deadline.fired() {
+                    finish_person_action(&ui, "markPersonsAsUnknown");
+                    set_status(
+                        &ui,
+                        "Couldn't mark as unknown: FileID didn't answer in time. Try again.".to_string(),
+                    );
+                    update_bulk_strip(&ui);
                 }
             });
         }
@@ -1912,6 +1929,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
+                let _deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
                     match &*event {
                         EngineEvent::BulkActionResult(result) => {
@@ -2077,6 +2095,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
+                let _deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
                     match &*event {
                         EngineEvent::BulkActionResult(result) => {
@@ -2469,35 +2488,39 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                 set_status(&ui2, "Wait for the current merge to finish.".to_string());
                 return;
             }
-            ui2.merge_failed.set(false);
-            let sources: Vec<i64> = ids2
-                .iter()
-                .copied()
-                .filter(|source| *source != target_id)
-                .collect();
-            ui2.merge_results_pending.set(sources.len());
-            let faces_rx = actions::read_face_ids(sources.clone());
-            let (ui3, dialog3, total) = (ui2.clone(), dialog2.clone(), ids2.len());
-            glib::MainContext::default().spawn_local(async move {
-                let faces = faces_rx.recv().await.unwrap_or_default();
-                let sent = send_merges(&ui3, target_id, &sources, &faces);
-                ui3.merge_results_pending.set(sent);
-                if sent < sources.len() {
-                    ui3.merge_failed.set(true);
+            let (ui2, ids2, dialog2) = (ui2.clone(), ids2.clone(), dialog2.clone());
+            actions::confirm_merge(&dialog2.clone(), move || {
+                if ui2.merge_results_pending.get() > 0 {
+                    set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                    return;
                 }
-                if sent > 0 {
-                    let status = if sent == sources.len() {
-                        format!("Combining {total} cards into one…")
-                    } else {
-                        format!(
-                            "Sent {sent} of {} merges; reloading after a connection failure.",
-                            sources.len()
-                        )
-                    };
-                    set_status(&ui3, status);
-                    set_mode(&ui3, Mode::Normal);
-                    dialog3.close();
-                }
+                ui2.merge_failed.set(false);
+                let sources: Vec<i64> = ids2
+                    .iter()
+                    .copied()
+                    .filter(|source| *source != target_id)
+                    .collect();
+                ui2.merge_results_pending.set(sources.len());
+                let faces_rx = actions::read_face_ids(sources.clone());
+                let (ui3, dialog3, total) = (ui2.clone(), dialog2.clone(), ids2.len());
+                glib::MainContext::default().spawn_local(async move {
+                    let faces = faces_rx.recv().await.unwrap_or_default();
+                    let sent = send_merges(&ui3, target_id, &sources, &faces);
+                    ui3.merge_results_pending.set(sent);
+                    if sent < sources.len() {
+                        ui3.merge_failed.set(true);
+                    }
+                    if sent > 0 {
+                        let status = if sent == sources.len() {
+                            format!("Combining {total} cards into one…")
+                        } else {
+                            format!("Merged {sent} of {} cards. FileID restarted before the rest.", sources.len())
+                        };
+                        set_status(&ui3, status);
+                        set_mode(&ui3, Mode::Normal);
+                        dialog3.close();
+                    }
+                });
             });
         });
         listbox.append(&row);
@@ -2542,9 +2565,35 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             break;
         }
         ui.merge_journal.borrow_mut().push_back(record);
+        super::merge_ledger::sent(super::merge_ledger::Owner::People, source, destination);
         sent += 1;
     }
     sent
+}
+
+fn take_journaled(journal: &mut VecDeque<MergeRecord>, source: i64, destination: i64) -> Option<MergeRecord> {
+    let index = journal
+        .iter()
+        .position(|record| record.source == source && record.destination == destination)?;
+    journal.remove(index)
+}
+
+/// The helper stopped before answering: nothing sent is coming back, so the
+/// merge controls must not stay locked behind results that will never land.
+fn abandon_merges(ui: &Rc<Ui>) {
+    super::merge_ledger::clear();
+    ui.merge_journal.borrow_mut().clear();
+    let waiting = ui.merge_results_pending.replace(0);
+    for pending in ui.pending_suggestions.borrow_mut().drain(..) {
+        if let Some(button) = pending.button.upgrade() {
+            button.set_sensitive(true);
+            button.set_label("Merge");
+        }
+    }
+    if waiting > 0 {
+        set_status(ui, "FileID restarted before the merge finished. Check the cards, then try again.".to_string());
+        schedule_reload_burst(ui);
+    }
 }
 
 fn refresh_undo_merge(ui: &Rc<Ui>) {
@@ -2635,8 +2684,17 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
     let ui = ui.clone();
     let btn = btn.clone();
     glib::MainContext::default().spawn_local(async move {
+        let deadline = rx.deadline(Duration::from_secs(MERGE_SUGGESTIONS_TIMEOUT_SECS));
         let cands = loop {
-            let Ok(event) = rx.recv().await else { break Vec::new() };
+            let Ok(event) = rx.recv().await else {
+                if deadline.fired() {
+                    set_status(&ui, "Looking for people to merge took too long. Try again in a moment.".to_owned());
+                    btn.set_sensitive(true);
+                    btn.set_label("Suggest merges");
+                    return;
+                }
+                break Vec::new();
+            };
             match &*event {
                 EngineEvent::MergeSuggestions(result) => {
                     break result
@@ -2746,36 +2804,43 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                         set_status(&ui2, "Wait for the current merge to finish.".to_string());
                         return;
                     }
-                    ui2.merge_results_pending.set(1);
-                    ui2.merge_failed.set(false);
-                    button.set_sensitive(false);
-                    different_btn.set_sensitive(false);
-                    button.set_label("Merging…");
-                    set_status(&ui2, "Merging…".to_string());
-                    let faces_rx = actions::read_face_ids(vec![source_id]);
-                    let (ui3, row_weak, button_weak, dialog_weak, different_btn) = (
+                    let (ui2, button, different_btn, row_weak, button_weak, dialog_weak) = (
                         ui2.clone(),
+                        button.clone(),
+                        different_btn.clone(),
                         row_weak.clone(),
                         button_weak.clone(),
                         dialog_weak.clone(),
-                        different_btn.clone(),
                     );
-                    glib::MainContext::default().spawn_local(async move {
-                        let faces = faces_rx.recv().await.unwrap_or_default();
-                        if send_merges(&ui3, target_id, &[source_id], &faces) == 1 {
-                            ui3.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
-                                row: row_weak,
-                                button: button_weak,
-                                dialog: dialog_weak,
-                            });
-                        } else {
-                            ui3.merge_results_pending.set(0);
-                            if let Some(button) = button_weak.upgrade() {
-                                button.set_sensitive(true);
-                                button.set_label("Merge");
-                            }
-                            different_btn.set_sensitive(true);
+                    actions::confirm_merge(&button.clone(), move || {
+                        if ui2.merge_results_pending.get() > 0 {
+                            set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                            return;
                         }
+                        ui2.merge_results_pending.set(1);
+                        ui2.merge_failed.set(false);
+                        button.set_sensitive(false);
+                        different_btn.set_sensitive(false);
+                        button.set_label("Merging…");
+                        set_status(&ui2, "Merging…".to_string());
+                        let faces_rx = actions::read_face_ids(vec![source_id]);
+                        glib::MainContext::default().spawn_local(async move {
+                            let faces = faces_rx.recv().await.unwrap_or_default();
+                            if send_merges(&ui2, target_id, &[source_id], &faces) == 1 {
+                                ui2.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
+                                    row: row_weak,
+                                    button: button_weak,
+                                    dialog: dialog_weak,
+                                });
+                            } else {
+                                ui2.merge_results_pending.set(0);
+                                if let Some(button) = button_weak.upgrade() {
+                                    button.set_sensitive(true);
+                                    button.set_label("Merge");
+                                }
+                                different_btn.set_sensitive(true);
+                            }
+                        });
                     });
                 }
             ));

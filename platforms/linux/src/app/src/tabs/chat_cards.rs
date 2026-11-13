@@ -489,6 +489,7 @@ impl Runner {
                         source_person_id: source,
                         destination_person_id: target,
                     })) {
+                        super::merge_ledger::sent(super::merge_ledger::Owner::Chat, source, target);
                         outstanding += 1;
                     }
                 }
@@ -627,7 +628,8 @@ impl Runner {
         });
     }
 
-    fn on_event(self: &Rc<Self>, event: &EngineState) {
+    fn on_event(self: &Rc<Self>, shared: &Rc<EngineState>) {
+        let event = &**shared;
         match event {
             EngineState::Progress(progress) => {
                 let phase = progress.phase;
@@ -689,6 +691,13 @@ impl Runner {
                     None => self.finish(&pending.action, rules::undo_move_summary(result), None),
                 }
             }
+            EngineState::BulkActionResult(result) if result.action == "mergeClusters" => {
+                let ours = super::merge_ledger::entry_for(shared)
+                    .is_some_and(|entry| entry.owner == super::merge_ledger::Owner::Chat);
+                if ours {
+                    self.on_bulk(result.clone());
+                }
+            }
             EngineState::BulkActionResult(result) => self.on_bulk(result.clone()),
             EngineState::CatalogResponse(response) => {
                 let request_id = response.request_id.clone();
@@ -704,7 +713,7 @@ impl Runner {
             EngineState::Error { kind, message, .. } => {
                 if rules::is_describe_error(kind) {
                     while let Some(pending) = self.take(|wait| matches!(wait, Wait::Describe)) {
-                        self.fail(&pending.action, message);
+                        self.fail(&pending.action, &crate::engine_errors::text(kind, message));
                     }
                 }
                 if rules::is_folder_error(kind) {
@@ -714,6 +723,7 @@ impl Runner {
                 }
             }
             EngineState::Exited | EngineState::Failed(_) => {
+                super::merge_ledger::clear();
                 let pending: Vec<Pending> = self.pending.borrow_mut().drain(..).collect();
                 for pending in pending {
                     if self.running(&pending.action) {

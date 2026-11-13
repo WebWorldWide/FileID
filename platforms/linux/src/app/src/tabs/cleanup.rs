@@ -2173,7 +2173,7 @@ fn trash_operation_is_current(current: u64, operation: u64, deleting: bool) -> b
 
 /// Why files stayed out of Trash. The engine's `reason` groups them in plain
 /// words; refusals without one (older engines) fall back to their messages.
-fn trash_failure_details(refused: &[&BulkActionItem]) -> String {
+pub(super) fn trash_failure_details(refused: &[&BulkActionItem]) -> String {
     let count = |reason: &str| refused.iter().filter(|item| item.reason.as_deref() == Some(reason)).count();
     let mut parts = Vec::new();
     for (reason, one, many) in [

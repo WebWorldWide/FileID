@@ -845,12 +845,23 @@ impl QueuePanel {
         button.update_property(&[gtk::accessible::Property::Label(label)]);
         button.set_tooltip_text(Some(label));
         let weak = Rc::downgrade(self);
-        button.connect_clicked(move |_| {
-            if let Some(panel) = weak.upgrade() {
-                let mut payload = payload.clone();
-                payload.request_id = request_id();
+        button.connect_clicked(move |button| {
+            let Some(panel) = weak.upgrade() else { return };
+            let mut payload = payload.clone();
+            payload.request_id = request_id();
+            if payload.resolution != "merge" {
                 panel.resolve(payload, done.clone());
+                return;
             }
+            if panel.busy.get() {
+                return;
+            }
+            let (weak, done) = (weak.clone(), done.clone());
+            super::people_actions::confirm_merge(button, move || {
+                if let Some(panel) = weak.upgrade() {
+                    panel.resolve(payload, done);
+                }
+            });
         });
         button
     }

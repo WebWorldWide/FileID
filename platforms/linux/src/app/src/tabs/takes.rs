@@ -1113,13 +1113,12 @@ impl Ui {
         let Some(pending) = self.end_trash() else {
             return;
         };
+        let refused: Vec<&fileid_engine::ipc::BulkActionItem> =
+            result.messages.iter().filter(|item| !item.ok).collect();
+        let why = super::cleanup::trash_failure_details(&refused);
         if result.succeeded == 0 {
-            let reason = result
-                .messages
-                .iter()
-                .find_map(|item| item.message.clone())
-                .unwrap_or_else(|| "Nothing was moved.".to_owned());
-            self.toast(&format!("Couldn't move to Trash. {reason}"));
+            let why = if why.is_empty() { "Nothing was moved.".to_owned() } else { why };
+            self.toast(&format!("Couldn't move to Trash. {why}"));
             return;
         }
         let reopen = (pending.kept_tries >= 2).then(|| pending.kept_files.clone());
@@ -1133,7 +1132,10 @@ impl Ui {
             self.send("keep-rest", request);
         }
         let moved = model::moved_tries(&pending.doomed, &result);
-        let text = model::moved_message(&pending.group, moved, result.failed);
+        let mut text = model::moved_message(&pending.group, moved, result.failed);
+        if result.failed > 0 && !why.is_empty() {
+            text.push_str(&format!(" ({why})"));
+        }
         let batch = result
             .action
             .split_once(':')

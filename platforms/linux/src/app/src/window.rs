@@ -76,7 +76,13 @@ struct Shell {
     current: Cell<&'static str>,
     counting: Cell<bool>,
     scan_when_ready: Cell<bool>,
+    /// Settings was opened on purpose, so it shows even with no folder yet.
+    settings_requested: Cell<bool>,
     inspector: crate::motion::SpringRevealer,
+}
+
+fn detail_page(has_folder: bool, total_files: u64, settings_requested: bool) -> &'static str {
+    if !has_folder && total_files == 0 && !settings_requested { "first-run" } else { "pages" }
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -217,6 +223,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         current: Cell::new("library"),
         counting: Cell::new(false),
         scan_when_ready: Cell::new(false),
+        settings_requested: Cell::new(false),
         inspector,
     });
     let _ = slot.set(Rc::downgrade(&shell));
@@ -231,6 +238,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .and_then(|id| shell::page(&id))
         .map_or("library", |page| page.id);
     shell.navigate(initial);
+    shell.settings_requested.set(false);
     shell.refresh();
     shell.count_files();
     let weak = Rc::downgrade(&shell);
@@ -389,6 +397,7 @@ impl Shell {
     fn navigate(&self, id: &'static str) {
         let Some(page) = shell::page(id) else { return };
         let changed = self.current.replace(page.id) != page.id;
+        self.settings_requested.set(page.id == "settings");
         self.stack.set_visible_child_name(page.id);
         crate::app_settings::remember_active_tab(page.id);
         if let Some(area) = page.area {
@@ -614,11 +623,7 @@ impl Shell {
             .map(|path| path.to_string_lossy().into_owned());
         self.title_bar.update(&status, path.as_deref());
         self.sidebar.update(&status);
-        let page = if status.folder.is_none() && status.total_files == 0 {
-            "first-run"
-        } else {
-            "pages"
-        };
+        let page = detail_page(status.folder.is_some(), status.total_files, self.settings_requested.get());
         crate::motion::show_child(&self.detail, page);
         for (id, header) in &self.headers {
             header.set_meta(&status.page_meta(id));
@@ -1107,6 +1112,14 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn settings_opens_before_the_first_folder_and_first_run_returns_after() {
+        assert_eq!(detail_page(false, 0, false), "first-run");
+        assert_eq!(detail_page(false, 0, true), "pages");
+        assert_eq!(detail_page(true, 0, false), "pages");
+        assert_eq!(detail_page(false, 12, false), "pages");
+    }
 
     #[test]
     fn only_text_editing_keys_defer_to_a_focused_field() {

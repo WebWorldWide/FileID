@@ -748,15 +748,7 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
 
         // A missing result must not strand the controls: the timeout ends the
         // wait itself, so this task and its subscription never outlive it.
-        let timed_out = Rc::new(Cell::new(false));
-        let closer = event_rx.closer();
-        let timeout = glib::timeout_add_local_once(Duration::from_secs(APPLY_TAGS_TIMEOUT_SECS), {
-            let timed_out = timed_out.clone();
-            move || {
-                timed_out.set(true);
-                closer.close();
-            }
-        });
+        let deadline = event_rx.deadline(Duration::from_secs(APPLY_TAGS_TIMEOUT_SECS));
 
         let mut received_results = 0usize;
         let mut succeeded = 0u32;
@@ -773,11 +765,10 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
                 _ => {}
             }
         }
-        if timed_out.get() {
+        if deadline.fired() {
             finish_apply_tags(&ui, generation, "FileID didn't finish adding tags. Try again in a moment.");
             return;
         }
-        timeout.remove();
         if received_results == expected_results {
             let status = if failed == 0 {
                 format!("Done: added {} to files.", plural(succeeded as usize, "tag"))
