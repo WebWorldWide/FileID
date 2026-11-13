@@ -21,7 +21,7 @@ Expected values are literal (exact) or a tolerance object:
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
 macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {clip_model} (the CLIP
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {hardware} (the Mac's benchmark hardware string), {clip_model} (the CLIP
 embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
@@ -117,6 +117,16 @@ def clip_model():
     ids = ["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"]
     descriptor = "|".join(["clip-rgb-stretch224-bpe77-l2-v1"] + [f"{key}:{hashes.get(key, 'missing')}" for key in ids])
     return "clip-vitb32-openai-v1:" + hashlib.sha256(descriptor.encode()).hexdigest()
+
+
+def mac_hardware():
+    """The hardware string the Mac engines file benchmarks under
+    (ModelBenchmarkRunner.hardwareFingerprint in the Swift engine)."""
+    def sysctl(name):
+        return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, check=True).stdout.strip()
+    memory = round(int(sysctl("hw.memsize")) / 1073741824)
+    version = ".".join(sysctl("kern.osproductversion").split(".")[:2])
+    return f"{sysctl('machdep.cpu.brand_string')} \u00b7 {memory} GB \u00b7 {sysctl('hw.activecpu')} cores \u00b7 macOS {version}"
 
 
 def host_os():
@@ -407,6 +417,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "hardware":
+            return mac_hardware()
         if name == "bookmark":
             return bookmark(self.path(argument))
         raise Failure(f"unknown placeholder {{{token}}}")
@@ -559,7 +571,7 @@ def build_tree(ctx, entries):
         elif "contentHex" in entry:
             target.write_bytes(bytes.fromhex(entry["contentHex"]))
         else:
-            data = entry.get("content", "").encode()
+            data = ctx.expand(entry.get("content", "")).encode()
             if "size" in entry:
                 data = (data * (entry["size"] // max(len(data), 1) + 1))[:entry["size"]] if data else bytes(entry["size"])
             target.write_bytes(data)

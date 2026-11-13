@@ -4830,3 +4830,8 @@ The Mac's Find Similar sends a catalog `search` with `searchMode semantic` and t
 ## 2026-11-12 — Swift reconcile reads the Rust Trash log without rewriting it
 
 After a rollback the Swift engine only drops catalog rows for Rust-batch files provably in the Trash; it neither completes the Rust entries nor touches the log (Rust owns it and imports Swift's journal itself). Restore of such a batch already works through `RustTrashLog.find`.
+## 2026-11-12 — Benchmark store: Swift's format wins (`left-benchmarks`)
+
+- The Mac app already reads and writes `model-benchmarks.json` as `{modelId: ModelBenchmark}`, filtered by the entry's own `hardware`. The Rust engine now uses that format everywhere (not only when Mac-hosted), so there is one reader and one writer shape. Rust's old multi-hardware list is not kept: Swift drops other hardware on save, and the Windows/Linux apps never read the file.
+- Import is lazy and idempotent: a parse failure in the new format that succeeds as the old one rewrites the file and keeps `model-benchmarks.json.rust-v1`. No Swift change is needed because Swift never saw the Rust format work.
+- The hosted engine builds the Swift hardware string itself (sysctl brand string, `hw.memsize` GiB rounded, `hw.activecpu`, `kern.osproductversion` major.minor) instead of trusting the adapter's string, so listing and storage cannot disagree.

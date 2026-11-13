@@ -9,6 +9,13 @@
 - Ticked: the Stage 1 leftovers (merged the two duplicate lines; the app-hosted scan writes no `rust-align112-v1` faces), and the Convergence item (Stage 10 bundles the pinned official ORT 1.22.0 dylib).
 - Narrowed: Stage 2 (the Swift test Trash root is done; the startup reconcile still reads only `trash-journal.json`) and Stage 6 (the `ffi.rs` digest and the SFace ORT 1.22 measurement are done; only the group-shot re-label remains).
 - `check_current_docs.py` passes. No engine runs; no code changed.
+## 2026-11-12 — One `model-benchmarks.json` format (`agent/left-benchmarks`)
+
+- **Format:** the Swift engine's file is now the only one: a plain object keyed by model id, each entry a `ModelBenchmark` with its own `hardware`. The Rust engine reads and writes it on every platform (`models/benchmark.rs`); before, it kept `{"results": [{model, hardware, benchmark}]}` in the same file name, which the Swift engine could not read, so the hosted `listModels` showed none of the Mac app's results and the app showed none of Rust's.
+- **Import:** a file in the earlier Rust format is rewritten in the shared format on first read; the original stays beside it as `model-benchmarks.json.rust-v1`. Like Swift, a save keeps only this machine's results.
+- **Hardware string:** the Mac-hosted engine files results under the Swift engine's wording (`chip · N GB · N cores · macOS x.y`), so both engines match each other's entries. Other builds keep the tuning fingerprint. The MLX benchmark result is stored under that string.
+- **Windows and Linux:** the apps never read the file; they get benchmarks from `listModels`. Nothing changes for them except the engine's file format (imported once).
+- **Conformance:** `models-mac-benchmarks-shared-format` (both engines list identical `benchmark` fields from a pre-written file; another Mac's entry and an unrecorded model carry none) and `models-mac-benchmarks-rust-format-import` (Rust only). New `{hardware}` placeholder; tree file contents expand placeholders. No model loads.
 
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
