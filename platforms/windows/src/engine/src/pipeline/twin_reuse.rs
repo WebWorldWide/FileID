@@ -91,22 +91,27 @@ impl TwinRegistry {
         }
     }
 
-    fn done(&self, hash: &ContentHash) -> Option<bool> {
+    /// `notify` is the waiter's handle on the owner it is waiting for. Another
+    /// owner in flight means that one failed and a later copy took over: the
+    /// old handle will never be notified again, so the wait is over.
+    fn done(&self, hash: &ContentHash, notify: &Notify) -> Option<bool> {
         match self.map.lock().get(hash) {
             Some(State::Done(ok)) => Some(*ok),
-            Some(State::InFlight(_)) => None,
-            None => Some(false),
+            Some(State::InFlight(current)) if std::ptr::eq(Arc::as_ptr(current), notify) => None,
+            Some(State::InFlight(_)) | None => Some(false),
         }
     }
 
     /// Wait until the owner of `hash` publishes; true when its analysis can be
-    /// copied. `notify` is the handle returned by [`TwinClaim::Pending`].
+    /// copied. `notify` is the handle returned by [`TwinClaim::Pending`]. False
+    /// also when that owner failed and another copy has since claimed the
+    /// image: the caller claims again to wait on the new owner.
     pub async fn wait(&self, hash: &ContentHash, notify: &Notify) -> bool {
         loop {
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(ok) = self.done(hash) {
+            if let Some(ok) = self.done(hash, notify) {
                 return ok;
             }
             notified.await;
@@ -125,6 +130,22 @@ impl TwinRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_waiter_of_a_failed_owner_is_released_when_another_copy_takes_over() {
+        let registry = TwinRegistry::new();
+        let hash = [8u8; 32];
+        assert!(matches!(registry.claim(hash), TwinClaim::Owner));
+        let TwinClaim::Pending(first_owner) = registry.claim(hash) else { panic!("second claim must wait") };
+        // The owner fails and a third copy claims the image before the waiter looks.
+        registry.publish(hash, false);
+        assert!(matches!(registry.claim(hash), TwinClaim::Owner));
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(2), registry.wait(&hash, &first_owner)).await;
+        assert_eq!(waited, Ok(false), "the old owner's handle is never notified again");
+        let TwinClaim::Pending(second_owner) = registry.claim(hash) else { panic!("the new owner is in flight") };
+        registry.publish(hash, true);
+        assert!(registry.wait(&hash, &second_owner).await);
+    }
 
     #[test]
     fn first_claim_owns_and_later_claims_follow_the_outcome() {
