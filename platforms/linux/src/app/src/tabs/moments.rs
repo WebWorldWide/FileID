@@ -1291,27 +1291,21 @@ fn wire(
     ui.editor.add_controller(escape);
 
     let weak = Rc::downgrade(ui);
-    glib::timeout_add_local(Duration::from_millis(250), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped() && ui.selected.borrow().is_some() {
+    v3::while_on_screen(&ui.root, Duration::from_millis(250), move || {
+        if let Some(ui) = weak.upgrade()
+            && ui.selected.borrow().is_some()
+        {
             ui.tick();
         }
-        glib::ControlFlow::Continue
     });
     let weak = Rc::downgrade(ui);
-    glib::timeout_add_local(Duration::from_secs(2), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped()
+    v3::while_on_screen(&ui.root, Duration::from_secs(2), move || {
+        if let Some(ui) = weak.upgrade()
             && ui.engine.borrow().is_ready()
             && !ui.requests.borrow().busy("jobs")
         {
             ui.send("jobs", catalog_request("jobs"));
         }
-        glib::ControlFlow::Continue
     });
     ui.root.connect_unmap({
         let weak = Rc::downgrade(ui);

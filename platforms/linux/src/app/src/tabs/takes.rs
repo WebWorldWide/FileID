@@ -421,18 +421,14 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     review.add_controller(enter);
 
     let weak = Rc::downgrade(&ui);
-    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped()
+    crate::v3::while_on_screen(&ui.root, std::time::Duration::from_secs(2), move || {
+        if let Some(ui) = weak.upgrade()
             && ui.manual.wants_jobs()
             && ui.engine.borrow().is_ready()
             && !ui.requests.borrow().busy("jobs")
         {
             ui.send("jobs", catalog_request("jobs"));
         }
-        glib::ControlFlow::Continue
     });
 
     super::takes_groups::wire(&ui);
