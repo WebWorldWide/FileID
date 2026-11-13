@@ -24,6 +24,7 @@ struct TwinAnalysis: Sendable {
             + (tagged.ocrText?.utf8.count ?? 0)
             + tagged.visionTags.reduce(0) { $0 + $1.utf8.count + 48 }
             + tagged.faceBBoxes.count * 96
+            + (tagged.catchUp?.vision?.utf8.count ?? 0)
     }
 }
 
@@ -308,6 +309,7 @@ extension Tagging {
             ocrStageRan: source.ocrStageRan
         )
         copy.ocrHandwritten = source.ocrHandwritten
+        copy.catchUp = source.catchUp
         copy.capturedFromEXIF = source.capturedFromEXIF
         return copy
     }

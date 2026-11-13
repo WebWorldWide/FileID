@@ -73,6 +73,9 @@ public struct TaggedFile: Sendable {
     public var ocrCarefulMs: Double = 0
     /// The OCR text came from Vision's accurate tier reading handwriting.
     public var ocrHandwritten = false
+    /// Work the scan still owes this file (RAM++ tags, careful text read);
+    /// written to `scan_catchup` with the row and settled by `ScanCatchUp`.
+    var catchUp: ScanCatchUp.Marker?
 
     // CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
@@ -739,6 +742,22 @@ public actor DBWriter {
                 try db.cachedStatement(sql: """
                     INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?, ?, ?, ?)
                     """).execute(arguments: [fileID, trimmed, "auto", score])
+            }
+        }
+
+        // 2b. What the scan still owes this file. A full analysis replaces any
+        // earlier marker, in the same transaction as the tags it describes.
+        if file.tagsEvaluated || file.ocrStageRan {
+            if let owed = file.catchUp, owed.stages & ScanCatchUp.owedMask != 0 {
+                try db.cachedStatement(sql: """
+                    INSERT OR REPLACE INTO scan_catchup
+                      (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                    """).execute(arguments: [fileID, owed.stages, Int(file.sizeBytes), newModified, owed.vision,
+                                             owed.faceCount, Date().timeIntervalSince1970])
+            } else {
+                try db.cachedStatement(sql: "DELETE FROM scan_catchup WHERE file_id = ?")
+                    .execute(arguments: [fileID])
             }
         }
 

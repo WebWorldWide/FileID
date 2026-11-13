@@ -166,6 +166,8 @@ struct MergeRecord {
     source_name: String,
     destination_name: String,
     faces: Vec<i64>,
+    /// The engine's undo record for this merge; older engines return none.
+    operation: Option<String>,
 }
 
 #[derive(Default)]
@@ -694,12 +696,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                     EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
                         let confirmed = ui.merge_journal.borrow_mut().pop_front();
+                        let operation = result.messages.iter().find_map(|item| item.operation_id.clone());
                         if let Some(record) = confirmed
                             && result.failed == 0
                             && result.succeeded > 0
-                            && !record.faces.is_empty()
+                            && (operation.is_some() || !record.faces.is_empty())
                         {
-                            ui.merge_undo.borrow_mut().push(record);
+                            ui.merge_undo.borrow_mut().push(MergeRecord { operation, ..record });
                             refresh_undo_merge(&ui);
                         }
                         let outstanding = ui.merge_results_pending.get();
@@ -2524,6 +2527,7 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             source_name: name(source),
             destination_name: name(destination),
             faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
+            operation: None,
         };
         if !send_cmd(
             ui,
@@ -2549,7 +2553,9 @@ fn refresh_undo_merge(ui: &Rc<Ui>) {
     }
 }
 
-/// Splits the last merged-in card back out (`revertMerge`).
+/// Splits the last merged-in card back out: through the engine's own undo
+/// record when the merge returned one, else by moving the faces back
+/// (`revertMerge`).
 fn undo_last_merge(ui: &Rc<Ui>) {
     let Some(record) = ui.merge_undo.borrow().last().cloned() else {
         return;
@@ -2566,13 +2572,39 @@ fn undo_last_merge(ui: &Rc<Ui>) {
     });
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
+        let forget = |ui: &Rc<Ui>| {
+            ui.merge_undo.borrow_mut().retain(|r| {
+                r.source != record.source || r.destination != record.destination || r.faces != record.faces || r.operation != record.operation
+            });
+            refresh_undo_merge(ui);
+        };
+        if let Some(operation) = record.operation.clone() {
+            let page = actions::undo_merge_operation(&ui.engine, operation, 30).await;
+            finish_person_action(&ui, "revertMerge");
+            ui.undo_merge_button.set_sensitive(true);
+            match page {
+                Some(page) if page.status == "ok" => {
+                    forget(&ui);
+                    set_status(&ui, actions::UNDO_MERGE_OK.to_string());
+                    schedule_reload_burst(&ui);
+                }
+                Some(page) => {
+                    if page.status == "refused" {
+                        forget(&ui);
+                    }
+                    let detail = page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                    set_status(&ui, actions::undo_merge_failed(&detail));
+                }
+                None => set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again.")),
+            }
+            return;
+        }
         let results = actions::send_and_collect(&ui.engine, vec![payload], "revertMerge", 30).await;
         finish_person_action(&ui, "revertMerge");
         ui.undo_merge_button.set_sensitive(true);
         match results.as_deref().and_then(<[_]>::first) {
             Some(result) if result.failed == 0 && result.succeeded > 0 => {
-                ui.merge_undo.borrow_mut().retain(|r| r.source != record.source || r.destination != record.destination || r.faces != record.faces);
-                refresh_undo_merge(&ui);
+                forget(&ui);
                 set_status(&ui, actions::UNDO_MERGE_OK.to_string());
                 schedule_reload_burst(&ui);
             }

@@ -76,9 +76,10 @@ struct PeopleView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { refreshFaceModelInstalled(); reload(); refreshReview(); refreshMergeUndo() }
-        .onChange(of: store.version) { _, _ in reload(debounced: true) }
+        .onChangeWhileActive(of: store.version) { reload(debounced: true) }
         .onChange(of: ModelInstaller.face.status) { _, _ in refreshFaceModelInstalled() }
-        .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload(); refreshReview() }
+        .onChangeWhileActive(of: engine.lastFaceClustering?.durationSeconds) { reload(); refreshReview(); refreshMergeUndo() }
+        .onPageVisibility(shown: { refreshFaceModelInstalled() })
         .onChange(of: activeSheet) { _, sheet in
             publishSelection(sheet)
             if sheet == nil { refreshReview(); refreshMergeUndo() }
@@ -1917,7 +1918,7 @@ private struct FaceQueueObservers: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: jobs) { _, jobs in
+            .onChangeWhileActive(of: jobs) {
                 if jobs.contains(where: { $0.kind == "faceRefresh" }) { Task { await refresh?.reload() } }
             }
             .onChange(of: changes) { _, _ in onChange() }

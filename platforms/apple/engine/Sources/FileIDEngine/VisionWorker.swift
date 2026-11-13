@@ -272,7 +272,13 @@ public final class VisionWorker: @unchecked Sendable {
     /// language detection. Reads handwriting the fast tier can't; several times
     /// slower, so the tagging stage runs it only when `TextReading` asks.
     public func ocrAccurate(_ cgImage: CGImage) -> String {
-        guard AccurateOCRWarmup.shared.isReady, AccurateOCRBreaker.shared.allowed else { return "" }
+        ocrAccurateIfAvailable(cgImage) ?? ""
+    }
+
+    /// nil when the accurate tier is still warming up or paused by its breaker:
+    /// the read never ran, so the caller records it as owed (ScanCatchUp).
+    func ocrAccurateIfAvailable(_ cgImage: CGImage) -> String? {
+        guard AccurateOCRWarmup.shared.isReady, AccurateOCRBreaker.shared.allowed else { return nil }
         var completed = false
         let text = recognizeText(cgImage, level: .accurate, completed: &completed)
         AccurateOCRBreaker.shared.record(success: completed)
@@ -357,6 +363,8 @@ final class AccurateOCRWarmup: @unchecked Sendable {
         return ready
     }
 
+    static let isEnabled = ProcessInfo.processInfo.environment["FILEID_OCR_WARMUP"] != "0"
+
     /// The compile shares the Neural Engine with the scan's own model loads: on a cold engine an
     /// audio-only scan of 323 files took 115 s with the warmup running and 3.2 s without it.
     /// So wait a moment, and keep waiting while a scan is queued or running; a scan that starts
@@ -376,7 +384,7 @@ final class AccurateOCRWarmup: @unchecked Sendable {
         guard !started else { lock.unlock(); return }
         started = true
         lock.unlock()
-        if ProcessInfo.processInfo.environment["FILEID_OCR_WARMUP"] == "0" { return }
+        if !Self.isEnabled { return }
         DispatchQueue.global(qos: .utility).async {
             let began = CFAbsoluteTimeGetCurrent()
             // Real text, so the recognizers compile too, not just the detector

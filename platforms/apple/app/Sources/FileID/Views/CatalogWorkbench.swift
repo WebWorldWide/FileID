@@ -8,6 +8,7 @@ struct CatalogWorkbench: View {
     var store: ReadStore? = nil
     var onSwitchTab: ((MainWindow.Tab) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.pageActive) private var pageActive
     @State private var query = ""
     @State private var hits: [CatalogHit] = []
     @State private var resultRows: [MomentResultRow] = []
@@ -85,9 +86,10 @@ struct CatalogWorkbench: View {
         .sheet(isPresented: $showingTakes) {
             TakeWorkbench(engine: engine, candidates: hits)
         }
-        .task {
+        .task(id: pageActive) {
             // Ask every second only while something is waiting or running;
-            // otherwise once every ten seconds.
+            // otherwise once every ten seconds. Not at all while hidden.
+            guard pageActive else { return }
             var idleTicks = 0
             while !Task.isCancelled {
                 let active = engine.catalogJobs.contains { $0.state == "queued" || $0.state == "running" }
@@ -109,9 +111,9 @@ struct CatalogWorkbench: View {
         }
         .task(id: selected?.fileID) { await loadTimeline() }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
-        .onChange(of: engine.catalogJobs) { _, jobs in
+        .onChangeWhileActive(of: engine.catalogJobs) {
             guard let selected,
-                  let completed = jobs.first(where: {
+                  let completed = engine.catalogJobs.first(where: {
                       $0.kind == "timelineSample" && $0.state == "completed"
                           && $0.fileIDs.contains(selected.fileID) && !refreshedTimelineJobs.contains($0.id)
                   }) else { return }
@@ -120,6 +122,7 @@ struct CatalogWorkbench: View {
             Task { await loadTimeline() }
         }
         .onDisappear { player?.pause(); clock.attach(nil) }
+        .onPageVisibility(hidden: { player?.pause() })
     }
 
     // MARK: - Results pane
@@ -130,7 +133,7 @@ struct CatalogWorkbench: View {
                 DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
                 CaptureDateFilter(window: $captureWindow)
                     .onChange(of: captureWindow) { _, _ in search() }
-                    .onChange(of: store?.scopeEpoch ?? 0) { _, _ in search() }
+                    .onChangeWhileActive(of: store?.scopeEpoch ?? 0) { search() }
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)

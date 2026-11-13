@@ -295,18 +295,31 @@ final class ChatActionRunner {
             guard let store = handoff.store, let renames = action.renames else { return }
             phases[action.id] = .running("Renaming \(renames.count.formatted()) files")
             let wanted = Dictionary(renames.map { ($0.fileID, $0.newName) }, uniquingKeysWith: { first, _ in first })
-            let rows = await Task.detached(priority: .userInitiated) { () -> [FileRow] in
+            let current = await Task.detached(priority: .userInitiated) { () -> [Int64] in
                 // Only files whose suggestion is still the one the card showed.
                 store.files(forFileIDs: Array(wanted.keys)).filter { row in
                     guard let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines), let name = wanted[row.id] else { return false }
                     let ext = row.url.pathExtension
                     return (ext.isEmpty ? proposed : "\(proposed).\(ext)") == name
-                }
+                }.map(\.id).sorted()
             }.value
-            let result = await CatalogWrites.applyProposedNames(rows, engine: engine, store: store)
+            // Same path as the rename sheets: names in the saved Name style.
+            let naming = StyledNames.savedNaming()
+            var styled: [CatalogWrites.NamedRename] = []
+            for start in stride(from: 0, to: current.count, by: NameStyle.maxFiles) {
+                let ids = Array(current[start..<min(start + NameStyle.maxFiles, current.count)])
+                switch await StyledNames.rows(engine: engine, fileIDs: ids, naming: naming) {
+                case .failed(let why):
+                    phases[action.id] = .failed(why)
+                    return
+                case .rows(let rows):
+                    styled += NameStyle.renames(rows)
+                }
+            }
+            let result = await CatalogWrites.applyNames(styled, engine: engine, store: store)
             BulkRenameSheet.saveLastBatch(result.renamed)
-            let skipped = renames.count - result.renamed.count - result.failed
-            phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (result.failed > 0 ? " · \(result.failed.formatted()) failed" : "") + (skipped > 0 ? " · \(skipped.formatted()) skipped because their suggestion changed" : "") + ".")
+            let changed = renames.count - current.count
+            phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (StyledNames.suggestionLabel() == "Suggested name" ? "" : " in your name style") + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" : "") + (changed > 0 ? " · \(changed.formatted()) skipped because their suggestion changed" : "") + ".")
             if !result.renamed.isEmpty {
                 let batch = result.renamed
                 offerUndo(action, label: "Undo renames") {

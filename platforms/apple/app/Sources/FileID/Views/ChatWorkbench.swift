@@ -7,6 +7,7 @@ struct ChatWorkbench: View {
     @Bindable var engine: EngineClient
     var onClose: (() -> Void)? = nil
     @FocusState private var inputFocused: Bool
+    @Environment(\.pageActive) private var pageActive
     @AppStorage("chatConversationID") private var conversationID = ""
     @AppStorage("chatDraft") private var input = ""
     @AppStorage("chatUseModel") private var useModel = true
@@ -64,6 +65,9 @@ struct ChatWorkbench: View {
             control("history")
         }
         .onDisappear { player?.pause() }
+        // After the page stack has released the old page's focus.
+        .onPageVisibility(shown: { DispatchQueue.main.async { inputFocused = true } },
+                          hidden: { inputFocused = false; player?.pause() })
         .onChange(of: engine.latestChatResponse) { _, response in
             guard let response, response.conversationID == conversationID, !ignored.contains(response.requestID) else { return }
             if response.requestID == historyRequest, busy { return }
@@ -256,7 +260,7 @@ struct ChatWorkbench: View {
                 if busy {
                     Button("Stop") { control("cancel") }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
-                        .keyboardShortcut(".", modifiers: .command)
+                        .keyboardShortcut(pageActive ? KeyboardShortcut(".", modifiers: .command) : nil)
                         .help("Stop the answer (⌘.)")
                 } else {
                     Button("Send", action: send)

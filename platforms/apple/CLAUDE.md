@@ -13,7 +13,7 @@ Two binaries, newline-delimited JSON over stdin/stdout:
 - `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (convergence Stage 0; C interface in `adapters/include/fileid_apple.h`). The app starts `fileidd` only with `defaults write com.fileid.app engine.backend rust`; bundle it with `FILEID_WITH_RUST_ENGINE=1 scripts/assemble_app.sh`.
 - `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
 
-Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v33**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
+Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v34**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
 
 ## Tabs
 

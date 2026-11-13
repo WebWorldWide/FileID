@@ -509,6 +509,7 @@ pub(crate) fn list(conn: &Connection, payload: &ListFaceReviewPayload) -> rusqli
         Some("merges") => super::face_queues::list_merges(conn, payload),
         Some("splits") => super::face_queues::list_splits(conn, payload),
         Some("refresh") => super::face_refresh::status_page(conn, &payload.request_id),
+        Some(super::person_merge::QUEUE) => super::person_merge::list(conn, &payload.request_id, now()),
         Some(_) => Ok(refused(&payload.request_id, "list", "Choose the faces, merges, splits or refresh queue.")),
     }
 }
@@ -730,12 +731,18 @@ fn resolve_face_in(conn: &Connection, request: &str, face_id: i64, person_id: i6
 
 fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
     let request = payload.request_id.as_str();
+    let at = now();
+    let operation = if payload.operation_id == super::person_merge::LAST_TOKEN {
+        super::person_merge::latest(conn, at)?.map_or_else(|| payload.operation_id.clone(), |found| found.0)
+    } else {
+        payload.operation_id.clone()
+    };
     let found: Option<(String, String, String)> = conn
         .query_row(
             "SELECT c.kind, c.before_json, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id \
              WHERE o.id=?1 AND o.state='completed' \
-               AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review')",
-            [&payload.operation_id],
+               AND c.kind IN ('face_review','face_review_bulk','face_merge_review','face_split_review','person_merge')",
+            [&operation],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -750,11 +757,12 @@ fn undo_in(conn: &Connection, payload: &UndoFaceReviewPayload) -> rusqlite::Resu
     let reply = match kind.as_str() {
         "face_review_bulk" => undo_accept_all_in(conn, request, &before, &after)?,
         "face_merge_review" | "face_split_review" => super::face_queues::undo_in(conn, request, &before, &after)?,
+        super::person_merge::KIND => super::person_merge::undo(conn, request, &before, &after, at)?,
         _ => undo_face_in(conn, request, &before, &after)?,
     };
     if reply.status == "ok" {
-        conn.execute("UPDATE catalog_operations SET state='undone' WHERE id=?1", [&payload.operation_id])?;
-        return Ok(FaceReviewPage { operation_id: Some(payload.operation_id.clone()), ..reply });
+        conn.execute("UPDATE catalog_operations SET state='undone' WHERE id=?1", [&operation])?;
+        return Ok(FaceReviewPage { operation_id: Some(operation), ..reply });
     }
     Ok(reply)
 }
@@ -1000,6 +1008,7 @@ fn with_pending_total(conn: &Connection, reply: FaceReviewPage) -> rusqlite::Res
     let total = match reply.queue.as_deref() {
         Some("merges") => super::face_queues::merge_count(conn)?,
         Some("splits") => super::face_queues::split_count(conn)?,
+        Some(super::person_merge::QUEUE) => super::person_merge::offered(conn, now())?,
         _ => pending_count(conn)?,
     };
     Ok(FaceReviewPage { total, ..reply })

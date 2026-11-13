@@ -24,6 +24,12 @@ struct LibraryView: View {
     @State private var tagsByFile: [Int64: [String]] = [:]
     @State private var searchText: String = ""
     @FocusState private var searchFocused: Bool
+    @Environment(\.pageActive) private var pageActive
+    /// What changed while another page covered this one; applied on return.
+    @State private var missedWhileHidden: Set<HiddenChange> = []
+    private enum HiddenChange { case batch, listing, scope, terminal }
+    /// The tile token last shown, held while hidden so tiles don't reload unseen.
+    @State private var shownTileToken = ""
     /// Debounce against per-keystroke reloads while CLIP semantic
     /// search is active (~50ms per query).
     @State private var searchDebounce: Task<Void, Never>?
@@ -131,11 +137,11 @@ struct LibraryView: View {
                 searchDebounce = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     guard !Task.isCancelled else { return }
-                    reload()
+                    reloadWhenShown()
                 }
             }
-            .onChange(of: kindFilterRaw) { _, _ in reload() }
-            .onChange(of: similarSeed?.id) { _, _ in reload() }
+            .onChange(of: kindFilterRaw) { _, _ in reloadWhenShown() }
+            .onChange(of: similarSeed?.id) { _, _ in reloadWhenShown() }
             .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
             // Keep the tile-refresh epoch tracking store.version while idle so a
             // tag edit / undo refreshes the dots, but leave it frozen during a
@@ -146,7 +152,10 @@ struct LibraryView: View {
             // The encoder's ORT session takes seconds to build after launch /
             // install; without this the first search silently stays keyword-only.
             .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
-                if ready { reload() }
+                if ready { reloadWhenShown() }
+            }
+            .onChange(of: tileRefreshToken, initial: true) { _, token in
+                if pageActive { shownTileToken = token }
             }
             // Surface the undo outcome (renames or tags, incl. partial/total
             // failures) — it was written to `undoStatus` but never shown, so
@@ -175,31 +184,14 @@ struct LibraryView: View {
             .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
-            .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-                if new != lastSeenBatchIndex {
-                    lastSeenBatchIndex = new
-                    let now = Date()
-                    if now.timeIntervalSince(lastCounterRefreshAt) >= 1.0 {
-                        lastCounterRefreshAt = now
-                        store.notifyChanged()
-                    }
-                    // New files are prepended, which reloads the whole grid.
-                    // An empty grid fills right away; otherwise it refreshes
-                    // only while the user sits at the top, and at a slow beat.
-                    let wait = rows.isEmpty ? 1.0 : Self.liveReloadInterval
-                    guard Date().timeIntervalSince(lastReloadAt) >= wait else { return }
-                    if rows.isEmpty || (gridAtTop && !selectMode && previewSelectedID == nil) {
-                        lastReloadAt = Date()
-                        reload(firstPageOnly: true)
-                    } else {
-                        newFilesWaiting = true
-                    }
-                }
+            .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
+                if pageActive { scanBatchArrived() } else { missedWhileHidden.insert(.batch) }
             }
             .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
-                refreshBulkState()
+                if pageActive { refreshBulkState() }
             }
             .onChange(of: store.scopeEpoch) { _, _ in
+                guard pageActive else { missedWhileHidden.insert(.scope); return }
                 listedQuery = nil
                 reload()
             }
@@ -208,12 +200,61 @@ struct LibraryView: View {
             // so the last batch never triggers a reload if it lands within 1 s).
             // Reloading on any terminal event guarantees the grid ends complete.
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
-                store.notifyChanged()
-                refreshOpenPreview()
-                reload()
-                refreshBulkState()
-                engine.refreshLibraryRoots()
+                if pageActive { scanEnded() } else { missedWhileHidden.insert(.terminal) }
             }
+            .onPageVisibility(shown: pageShown, hidden: { searchFocused = false })
+    }
+
+    private func reloadWhenShown() {
+        if pageActive { reload() } else { missedWhileHidden.insert(.listing) }
+    }
+
+    private func scanBatchArrived() {
+        let new = engine.lastBatch?.batchIndex ?? -1
+        guard new != lastSeenBatchIndex else { return }
+        lastSeenBatchIndex = new
+        let now = Date()
+        if now.timeIntervalSince(lastCounterRefreshAt) >= 1.0 {
+            lastCounterRefreshAt = now
+            store.notifyChanged()
+        }
+        // New files are prepended, which reloads the whole grid.
+        // An empty grid fills right away; otherwise it refreshes
+        // only while the user sits at the top, and at a slow beat.
+        let wait = rows.isEmpty ? 1.0 : Self.liveReloadInterval
+        guard Date().timeIntervalSince(lastReloadAt) >= wait else { return }
+        if rows.isEmpty || (gridAtTop && !selectMode && previewSelectedID == nil) {
+            lastReloadAt = Date()
+            reload(firstPageOnly: true)
+        } else {
+            newFilesWaiting = true
+        }
+    }
+
+    private func scanEnded() {
+        store.notifyChanged()
+        refreshOpenPreview()
+        reload()
+        refreshBulkState()
+        engine.refreshLibraryRoots()
+    }
+
+    /// Back on screen after another page: apply only what was missed, so the
+    /// grid keeps its rows and scroll position when nothing changed.
+    private func pageShown() {
+        shownTileToken = tileRefreshToken
+        refreshClipModelOnDisk()
+        refreshBulkState()
+        let missed = missedWhileHidden
+        missedWhileHidden = []
+        if missed.contains(.scope) { listedQuery = nil }
+        if missed.contains(.terminal) {
+            scanEnded()
+        } else if missed.contains(.scope) || missed.contains(.listing) {
+            reload()
+        } else if missed.contains(.batch) {
+            scanBatchArrived()
+        }
     }
 
     private var content: some View {
@@ -270,7 +311,7 @@ struct LibraryView: View {
         // is the standard idiom.
         .background(
             Button("") { searchFocused = true }
-                .keyboardShortcut("f", modifiers: .command)
+                .keyboardShortcut(pageActive ? KeyboardShortcut("f", modifiers: .command) : nil)
                 .opacity(0)
                 .frame(width: 0, height: 0)
         )
@@ -322,7 +363,7 @@ struct LibraryView: View {
         let query = queryHandoff
         queryHandoff = ""
         similarSeed = nil
-        if searchText == query { reload() } else { searchText = query }
+        if searchText == query { reloadWhenShown() } else { searchText = query }
     }
 
     struct SearchProblem: Equatable {
@@ -624,7 +665,7 @@ struct LibraryView: View {
                     checkedFiles.removeAll()
                 }
                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                .keyboardShortcut(.escape, modifiers: [])
+                .keyboardShortcut(pageActive ? KeyboardShortcut(.escape, modifiers: []) : nil)
             } else {
                 Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
@@ -795,7 +836,7 @@ struct LibraryView: View {
             selectMode: selectMode,
             checkedIDs: Set(checkedFiles.keys),
             selectedID: previewSelectedID ?? paneSelectedID,
-            refreshToken: tileRefreshToken,
+            refreshToken: pageActive ? tileRefreshToken : shownTileToken,
             contentVersion: rowsEpoch,
             scrollToTopToken: scrollToTopToken,
             textSize: ContentTextScale.shared.size,
@@ -1285,7 +1326,7 @@ private struct FilePreviewSheet: View {
                             HStack(spacing: 10) {
                                 Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Suggested name").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                                    Text(StyledNames.suggestionLabel()).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                                     Text("\(proposed).\(file.extension)").font(Theme.Font.mono(11.5)).foregroundStyle(Theme.gold)
                                         .lineLimit(2).textSelection(.enabled)
                                 }
@@ -1709,6 +1750,7 @@ private struct LibrarySelectedPane: View {
     let onOpen: () -> Void
     let onFindSimilar: () -> Void
     let onClose: () -> Void
+    @Environment(\.pageActive) private var pageActive
     @State private var thumbnail: NSImage?
     @State private var tags: [String] = []
     @State private var people: [String] = []
@@ -1724,7 +1766,7 @@ private struct LibrarySelectedPane: View {
                             .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.dsRow)
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(pageActive ? .cancelAction : nil)
                     .help("Close details")
                 }
                 ZStack {
@@ -1774,7 +1816,7 @@ private struct LibrarySelectedPane: View {
 
                 if let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines), !proposed.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
-                        MetaText("Suggested name", size: 11)
+                        MetaText(StyledNames.suggestionLabel(), size: 11)
                         Text(row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)")
                             .font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.gold)
                             .lineLimit(2).truncationMode(.middle).textSelection(.enabled)

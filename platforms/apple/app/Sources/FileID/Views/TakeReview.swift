@@ -31,6 +31,7 @@ struct TakeReview: View {
     @State private var player: AVPlayer?
     @State private var playingID: Int64?
     @FocusState private var stripFocused: Bool
+    @Environment(\.pageActive) private var pageActive
 
     private var isVideo: Bool { group.kind == "videos" }
     private var noun: (one: String, many: String) { ("take", "takes") }
@@ -62,6 +63,7 @@ struct TakeReview: View {
         }
         .task(id: group.groupKey) { await load() }
         .onDisappear { player?.pause() }
+        .onPageVisibility(hidden: { player?.pause() })
         .confirmationDialog(confirmTitle, isPresented: $confirmTrash, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) { Task { await trashOthers() } }
             Button("Cancel", role: .cancel) {}
@@ -91,7 +93,7 @@ struct TakeReview: View {
                 Button(primaryTitle) { confirmTrash = true }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(loading || trashing || victims.isEmpty || keep.isEmpty)
-                    .keyboardShortcut(.delete, modifiers: .command)
+                    .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
                     .help(primaryHelp)
                 Button("Keep all") { Task { await decide("keepAll") } }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.control))

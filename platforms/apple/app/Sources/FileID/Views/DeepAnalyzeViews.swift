@@ -418,12 +418,12 @@ struct DeepAnalyzeView: View {
         }
         .background(Color.clear, ignoresSafeAreaEdges: [])
         .onAppear { refreshPendingRenameCount(); refreshStatusCounts() }
-        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+        .onChangeWhileActive(of: engine.deepAnalyzeComplete?.processed ?? -1) {
             refreshPendingRenameCount()
             refreshStatusCounts()
         }
-        .onChange(of: store.version) { _, _ in throttledRefresh() }
-        .onChange(of: settings.activeKind.rawValue) { _, _ in
+        .onChangeWhileActive(of: store.version) { throttledRefresh() }
+        .onChangeWhileActive(of: settings.activeKind.rawValue) {
             refreshStatusCounts()   // pending is keyed by active model
         }
         .onChange(of: engine.lastErrorSignal) { _, _ in
@@ -452,7 +452,7 @@ struct DeepAnalyzeView: View {
     /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
     /// most one refresh per second so the 3 status COUNT(*) queries
     /// (countFilesWithProposedNames / deepAnalyzePending / namedPersonCount)
-    /// don't fire 1000× — including while this tab is off-screen. Leading
+    /// don't fire 1000×. Leading
     /// edge refreshes at once when the last was ≥1s ago; otherwise a trailing
     /// debounce guarantees a final refresh after the burst settles. Mirrors
     /// LibraryView's batch throttle + search debounce.

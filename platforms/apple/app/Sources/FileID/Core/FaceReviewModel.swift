@@ -7,7 +7,7 @@ enum FaceReviewText {
     static let empty = "No suggestions to review."
     static let undo = "Undo"
     static let undoLabel = "Undo the last review"
-    static let unreachable = "FileID couldn't reach the engine. Try again in a moment."
+    static let unreachable = "FileID's helper didn't answer. Try again in a moment."
 
     static func name(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

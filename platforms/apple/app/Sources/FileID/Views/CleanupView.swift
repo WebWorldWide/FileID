@@ -40,6 +40,9 @@ struct CleanupView: View {
     @State private var reloadTask: Task<Void, Never>?
     @State private var lastScanTimeReload = Date.distantPast
     @State private var reloadPending = false
+    @Environment(\.pageActive) private var pageActive
+    /// Files changed, or a comparison was cut short, while another page was shown.
+    @State private var staleWhileHidden = false
 
     /// Mirrors LibraryView: true while the engine is discovering, tagging, or
     /// post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz
@@ -91,27 +94,8 @@ struct CleanupView: View {
             store.openIfPossible()
             reload()
         }
-        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-            if new != lastSeenBatchIndex {
-                lastSeenBatchIndex = new
-                store.notifyChanged()
-                // Exact mode's reload() runs a live full-file SHA-256 pass over up
-                // to ExactDuplicateVerifier.candidateCap candidates; the digest
-                // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
-                // keeps the whole candidate set hot and contends with the engine's
-                // scan reads on the same drive for the entire scan. Defer the exact
-                // re-verify to scan completion (the lastTerminalEventAt handler
-                // below). Similar mode's perceptual index is cheap and drive-light,
-                // so it keeps refreshing live. (reload storm)
-                if !scanActive {
-                    reload()
-                } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
-                    // Look-alike grouping compares every pair of photos; once per
-                    // batch it kept a core busy for the whole scan.
-                    lastScanTimeReload = Date()
-                    reload()
-                }
-            }
+        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
+            if pageActive { scanBatchArrived() } else { staleWhileHidden = true }
         }
         .onDisappear { reloadTask?.cancel() }
         // Exact mode skips its per-batch reload during a live scan, so the final
@@ -119,9 +103,26 @@ struct CleanupView: View {
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's
         // terminal reload; single-flight reload() coalesces if one is in flight.
         .onChange(of: engine.lastTerminalEventAt) { _, _ in
+            guard pageActive else { staleWhileHidden = true; return }
             store.notifyChanged()
             reload()
         }
+        // Leaving stops an unfinished comparison, as it did when the page was
+        // rebuilt on every visit; coming back runs it again only if it was cut
+        // short or files changed meanwhile.
+        .onPageVisibility(shown: {
+            guard staleWhileHidden else { return }
+            staleWhileHidden = false
+            lastSeenBatchIndex = engine.lastBatch?.batchIndex ?? -1
+            store.notifyChanged()
+            reload()
+        }, hidden: {
+            if reloadTask != nil {
+                reloadTask?.cancel()
+                reloadPending = false
+                staleWhileHidden = true
+            }
+        })
         .onChange(of: confirmDelete) { _, presented in
             // Dialog dismissed (confirm, cancel, or click-away): apply any scan
             // batches we deferred while it was open, re-deriving keepers.
@@ -555,6 +556,29 @@ struct CleanupView: View {
             : (undone.message ?? "Nothing was put back. Check the Trash.")
         store.notifyChanged()
         reload()
+    }
+
+    private func scanBatchArrived() {
+        let new = engine.lastBatch?.batchIndex ?? -1
+        guard new != lastSeenBatchIndex else { return }
+        lastSeenBatchIndex = new
+        store.notifyChanged()
+        // Exact mode's reload() runs a live full-file SHA-256 pass over up
+        // to ExactDuplicateVerifier.candidateCap candidates; the digest
+        // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
+        // keeps the whole candidate set hot and contends with the engine's
+        // scan reads on the same drive for the entire scan. Defer the exact
+        // re-verify to scan completion (the lastTerminalEventAt handler).
+        // Similar mode's perceptual index is cheap and drive-light,
+        // so it keeps refreshing live. (reload storm)
+        if !scanActive {
+            reload()
+        } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
+            // Look-alike grouping compares every pair of photos; once per
+            // batch it kept a core busy for the whole scan.
+            lastScanTimeReload = Date()
+            reload()
+        }
     }
 
     private func reload() {

@@ -55,6 +55,14 @@ struct PipelineBlock: View {
             case .discovering:
                 return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(p.discovered.formatted()) files found so far", indeterminate: true)
             case .postScan:
+                // After the files are read, FileID's helper adds detailed tags: the
+                // total then runs past the files found by the number of photos left.
+                let owed = p.total - p.discovered
+                if owed > 0 {
+                    let done = min(owed, max(0, p.processed + p.failed - p.discovered))
+                    let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
+                    return Status(title: "Tagging photos", fraction: Double(done) / Double(owed), tone: .gold, color: Theme.gold, sub: "\(done.formatted()) of \(owed.formatted()) photos" + left)
+                }
                 return Status(title: "Finishing up", fraction: 0, tone: .gold, color: Theme.gold, sub: "Saving what FileID found", indeterminate: true)
             default:
                 let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""

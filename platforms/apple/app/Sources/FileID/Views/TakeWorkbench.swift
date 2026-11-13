@@ -9,6 +9,7 @@ struct TakeWorkbench: View {
     var inline = false
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.pageActive) private var pageActive
     @State private var events: [CatalogEvent] = []
     @State private var selectedEvent: CatalogEvent?
     @State private var takes: [CatalogTake] = []
@@ -116,10 +117,11 @@ struct TakeWorkbench: View {
         .frame(minWidth: inline ? nil : 960, minHeight: inline ? nil : 680)
         .tint(Theme.gold)
         .task { send("listEvents"); reloadAuto(after: nil); reloadProposals(after: nil) }
-        .onChange(of: engine.lastTerminalEventAt) { _, _ in reloadAuto(after: nil) }
+        .onChangeWhileActive(of: engine.lastTerminalEventAt) { reloadAuto(after: nil) }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
-        .onChange(of: engine.catalogJobs) { _, jobs in refreshGoalJob(); refreshGrouping(jobs) }
+        .onChangeWhileActive(of: engine.catalogJobs) { refreshGoalJob(); refreshGrouping(engine.catalogJobs) }
         .onDisappear { player?.pause() }
+        .onPageVisibility(hidden: { player?.pause() })
         .confirmationDialog("Delete this group?", isPresented: $confirmDeleteGroup, titleVisibility: .visible) {
             Button("Delete group", role: .destructive) {
                 guard let event = selectedEvent else { return }
@@ -324,7 +326,7 @@ struct TakeWorkbench: View {
                 Button("Save group") { saveGroup() }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
                     .disabled(!canSave)
-                    .keyboardShortcut("s", modifiers: .command)
+                    .keyboardShortcut(pageActive ? KeyboardShortcut("s", modifiers: .command) : nil)
                     .help(canSave ? "Save (⌘S)" : "Needs a name, a goal and at least two takes")
                 if let event = selectedEvent {
                     Button("Score takes") { analyzeGoal(event) }

@@ -45,6 +45,8 @@ struct RestructureView: View {
     @State private var storedPlanFolders: [RestructureCategoryCount] = []
     @State private var planBuild: Task<Void, Never>?
     @State private var planVersion = 0
+    /// `store.version` when the plan on screen was asked for.
+    @State private var planStoreVersion = 0
     @State private var sankeyHeaderStat = ""
     /// Single-flight guard for the apply / convert paths. A real move is
     /// irreversible inside the app, so a double-click must never run apply
@@ -294,7 +296,7 @@ struct RestructureView: View {
         // spacing it caused UI stutters and slowed the engine. Terminal-only
         // is the right granularity: Deep Analyze is a single batch run, and
         // proposals don't need to track mid-flight progress.
-        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+        .onChangeWhileActive(of: engine.deepAnalyzeComplete?.processed ?? -1) {
             guard libraryRoot != nil else { return }
             store.notifyChanged()
             requestPlan()
@@ -304,6 +306,12 @@ struct RestructureView: View {
         .onChange(of: engine.restructurePlanSignal) { _, _ in
             applyPlan()
         }
+        // Coming back used to rebuild the page and plan again every time; now
+        // it plans again only when files changed or the last plan never arrived.
+        .onPageVisibility(shown: {
+            guard libraryRoot != nil, !loading, !applying, !confirmApply, !confirmLargeApply else { return }
+            if store.version != planStoreVersion || proposals.isEmpty { requestPlan() }
+        })
         // Apply finished engine-side — surface the result, release the
         // single-flight guard, and re-request a fresh plan (moved files now
         // carry new path_text).
@@ -983,6 +991,7 @@ struct RestructureView: View {
         storedPlanFolders = []
         loading = true
         status = nil
+        planStoreVersion = store.version
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
             status = "FileID is still getting ready. Open this page again in a moment to see your plan."

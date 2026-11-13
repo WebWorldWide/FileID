@@ -107,6 +107,16 @@ enum StyledNames {
                          learn: defaults.object(forKey: NameStyle.learnKey) as? Bool ?? NameStyle.defaultLearn)
     }
 
+    /// The stored suggestion is written in the default style; Rename applies the saved one.
+    static func suggestionLabel(_ defaults: UserDefaults = .standard) -> String {
+        var saved = savedNaming(defaults)
+        saved.learn = false
+        let standard = NameStyle.naming(style: NameStyle.defaultStyle, maxLength: NameStyle.defaultMaxLength,
+                                        includePeople: NameStyle.defaultIncludePeople, includeEvent: NameStyle.defaultIncludeEvent,
+                                        includeDate: NameStyle.defaultIncludeDate)
+        return saved == standard ? "Suggested name" : "Suggested name (before your name style)"
+    }
+
     static func rows(engine: EngineClient, fileIDs: [Int64], naming: CatalogNaming, previous: [NameStyle.Row] = []) async -> Outcome {
         let ids = NameStyle.fileIDs(selection: fileIDs, fallback: [])
         guard !ids.isEmpty else { return .rows([]) }

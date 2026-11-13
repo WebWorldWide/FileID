@@ -2165,6 +2165,7 @@ struct FileIDEngineMain {
                                                        isCancelled: { ScanCoordinator.isCancelledSync() })
             }
             await autoEnqueueFaceClusteringIfNeeded(database: database, sink: sink)
+            await runCatchUp(database: database, root: url.path, coordinator: coordinator, sink: sink)
         }
 
         let totalDur = Date().timeIntervalSince(scanStart)
@@ -2174,6 +2175,29 @@ struct FileIDEngineMain {
     }
 
     static let visionTimeoutMessage = "Vision pass timed out (will retry next scan)"
+
+    /// RAM++ tags and careful text reads the main pass left owed, including what
+    /// an earlier cancelled or interrupted scan of this folder still owes.
+    private static func runCatchUp(
+        database: Database, root: String, coordinator: ScanCoordinator, sink: IPCSink
+    ) async {
+        guard await ScanCatchUp.owed(database: database, root: root).any else { return }
+        // The warm-up otherwise waits for the scan job to end; the main pass is
+        // over, so the Neural Engine is free for the compile now.
+        AccurateOCRWarmup.shared.start()
+        await ScanCatchUp.run(
+            database: database, root: root,
+            isCancelled: { ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync() },
+            isPaused: { ScanCoordinator.isPausedSync() }
+        ) { event in
+            switch event {
+            case .total(let total): await coordinator.setCatchUp(total: total)
+            case .advance(let count): await coordinator.bumpCatchUp(by: count)
+            }
+            if let snapshot = await coordinator.periodicSnapshot() { await sink.emit(.progress(snapshot)) }
+        }
+        await coordinator.endCatchUp()
+    }
 
     /// Photos under `root` whose Vision pass timed out during this scan.
     private static func visionTimeouts(database: Database, root: URL, since: Date) async -> Int {

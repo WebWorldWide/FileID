@@ -1672,10 +1672,16 @@ pub(crate) async fn handle_merge_clusters(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::MergeClustersPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        let src = payload.source_person_id;
-        let dst = payload.destination_person_id;
-        let conn = db.lock();
+    let result = tokio::task::spawn_blocking(move || {
+        merge_clusters(&db.lock(), payload.source_person_id, payload.destination_person_id)
+    })
+    .await;
+
+    emit_bulk_result(&sink, "mergeClusters", result).await;
+}
+
+pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) -> anyhow::Result<BulkActionResult> {
+    {
         let tx = conn.unchecked_transaction()?;
         let source_exists = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
@@ -1717,6 +1723,7 @@ pub(crate) async fn handle_merge_clusters(
                 }],
             });
         }
+        let journal = super::person_merge::begin(&tx, dst, src)?;
         persist_manual_merge_constraint(&tx, src, dst)?;
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
@@ -1774,6 +1781,10 @@ pub(crate) async fn handle_merge_clusters(
             )? == 1,
             "destination person disappeared during representative refresh"
         );
+        let operation_id = match journal {
+            Some(journal) => Some(journal.record(&tx, super::face_review::now())?),
+            None => None,
+        };
         tx.commit()?;
         Ok(BulkActionResult {
             action: "mergeClusters".into(),
@@ -1784,13 +1795,10 @@ pub(crate) async fn handle_merge_clusters(
                 ok: true,
                 message: Some(format!("moved {moved} face prints from #{src} into #{dst}")),
                 reason: None,
-                operation_id: None,
+                operation_id,
             }],
         })
-    })
-    .await;
-
-    emit_bulk_result(&sink, "mergeClusters", result).await;
+    }
 }
 
 pub(crate) async fn emit_bulk_result(

@@ -21,16 +21,19 @@ enum CatalogWrites {
         guard engine.send(command) else {
             return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: notReady)])
         }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if engine.bulkActionResultSignal != seen {
-                seen = engine.bulkActionResultSignal
-                if let result = engine.bulkActionResult, result.action == action,
-                   id == nil || result.messages.allSatisfy({ $0.fileID == nil }) || result.messages.contains(where: { $0.fileID == id }) {
-                    return result
-                }
-            }
-            try? await Task.sleep(for: .milliseconds(15))
+        func mine(_ result: BulkActionResult) -> Bool {
+            result.action == action
+                && (id == nil || result.messages.allSatisfy({ $0.fileID == nil }) || result.messages.contains(where: { $0.fileID == id }))
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(timeout)
+        while clock.now < deadline {
+            guard let result = await engine.bulkActionResult(after: seen, prefix: action, timeout: deadline - clock.now) else { break }
+            // A second reply can land before this resumes; check the newest too.
+            let latest = engine.bulkActionResult
+            seen = engine.bulkActionResultSignal
+            if mine(result) { return result }
+            if let latest, mine(latest) { return latest }
         }
         return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: noAnswer)])
     }
@@ -80,8 +83,7 @@ enum CatalogWrites {
     /// Runs a `ReadStore.mergeBatchPlan`. Returns how many people were merged away.
     /// `progress` is told which merge is starting; `shouldStop` is asked
     /// between merges. Stopping is a flag rather than task cancellation
-    /// because `request` polls with a sleep that cancellation would turn
-    /// into a busy loop.
+    /// because a merge already sent must be waited for, not abandoned.
     static func mergeBatch(_ engine: EngineClient, store: ReadStore, plan: [(target: Int64, sources: [Int64])],
                            progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int {
         let total = plan.reduce(0) { sum, group in sum + group.sources.filter { $0 != group.target }.count }
@@ -182,42 +184,6 @@ enum CatalogWrites {
         return ia.isEqual(ib)
     }
 
-    /// Renames files to the suggested names the user saw. Paths are re-read
-    /// first so a file that moved since the list loaded is renamed where it is.
-    static func applyProposedNames(_ files: [FileRow], engine: EngineClient, store: ReadStore) async -> ReadStore.BulkRenameResult {
-        guard !files.isEmpty else { return ReadStore.BulkRenameResult(renamed: [], failed: 0, firstError: nil) }
-        let (planned, missing) = await Task.detached(priority: .userInitiated) { () -> ((plans: [RenamePlan], unnamed: Int), Int) in
-            let current = Dictionary(store.files(forFileIDs: files.map(\.id)).map { ($0.id, $0.pathText) },
-                                     uniquingKeysWith: { first, _ in first })
-            let fresh = files.compactMap { file in
-                current[file.id].map { RenameCandidate(fileID: file.id, path: $0, proposed: file.vlmProposedName) }
-            }
-            return (planRenames(fresh), files.count - fresh.count)
-        }.value
-        var renamed: [ReadStore.RenameOutcome] = []
-        var failed = planned.unnamed + missing
-        var firstError: String?
-        let plans = planned.plans
-        for start in stride(from: 0, to: plans.count, by: renameChunk) {
-            let chunk = Array(plans[start..<min(start + renameChunk, plans.count)])
-            let result = await request(engine, .renameFiles(renames: chunk.map { RenameEntry(fileID: $0.fileID, newName: $0.target.lastPathComponent) }),
-                                       action: "renameFiles", id: chunk[0].fileID, timeout: 60 + Double(chunk.count) / 4)
-            let byID = Dictionary(chunk.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
-            let landed = result.messages.filter(\.ok).compactMap(\.fileID).compactMap { byID[$0] }
-            renamed += await Task.detached(priority: .userInitiated) {
-                landed.map { ReadStore.RenameOutcome(fileID: $0.fileID, oldPath: $0.oldPath, newPath: $0.target.path) }
-            }.value
-            failed += chunk.count - landed.count
-            if firstError == nil { firstError = result.messages.first { !$0.ok }?.message }
-            if !answered(result) {
-                failed += plans.count - start - chunk.count
-                break
-            }
-        }
-        if !renamed.isEmpty { store.notifyChanged() }
-        return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
-    }
-
     struct NamedRename: Sendable, Equatable {
         let fileID: Int64
         let newName: String
@@ -278,14 +244,6 @@ enum CatalogWrites {
         }
         if !renamed.isEmpty { store.notifyChanged() }
         return ReadStore.BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
-    }
-
-    /// One file's suggested-name rename. Returns its path afterwards (the old
-    /// one when it already had the name), or nil when the rename failed.
-    static func applyProposedName(_ file: FileRow, engine: EngineClient, store: ReadStore) async -> URL? {
-        let result = await applyProposedNames([file], engine: engine, store: store)
-        if let landed = result.renamed.first { return URL(fileURLWithPath: landed.newPath) }
-        return result.failed == 0 ? file.url : nil
     }
 
     /// Why a recorded rename can't be put back, or nil when it can: the file

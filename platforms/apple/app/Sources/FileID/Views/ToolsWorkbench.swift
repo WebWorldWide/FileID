@@ -240,6 +240,7 @@ struct ToolsWorkbench: View {
         .modifier(RecipeHooks(view: self))
         .task(id: trimSource) { await loadTrimPlayer() }
         .onDisappear { player?.pause() }
+        .onPageVisibility(hidden: { player?.pause() })
         .onChange(of: engine.engineResetSignal) { _, new in session.abandonPendingIfEngineRestarted(generation: new) }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }

@@ -39,7 +39,7 @@ use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    CommandPayload, ExactTrashIdentity, RestoreFromTrashPayload, TrashFilesPayload,
+    BulkActionItem, CommandPayload, ExactTrashIdentity, RestoreFromTrashPayload, TrashFilesPayload,
 };
 use fileid_engine::read::dupes::{self, ExactCaps, DEFAULT_SIMILAR_THRESHOLD, MAX_SIMILAR_THRESHOLD};
 
@@ -1488,27 +1488,12 @@ impl Cleanup {
                 tagged_summary(tagged),
             ));
         } else {
-            let details = result
+            let refused: Vec<&BulkActionItem> = result
                 .messages
                 .iter()
-                .filter(|message| !message.ok)
-                .filter_map(|message| {
-                    message
-                        .file_id
-                        .filter(|id| pending.ids.contains(id))
-                        .map(|id| {
-                            format!(
-                                "#{id}: {}",
-                                message
-                                    .message
-                                    .as_deref()
-                                    .unwrap_or("Trash rejected the file")
-                            )
-                        })
-                })
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" · ");
+                .filter(|message| !message.ok && message.file_id.is_some_and(|id| pending.ids.contains(&id)))
+                .collect();
+            let details = trash_failure_details(&refused);
             let preflight = if pending.preflight_rejected > 0 {
                 format!(
                     "{} skipped because the file changed since the scan. ",
@@ -2186,6 +2171,32 @@ fn trash_operation_is_current(current: u64, operation: u64, deleting: bool) -> b
     deleting && current == operation
 }
 
+/// Why files stayed out of Trash. The engine's `reason` groups them in plain
+/// words; refusals without one (older engines) fall back to their messages.
+fn trash_failure_details(refused: &[&BulkActionItem]) -> String {
+    let count = |reason: &str| refused.iter().filter(|item| item.reason.as_deref() == Some(reason)).count();
+    let mut parts = Vec::new();
+    for (reason, one, many) in [
+        ("changed", "1 file changed since it was scanned.", "files changed since they were scanned."),
+        ("protected", "1 file is in a protected location.", "files are in a protected location."),
+        ("missing", "1 file is no longer in the library.", "files are no longer in the library."),
+    ] {
+        match count(reason) {
+            0 => {}
+            1 => parts.push(one.to_owned()),
+            n => parts.push(format!("{n} {many}")),
+        }
+    }
+    let other: Vec<String> = refused
+        .iter()
+        .filter(|item| !matches!(item.reason.as_deref(), Some("changed" | "protected" | "missing")))
+        .filter_map(|item| item.message.clone().or_else(|| item.reason.is_none().then(|| "Trash rejected the file".to_owned())))
+        .take(3)
+        .collect();
+    parts.extend(other);
+    parts.join(" · ")
+}
+
 fn is_trash_result(action: &str) -> bool {
     action == "trashFiles" || action.starts_with("trashFiles:")
 }
@@ -2256,6 +2267,31 @@ mod tests {
     fn trash_results_accept_engine_batch_suffixes() {
         assert!(is_trash_result("trashFiles"));
         assert!(is_trash_result("trashFiles:batch-id"));
+    }
+
+    #[test]
+    fn trash_failures_are_grouped_by_the_engine_reason() {
+        let item = |reason: Option<&str>, message: Option<&str>| BulkActionItem {
+            file_id: Some(1),
+            ok: false,
+            message: message.map(str::to_owned),
+            reason: reason.map(str::to_owned),
+            operation_id: None,
+        };
+        let items = [
+            item(Some("changed"), Some("internal wording a")),
+            item(Some("changed"), Some("internal wording b")),
+            item(Some("protected"), None),
+            item(Some("failed"), Some("The disk is full.")),
+            item(None, Some("Older helper text.")),
+            item(None, None),
+        ];
+        let refs: Vec<&BulkActionItem> = items.iter().collect();
+        assert_eq!(
+            trash_failure_details(&refs),
+            "2 files changed since they were scanned. · 1 file is in a protected location. · The disk is full. · Older helper text. · Trash rejected the file"
+        );
+        assert_eq!(trash_failure_details(&[]), "");
         assert!(!is_trash_result("applyTags"));
     }
 

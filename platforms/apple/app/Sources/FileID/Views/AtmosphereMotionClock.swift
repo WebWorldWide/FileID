@@ -53,6 +53,7 @@ struct AtmosphereTimeline<Content: View>: View {
     @ViewBuilder var content: (TimeInterval) -> Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.atmospherePaused) private var userPaused
+    @Environment(\.pageActive) private var pageActive
     @State private var delivery = AtmosphereActivityDelivery()
     @State private var mounted = false
     @State private var windowActive = false
@@ -61,7 +62,7 @@ struct AtmosphereTimeline<Content: View>: View {
         var reasons: AtmosphereSuspension = []
         if !mounted { reasons.insert(.unmounted) }
         if reduceMotion { reasons.insert(.reduceMotion) }
-        if paused || userPaused { reasons.insert(.userPaused) }
+        if paused || userPaused || !pageActive { reasons.insert(.userPaused) }
         return reasons
     }
 

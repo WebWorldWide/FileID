@@ -767,12 +767,13 @@ struct DSProgressViewStyle: ProgressViewStyle {
 struct IndeterminateBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.atmospherePaused) private var userPaused
+    @Environment(\.pageActive) private var pageActive
     @State private var phase: CGFloat = -0.35
     @State private var windowVisible = true
 
     /// A repeatForever animation keeps the compositor awake, so it only runs
     /// while its window is on screen.
-    private var animating: Bool { !reduceMotion && !userPaused && windowVisible }
+    private var animating: Bool { !reduceMotion && !userPaused && windowVisible && pageActive }
 
     var body: some View {
         GeometryReader { geo in
