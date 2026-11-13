@@ -587,12 +587,14 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.True(reset > tryReserve && undo > reset && waiter > undo,
             "Undo must subscribe before the bulk waiter so a terminal cannot dispose it before capture.");
         Assert.True(timeout > waiter && lateRelease > timeout,
-            "A timed-out prefix must remain reserved until a late terminal or engine transition.");
+            "A timed-out prefix must remain reserved until a late terminal, an engine transition, or the late-reply hold.");
         Assert.Contains("catch (TimeoutException) when (sendCompleted)", commands, StringComparison.Ordinal);
 
         var cleanup = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "Cleanup", "CleanupView.xaml.cs"));
-        Assert.Contains("timeout: Timeout.InfiniteTimeSpan", cleanup, StringComparison.Ordinal);
+        Assert.Contains("ReleaseAfterLateReplyHold(ReleaseOwnership);", commands, StringComparison.Ordinal);
+        Assert.DoesNotContain("timeout: Timeout.InfiniteTimeSpan", cleanup, StringComparison.Ordinal);
+        Assert.Contains("timeout: Services.BulkActionTimeout.ForTrash(ids.Count)", cleanup, StringComparison.Ordinal);
     }
 
     [Fact]

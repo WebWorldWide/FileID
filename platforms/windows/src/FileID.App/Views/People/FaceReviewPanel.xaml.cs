@@ -368,7 +368,7 @@ public sealed partial class FaceReviewPanel : UserControl
         {
             var page = await EngineClient.Instance.UndoFaceReviewAsync(operationId);
             return FaceReviewPolicy.IsOk(page);
-        });
+        }, ChangePage.People);
     }
 
     private async void OnUndoClicked(object sender, RoutedEventArgs e)

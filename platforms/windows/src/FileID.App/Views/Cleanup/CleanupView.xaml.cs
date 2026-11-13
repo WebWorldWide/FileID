@@ -43,6 +43,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Groups.CollectionChanged += OnGroupsCollectionChanged;
         ViewModels.EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Services.UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
         Loaded += OnLoadedAsync;
         Unloaded += OnUnloaded;
     }
@@ -106,9 +107,66 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         });
     }
 
+    private void OnUndoStackChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("CleanupView.OnUndoStackChanged", () =>
+        {
+            if (_unloaded) return;
+            if (e.PropertyName is nameof(Services.UndoStack.CanUndo) or nameof(Services.UndoStack.TopLabel))
+            {
+                DispatcherQueue.TryEnqueue(SyncPutBackButton);
+            }
+        });
+
+    private void SyncPutBackButton()
+    {
+        if (_unloaded || PutBackButton is null) return;
+        PutBackButton.Visibility = Services.UndoStack.Instance.CanUndoOn(Services.ChangePage.Cleanup)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private int _putBackInFlight;
+
+    private async void OnPutBackLastMoveClicked(object sender, RoutedEventArgs e)
+    {
+        if (Interlocked.CompareExchange(ref _putBackInFlight, 1, 0) != 0) return;
+        try
+        {
+            PutBackButton.IsEnabled = false;
+            var label = await Services.UndoStack.Instance.UndoAsync(Services.ChangePage.Cleanup);
+            if (_unloaded) return;
+            if (string.IsNullOrEmpty(label))
+            {
+                await ShowAlertAsync(
+                    "Couldn't put the files back",
+                    "The files are still in the Recycle Bin. Open the Recycle Bin, choose them and press Restore.");
+            }
+            else
+            {
+                TrashResultText.Text = "Put the files back where they were.";
+                TrashResultText.Visibility = Visibility.Visible;
+            }
+            await ViewModel.RefreshAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnPutBackLastMoveClicked: " + ex.Message);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _putBackInFlight, 0);
+            if (!_unloaded)
+            {
+                PutBackButton.IsEnabled = true;
+                SyncPutBackButton();
+            }
+        }
+    }
+
     private async void OnLoadedAsync(object sender, RoutedEventArgs e)
     {
         if (_unloaded) return;
+        SyncPutBackButton();
         try { await ViewModel.RefreshAsync(CancellationToken.None); }
         catch (Exception ex) { DebugLog.Warn("CleanupView.OnLoaded refresh threw: " + ex.Message); }
     }
@@ -217,6 +275,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         catch { /* swallow */ }
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
+        try { Services.UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
         foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
         _inflightThumbs.Clear();
         try { ViewModel.Dispose(); } catch { /* swallow */ }
@@ -432,41 +491,41 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                     return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
                 }
                 catch { return false; }
-            });
+            },
+            Services.ChangePage.Cleanup);
 
         // Await the engine's BulkActionResult so a partial/total failure is
         // surfaced instead of fire-and-forgetting + unconditionally refreshing
         // (the #1 silent failure: the user thinks files were trashed when some
-        // weren't). Only refresh on a clean run (Failed == 0).
+        // weren't). A partial run still refreshes so moved files leave the list.
         try
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
-                timeout: Timeout.InfiniteTimeSpan,
+                timeout: Services.BulkActionTimeout.ForTrash(ids.Count),
                 beforeSend: beforeSend);
             if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
-                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
                 await ShowAlertAsync(
-                    "Some files weren't trashed",
+                    "Some files weren't moved",
                     result.Failed == 0
-                        ? "The engine did not confirm every selected file. Re-run the scan before trying again."
-                        : $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                        ? "FileID couldn't confirm every chosen file. Press Check again before retrying."
+                        : $"{result.Succeeded:N0} moved to the Recycle Bin. {Services.TrashFailureText.Summary(result)}");
+                if (result.Succeeded > 0) await ViewModel.RefreshAsync(CancellationToken.None);
                 return;
             }
         }
         catch (TimeoutException)
         {
             await ShowAlertAsync(
-                "Trash didn't confirm",
-                "The engine didn't confirm the trash. The files may or may not have moved — re-run the scan to check before retrying.");
+                "Couldn't confirm the move",
+                "FileID couldn't tell whether the files reached the Recycle Bin. Look in the Recycle Bin, then press Check again before retrying.");
             return;
         }
         catch (Exception ex)
         {
-            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            await ShowAlertAsync("Couldn't move the files", $"The chosen files weren't moved to the Recycle Bin. {ex.Message}");
             return;
         }
 
@@ -642,7 +701,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try { return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); }
                 catch { return false; }
-            });
+            },
+            Services.ChangePage.Cleanup);
 
         // Await the engine reply: surface partial/total failure and only
         // refresh on a clean run, so a per-group trash can't falsely look done.
@@ -651,30 +711,29 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
-                timeout: Timeout.InfiniteTimeSpan,
+                timeout: Services.BulkActionTimeout.ForTrash(ids.Count),
                 beforeSend: beforeSend);
             if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
-                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
                 await ShowAlertAsync(
-                    "Some files weren't trashed",
+                    "Some files weren't moved",
                     result.Failed == 0
-                        ? "The engine did not confirm every selected file. Re-run the scan before trying again."
-                        : $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                        ? "FileID couldn't confirm every chosen file. Press Check again before retrying."
+                        : $"{result.Succeeded:N0} moved to the Recycle Bin. {Services.TrashFailureText.Summary(result)}");
+                if (result.Succeeded > 0) await ViewModel.RefreshAsync(CancellationToken.None);
                 return;
             }
         }
         catch (TimeoutException)
         {
             await ShowAlertAsync(
-                "Trash didn't confirm",
-                "The engine didn't confirm the trash. The files may or may not have moved — re-run the scan to check before retrying.");
+                "Couldn't confirm the move",
+                "FileID couldn't tell whether the files reached the Recycle Bin. Look in the Recycle Bin, then press Check again before retrying.");
             return;
         }
         catch (Exception ex)
         {
-            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            await ShowAlertAsync("Couldn't move the files", $"The chosen files weren't moved to the Recycle Bin. {ex.Message}");
             return;
         }
         ShowTrashResult(ids.Count, bytes);

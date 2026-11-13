@@ -552,7 +552,7 @@ internal sealed class NameStyleCard : UserControl
             var dispatcher = DispatcherQueue;
             if (inverse.Count > 0)
             {
-                UndoStack.Instance.Push($"rename {inverse.Count} file{(inverse.Count == 1 ? "" : "s")}", async () =>
+                UndoStack.Instance.Push($"rename {inverse.Count} file{(inverse.Count == 1 ? "" : "s")}", ChangePage.DeepAnalyze, async () =>
                 {
                     try
                     {

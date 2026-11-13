@@ -249,12 +249,13 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     {
         if (UndoButton == null) return;
         var stack = UndoStack.Instance;
-        if (stack.CanUndo)
+        var label = stack.TopLabelOn(ChangePage.Library);
+        if (stack.CanUndoOn(ChangePage.Library))
         {
             UndoButton.Visibility = Visibility.Visible;
-            UndoButtonText.Text = string.IsNullOrEmpty(stack.TopLabel)
+            UndoButtonText.Text = string.IsNullOrEmpty(label)
                 ? "Undo"
-                : $"Undo {stack.TopLabel}";
+                : $"Undo {label}";
         }
         else
         {
@@ -290,7 +291,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try
         {
             UndoButton.IsEnabled = false;
-            var label = await UndoStack.Instance.UndoAsync();
+            var label = await UndoStack.Instance.UndoAsync(ChangePage.Library);
             DebugLog.Info(string.IsNullOrEmpty(label) ? "Undo: nothing to undo" : $"Undo applied: {label}");
             await ViewModel.RefreshAsync(CancellationToken.None);
         }
@@ -504,7 +505,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
             if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
-            if (!UndoStack.Instance.CanUndo) return;
+            if (!UndoStack.Instance.CanUndoOn(ChangePage.Library)) return;
             OnUndoLastClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -1248,7 +1249,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                         return await EngineClient.Instance.RestoreFromTrashAsync(batchId);
                     }
                     catch { return false; }
-                });
+                },
+                ChangePage.Library);
 
             FileID.IpcSchema.BulkActionResult? result = null;
             try
@@ -1260,21 +1262,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                     "trashFiles",
                     () => EngineClient.Instance.TrashFilesAsync(ids),
-                    TimeSpan.FromSeconds(30),
+                    BulkActionTimeout.ForTrash(ids.Length),
                     beforeSend: beforeSend);
             }
             catch (TimeoutException ex)
             {
                 Services.DebugLog.Warn("Trash timed out: " + ex.Message);
                 await ShowAlertAsync(
-                    "Trash didn't confirm",
-                    "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+                    "Couldn't confirm the move",
+                    "FileID couldn't tell whether the files reached the Recycle Bin. Look in the Recycle Bin, then scan again before retrying.");
                 return;
             }
             catch (Exception ex)
             {
                 Services.DebugLog.Warn("Trash failed: " + ex.Message);
-                await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+                await ShowAlertAsync("Couldn't move the files", $"The selected files weren't moved to the Recycle Bin. {ex.Message}");
                 return;
             }
 
@@ -1298,12 +1300,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // a real total failure — surface it + refresh, matching the sibling flows.
             if (result.Failed > 0 || result.Succeeded == 0)
             {
-                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                var why = Services.TrashFailureText.Summary(result);
                 var body = result.Succeeded == 0 && result.Failed == 0
-                    ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
-                    : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
-                await ShowAlertAsync("Some files couldn't be recycled", body);
+                    ? (why.Length > 0 ? $"Nothing was moved. {why}" : "Nothing was moved. Your files are unchanged. Try again in a moment.")
+                    : $"{result.Succeeded:N0} moved to the Recycle Bin. {why}";
+                await ShowAlertAsync("Some files weren't moved", body);
                 RequestLibraryRefresh(force: true);
             }
         }

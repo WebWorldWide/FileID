@@ -555,8 +555,11 @@ public sealed partial class MainWindow : Window
         AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
             if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
-            if (!Services.UndoStack.Instance.CanUndo) return;
-            var label = await Services.UndoStack.Instance.UndoAsync();
+            // Ctrl+Z undoes the showing page's own newest change, never one
+            // made on another page (those stay in Recent changes).
+            if (Services.UndoStack.PageForTab(AppViewModel.Instance.ActiveTab.Id) is not { } page) return;
+            if (!Services.UndoStack.Instance.CanUndoOn(page)) return;
+            var label = await Services.UndoStack.Instance.UndoAsync(page);
             args.Handled = true;
             if (!string.IsNullOrEmpty(label))
             {
