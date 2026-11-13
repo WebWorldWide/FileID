@@ -620,6 +620,7 @@ async fn async_main() -> Result<()> {
         let check = integrity_check.clone();
         let _ = tokio::task::spawn_blocking(move || check.cancel()).await;
     }
+    db::close_readers();
     if mutation_guard.is_some() {
         let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
             let guard = conn_arc.lock();

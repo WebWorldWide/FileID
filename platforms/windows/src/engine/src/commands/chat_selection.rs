@@ -754,9 +754,8 @@ pub(crate) fn evidence_answer(conn: &Connection, request: &ChatRequest) -> Resul
 
 pub(crate) type Database = Arc<Mutex<Connection>>;
 
-fn reader(database: &Database) -> Result<Option<Connection>> {
-    let path = database.lock().path().filter(|path| !path.is_empty()).map(PathBuf::from);
-    path.map(|path| crate::db::open_read(&path)).transpose()
+fn reader(database: &Database) -> Result<Option<crate::db::Reader<'static>>> {
+    crate::db::reader_for(database)
 }
 
 pub(crate) async fn send(sink: Sink, database: Database, request: ChatRequest, model: Option<String>) {

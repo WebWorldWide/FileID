@@ -92,6 +92,15 @@ pub(super) fn fingerprint(conn: &Connection) -> rusqlite::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Runs `work` on a read-only connection so hashing the catalog does not
+/// hold the writer; an in-memory catalog only has its writer.
+pub(super) fn with_reader<R>(writer: &parking_lot::Mutex<Connection>, work: impl FnOnce(&Connection) -> R) -> R {
+    match crate::db::reader_for(writer) {
+        Ok(Some(reader)) => work(&reader),
+        _ => work(&writer.lock()),
+    }
+}
+
 fn state_path(conn: &Connection) -> Option<PathBuf> {
     let path = conn.path().filter(|path| !path.is_empty() && !path.starts_with(':'))?;
     Some(PathBuf::from(path).with_extension("face-clustering.json"))

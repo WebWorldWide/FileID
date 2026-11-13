@@ -199,6 +199,95 @@ pub fn open_read(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// A few read-only connections kept open between requests, so a read handler
+/// neither waits on the writer nor pays to open the catalog and parse its
+/// schema on every call. Holds connections to one database at a time.
+pub struct ReaderPool {
+    capacity: usize,
+    idle: parking_lot::Mutex<Vec<(std::path::PathBuf, Connection)>>,
+}
+
+/// A pooled read-only connection, returned to its pool on drop.
+pub struct Reader<'a> {
+    pool: &'a ReaderPool,
+    path: std::path::PathBuf,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("held until drop")
+    }
+}
+
+impl std::ops::DerefMut for Reader<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        // A connection left inside a transaction would pin an old snapshot.
+        let Some(conn) = self.conn.take().filter(Connection::is_autocommit) else { return };
+        let mut idle = self.pool.idle.lock();
+        idle.retain(|(path, _)| *path == self.path);
+        if idle.len() < self.pool.capacity {
+            idle.push((std::mem::take(&mut self.path), conn));
+        }
+    }
+}
+
+impl ReaderPool {
+    pub const fn new(capacity: usize) -> Self {
+        Self { capacity, idle: parking_lot::Mutex::new(Vec::new()) }
+    }
+
+    pub fn get(&self, db_path: &Path) -> Result<Reader<'_>> {
+        let cached = {
+            let mut idle = self.idle.lock();
+            idle.retain(|(path, _)| path == db_path);
+            idle.pop()
+        };
+        let conn = match cached {
+            Some((_, conn)) => conn,
+            None => {
+                let conn = open_read(db_path)?;
+                conn.set_prepared_statement_cache_capacity(32);
+                conn
+            }
+        };
+        Ok(Reader { pool: self, path: db_path.to_path_buf(), conn: Some(conn) })
+    }
+
+    /// Closes every idle connection.
+    pub fn clear(&self) {
+        self.idle.lock().clear();
+    }
+
+    #[cfg(test)]
+    fn idle_count(&self) -> usize {
+        self.idle.lock().len()
+    }
+}
+
+// Tests delete their temporary catalogs; an idle handle would block that on
+// Windows, so the shared pool keeps nothing there.
+static READERS: ReaderPool = ReaderPool::new(if cfg!(test) { 0 } else { 4 });
+
+/// A pooled read-only connection to the writer's database, or `None` for an
+/// in-memory database (which only its own connection can see).
+pub fn reader_for(writer: &parking_lot::Mutex<Connection>) -> Result<Option<Reader<'static>>> {
+    let path = writer.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
+    path.map(|path| READERS.get(&path)).transpose()
+}
+
+/// Closes the shared pool's idle connections (shutdown).
+pub fn close_readers() {
+    READERS.clear();
+}
+
 /// Run `PRAGMA quick_check` on the writer connection. Returns `Ok(())` when the
 /// database is structurally sound, or `Err(detail)` carrying the first problem
 /// SQLite reports. quick_check is the fast cousin of `integrity_check` — it
@@ -579,6 +668,45 @@ mod tests {
                 let _ = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0));
             }
         }
+    }
+
+    #[test]
+    fn the_reader_pool_reuses_connections_and_never_writes() {
+        let (path, _dir) = temp_db("pool");
+        seeded(&path);
+        let pool = ReaderPool::new(2);
+        {
+            let first = pool.get(&path).unwrap();
+            let second = pool.get(&path).unwrap();
+            let third = pool.get(&path).unwrap();
+            assert_eq!(pool.idle_count(), 0);
+            assert!(first.execute("DELETE FROM files", []).is_err(), "pooled connections are read-only");
+            let _ = (second.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0)).unwrap(), third);
+        }
+        assert_eq!(pool.idle_count(), 2, "at most `capacity` connections are kept");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute("UPDATE files SET size_bytes=4242", []).unwrap();
+        let reused = pool.get(&path).unwrap();
+        assert_eq!(pool.idle_count(), 1);
+        let seen: i64 = reused.query_row("SELECT MAX(size_bytes) FROM files", [], |row| row.get(0)).unwrap();
+        assert_eq!(seen, 4242, "a reused connection sees later commits");
+        reused.execute_batch("BEGIN").unwrap();
+        drop(reused);
+        assert_eq!(pool.idle_count(), 1, "a connection left in a transaction is closed, not reused");
+
+        let (other, _other_dir) = temp_db("pool-other");
+        seeded(&other);
+        drop(pool.get(&other).unwrap());
+        assert_eq!(pool.idle_count(), 1, "switching databases drops the old one's connections");
+        assert!(pool.idle.lock().iter().all(|(held, _)| *held == other));
+        pool.clear();
+        assert_eq!(pool.idle_count(), 0);
+
+        let memory = parking_lot::Mutex::new(Connection::open_in_memory().unwrap());
+        assert!(reader_for(&memory).unwrap().is_none());
+        let file = parking_lot::Mutex::new(Connection::open(&path).unwrap());
+        let shared = reader_for(&file).unwrap().expect("file databases get a reader");
+        assert!(shared.execute("DELETE FROM files", []).is_err());
     }
 
     fn many_rows(path: &Path) {

@@ -1411,7 +1411,7 @@ pub(crate) async fn handle_run_face_clustering(
     }
     let started = Instant::now();
     let skip_db = db.clone();
-    if let Ok(Some(mut remembered)) = tokio::task::spawn_blocking(move || skip::unchanged(&skip_db.lock())).await {
+    if let Ok(Some(mut remembered)) = tokio::task::spawn_blocking(move || skip::with_reader(&skip_db, skip::unchanged)).await {
         tracing::info!("[CLUSTER] nothing changed since the last pass; skipped");
         remembered.duration_seconds = started.elapsed().as_secs_f64();
         release_active_before_terminal(&active);
@@ -1422,11 +1422,10 @@ pub(crate) async fn handle_run_face_clustering(
     let mac = tokio::task::spawn_blocking(move || {
         let space = super::face_clustering_mac::selected_space(&mac_db.lock())?;
         let outcome = super::face_clustering_mac::run(&mac_db, &space);
-        let conn = mac_db.lock();
-        match outcome.error {
-            None => skip::remember(&conn, &outcome.result),
-            Some(_) => skip::forget(&conn),
-        }
+        skip::with_reader(&mac_db, |conn| match outcome.error {
+            None => skip::remember(conn, &outcome.result),
+            Some(_) => skip::forget(conn),
+        });
         Some(outcome)
     })
     .await;
@@ -1449,11 +1448,10 @@ pub(crate) async fn handle_run_face_clustering(
     }
     let result = tokio::task::spawn_blocking(move || {
         let result = run_portable(&db);
-        let conn = db.lock();
-        match &result {
-            Ok(result) => skip::remember(&conn, result),
-            Err(_) => skip::forget(&conn),
-        }
+        skip::with_reader(&db, |conn| match &result {
+            Ok(result) => skip::remember(conn, result),
+            Err(_) => skip::forget(conn),
+        });
         result
     })
     .await;

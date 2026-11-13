@@ -154,9 +154,8 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, payloa
     let request_id = payload.request_id;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<LibraryRoot>> {
         let Some(database) = database else { return Ok(vec![]) };
-        let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
-        match path {
-            Some(path) => Ok(list(&crate::db::open_read(&path)?)?),
+        match crate::db::reader_for(&database)? {
+            Some(reader) => Ok(list(&reader)?),
             None => Ok(list(&database.lock())?),
         }
     })
