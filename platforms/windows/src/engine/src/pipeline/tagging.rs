@@ -1023,6 +1023,18 @@ pub struct Tagger {
     twins: Arc<TwinRegistry>,
 }
 
+/// The Mac adapters decode and analyse this process's scans.
+pub(crate) fn apple_scan_enabled() -> bool {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        mac::enabled()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        false
+    }
+}
+
 /// `FILEID_TWIN_REUSE=0` analyzes every copy itself (the A/B control).
 fn twin_reuse_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -1358,6 +1370,7 @@ impl Tagger {
                     // calls enforce their own limits where the OS permits. A
                     // panic on one file becomes that file's failure so the
                     // worker keeps draining the queue.
+                    let transient = refused.is_some();
                     let outcome = if let Some(message) = refused {
                         Err((message, 0.0))
                     } else {
@@ -1394,6 +1407,13 @@ impl Tagger {
                             }
                         }
                     };
+                    let mut tagged = tagged;
+                    if tagged.failed && !tagged.failure_is_transient {
+                        tagged.failure_is_transient = transient
+                            || coord.is_cancelled()
+                            || coord.is_gpu_dead()
+                            || !crate::pipeline::catch_up::failure_is_about_the_file(&tagged.path);
+                    }
                     let publish = twin_hash.filter(|_| !tagged.reuse_twin).map(|hash| {
                         (hash, !tagged.failed && tagged.tags_evaluated)
                     });

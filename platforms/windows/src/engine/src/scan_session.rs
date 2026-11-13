@@ -328,6 +328,13 @@ impl ScanSession {
                 }
             }
 
+            // Files that failed on enough scans, unchanged since, stay failed
+            // rows (the Library still lists them) but are not attempted again.
+            let given_up = add_given_up_failures(&conn, &mut set, &lo, hi.as_deref());
+            if given_up > 0 {
+                tracing::info!(given_up, "[SCAN] files that keep failing are left alone until they change");
+            }
+
             // Crash self-heal: face crops are written post-commit outside the
             // writer tx, so a mid-scan kill can leave committed face_prints
             // rows with no on-disk crop JPEG. Those files are size+mtime
@@ -1130,6 +1137,33 @@ fn reconcile_missing_face_crops_in(
     removed
 }
 
+/// Adds the failed rows that used up their retries to the skip set; discovery
+/// then skips each one only while its size and date still match.
+fn add_given_up_failures(
+    conn: &Connection,
+    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
+    lo: &str,
+    hi: Option<&str>,
+) -> usize {
+    let base = crate::pipeline::catch_up::GIVEN_UP_SQL;
+    let context = crate::pipeline::catch_up::failure_context();
+    let sql = if hi.is_some() { format!("{base} AND f.path_text >= ?2 AND f.path_text < ?3") } else { base.to_string() };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?));
+    let Ok(mut stmt) = conn.prepare(&sql) else { return 0 };
+    let rows = match hi {
+        Some(hi) => stmt.query_map(rusqlite::params![context, lo, hi], row),
+        None => stmt.query_map(rusqlite::params![context], row),
+    };
+    let mut added = 0;
+    if let Ok(rows) = rows {
+        for (path, size, modified) in rows.flatten() {
+            set.insert(path_fingerprint_text(&path), (size, modified));
+            added += 1;
+        }
+    }
+    added
+}
+
 /// Rows under `root` that were catalogued as cloud placeholders, keyed like the
 /// skip set.
 fn known_placeholders(
@@ -1442,6 +1476,45 @@ mod tests {
         );
         assert_eq!(discovery_notice(0, 40, 0, 0, "/lib").unwrap().kind, "rescan_no_changes");
         assert!(discovery_notice(5, 0, 0, 0, "/lib").is_none());
+    }
+
+    #[test]
+    fn files_that_keep_failing_join_the_skip_set_with_their_stored_size_and_date() {
+        let conn = crate::db::test_support::memory_db();
+        let sep = std::path::MAIN_SEPARATOR;
+        let path = |name: &str| format!("{sep}lib{sep}{name}");
+        let context = crate::pipeline::catch_up::failure_context();
+        let add = |id: i64, name: &str, failed: i64, stages: i64, attempts: i64, vision: &str| {
+            crate::db::test_support::insert_file(&conn, id, &path(name), "image");
+            conn.execute("UPDATE files SET failed = ?2 WHERE id = ?1", rusqlite::params![id, failed]).unwrap();
+            conn.execute(
+                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+                 VALUES (?1, ?2, 100, 10, ?3, 0, ?4, 0)",
+                rusqlite::params![id, stages, vision, attempts],
+            )
+            .unwrap();
+        };
+        add(1, "given-up.jpg", 1, 4, 3, context);
+        add(2, "two-tries.jpg", 1, 4, 2, context);
+        add(3, "other-build.jpg", 1, 4, 5, "{\"failedBy\":\"fileid-engine 0.0.0 portable\"}");
+        add(4, "owes-tags.jpg", 0, 1, 3, "{}");
+        add(5, "fine-now.jpg", 0, 4, 3, context);
+        crate::db::test_support::insert_file(&conn, 6, &format!("{sep}elsewhere{sep}given-up.jpg"), "image");
+        conn.execute("UPDATE files SET failed = 1 WHERE id = 6", []).unwrap();
+        conn.execute(
+            "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) VALUES (6, 4, 100, 10, ?1, 0, 3, 0)",
+            [context],
+        )
+        .unwrap();
+
+        let lo = root_descendant_prefix(Path::new(&format!("{sep}lib")));
+        let hi = prefix_upper_bound(&lo);
+        let mut set = std::collections::HashMap::new();
+        assert_eq!(add_given_up_failures(&conn, &mut set, &lo, hi.as_deref()), 1);
+        assert_eq!(set.get(&path_fingerprint_text(&path("given-up.jpg"))), Some(&(100, Some(10.0))));
+
+        let mut everywhere = std::collections::HashMap::new();
+        assert_eq!(add_given_up_failures(&conn, &mut everywhere, "", None), 2);
     }
 
     #[test]

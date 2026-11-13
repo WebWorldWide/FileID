@@ -400,6 +400,12 @@ impl DbWriter {
             let mut twin_unavailable = tx
                 .prepare_cached("UPDATE files SET failed = 1, error_message = ?2 WHERE id = ?1")
                 .context("preparing twin unavailable update")?;
+            let mut failure_record = tx
+                .prepare_cached(crate::pipeline::catch_up::RECORD_FAILURE_SQL)
+                .context("preparing failure memory")?;
+            let mut failure_clear = tx
+                .prepare_cached(crate::pipeline::catch_up::CLEAR_FAILURE_SQL)
+                .context("preparing failure memory clear")?;
             for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -793,6 +799,26 @@ impl DbWriter {
                             *failed += 1;
                         }
                     }
+                }
+
+                // Remember a failure that is about the file, so a file that
+                // can never be read stops costing a full attempt on every scan.
+                if f.failed {
+                    if !f.failure_is_transient {
+                        failure_record
+                            .execute(params![
+                                file_id,
+                                f.size_bytes as i64,
+                                f.modified_unix,
+                                crate::pipeline::catch_up::failure_context(),
+                                f.scanned_unix,
+                            ])
+                            .with_context(|| format!("failure memory for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                    }
+                } else {
+                    failure_clear
+                        .execute(params![file_id])
+                        .with_context(|| format!("failure memory clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
                 if f.failed {
@@ -2883,3 +2909,120 @@ mod heal_only_tests {
         assert!(rows(&conn).is_empty());
     }
 }
+
+#[cfg(test)]
+mod failure_memory_tests {
+    use super::*;
+    use crate::pipeline::catch_up;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn file(path: &str, failed: bool) -> TaggedFile {
+        let mut file = TaggedFile::bare(&DiscoveredFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        });
+        file.failed = failed;
+        file.error_message = failed.then(|| "image decode: broken".to_string());
+        file.tags_evaluated = !failed;
+        file
+    }
+
+    fn memory(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, String)> {
+        conn.lock()
+            .query_row(
+                "SELECT c.stages, c.attempts, c.vision FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn given_up(conn: &Arc<Mutex<Connection>>) -> Vec<String> {
+        let db = conn.lock();
+        let mut stmt = db.prepare(catch_up::GIVEN_UP_SQL).unwrap();
+        stmt.query_map([catch_up::failure_context()], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn three_failures_of_the_same_file_are_remembered_and_a_success_forgets_them() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        for attempt in 1..=3 {
+            writer.flush(&mut vec![file("/lib/broken.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            assert_eq!(memory(&conn, "/lib/broken.jpg"), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
+            assert_eq!(given_up(&conn).len(), usize::from(attempt == 3));
+        }
+        let (failed, message): (i64, String) = conn
+            .lock()
+            .query_row("SELECT failed, error_message FROM files WHERE path_text = '/lib/broken.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((failed, message.as_str()), (1, "image decode: broken"), "the row the Library lists as unreadable is kept");
+
+        writer.flush(&mut vec![file("/lib/broken.jpg", false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, "/lib/broken.jpg"), None);
+        assert!(given_up(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_changed_file_or_engine_starts_counting_again_and_transient_failures_never_count() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        for attempt in 0..3 {
+            writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+        }
+        assert_eq!(given_up(&conn), vec!["/lib/a.jpg".to_string()]);
+
+        // Edited on disk: the next failure is the first for the new content.
+        let mut edited = file("/lib/a.jpg", true);
+        edited.modified_unix += 60.0;
+        writer.flush(&mut vec![edited], &mut 0, &mut 0, &mut 0, 3).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert!(given_up(&conn).is_empty());
+
+        // Failures recorded by another engine build do not count for this one.
+        conn.lock().execute("UPDATE scan_catchup SET attempts = 3, vision = '{\"failedBy\":\"fileid-engine 0.0.1 portable\"}'", []).unwrap();
+        assert!(given_up(&conn).is_empty());
+        let mut again = file("/lib/a.jpg", true);
+        again.modified_unix += 60.0;
+        writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+
+        // The stored row changed without a scan (size differs): not given up.
+        conn.lock().execute("UPDATE scan_catchup SET attempts = 3", []).unwrap();
+        assert_eq!(given_up(&conn).len(), 1);
+        conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
+        assert!(given_up(&conn).is_empty());
+
+        let mut transient = file("/lib/offline.jpg", true);
+        transient.failure_is_transient = true;
+        for attempt in 5..9 {
+            writer.flush(&mut vec![transient.clone()], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+        }
+        assert_eq!(memory(&conn, "/lib/offline.jpg"), None);
+    }
+
+    #[test]
+    fn a_failure_replaces_work_owed_from_an_earlier_scan() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer.flush(&mut vec![file("/lib/a.jpg", false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock()
+            .execute(
+                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+                 SELECT id, 1, size_bytes, modified_at, '{}', 2, 2, 0 FROM files",
+                [],
+            )
+            .unwrap();
+        writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| (m.0, m.1)), Some((4, 1)));
+    }
+}
+
