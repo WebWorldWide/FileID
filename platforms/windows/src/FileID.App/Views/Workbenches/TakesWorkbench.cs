@@ -22,8 +22,8 @@ namespace FileID.Views.Workbenches;
 
 /// <summary>Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated clips by
 /// itself and scores each try without a model. The user checks the starred best try, keeps all, skips,
-/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs. The
-/// goal-ranking panel is left out: the shared engine reports it as unavailable.</summary>
+/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs; the
+/// Goal (optional) ranking panel lives in TakesWorkbench.Goal.cs.</summary>
 internal sealed partial class TakesWorkbench : WorkbenchPanel
 {
     private static readonly TimeSpan TrashUndoWindow = TimeSpan.FromSeconds(10);
@@ -304,6 +304,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _hint.FontSize = 11.5;
         _filmstrip.Children.Add(_hint);
         _review.Children.Add(_filmstrip);
+        _review.Children.Add(BuildGoalPanel());
 
         _trash.Click += (_, _) => _ = DebugLog.SafeRunAsync("TakesWorkbench.Trash", ConfirmTrashAsync);
         _keepAll.Click += (_, _) => Run(ct => DecideAsync("keepAll", ct));
@@ -582,6 +583,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _qualities = Array.Empty<CatalogTakeQuality>();
         _keep.Clear();
         _zoom = false;
+        ResetGoal();
         RenderHeader(group);
         _notice.Visibility = Visibility.Collapsed;
         _manualPage.Visibility = Visibility.Collapsed;
@@ -627,6 +629,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _compare.Visibility = Visibility.Visible;
         _filmstrip.Visibility = Visibility.Visible;
         _hint.Text = TakeReviewPolicy.HintLine(group);
+        UpdateGoalControls();
         AutomationProperties.SetName(_stripHost, $"{qualities.Count} {TakeReviewPolicy.Noun(group, qualities.Count)}. Left and right arrows move, Space marks keep.");
         RebuildStrip();
         UpdateAll();

@@ -36,6 +36,11 @@
 - CoreML EP vs CPU on ORT 1.22.0, release, scratch models: vectors match within 4.2e-7 (SFace) and 3.0e-7 (CLIP text). SFace CoreML is about 15% slower per call than CPU (kept on CoreML for Swift bit parity); CLIP text CoreML is 4-5x slower with 5-8 s session builds (stays CPU). BGE is not installed here, so it is untested. Load was 31-45 throughout.
 - `ready`: Rust 45-49 ms cold / 33-35 ms warm, Swift 42-44 / 29-33 ms (10 runs each, load 23-24). Gate 0.1 s met.
 - New `examples/coreml_ab.rs` in the engine crate (no engine code changed). Numbers and decisions in DECISIONS 2026-11-12.
+## 2026-11-12 — Windows/Linux parity: Best Takes goal panel; "Faster text reading" not ported (`agent/parity-engine`)
+
+- **Best Takes goal ranking** (agent): the shared engine already ranks (`commands/take_goal.rs`: numbered contact sheet of up to six shots through the resident description model; `goal_unavailable` only when no description model is installed or the catalog is missing), so the parity audit's "engine gap" was stale. The missing piece was the pages. GTK (`tabs/takes.rs`, rules in `takes_model.rs`) and WinUI (`TakesWorkbench.Goal.cs`, rules in `TakeReviewPolicy.cs`) now have the Mac's "Goal (optional)" panel under the filmstrip: text field, "Rank with AI", busy bar, the answer's summary, "Shows the goal" / "Closest to the goal" chips, and the top try becomes the kept pick when the quality pick was the only mark. Photos only. No model is needed by the tests: Rust `take_goal.rs` (stub reply orders best, met, rest) and conformance `goal without a model` (`goal_unavailable`) already cover the engine; new unit tests cover the page rules on both apps. Not run against a real vision model (none installed here).
+- **Faster text reading (Latin scripts only): not ported.** See DECISIONS 2026-11-12. The engine's OCR has no automatic-language-detection tier to skip, so there is nothing to make faster and no toggle was added.
+- **Needs a screen check:** the new panel on Windows and Linux (layout under the filmstrip, busy bar while ranking, chips after an answer).
 
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
