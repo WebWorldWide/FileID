@@ -76,9 +76,40 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // and call RefreshAsync inline; the _unloaded guard prevents a
         // late-firing dispatcher continuation from touching disposed state.
         FileID.ViewModels.EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+        _undonePeopleChanges = UndonePeopleChanges();
+        ChangeLog.Instance.Changed += OnChangeLogChanged;
         Loaded += OnLoadedAsync;
         Unloaded += OnUnloaded;
     }
+
+    // An undone merge changes the cards without a new face-grouping pass, so
+    // nothing else tells this page to re-read them.
+    private int _undonePeopleChanges;
+
+    private static int UndonePeopleChanges()
+    {
+        var undone = 0;
+        foreach (var entry in ChangeLog.Instance.Snapshot())
+        {
+            if (entry.Page == ChangePage.People && entry.Status == ChangeStatus.Undone) undone++;
+        }
+        return undone;
+    }
+
+    private void OnChangeLogChanged(object? sender, EventArgs e)
+        => DebugLog.SafeRun("PeopleView.OnChangeLogChanged", () =>
+        {
+            if (_unloaded) return;
+            var undone = UndonePeopleChanges();
+            if (Interlocked.Exchange(ref _undonePeopleChanges, undone) == undone) return;
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                if (_unloaded) return;
+                try { await ViewModel.RefreshAsync(CancellationToken.None); }
+                catch (Exception ex) { DebugLog.Warn("PeopleView post-undo refresh threw: " + ex.Message); }
+                await RefreshReviewCountAsync();
+            });
+        });
 
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnEngineClientChanged", () =>
@@ -384,6 +415,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // unload.
         try { foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged; } catch { /* swallow */ }
         try { FileID.ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
+        try { ChangeLog.Instance.Changed -= OnChangeLogChanged; } catch { /* swallow */ }
         // Dispose the ViewModel — cancels its _disposalCts so any in-flight
         // RefreshAsync task running on a thread-pool thread unwinds with
         // OperationCanceledException instead of accessing detached state.
@@ -707,7 +739,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 XamlRoot = XamlRoot,
                 Title = "Combine these cards?",
-                Content = $"Merge \"{srcName}\" ({srcCluster?.MemberCount ?? 0} faces) into \"{dstName}\" ({dstCluster?.MemberCount ?? 0} faces)?\n\nAll faces from {srcName} will be reassigned to {dstName}.",
+                Content = $"Merge \"{srcName}\" ({srcCluster?.MemberCount ?? 0} faces) into \"{dstName}\" ({dstCluster?.MemberCount ?? 0} faces)?\n\nAll faces from {srcName} move to {dstName}. {PersonMergePolicy.UndoHint}",
                 PrimaryButtonText = "Merge",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Primary,
@@ -745,7 +777,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             }
             else
             {
-                PushMergeUndo(sourceId, destId, sourceFaceIds);
+                OfferMergeUndo(r, sourceId, destId, sourceFaceIds);
             }
             await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
         }
@@ -763,10 +795,40 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
 
+    /// <summary>Files an undo for a confirmed merge. The helper's own record
+    /// of the merge is replayed when it sent one; a helper that sent none is
+    /// undone the older way, from the list of faces that moved.</summary>
+    internal static void OfferMergeUndo(
+        BulkActionResult merged,
+        long sourcePersonId,
+        long destinationPersonId,
+        IReadOnlyList<long> faceIdsToRevert)
+    {
+        if (PersonMergePolicy.OperationId(merged) is not { } operationId)
+        {
+            if (faceIdsToRevert.Count > 0) PushMergeUndo(sourcePersonId, destinationPersonId, faceIdsToRevert);
+            return;
+        }
+        UndoStack.Instance.Push(PersonMergePolicy.UndoLabel, ChangePage.People, async () =>
+        {
+            try
+            {
+                await EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(30));
+                var page = await EngineClient.Instance.UndoFaceReviewAsync(operationId);
+                return FaceReviewPolicy.IsOk(page);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("People merge undo failed: " + ex.Message);
+                return false;
+            }
+        });
+    }
+
     internal static void PushMergeUndo(long sourcePersonId, long destinationPersonId, IReadOnlyList<long> faceIdsToRevert)
     {
         var faceIds = faceIdsToRevert.ToArray();
-        UndoStack.Instance.Push("Merge people", async () =>
+        UndoStack.Instance.Push(PersonMergePolicy.UndoLabel, ChangePage.People, async () =>
         {
             var engine = EngineClient.Instance;
             try
@@ -791,7 +853,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         });
     }
 
-    private static Task<long[]> ReadPersonFaceIdsAsync(long personId) => Task.Run(() =>
+    internal static Task<long[]> ReadPersonFaceIdsAsync(long personId) => Task.Run(() =>
     {
         var connectionString = new SqliteConnectionStringBuilder
         {
@@ -953,7 +1015,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             });
             stack.Children.Add(new TextBlock
             {
-                Text = $"Combine {selectedClusters.Count} cards into one person. Choose the card to keep; photos from the other cards move into it, and those cards go away.",
+                Text = $"Combine {selectedClusters.Count} cards into one person. Choose the card to keep; photos from the other cards move into it, and those cards go away. {PersonMergePolicy.UndoHint}",
                 Style = Application.Current.Resources["CaptionTextBlockStyle"] as Style,
                 Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
                 TextWrapping = TextWrapping.Wrap,
@@ -1005,7 +1067,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     else
                     {
                         merged++;
-                        PushMergeUndo(srcId, dest, sourceFaceIds);
+                        OfferMergeUndo(r, srcId, dest, sourceFaceIds);
                     }
                 }
                 catch (Exception ex)
