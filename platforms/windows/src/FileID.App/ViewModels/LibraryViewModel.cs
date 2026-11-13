@@ -319,7 +319,14 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public async Task RefreshAsync(CancellationToken ct)
+    public Task RefreshAsync(CancellationToken ct) => RefreshAsync(ct, liveScan: false);
+
+    /// <summary><paramref name="liveScan"/> marks the once-a-second refresh
+    /// while a scan is adding files: it re-reads only the first page, puts
+    /// the new files in front of what is already listed, and reuses recent
+    /// per-kind counts. Every other refresh re-reads the pages already
+    /// loaded.</summary>
+    public async Task RefreshAsync(CancellationToken ct, bool liveScan)
     {
         if (_disposed) return;
         long myGen = Interlocked.Increment(ref _refreshGen);
@@ -340,6 +347,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             int? total = null;
             bool pageable = false;
+            bool headOnly = false;
             string? listedKind = null;
             if (string.IsNullOrWhiteSpace(_query))
             {
@@ -353,12 +361,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 // Keep every page already scrolled into, so a live-scan refresh
                 // doesn't snap the grid back to the first page.
                 listedKind = _kindFilter;
-                int want = RefreshWindow(_listedKind == listedKind, Volatile.Read(ref _loadedRows));
+                headOnly = liveScan && _listedKind == listedKind && Volatile.Read(ref _loadedRows) > 0;
+                int want = headOnly ? PageSize : RefreshWindow(_listedKind == listedKind, Volatile.Read(ref _loadedRows));
                 string? kind = listedKind == "all" ? null : listedKind;
                 var listing = await Task.Run(async () =>
                 {
                     var recent = await _store.RecentAsync(want, token, kind).ConfigureAwait(false);
-                    var counts = await _store.KindCountsAsync(token).ConfigureAwait(false);
+                    var counts = await KindCountsAsync(liveScan, token).ConfigureAwait(false);
                     return (Rows: recent, Total: CountForKind(counts, kind));
                 }, token).ConfigureAwait(false);
                 rows = listing.Rows;
@@ -382,7 +391,14 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
 
             int loaded = rows.Count;
-            ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind);
+            if (headOnly)
+            {
+                ApplyHeadOnUi(filtered, myGen, total, listedKind);
+            }
+            else
+            {
+                ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -474,7 +490,18 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             // Reached from an async-void context-menu handler on the UI thread;
             // Microsoft.Data.Sqlite's fake-async would run the whole scan inline.
             // Offload to the thread pool.
-            var similar = await Task.Run(() => _store.SimilarFilesAsync(fileId, PageSize, token), token).ConfigureAwait(false);
+            // Ask the helper first (it ranks from its index); read and rank
+            // here only when it can't answer yet.
+            var similar = await Task.Run(async () =>
+            {
+                var request = EngineSimilarity.SeedRequest(fileId, _store.Scope?.Root.Id, EngineSimilarity.MaxResults);
+                if (await _clip.EngineRankedIdsAsync(request, token).ConfigureAwait(false) is { } ids)
+                {
+                    var ranked = await _store.RowsByIdsAsync(ids, token).ConfigureAwait(false);
+                    if (ranked.Count > 0) return ranked;
+                }
+                return await _store.SimilarFilesAsync(fileId, PageSize, token).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(similar.Count);
             foreach (var r in similar)
@@ -525,6 +552,144 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             _ui.TryEnqueue(Apply);
         }
+    }
+
+    private void ApplyHeadOnUi(IReadOnlyList<FileTile> head, long gen, int? total, string? listedKind)
+    {
+        void Apply()
+        {
+            if (Interlocked.Read(ref _refreshGen) != gen) return;
+            int added = _listedKind == listedKind ? MergeHeadPage(Items, head) : -1;
+            if (added < 0)
+            {
+                // The listing changed underneath, or more files arrived than
+                // one page holds: start again from the first page.
+                ReplaceItems(head);
+                _listedKind = listedKind;
+                _hasMore = head.Count == PageSize;
+                Volatile.Write(ref _loadedRows, head.Count);
+            }
+            else
+            {
+                Volatile.Write(ref _loadedRows, Volatile.Read(ref _loadedRows) + added);
+            }
+            TotalCount = total;
+        }
+        if (_ui.HasThreadAccess)
+        {
+            Apply();
+        }
+        else
+        {
+            _ui.TryEnqueue(Apply);
+        }
+    }
+
+    /// <summary>Folds a freshly read first page into a longer list that is
+    /// already showing: files not listed yet go in front (one collection
+    /// event when nothing else moved), files already listed keep their tile
+    /// and take the fresh tags and name. Returns how many files were added,
+    /// or -1 when the page shares no file with the list, which means files
+    /// may be missing in between and the caller should reload.</summary>
+    internal static int MergeHeadPage(
+        System.Collections.ObjectModel.ObservableCollection<FileTile> items,
+        IReadOnlyList<FileTile> head)
+    {
+        if (items.Count == 0 || head.Count == 0) return -1;
+        var existingById = new Dictionary<long, FileTile>(items.Count);
+        foreach (var t in items) existingById[t.Id] = t;
+
+        var seen = new HashSet<long>(head.Count);
+        var fresh = new List<FileTile>();
+        var known = new List<FileTile>(head.Count);
+        bool freshAfterKnown = false;
+        foreach (var t in head)
+        {
+            if (!seen.Add(t.Id)) continue;
+            if (existingById.TryGetValue(t.Id, out var keep))
+            {
+                if (!NullableDoubleEquals(keep.ModifiedAt, t.ModifiedAt)) keep.ClearThumbnailForRecycle();
+                keep.MergeMutableFrom(t);
+                known.Add(keep);
+            }
+            else
+            {
+                if (known.Count > 0) freshAfterKnown = true;
+                fresh.Add(t);
+            }
+        }
+        if (known.Count == 0) return -1;
+
+        bool sameOrder = !freshAfterKnown && known.Count <= items.Count;
+        for (int i = 0; sameOrder && i < known.Count; i++)
+        {
+            sameOrder = ReferenceEquals(items[i], known[i]);
+        }
+        if (sameOrder)
+        {
+            if (fresh.Count == 0) return 0;
+            if (items is BatchObservableCollection<FileTile> batch)
+            {
+                batch.PrependRange(fresh);
+            }
+            else
+            {
+                for (int i = 0; i < fresh.Count; i++) items.Insert(i, fresh[i]);
+            }
+            return fresh.Count;
+        }
+
+        // Something already listed moved (a file was scanned again) or left
+        // the first page: rebuild the order as the new first page followed by
+        // everything else that was listed.
+        var desired = new List<FileTile>(items.Count + fresh.Count);
+        foreach (var t in head)
+        {
+            if (!seen.Remove(t.Id)) continue;
+            desired.Add(existingById.TryGetValue(t.Id, out var keep) ? keep : t);
+        }
+        var inHead = new HashSet<long>(desired.Count);
+        foreach (var t in desired) inHead.Add(t.Id);
+        foreach (var t in items)
+        {
+            if (inHead.Add(t.Id)) desired.Add(t);
+        }
+        MergeById(items, desired);
+        return fresh.Count;
+    }
+
+    private readonly object _kindCountsLock = new();
+    private IReadOnlyDictionary<string, int>? _kindCounts;
+    private LibraryScope? _kindCountsScope;
+    private long _kindCountsAtTick;
+    private const long KindCountsLiveReuseMs = 5000;
+
+    /// <summary>Per-kind totals. The once-a-second scan refresh reuses totals
+    /// read in the last few seconds for the same location; every other
+    /// refresh counts again.</summary>
+    private async Task<IReadOnlyDictionary<string, int>> KindCountsAsync(bool liveScan, CancellationToken ct)
+    {
+        var scope = _store.Scope;
+        if (liveScan)
+        {
+            lock (_kindCountsLock)
+            {
+                if (_kindCounts is { } cached
+                    && ReferenceEquals(_kindCountsScope, scope)
+                    && Environment.TickCount64 - _kindCountsAtTick < KindCountsLiveReuseMs)
+                {
+                    return cached;
+                }
+            }
+        }
+        var counts = await _store.KindCountsAsync(ct).ConfigureAwait(false);
+        lock (_kindCountsLock)
+        {
+            _kindCounts = counts;
+            _kindCountsScope = scope;
+            _kindCountsAtTick = Environment.TickCount64;
+        }
+        return counts;
     }
 
     /// <summary>Appends the next page of the plain listing when the grid nears

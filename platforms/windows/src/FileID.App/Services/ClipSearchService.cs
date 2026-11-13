@@ -216,12 +216,68 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
     }
 
+    private long _engineRankRetryAtTick;
+
+    /// <summary>Asks the helper to rank files for a search or a look-alike
+    /// request. Null means "rank in the app instead": the helper is not
+    /// ready, its index is still being built, it did not answer in time, or
+    /// it had nothing. After a miss the helper is left alone for a few
+    /// seconds so a busy scan never adds a wait to every keystroke.</summary>
+    public async Task<IReadOnlyList<long>?> EngineRankedIdsAsync(CatalogRequest request, CancellationToken ct)
+    {
+        var engine = EngineClient.Instance;
+        if (_disposed || engine.State != EngineClient.LifecycleState.Ready) return null;
+        if (Environment.TickCount64 < Interlocked.Read(ref _engineRankRetryAtTick)) return null;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(EngineSimilarity.EngineWait);
+        try
+        {
+            var response = await engine.CatalogAsync(request, cts.Token).ConfigureAwait(false);
+            var ids = EngineSimilarity.RankedIds(response);
+            if (ids is null && response.Status != "ok")
+            {
+                DebugLog.Info($"[CLIP] helper ranking unavailable (pending={EngineSimilarity.IsPending(response)}); ranking in the app.");
+                DeferEngineRanking();
+            }
+            return ids;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            DebugLog.Info("[CLIP] helper ranking timed out; ranking in the app.");
+            DeferEngineRanking();
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"[CLIP] helper ranking failed: {ex.GetType().Name}");
+            DeferEngineRanking();
+            return null;
+        }
+    }
+
+    private void DeferEngineRanking() =>
+        Interlocked.Exchange(ref _engineRankRetryAtTick,
+            Environment.TickCount64 + (long)EngineSimilarity.RetryAfterMiss.TotalMilliseconds);
+
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
         string query, int limit, CancellationToken ct, string? kind = null)
     {
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
         {
+            // The helper ranks from its own index. It has no kind filter, so a
+            // kind-filtered search still ranks here to keep the grid full.
+            if (kind is null
+                && EngineSimilarity.QueryRequest(query, embed, _store.Scope?.Root.Id, limit) is { } request
+                && await EngineRankedIdsAsync(request, ct).ConfigureAwait(false) is { } ids)
+            {
+                var engineRows = await _store.RowsByIdsAsync(ids, ct).ConfigureAwait(false);
+                if (engineRows.Count > 0) return engineRows;
+            }
             var ranked = await _store.SemanticSearchAsync(embed, limit, ct, kind).ConfigureAwait(false);
             var rows = new List<FileRow>(ranked.Count);
             foreach (var r in ranked)
