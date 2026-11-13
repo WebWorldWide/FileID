@@ -185,6 +185,13 @@ actor ResourceScheduler {
         drainWaiters()
     }
 
+    /// Whether background work may hold `memoryMB` more right now. Nothing is
+    /// reserved: the scan's decode-ahead asks before each frame and decodes
+    /// in its worker instead when the answer is no.
+    func backgroundHeadroom(memoryMB: UInt64) -> Bool {
+        !hasInteractiveReservation && canGrant(Demand(memoryMB: max(1, memoryMB)))
+    }
+
     func snapshot() -> Snapshot {
         Snapshot(reservedMemoryMB: reservations.values.map { $0.demand.memoryMB }.reduce(0, saturatingAdd),
                  reservedCPUUnits: Demand(cpuHalves: reservedCPUHalves).cpuUnits,

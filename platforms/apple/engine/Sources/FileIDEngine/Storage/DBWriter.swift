@@ -47,6 +47,9 @@ public struct TaggedFile: Sendable {
     public var faceYaws: [Double?]           // radians, parallel to faceBBoxes; nil = missing
     public var facePitches: [Double?]        // radians, parallel to faceBBoxes; nil = missing
     public var faceMinDimPx: [Double]        // min(w,h) absolute source px, parallel to faceBBoxes
+    /// The stored hold decision of each face, for a row copied from the catalog:
+    /// pose and pixel size are not stored, so the gate cannot be recomputed.
+    var faceExcluded: [Bool]?
     public var ocrText: String?              // empty/nil if no text or skipped
     /// Extracted document/PDF text — the SAME text fed to BGE — persisted into the
     /// `doc_text` table so the v15 AFTER INSERT trigger fills `doc_fts` for full-text
@@ -837,9 +840,10 @@ public actor DBWriter {
                     // fails OPEN on the size gate — quality/area/pose still apply.
                     let minDimPx: Double = i < file.faceMinDimPx.count
                         ? file.faceMinDimPx[i] : Double.greatestFiniteMagnitude
-                    let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                                   pitch: pitch, bboxArea: bboxArea,
-                                                   bboxMinDimPx: minDimPx)
+                    let stored = file.faceExcluded.flatMap { i < $0.count ? $0[i] : nil }
+                    let excluded = stored ?? Self.isExcluded(quality: quality, yaw: yaw,
+                                                             pitch: pitch, bboxArea: bboxArea,
+                                                             bboxMinDimPx: minDimPx)
                     try db.cachedStatement(sql: """
                         INSERT INTO face_prints
                           (file_id, print_data, bbox, face_quality, excluded)

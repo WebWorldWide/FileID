@@ -1,5 +1,19 @@
 # FileID — State
 
+## 2026-11-13 — After-scan tagging and careful-text catch-up (catalog v34), merge undo on every engine, pages kept alive, reuse across scans
+
+Round 4 of the Mac audit. Swift 1,060 tests (three clean runs), Rust engine clippy + 1,290 tests on 1.98, Linux app clippy + 250 tests, CLI tests, IPC DTO, catalog schema and egress gates pass. **Still nothing checked on screen.**
+
+- **Tagging no longer caps the Mac scan (catalog v34, `scan_catchup`).** With RAM++ installed the scan stores classifier tags and marks each image as owing tags; a "Tagging photos" pass inside the scan's finishing phase then runs RAM++ and rewrites the auto tags, and re-reads text where the new tags open the text gate. `FILEID_RAMPLUS_INLINE=1` restores the old behaviour. Measured on the M1 Pro (release engine, RAM++ through ONNX Runtime/CoreML because no Metal library sits beside the scratch engine, 61 photos): files listed after 16 s instead of 144 s; whole scan including tagging 72 s instead of 144 s; **tags, scores and text identical on all 61 files**. With the MLX GPU path the pass should be faster than the 1.1 files/s seen here; not measured.
+- **Careful text reads are owed, not lost.** A file that needed a careful read while the reader was cold is marked; the reader warms when the main pass ends and a catch-up reads those files. Measured: with the reader enabled nothing stayed owed and one more photo of the 61 got text.
+- **Behaviour to know:** `scanComplete` arrives after the catch-up, so a new scan waits for tagging or a Stop; an interrupted catch-up resumes on the next scan of that folder (not at launch); the Rust engine creates the v34 table but does not use it.
+- **Merge undo on every engine.** The Rust engine writes the same `person_merge` journal and serves the same undo; conformance passes alone and cross-engine in both directions (Swift merges, Rust undoes, and the reverse). GTK's "Undo merge" uses it; WinUI still needs wiring. Rust Describe Files failures send a plain sentence; detail goes to the log.
+- **Pages stay mounted across tab switches** (`Views/PageKeepAlive.swift`): up to four pages, hidden ones do no polling, reloads, playback or shortcuts and catch up on return. Organize Folders no longer re-plans on every visit.
+- **Identical photos reused across scans (Mac engine).** A new file whose bytes match a finished row takes that row's analysis when the same models are loaded; a touched file keeps its rows. Measured: 150 HEICs scanned in 5.3 s; a second scan with 150 new copies and 20 touched originals took 1.5 s, all 150 copies identical to their originals and all originals unchanged.
+- **Decode-ahead stage built and left off** (`FILEID_DECODE_AHEAD`, `ScanDecodeAhead.enabledByDefault`): 400 HEICs 12.8 / 12.7 / 12.8 s off, 12.6 / 12.6 / 12.6 s at depth 8 with identical rows. About 1 %, not worth the memory.
+- **App leftovers:** no polling left in `CatalogWrites`; Chat rename uses the Name style; CLI wording; "Suggested name (before your name style)".
+- One egress digest refreshed (`bulk.rs`, audited). Decode-ahead and pause tests made count-based so they hold on a busy machine.
+
 ## 2026-11-12 — Merge undo, Mac identical-photo reuse, download resume, cheaper lava lamp, plain wording on Windows and Linux (IPC 1.27.0)
 
 Round 3 of the Mac audit. Builds pass; Swift 1,024 tests (193 shared, 137 app, 686 engine, 8 other), Rust engine clippy + 1,278 tests on 1.98, Linux app clippy, C# IPC tests 70/70, IPC DTO check, catalog schema check and the egress gate all pass. **Still nothing checked on screen.**

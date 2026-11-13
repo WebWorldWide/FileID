@@ -43,7 +43,8 @@ public enum Tagging {
         discovered: DiscoveredFile,
         worker: VisionWorker
     ) async -> TaggedFile {
-        await processFile(discovered: discovered, worker: worker, twins: TwinReuse.enabled ? TwinReuse.shared : nil)
+        await processFile(discovered: discovered, worker: worker, twins: TwinReuse.enabled ? TwinReuse.shared : nil,
+                          catalog: TwinReuse.catalog)
     }
 
     /// `twins` nil analyzes every image itself; tests pass their own registry
@@ -52,6 +53,7 @@ public enum Tagging {
         discovered: DiscoveredFile,
         worker: VisionWorker,
         twins: TwinRegistry?,
+        catalog: CatalogTwins? = nil,
         options: ScanCatchUp.ScanOptions = .live
     ) async -> TaggedFile {
         let url = discovered.url
@@ -71,7 +73,8 @@ public enum Tagging {
         var tagged: TaggedFile
         switch discovered.kind {
         case .image:
-            tagged = await processImage(discovered: discovered, worker: worker, started: started, twins: twins, options: options)
+            tagged = await processImage(
+                discovered: discovered, worker: worker, started: started, twins: twins, catalog: catalog, options: options)
         case .video:
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
@@ -98,6 +101,12 @@ public enum Tagging {
                 tagged.textStageDone = true
             }
         }
+        await finalize(&tagged, discovered: discovered)
+        return tagged
+    }
+
+    private static func finalize(_ tagged: inout TaggedFile, discovered: DiscoveredFile) async {
+        let url = discovered.url
         if tagged.contentHash == nil && !Task.isCancelled {
             let contentSize = UInt64(max(0, discovered.sizeBytes))
             let state = OnceContinuation<Data?>()
@@ -116,7 +125,6 @@ public enum Tagging {
             giveUp.cancel()
         }
         tagged.fileRef = discovered.fileRef
-        return tagged
     }
 
     // MARK: - Audio pipeline
@@ -207,20 +215,43 @@ public enum Tagging {
     // MARK: - Image pipeline
 
     /// Hashes an image before it is decoded, so a byte-identical copy of one
-    /// already analyzed (or being analyzed) in this scan takes that result.
+    /// already analyzed (or being analyzed) in this scan, or analyzed by an
+    /// earlier scan, takes that result.
     private static func processImage(
         discovered: DiscoveredFile,
         worker: VisionWorker,
         started: CFAbsoluteTime,
         twins: TwinRegistry?,
+        catalog: CatalogTwins?,
         options: ScanCatchUp.ScanOptions
     ) async -> TaggedFile {
+        let plan = await planImage(discovered: discovered, started: started, twins: twins, catalog: catalog)
+        return await finishImage(plan, discovered: discovered, worker: worker, started: started, twins: twins, options: options)
+    }
+
+    struct TwinOwnership: Sendable {
+        let key: TwinKey
+        let models: String
+    }
+
+    /// What is left to do for an image once its hash and twin claim are known.
+    enum ImagePlan: Sendable {
+        case done(TaggedFile)
+        case analyze(hash: ImageHash, heif: HEIFDecoder.FileBytes?, owner: TwinOwnership?)
+    }
+
+    static func planImage(
+        discovered: DiscoveredFile,
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins?
+    ) async -> ImagePlan {
         guard let twins, TwinReuse.eligible(sizeBytes: discovered.sizeBytes), !Task.isCancelled else {
-            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .alongside, options: options).tagged
+            return .analyze(hash: .alongside, heif: nil, owner: nil)
         }
         let early = await hashBeforeDecode(discovered)
         guard let hash = early.hash else {
-            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .known(nil), options: options).tagged
+            return .analyze(hash: .known(nil), heif: nil, owner: nil)
         }
         let key = TwinKey(hash: hash, size: discovered.sizeBytes)
         let models = TwinReuse.modelFingerprint()
@@ -228,21 +259,156 @@ public enum Tagging {
         switch twins.claim(key, models: models) {
         case .ready(let twin):
             twins.noteReuse()
-            return twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs)
+            return .done(twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs))
         case .pending:
             if let twin = await twins.wait(key, timeout: TwinReuse.waitSeconds), twin.models == models {
                 twins.noteReuse()
-                return twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs)
+                return .done(twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs))
             }
-            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .known(hash), options: options).tagged
+            return .analyze(hash: .known(hash), heif: nil, owner: nil)
         case .owner:
+            if let catalog, catalog.contains(key),
+               let found = await catalog.analysis(for: key, discovered: discovered, models: models) {
+                twins.publish(key, found.twin, analyzedHere: false)
+                twins.noteCatalogReuse()
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+                return .done(found.ownRow
+                    ? unchangedContent(of: found.twin, for: discovered, contentHash: hash, elapsedMs: elapsedMs)
+                    : twinCopy(of: found.twin, for: discovered, contentHash: hash, elapsedMs: elapsedMs))
+            }
+            return .analyze(hash: .known(hash), heif: early.heif, owner: TwinOwnership(key: key, models: models))
+        }
+    }
+
+    static func finishImage(
+        _ plan: ImagePlan,
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?,
+        options: ScanCatchUp.ScanOptions,
+        predecoded: PredecodedImage? = nil
+    ) async -> TaggedFile {
+        switch plan {
+        case .done(let tagged):
+            return tagged
+        case .analyze(let hash, let heif, let owner):
             let analysis = await analyzeImage(
-                discovered: discovered, worker: worker, started: started, hash: .known(hash), heif: early.heif, options: options)
-            // A model that loaded while this file was analyzed may have missed it.
-            let reusable = !analysis.tagged.failed && analysis.tagged.tagsEvaluated
-                && TwinReuse.modelFingerprint() == models
-            twins.publish(key, reusable ? TwinAnalysis(tagged: analysis.tagged, modelTags: analysis.modelTags, models: models) : nil)
+                discovered: discovered, worker: worker, started: started, hash: hash, heif: heif,
+                predecoded: predecoded, options: options)
+            if let owner, let twins {
+                // A model that loaded while this file was analyzed may have missed it.
+                let reusable = !analysis.tagged.failed && analysis.tagged.tagsEvaluated
+                    && TwinReuse.modelFingerprint() == owner.models
+                twins.publish(owner.key, reusable
+                    ? TwinAnalysis(tagged: analysis.tagged, modelTags: analysis.modelTags, models: owner.models) : nil)
+            }
             return analysis.tagged
+        }
+    }
+
+    // MARK: - Decode-ahead
+
+    /// A scan image decoded before an inference worker was free for it.
+    struct PredecodedImage: @unchecked Sendable {
+        let image: CGImage?
+        let exif: (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?)
+        let loadMs: Double
+
+        var bytes: Int { image.map { $0.bytesPerRow * $0.height } ?? 0 }
+    }
+
+    /// A file after the decode-ahead stage: hashed, its twin claim settled and,
+    /// when it needs analysis, decoded.
+    struct PreparedFile: Sendable {
+        enum Stage: Sendable {
+            /// Not an image: the worker runs the whole file as it always has.
+            case whole
+            case image(ImagePlan, PredecodedImage?)
+        }
+        let discovered: DiscoveredFile
+        let stage: Stage
+        /// Time spent hashing and decoding; waiting in the queue is not counted.
+        let prepSeconds: Double
+
+        var decodedBytes: Int {
+            if case .image(_, let decoded?) = stage { return decoded.bytes }
+            return 0
+        }
+
+        /// A copy that reused a twin: nothing is left for a worker to do.
+        var finishedCopy: TaggedFile? {
+            guard case .image(.done(var tagged), _) = stage else { return nil }
+            tagged.fileRef = discovered.fileRef
+            return tagged
+        }
+    }
+
+    static var scanMaxPixels: Int {
+        ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
+            .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
+    }
+
+    /// Hash, twin claim and (when `decode`) the bounded decode, with the same
+    /// calls a worker makes, so a prepared file finishes with the same result.
+    static func prepare(
+        discovered: DiscoveredFile, twins: TwinRegistry?, catalog: CatalogTwins?, decode: Bool
+    ) async -> PreparedFile {
+        guard discovered.kind == .image, !discovered.movedFromKnownRow else {
+            return PreparedFile(discovered: discovered, stage: .whole, prepSeconds: 0)
+        }
+        let started = CFAbsoluteTimeGetCurrent()
+        let plan = await planImage(discovered: discovered, started: started, twins: twins, catalog: catalog)
+        guard case .analyze(let hash, let heif, let owner) = plan else {
+            return PreparedFile(discovered: discovered, stage: .image(plan, nil),
+                                prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+        }
+        guard decode, !Task.isCancelled else {
+            return PreparedFile(discovered: discovered, stage: .image(.analyze(hash: hash, heif: nil, owner: owner), nil),
+                                prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+        }
+        let heifBox = ScanSideResult<HEIFDecoder.FileBytes>()
+        if let heif { heifBox.set(heif) }
+        let decoded: PredecodedImage = await withCheckedContinuation { continuation in
+            visionQueue.async {
+                continuation.resume(returning: autoreleasepool {
+                    let loadStart = CFAbsoluteTimeGetCurrent()
+                    let loaded = loadImageAndEXIF(
+                        url: discovered.url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take())
+                    return PredecodedImage(
+                        image: loaded?.0, exif: loaded?.1 ?? (nil, nil, nil, nil),
+                        loadMs: (CFAbsoluteTimeGetCurrent() - loadStart) * 1000)
+                })
+            }
+        }
+        return PreparedFile(discovered: discovered, stage: .image(.analyze(hash: hash, heif: nil, owner: owner), decoded),
+                            prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+    }
+
+    static func processFile(
+        prepared: PreparedFile,
+        worker: VisionWorker,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins? = nil,
+        options: ScanCatchUp.ScanOptions = .live
+    ) async -> TaggedFile {
+        let discovered = prepared.discovered
+        guard case .image(let plan, let predecoded) = prepared.stage else {
+            return await processFile(discovered: discovered, worker: worker, twins: twins, catalog: catalog, options: options)
+        }
+        var tagged = await finishImage(
+            plan, discovered: discovered, worker: worker,
+            started: CFAbsoluteTimeGetCurrent() - prepared.prepSeconds,
+            twins: twins, options: options, predecoded: predecoded)
+        await finalize(&tagged, discovered: discovered)
+        return tagged
+    }
+
+    /// Releases the twin claim of a prepared file that will not be analyzed
+    /// (cancelled scan), so copies waiting on it stop waiting.
+    static func discard(_ prepared: PreparedFile, twins: TwinRegistry?) {
+        if case .image(.analyze(_, _, let owner?), _) = prepared.stage {
+            twins?.publish(owner.key, nil)
         }
     }
 
@@ -278,7 +444,7 @@ public enum Tagging {
         return result
     }
 
-    private enum ImageHash {
+    enum ImageHash: Sendable {
         /// Read the file for its hash while the models run.
         case alongside
         /// Already attempted before decode; nil when that read failed.
@@ -291,6 +457,7 @@ public enum Tagging {
         started: CFAbsoluteTime,
         hash: ImageHash,
         heif: HEIFDecoder.FileBytes? = nil,
+        predecoded: PredecodedImage? = nil,
         options: ScanCatchUp.ScanOptions
     ) async -> (tagged: TaggedFile, modelTags: [String]) {
         let heifBox = ScanSideResult<HEIFDecoder.FileBytes>()
@@ -305,8 +472,13 @@ public enum Tagging {
                     if case .known(let value) = hash { knownHash = value }
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let (cgImage, exif) = loadImageAndEXIF(
-                        url: url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take()) else {
+                    let loaded: (CGImage, (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?))?
+                    if let predecoded {
+                        loaded = predecoded.image.map { ($0, predecoded.exif) }
+                    } else {
+                        loaded = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take())
+                    }
+                    guard let (cgImage, exif) = loaded else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
                         return (TaggedFile(
                             url: url, kind: "image", extension: ext,
@@ -319,7 +491,7 @@ public enum Tagging {
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
                         ), [])
                     }
-                    let loadMs = (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
+                    let loadMs = predecoded?.loadMs ?? (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
 
                     // CLIP runs on the GPU and the file hash on the disk while
                     // Vision uses the Neural Engine below; join before building
@@ -841,8 +1013,7 @@ public enum Tagging {
         //     lower = faster scan + fewer faces, higher = slower + more faces.
         // Always generate the bounded decode from the source: embedded JPEG
         // previews are commonly only 160×120 and are too small for face gating.
-        let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
-            .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
+        let maxPixels = scanMaxPixels
         // With the file already in memory, the same order as decodeScanImage for a
         // HEIC (hardware decoder, then ImageIO) without reading it a second time.
         let decoded: CGImage?

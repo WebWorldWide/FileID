@@ -5,7 +5,8 @@ import FileIDShared
 /// decoded and run through Vision, RAM++, CLIP and OCR; later copies wait for
 /// it and take its model output. Mirrors the shared engine's
 /// `pipeline/twin_reuse.rs`, except that results are held in memory here
-/// (the writer does not copy rows), so nothing is seeded from earlier scans.
+/// (the writer does not copy rows); images analyzed by an earlier scan are
+/// read back from the catalog through `CatalogTwins`.
 struct TwinKey: Hashable, Sendable {
     let hash: Data
     let size: Int64
@@ -47,6 +48,7 @@ final class TwinRegistry: @unchecked Sendable {
     private var heldBytes = 0
     private var analyzed = 0
     private var reused = 0
+    private var fromCatalog = 0
     private var lastUse = Date.distantPast
     private var sweepScheduled = false
     private let budgetBytes: Int
@@ -77,7 +79,7 @@ final class TwinRegistry: @unchecked Sendable {
             lock.unlock()
             return
         }
-        let snapshot = (analyzed, reused, heldBytes)
+        let snapshot = (analyzed, reused, heldBytes, fromCatalog)
         for (key, state) in map {
             if case .done = state { map[key] = nil }
         }
@@ -86,13 +88,16 @@ final class TwinRegistry: @unchecked Sendable {
         heldBytes = 0
         analyzed = 0
         reused = 0
+        fromCatalog = 0
         lock.unlock()
-        if snapshot.1 > 0 { log(snapshot) }
+        if snapshot.1 > 0 || snapshot.3 > 0 { log(snapshot) }
     }
 
-    var counts: (analyzed: Int, reused: Int, held: Int) {
+    /// `reused` counts copies of an image analyzed in this scan, `catalog`
+    /// files whose analysis came from a row an earlier scan stored.
+    var counts: (analyzed: Int, reused: Int, held: Int, catalog: Int) {
         lock.lock(); defer { lock.unlock() }
-        return (analyzed, reused, heldBytes)
+        return (analyzed, reused, heldBytes, fromCatalog)
     }
 
     func claim(_ key: TwinKey, models: String) -> Claim {
@@ -114,7 +119,7 @@ final class TwinRegistry: @unchecked Sendable {
 
     /// Records the owner's outcome and wakes its waiters. nil (a failed or
     /// timed-out analysis) is never kept: the next copy analyzes itself.
-    func publish(_ key: TwinKey, _ analysis: TwinAnalysis?) {
+    func publish(_ key: TwinKey, _ analysis: TwinAnalysis?, analyzedHere: Bool = true) {
         lock.lock()
         guard case .inFlight(let waiters) = map[key] else {
             lock.unlock()
@@ -124,7 +129,7 @@ final class TwinRegistry: @unchecked Sendable {
             let bytes = analysis.approximateBytes
             map[key] = .done(analysis, bytes: bytes)
             heldBytes += bytes
-            analyzed += 1
+            if analyzedHere { analyzed += 1 }
             finished.append(key)
             evictOverBudget(keeping: key)
             scheduleSweepLocked()
@@ -209,15 +214,23 @@ final class TwinRegistry: @unchecked Sendable {
     func noteReuse() {
         lock.lock()
         reused += 1
-        let snapshot = (analyzed, reused, heldBytes)
+        let snapshot = (analyzed, reused, heldBytes, fromCatalog)
         lock.unlock()
         if snapshot.1 % logEvery == 0 { log(snapshot) }
+    }
+
+    func noteCatalogReuse() {
+        lock.lock()
+        fromCatalog += 1
+        let snapshot = (analyzed, reused, heldBytes, fromCatalog)
+        lock.unlock()
+        if snapshot.3 % logEvery == 0 { log(snapshot) }
     }
 
     /// Forgets everything; call when a scan starts and when it ends.
     func reset() {
         lock.lock()
-        let snapshot = (analyzed, reused, heldBytes)
+        let snapshot = (analyzed, reused, heldBytes, fromCatalog)
         var waiting: [CheckedContinuation<TwinAnalysis?, Never>] = []
         for state in map.values {
             if case .inFlight(let waiters) = state { waiting.append(contentsOf: waiters.values) }
@@ -228,15 +241,17 @@ final class TwinRegistry: @unchecked Sendable {
         heldBytes = 0
         analyzed = 0
         reused = 0
+        fromCatalog = 0
         lock.unlock()
         for waiter in waiting { waiter.resume(returning: nil) }
-        if snapshot.1 > 0 { log(snapshot) }
+        if snapshot.1 > 0 || snapshot.3 > 0 { log(snapshot) }
     }
 
-    private func log(_ snapshot: (Int, Int, Int)) {
+    private func log(_ snapshot: (Int, Int, Int, Int)) {
         JSONLog.shared.info(ev: "twin_reuse", extra: [
             "analyzed": AnyCodable(snapshot.0),
             "reused": AnyCodable(snapshot.1),
+            "catalog_reused": AnyCodable(snapshot.3),
             "held_mb": AnyCodable(snapshot.2 >> 20)
         ])
     }
@@ -262,7 +277,28 @@ enum TwinReuse {
         sizeBytes >= minBytes && UInt64(sizeBytes) <= ContentHash.fullHashMaxBytes
     }
 
-    static func reset() { shared.reset() }
+    private static let seeded = Tagging.ScanSideResult<CatalogTwins>()
+
+    /// Image rows earlier scans finished, for the running scan; nil between scans.
+    static var catalog: CatalogTwins? { enabled ? seeded.get() : nil }
+
+    /// Call after `reset()` when a scan starts. A forced rescan asks for fresh
+    /// analysis, so it is not seeded.
+    static func seed(database: Database) async {
+        guard enabled else { return }
+        let started = CFAbsoluteTimeGetCurrent()
+        guard let twins = await CatalogTwins.seeded(database: database) else { return }
+        seeded.set(twins)
+        JSONLog.shared.info(ev: "twin_reuse_seeded", extra: [
+            "images": AnyCodable(twins.count),
+            "ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000)
+        ])
+    }
+
+    static func reset() {
+        shared.reset()
+        _ = seeded.take()
+    }
 
     static func modelFingerprint() -> String {
         let flags = [RamPlusService.shared.isReady, MobileCLIPService.shared.canEmbed, ArcFaceService.shared.isReady]
@@ -308,9 +344,140 @@ extension Tagging {
             facesEvaluated: source.facesEvaluated,
             ocrStageRan: source.ocrStageRan
         )
+        copy.faceExcluded = source.faceExcluded
         copy.ocrHandwritten = source.ocrHandwritten
         copy.catchUp = source.catchUp
         copy.capturedFromEXIF = source.capturedFromEXIF
         return copy
+    }
+}
+
+/// Image rows finished by earlier scans. A file whose bytes match one takes
+/// that row's analysis: a second copy added later, or a file whose date
+/// changed (touch, restore from backup) while its content did not.
+final class CatalogTwins: Sendable {
+    private let database: Database
+    private let known: Set<TwinCatalogStore.Fingerprint>
+    private let provenance: @Sendable () -> TwinCatalogStore.Provenance
+
+    init(database: Database, known: Set<TwinCatalogStore.Fingerprint>,
+         provenance: @escaping @Sendable () -> TwinCatalogStore.Provenance = { .current }) {
+        self.database = database
+        self.known = known
+        self.provenance = provenance
+    }
+
+    var count: Int { known.count }
+
+    /// nil when the catalog holds no finished image or cannot be read.
+    static func seeded(
+        database: Database,
+        provenance: @escaping @Sendable () -> TwinCatalogStore.Provenance = { .current }
+    ) async -> CatalogTwins? {
+        guard let known = try? await database.pool.read({ try TwinCatalogStore.knownFingerprints($0) }),
+              !known.isEmpty else { return nil }
+        return CatalogTwins(database: database, known: known, provenance: provenance)
+    }
+
+    func contains(_ key: TwinKey) -> Bool {
+        TwinCatalogStore.Fingerprint(hash: key.hash, size: key.size).map(known.contains) ?? false
+    }
+
+    /// The stored analysis of these bytes, shaped like an in-scan twin's.
+    /// `ownRow` when it is the row of `discovered` itself. nil (analyze the
+    /// file) when the row is gone, came from other models, or the read fails.
+    func analysis(
+        for key: TwinKey, discovered: DiscoveredFile, models: String
+    ) async -> (twin: TwinAnalysis, ownRow: Bool)? {
+        let path = discovered.url.path
+        let current = provenance()
+        guard let row = try? await database.pool.read({ db in
+            try TwinCatalogStore.row(db, hash: key.hash, size: key.size, preferPath: path, provenance: current)
+        }) else { return nil }
+        // Identical bytes carry identical EXIF; whether the stored date came
+        // from EXIF is not recorded, so it is read from this file (no decode).
+        let url = discovered.url
+        let captured: Date? = await withCheckedContinuation { continuation in
+            Tagging.visionQueue.async { continuation.resume(returning: Tagging.exifCaptureTime(url: url)) }
+        }
+        return (Tagging.catalogTwin(row, sizeBytes: key.size, capturedAt: captured, models: models), row.path == path)
+    }
+}
+
+extension Tagging {
+    private static func isYearTag(_ tag: String) -> Bool {
+        tag.hasPrefix("Year_") && tag.count > 5 && tag.dropFirst(5).allSatisfy(\.isNumber)
+    }
+
+    /// A stored row as the analysis a twin copy is built from. The Year and
+    /// camera-family tags are left out: `twinCopy` adds each file's own.
+    static func catalogTwin(
+        _ row: TwinCatalogStore.Row, sizeBytes: Int64, capturedAt: Date?, models: String
+    ) -> TwinAnalysis {
+        let family = Set(extraTags(cameraModel: row.cameraModel, creationDate: nil))
+        let modelTags = row.tags
+            .filter { !isYearTag($0.tag) && !($0.score == nil && family.contains($0.tag)) }
+            .map(\.tag)
+        let scores = Dictionary(
+            row.tags.compactMap { entry in entry.score.map { (entry.tag, $0) } }, uniquingKeysWith: { first, _ in first })
+        let url = URL(fileURLWithPath: row.path)
+        var tagged = TaggedFile(
+            url: url, kind: "image", extension: url.pathExtension.lowercased(), sizeBytes: sizeBytes,
+            createdAt: capturedAt, modifiedAt: nil,
+            visionTags: row.tags.map(\.tag),
+            tagScores: scores.isEmpty ? nil : scores,
+            phash: row.phash,
+            aestheticScore: row.aesthetic,
+            hasFaces: row.hasFaces,
+            facePrints: row.faces.map(\.print),
+            faceBBoxes: row.faces.map(\.bbox),
+            faceQualities: row.faces.map { $0.quality ?? -1 },
+            faceYaws: row.faces.map { _ in nil },
+            facePitches: row.faces.map { _ in nil },
+            ocrText: row.ocrText,
+            cameraModel: row.cameraModel,
+            locationLat: row.locationLat,
+            locationLon: row.locationLon,
+            clipEmbeddingBlob: row.clip,
+            tagsEvaluated: true,
+            facesEvaluated: true,
+            ocrStageRan: true
+        )
+        tagged.faceExcluded = row.faces.map(\.excluded)
+        tagged.ocrHandwritten = row.ocrHandwritten
+        tagged.capturedFromEXIF = capturedAt != nil
+        return TwinAnalysis(tagged: tagged, modelTags: modelTags, models: models)
+    }
+
+    /// The row of a file whose bytes are what the catalog already analyzed at
+    /// this path: only its size, dates and hash are refreshed. Every stage
+    /// flag stays off, so the writer leaves its tags, faces (and the people
+    /// they are assigned to) and text exactly as they are. The embedding is
+    /// carried because the catalog drops a file's vector when its date changes.
+    static func unchangedContent(
+        of twin: TwinAnalysis, for discovered: DiscoveredFile, contentHash: Data, elapsedMs: Double
+    ) -> TaggedFile {
+        let source = twin.tagged
+        var same = TaggedFile(
+            url: discovered.url, kind: "image", extension: discovered.url.pathExtension.lowercased(),
+            sizeBytes: discovered.sizeBytes,
+            createdAt: source.capturedFromEXIF ? source.createdAt : discovered.creationDate,
+            modifiedAt: discovered.modificationDate,
+            fileRef: discovered.fileRef,
+            visionTags: source.visionTags,
+            tagScores: source.tagScores,
+            phash: source.phash,
+            contentHash: contentHash,
+            aestheticScore: source.aestheticScore,
+            hasFaces: source.hasFaces,
+            ocrText: source.ocrText,
+            cameraModel: source.cameraModel,
+            locationLat: source.locationLat,
+            locationLon: source.locationLon,
+            perFileTotalMs: elapsedMs,
+            clipEmbeddingBlob: source.clipEmbeddingBlob
+        )
+        same.capturedFromEXIF = source.capturedFromEXIF
+        return same
     }
 }

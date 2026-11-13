@@ -1975,6 +1975,10 @@ struct FileIDEngineMain {
         let catalogHadRows = await CaptureDateBackfill.catalogHasRows(database: database, root: url)
         let datesCurrent = rescan || !catalogHadRows
 
+        // Read which images earlier scans finished while the models warm up.
+        // A forced rescan asks for fresh analysis, so it reuses nothing stored.
+        async let seeding: Void = rescan ? () : TwinReuse.seed(database: database)
+
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
         // simultaneously. Each is a no-op if the model isn't installed.
@@ -1994,6 +1998,7 @@ struct FileIDEngineMain {
             // building its CoreML session delayed the first file by about 2 s.
             // Face clustering loads it when it runs.
         }.value
+        await seeding
 
         // Unbuffered (rendezvous) async channels: each `send` suspends until a
         // consumer calls `next`. They are NOT bounded buffers — see the cancel
@@ -2060,10 +2065,38 @@ struct FileIDEngineMain {
                     await sink.emit(.error(notice))
                 }
             }
+            let decodeAhead = ScanDecodeAhead.depth(workerCap: workerCap)
+            if decodeAhead > 0 {
+                group.addTask {
+                    let twins = TwinReuse.enabled ? TwinReuse.shared : nil
+                    let catalog = TwinReuse.catalog
+                    let budget = ScanDecodeAhead.budgetBytes()
+                    let summary = await ScanDecodeAhead.run(
+                        source: discoveryChan, depth: decodeAhead, budgetBytes: budget, workers: workerCap,
+                        twins: twins, catalog: catalog,
+                        isCancelled: { ScanCoordinator.isCancelledSync() },
+                        isPaused: { ScanCoordinator.isPausedSync() },
+                        admit: { bytes in
+                            await ResourceScheduler.shared.backgroundHeadroom(memoryMB: UInt64((bytes + 1_048_575) >> 20))
+                        },
+                        process: { prepared in
+                            do {
+                                return try await Self.processScanFile(prepared, pool: pool, twins: twins, catalog: catalog)
+                            } catch is CancellationError {
+                                return nil
+                            } catch {
+                                JSONLog.shared.warn(ev: "scan_worker_scheduler_failed", error: "\(error)")
+                                return nil
+                            }
+                        },
+                        emit: { await taggedChan.send($0) })
+                    Self.logDecodeAhead(summary, depth: decodeAhead, budgetBytes: budget, sessionID: session.id)
+                }
+            }
             // Workers — N concurrent. Each pulls files until the channel
             // closes, processes via the Vision pool, pushes to tagged.
             // Honors cancel + pause via the sync mirrors on ScanCoordinator.
-            for _ in 0..<workerCap {
+            for _ in 0..<(decodeAhead > 0 ? 0 : workerCap) {
                 group.addTask {
                     for await disc in discoveryChan {
                         if ScanCoordinator.isCancelledSync() { break }
@@ -2225,6 +2258,52 @@ struct FileIDEngineMain {
             tagged.admissionWaitMs = admissionWaitMs
             return tagged
         }
+    }
+
+    private static func processScanFile(
+        _ prepared: Tagging.PreparedFile,
+        pool: VisionWorkerPool,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins?
+    ) async throws -> TaggedFile? {
+        try await ScanTaggingAdmission.withBackgroundCPU(
+            isCancelled: {
+                ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync()
+            }
+        ) { admissionWaitMs in
+            guard var tagged = await pool.with({ worker in
+                await Tagging.processFile(prepared: prepared, worker: worker, twins: twins, catalog: catalog)
+            }) else { return nil }
+            tagged.admissionWaitMs = admissionWaitMs
+            return tagged
+        }
+    }
+
+    /// One line per scan that ran with decode-ahead. `misses` are the times a
+    /// free inference worker found no file ready and waited `take_wait_ms`
+    /// in total; `reserve_wait_ms` is how long decoders stood still because
+    /// the queue was full (inference was the slower side).
+    private static func logDecodeAhead(
+        _ summary: ScanDecodeAhead.Summary, depth: Int, budgetBytes: Int, sessionID: String
+    ) {
+        let queue = summary.queue
+        JSONLog.shared.info(ev: "decode_ahead", sess: sessionID, extra: [
+            "depth": AnyCodable(depth),
+            "budget_mb": AnyCodable(budgetBytes >> 20),
+            "hits": AnyCodable(queue.hits),
+            "misses": AnyCodable(queue.misses),
+            "avg_queue_depth": AnyCodable(queue.averageDepth),
+            "take_wait_ms": AnyCodable(queue.takeWaitSeconds * 1000),
+            "reserve_waits": AnyCodable(queue.reserveWaits),
+            "reserve_wait_ms": AnyCodable(queue.reserveWaitSeconds * 1000),
+            "peak_held": AnyCodable(queue.peakHeld),
+            "peak_mb": AnyCodable(queue.peakBytes >> 20),
+            "decoded": AnyCodable(summary.decoded),
+            "not_admitted": AnyCodable(summary.notAdmitted),
+            "copies": AnyCodable(summary.copies),
+            "other": AnyCodable(summary.other),
+            "decode_ms": AnyCodable(summary.decodeSeconds * 1000)
+        ])
     }
 
     /// Post-scan orphan sweep: delete rows under `scanRootPath` whose file
