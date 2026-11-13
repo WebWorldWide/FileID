@@ -847,7 +847,7 @@ impl DbWriter {
                 clip.push(f.clip_ms);
                 let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
                 store.push(insert_ms);
-                if std::env::var("FILEID_PERF_TRACE").is_ok_and(|v| !v.is_empty() && v != "0") {
+                if crate::pipeline::tagging::perf_trace_enabled() {
                     tracing::debug!(
                         target: "FileIDEngine::perf",
                         stage = "db_write_done",

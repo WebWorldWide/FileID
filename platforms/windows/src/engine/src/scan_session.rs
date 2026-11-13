@@ -552,7 +552,10 @@ impl ScanSession {
         };
         let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
-            .with_legacy_hashes(writer.rename_heal_enabled())
+            .with_legacy_hashes(
+                writer.rename_heal_enabled()
+                    && legacy_hash_rows_possible(&self.db_conn.lock(), crate::paths::root().ok().as_deref()),
+            )
             .with_known_twins(known_twins);
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
@@ -1144,6 +1147,41 @@ fn reconcile_missing_face_crops_in(
     removed
 }
 
+/// Whether a row stamped with a pre-SHA-256 content hash can still be in the
+/// catalog, checked once per scan. The rename heal probes the frozen BLAKE3
+/// recipes only for such rows, and computing them costs a second hash of every
+/// image. Rows carry no recipe marker, so the state folder records when this
+/// engine (which stamps SHA-256, as the Swift engine does) first scanned: any
+/// hash on a row scanned before then may be a legacy one. Unknown means yes.
+fn legacy_hash_rows_possible(conn: &Connection, state_dir: Option<&Path>) -> bool {
+    let Some(marker) = state_dir.map(|dir| dir.join("sha256-content-hash-since")) else {
+        return true;
+    };
+    let since = match std::fs::read_to_string(&marker).ok().and_then(|text| text.trim().parse::<f64>().ok()) {
+        Some(since) => since,
+        None => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let written = marker
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&marker, format!("{now}")));
+            if written.is_err() || now <= 0.0 {
+                return true;
+            }
+            now
+        }
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE scanned_at < ?1 AND content_hash IS NOT NULL)",
+        [since],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
 /// Adds the failed rows that used up their retries to the skip set; discovery
 /// then skips each one only while its size and date still match.
 fn add_given_up_failures(
@@ -1522,6 +1560,33 @@ mod tests {
 
         let mut everywhere = std::collections::HashMap::new();
         assert_eq!(add_given_up_failures(&conn, &mut everywhere, "", None), 2);
+    }
+
+    #[test]
+    fn legacy_hashes_are_computed_only_while_a_row_predates_this_engines_first_scan() {
+        let dir = std::env::temp_dir().join(format!("fileid-legacy-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let conn = crate::db::test_support::memory_db();
+        assert!(legacy_hash_rows_possible(&conn, None), "no state folder: assume yes");
+
+        // A catalog that already has hashed rows when the marker is first written.
+        crate::db::test_support::insert_file(&conn, 1, "/lib/old.jpg", "image");
+        conn.execute("UPDATE files SET content_hash = X'01', scanned_at = 1000 WHERE id = 1", []).unwrap();
+        assert!(legacy_hash_rows_possible(&conn, Some(&dir)));
+        let since: f64 = std::fs::read_to_string(dir.join("sha256-content-hash-since")).unwrap().parse().unwrap();
+        assert!(since > 1000.0);
+        assert!(legacy_hash_rows_possible(&conn, Some(&dir)), "the old row is still there");
+
+        // Once every hashed row has been scanned since, the probe is retired.
+        conn.execute("UPDATE files SET scanned_at = ?1 WHERE id = 1", [since + 1.0]).unwrap();
+        assert!(!legacy_hash_rows_possible(&conn, Some(&dir)));
+        crate::db::test_support::insert_file(&conn, 2, "/lib/unhashed.bin", "other");
+        assert!(!legacy_hash_rows_possible(&conn, Some(&dir)), "a row without a hash cannot heal by hash");
+
+        // A new library never computes them.
+        let fresh = dir.join("fresh");
+        assert!(!legacy_hash_rows_possible(&crate::db::test_support::memory_db(), Some(&fresh)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
