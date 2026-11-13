@@ -43,6 +43,15 @@ public enum Tagging {
         discovered: DiscoveredFile,
         worker: VisionWorker
     ) async -> TaggedFile {
+        await processFile(discovered: discovered, worker: worker, twins: TwinReuse.enabled ? TwinReuse.shared : nil)
+    }
+
+    /// `twins` nil analyzes every image itself; tests pass their own registry.
+    static func processFile(
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        twins: TwinRegistry?
+    ) async -> TaggedFile {
         let url = discovered.url
         let kind = discovered.kind.rawValue
         let ext = url.pathExtension.lowercased()
@@ -60,7 +69,7 @@ public enum Tagging {
         var tagged: TaggedFile
         switch discovered.kind {
         case .image:
-            tagged = await processImage(discovered: discovered, worker: worker, started: started)
+            tagged = await processImage(discovered: discovered, worker: worker, started: started, twins: twins)
         case .video:
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
@@ -89,11 +98,11 @@ public enum Tagging {
         }
         if tagged.contentHash == nil && !Task.isCancelled {
             let contentSize = UInt64(max(0, discovered.sizeBytes))
-            let state = ContentHashContinuation()
+            let state = OnceContinuation<Data?>()
             let giveUp = DispatchWorkItem { state.finish(nil) }
             tagged.contentHash = await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    state.install(continuation)
+                    state.install(continuation, ifFinished: nil)
                     visionQueue.async {
                         state.finish(ContentHash.compute(url: url, size: contentSize))
                     }
@@ -195,30 +204,116 @@ public enum Tagging {
 
     // MARK: - Image pipeline
 
+    /// Hashes an image before it is decoded, so a byte-identical copy of one
+    /// already analyzed (or being analyzed) in this scan takes that result.
     private static func processImage(
         discovered: DiscoveredFile,
         worker: VisionWorker,
-        started: CFAbsoluteTime
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?
     ) async -> TaggedFile {
-        await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
+        guard let twins, TwinReuse.eligible(sizeBytes: discovered.sizeBytes), !Task.isCancelled else {
+            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .alongside).tagged
+        }
+        let early = await hashBeforeDecode(discovered)
+        guard let hash = early.hash else {
+            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .known(nil)).tagged
+        }
+        let key = TwinKey(hash: hash, size: discovered.sizeBytes)
+        let models = TwinReuse.modelFingerprint()
+        let hashMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        switch twins.claim(key, models: models) {
+        case .ready(let twin):
+            twins.noteReuse()
+            return twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs)
+        case .pending:
+            if let twin = await twins.wait(key, timeout: TwinReuse.waitSeconds), twin.models == models {
+                twins.noteReuse()
+                return twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs)
+            }
+            return await analyzeImage(discovered: discovered, worker: worker, started: started, hash: .known(hash)).tagged
+        case .owner:
+            let analysis = await analyzeImage(
+                discovered: discovered, worker: worker, started: started, hash: .known(hash), heif: early.heif)
+            // A model that loaded while this file was analyzed may have missed it.
+            let reusable = !analysis.tagged.failed && analysis.tagged.tagsEvaluated
+                && TwinReuse.modelFingerprint() == models
+            twins.publish(key, reusable ? TwinAnalysis(tagged: analysis.tagged, modelTags: analysis.modelTags, models: models) : nil)
+            return analysis.tagged
+        }
+    }
+
+    private struct EarlyHash: Sendable {
+        var hash: Data?
+        var heif: HEIFDecoder.FileBytes?
+    }
+
+    /// The full-file hash, bounded like the later one. A HEIC is read once
+    /// here and the same bytes go to the decoder.
+    private static func hashBeforeDecode(_ discovered: DiscoveredFile) async -> EarlyHash {
+        let url = discovered.url
+        let size = UInt64(max(0, discovered.sizeBytes))
+        let isHEIC = ["heic", "heif"].contains(url.pathExtension.lowercased())
+        let state = OnceContinuation<EarlyHash>()
+        let giveUp = DispatchWorkItem { state.finish(EarlyHash()) }
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                state.install(continuation, ifFinished: EarlyHash())
+                visionQueue.async {
+                    if isHEIC, let file = HEIFDecoder.load(path: url.path) {
+                        state.finish(EarlyHash(hash: ContentHash.compute(bytes: file.raw), heif: file))
+                    } else {
+                        state.finish(EarlyHash(hash: ContentHash.compute(url: url, size: size)))
+                    }
+                }
+                visionQueue.asyncAfter(deadline: .now() + hashTimeoutSeconds, execute: giveUp)
+            }
+        } onCancel: {
+            state.finish(EarlyHash())
+        }
+        giveUp.cancel()
+        return result
+    }
+
+    private enum ImageHash {
+        /// Read the file for its hash while the models run.
+        case alongside
+        /// Already attempted before decode; nil when that read failed.
+        case known(Data?)
+    }
+
+    private static func analyzeImage(
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        started: CFAbsoluteTime,
+        hash: ImageHash,
+        heif: HEIFDecoder.FileBytes? = nil
+    ) async -> (tagged: TaggedFile, modelTags: [String]) {
+        let heifBox = ScanSideResult<HEIFDecoder.FileBytes>()
+        if let heif { heifBox.set(heif) }
+        return await withCheckedContinuation { (cont: CheckedContinuation<(tagged: TaggedFile, modelTags: [String]), Never>) in
             visionQueue.async {
-                let result = autoreleasepool { () -> TaggedFile in
+                let result = autoreleasepool { () -> (tagged: TaggedFile, modelTags: [String]) in
                     let url = discovered.url
                     let ext = url.pathExtension.lowercased()
                     let sizeMB = Double(discovered.sizeBytes) / 1_048_576
+                    var knownHash: Data? = nil
+                    if case .known(let value) = hash { knownHash = value }
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let (cgImage, exif) = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes) else {
+                    guard let (cgImage, exif) = loadImageAndEXIF(
+                        url: url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take()) else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
-                        return TaggedFile(
+                        return (TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
+                            contentHash: knownHash,
                             failed: true,
                             errorMessage: "Could not decode image",
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
-                        )
+                        ), [])
                     }
                     let loadMs = (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
 
@@ -235,8 +330,12 @@ public enum Tagging {
                         clipBox.set((blob, (CFAbsoluteTimeGetCurrent() - clipStart) * 1000))
                     }
                     // The worker blocks on this join, so the read must not run below its priority.
-                    DispatchQueue.global(qos: .userInitiated).async(group: hashWork) {
-                        hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
+                    if case .alongside = hash {
+                        DispatchQueue.global(qos: .userInitiated).async(group: hashWork) {
+                            hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
+                        }
+                    } else {
+                        hashBox.set(knownHash)
                     }
 
                     // Vision primary pass — bundled classify + faces + saliency.
@@ -255,7 +354,7 @@ public enum Tagging {
                         sideWork.wait()
                         _ = hashWork.wait(timeout: .now() + hashTimeoutSeconds)
                         JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
-                        return TaggedFile(
+                        return (TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
@@ -264,7 +363,7 @@ public enum Tagging {
                             failed: true,
                             errorMessage: FileIDEngineMain.visionTimeoutMessage,
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
-                        )
+                        ), [])
                     }
 
                     // OCR — only if classify suggests there's text to read. The
@@ -328,7 +427,7 @@ public enum Tagging {
                     // which case the file simply won't participate in dedup.
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
                     var tagScores: [String: Double]? = nil
-                    var primaryTags: [String]
+                    let primaryTags: [String]
                     if !ramTags.isEmpty {
                         primaryTags = ramTags.map { $0.tag }
                         tagScores = Dictionary(ramTags.map { ($0.tag, Double($0.score)) },
@@ -340,25 +439,10 @@ public enum Tagging {
                     // Enrich the primary tags with EXIF + dimension signals we
                     // already have for free. Cheap, sync, gives the Library tile
                     // chips real value. EXIF/derived tags carry no score.
-                    var enrichedTags = primaryTags
-                    enrichedTags.append(contentsOf: extraTags(
-                        cgImage: cgImage,
+                    let dedupedTags = cappedTags(primaryTags + extraTags(
                         cameraModel: exif.cameraModel,
-                        creationDate: exif.capturedAt ?? discovered.creationDate,
-                        hasFaces: pass.faceCount > 0,
-                        hasOCR: ocr?.isEmpty == false,
-                        hasLocation: exif.lat != nil && exif.lon != nil
+                        creationDate: exif.capturedAt ?? discovered.creationDate
                     ))
-                    // Case-insensitive dedup (keep first-seen casing) then cap to 16 —
-                    // mirrors the Windows engine's pre-DB-write retain(seen)+truncate(16)
-                    // (tagging.rs) so a library's stored tag set is identical cross-platform.
-                    var seenTagKeys = Set<String>()
-                    var dedupedTags: [String] = []
-                    for tag in enrichedTags {
-                        guard seenTagKeys.insert(tag.lowercased()).inserted else { continue }
-                        dedupedTags.append(tag)
-                        if dedupedTags.count >= 16 { break }
-                    }
 
                     sideWork.wait()
                     // A stalled network volume must not park this worker for good.
@@ -402,7 +486,7 @@ public enum Tagging {
                     tagged.ocrCarefulMs = ocrCarefulMs
                     tagged.ocrHandwritten = ocrHandwritten
                     tagged.capturedFromEXIF = exif.capturedAt != nil
-                    return tagged
+                    return (tagged, primaryTags)
                 }
                 cont.resume(returning: result)
             }
@@ -704,6 +788,7 @@ public enum Tagging {
         private var value: T?
         func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
         func get() -> T? { lock.lock(); defer { lock.unlock() }; return value }
+        func take() -> T? { lock.lock(); defer { value = nil; lock.unlock() }; return value }
     }
 
     // EXIF is read from the SAME CGImageSource as the decode — a separate
@@ -713,7 +798,8 @@ public enum Tagging {
     // assertable via @testable — see TaggingLoadSizeTests.
     static func loadImageAndEXIF(
         url: URL,
-        sizeBytes: Int64
+        sizeBytes: Int64,
+        heifFile: HEIFDecoder.FileBytes? = nil
     ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
         // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
@@ -744,7 +830,16 @@ public enum Tagging {
         // previews are commonly only 160×120 and are too small for face gating.
         let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
             .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
-        guard let img = decodeScanImage(src, path: url.path, maxPixelSize: maxPixels) else { return nil }
+        // With the file already in memory, the same order as decodeScanImage for a
+        // HEIC (hardware decoder, then ImageIO) without reading it a second time.
+        let decoded: CGImage?
+        if let heifFile, isHEIF(src) {
+            decoded = HEIFDecoder.decode(file: heifFile, maxPixelSize: maxPixels)
+                ?? decodeBoundedImage(src, maxPixelSize: maxPixels)
+        } else {
+            decoded = decodeScanImage(src, path: url.path, maxPixelSize: maxPixels)
+        }
+        guard let img = decoded else { return nil }
         return (img, readEXIF(from: src))
     }
 
@@ -788,14 +883,7 @@ public enum Tagging {
     /// but they dominated `TopTwoTags` on EXIF-less files and read as UI
     /// concerns rather than content; the signals still live in their own
     /// DB columns/facets. Mirrors Windows `push_enriched_extras`.
-    private static func extraTags(
-        cgImage: CGImage,
-        cameraModel: String?,
-        creationDate: Date?,
-        hasFaces: Bool,
-        hasOCR: Bool,
-        hasLocation: Bool = false
-    ) -> [String] {
+    static func extraTags(cameraModel: String?, creationDate: Date?) -> [String] {
         var out: [String] = []
         // Year tag from creation date.
         if let d = creationDate {
@@ -819,6 +907,19 @@ public enum Tagging {
             else if lower.contains("pixel") { family = "Pixel" }
             else { family = nil }
             if let family { out.append(family) }
+        }
+        return out
+    }
+
+    /// Case-insensitive dedup (first-seen casing kept), capped at 16: mirrors the
+    /// Windows engine's retain(seen)+truncate(16) so stored tag sets match.
+    static func cappedTags(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for tag in tags {
+            guard seen.insert(tag.lowercased()).inserted else { continue }
+            out.append(tag)
+            if out.count >= 16 { break }
         }
         return out
     }
@@ -883,23 +984,23 @@ public enum Tagging {
     }
 }
 
-private final class ContentHashContinuation: @unchecked Sendable {
+private final class OnceContinuation<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data?, Never>?
+    private var continuation: CheckedContinuation<Value, Never>?
     private var finished = false
 
-    func install(_ continuation: CheckedContinuation<Data?, Never>) {
+    func install(_ continuation: CheckedContinuation<Value, Never>, ifFinished fallback: Value) {
         lock.lock()
         if finished {
             lock.unlock()
-            continuation.resume(returning: nil)
+            continuation.resume(returning: fallback)
             return
         }
         self.continuation = continuation
         lock.unlock()
     }
 
-    func finish(_ value: Data?) {
+    func finish(_ value: Value) {
         lock.lock()
         guard !finished else {
             lock.unlock()

@@ -29,6 +29,8 @@ struct ChatWorkbench: View {
     @State private var chosen: Set<Int64> = []
     @State private var selectionNote: String?
     @State private var scopedRequest = ""
+    @AppStorage(ChatActionRunner.lastTrashBatchKey) private var lastTrashBatch = ""
+    @State private var puttingBack = false
 
     private var isPage: Bool { onClose == nil }
     private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
@@ -138,6 +140,14 @@ struct ChatWorkbench: View {
                 .accessibilityLabel("Looking in names, tags, descriptions, chapters and text in files")
             }
             Spacer(minLength: 8)
+            if !lastTrashBatch.isEmpty {
+                Button { putBackLastTrash() } label: { Label("Put back", systemImage: "arrow.uturn.backward") }
+                    .buttonStyle(.dsGhost)
+                    .disabled(puttingBack)
+                    .help("Put back the last files Chat moved to Trash")
+                    .accessibilityLabel("Put back the last files Chat moved to Trash")
+                    .transition(.opacity)
+            }
             Button("Clear") { confirmClear = true }
                 .buttonStyle(.dsGhost)
                 .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted, after you confirm.")
@@ -151,6 +161,24 @@ struct ChatWorkbench: View {
         }
         .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, isPage ? 0 : 10)
         .frame(minHeight: isPage ? Theme.Metrics.paneHeaderHeight : nil)
+    }
+
+    private func putBackLastTrash() {
+        let batch = lastTrashBatch
+        guard !batch.isEmpty, !puttingBack else { return }
+        puttingBack = true
+        Task {
+            let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+            puttingBack = false
+            if lastTrashBatch == batch,
+               undone.restored > 0 || undone.message?.contains("unknown or already restored") == true {
+                withAnimation(Theme.springStandard) { lastTrashBatch = "" }
+            }
+            if undone.restored > 0 { ChatHandoff.shared.store?.notifyChanged() }
+            ToastCenter.shared.show(undone.restored > 0
+                ? "Put back \(undone.restored.formatted()) \(undone.restored == 1 ? "copy" : "copies") where \(undone.restored == 1 ? "it was" : "they were")"
+                : (undone.message ?? "Nothing was put back. Check the Trash."))
+        }
     }
 
     private var emptyState: some View {

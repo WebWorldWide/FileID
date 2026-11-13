@@ -75,13 +75,13 @@ struct PeopleView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { refreshFaceModelInstalled(); reload(); refreshReview() }
+        .onAppear { refreshFaceModelInstalled(); reload(); refreshReview(); refreshMergeUndo() }
         .onChange(of: store.version) { _, _ in reload(debounced: true) }
         .onChange(of: ModelInstaller.face.status) { _, _ in refreshFaceModelInstalled() }
         .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload(); refreshReview() }
         .onChange(of: activeSheet) { _, sheet in
             publishSelection(sheet)
-            if sheet == nil { refreshReview() }
+            if sheet == nil { refreshReview(); refreshMergeUndo() }
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
         .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: { reload() }))
@@ -258,7 +258,7 @@ struct PeopleView: View {
     }
 
     static let mergeFailed = "The merge didn't go through. Try again in a moment."
-    static let mergeWarning = "Their photos become one person. This can't be undone."
+    static let mergeWarning = "Their photos become one person. You can undo this right after."
 
     private func setStatus(_ text: String?, offersShowUnknowns: Bool = false) {
         mergeStatus = text
@@ -315,6 +315,29 @@ struct PeopleView: View {
         }
     }
 
+    private func refreshMergeUndo() {
+        Task { await MergeUndoModel.shared.refresh(engine) }
+    }
+
+    @ViewBuilder
+    private var undoMergeButton: some View {
+        let undo = MergeUndoModel.shared
+        if undo.operationID != nil, !mergeMode, !unknownMode {
+            Button {
+                Task {
+                    let result = await undo.undoLatest(engine, store: store)
+                    setStatus(MergeUndoModel.summary(result, of: 1))
+                    reload()
+                }
+            } label: {
+                Label("Undo last merge", systemImage: "arrow.uturn.backward")
+            }
+            .buttonStyle(.dsSecondary)
+            .disabled(undo.busy || mergeInFlight)
+            .help("Separate the two people you merged last. Their names and photos go back to how they were. Works for a day after the merge.")
+        }
+    }
+
     private var queueChanges: Int { (mergeQueue?.changes ?? 0) + (splitQueue?.changes ?? 0) }
 
     private func refreshReview() {
@@ -337,6 +360,7 @@ struct PeopleView: View {
                 MetaText(headerCountLine, color: Theme.text2)
                 Spacer()
                 reviewButton
+                undoMergeButton
                 headerActions
             }
             if let faceRefresh { FaceRefreshRow(model: faceRefresh) }
@@ -1644,7 +1668,7 @@ private struct SuggestedMergesSheet: View {
             Button("Cancel", role: .cancel) { pending = nil }
         } message: {
             Text(pending?.single == false
-                 ? "Each pair becomes one person. This can't be undone. You can stop partway; merges already done stay."
+                 ? "Each pair becomes one person. You can undo this right after. You can stop partway; merges already done stay."
                  : PeopleView.mergeWarning)
         }
     }
@@ -1804,7 +1828,7 @@ private struct MergeTargetPickerSheet: View {
             }
             Button("Cancel", role: .cancel) { pendingTarget = nil }
         } message: {
-            Text("The other \(checked.count - 1 == 1 ? "card goes" : "\(checked.count - 1) cards go") away and \(checked.count - 1 == 1 ? "its" : "their") photos move to this one. This can't be undone.")
+            Text("The other \(checked.count - 1 == 1 ? "card goes" : "\(checked.count - 1) cards go") away and \(checked.count - 1 == 1 ? "its" : "their") photos move to this one. You can undo this right after.")
         }
     }
 }

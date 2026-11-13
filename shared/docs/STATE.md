@@ -1,5 +1,20 @@
 # FileID — State
 
+## 2026-11-12 — Merge undo, Mac identical-photo reuse, download resume, cheaper lava lamp, plain wording on Windows and Linux (IPC 1.27.0)
+
+Round 3 of the Mac audit. Builds pass; Swift 1,024 tests (193 shared, 137 app, 686 engine, 8 other), Rust engine clippy + 1,278 tests on 1.98, Linux app clippy, C# IPC tests 70/70, IPC DTO check, catalog schema check and the egress gate all pass. **Still nothing checked on screen.**
+
+- **Undo for People merges (Mac engine + app).** `mergeClusters` writes a `person_merge` record into `catalog_operations` / `catalog_corrections` in the merge's transaction (no migration; catalog stays v33). Undo recreates the merged-in person under its old id, moves back the faces that still exist and still belong to the target, and restores names and verdicts. The app shows a 10 s Undo toast after any merge (Chat merges too) and an "Undo last merge" button in People for merges from the last 24 hours. Confirmations stay and now say it can be undone.
+- **IPC 1.27.0 (additive):** `BulkActionItem.operationID` and `BulkActionItem.reason` (`changed` / `protected` / `missing` / `failed`); `undoFaceReview.operationID` accepts a merge id or `"lastPersonMerge"`; `listFaceReview` queue `"mergeUndo"`. Mirrored in Swift, Rust and C#. The Swift engine sets `reason` on Trash failures and the Mac app prefers it over matching words; the Rust engine sets `missing` / `changed` / `failed`. **The Rust engine has no merge undo yet.**
+- **Identical photos analyzed once in the Mac engine** (`Pipeline/TwinReuse.swift`): hash first, a per-scan registry, later copies take the first copy's tags, faces, text and embedding with their own path, dates and Year tag. In-scan only (no seeding from earlier scans); `FILEID_TWIN_REUSE=0` turns it off. Tested end to end with real Vision on JPEG and HEIC; **speed on a real library is unmeasured**. HEIC files are read once; the MPF marker walk reads 64 KiB once.
+- **Downloads resume across a relaunch** for hash-pinned files: finished pieces live in a `resume-…` staging folder with a manifest and lock, are length-checked on reuse, and the assembled file is still hashed in full. Stale folders are swept after 7 days. Not exercised against a real interrupted download.
+- **Lava lamp:** wax drawn at a third of the window size and stretched back, 20 fps instead of 30; the Detail pane no longer blurs the lava under its 80 % fill. Needs the owner's eyes.
+- **Small app items:** Best Takes waits on replies instead of polling; Chat shows "Put back" after a restart; the preview's one-file rename uses the Name style and confirms; Spotlight sends only rows whose content fingerprint changed (first pass re-sends all once); thumbnail replies decode off the main thread; Welcome routes errors by model id.
+- **Windows and Linux wording:** the shared engine's user-facing errors and job titles now match the Mac's plain sentences (kinds unchanged; conformance-pinned strings kept; `emit_scope_failure` in `deep_analyze.rs` still forwards raw text because tests pin it).
+- **Speech permission:** left with the helper. It only prompts during Describe Files and Find moments, which the user starts; macOS grants speech per process, so the app cannot ask on the helper's behalf.
+- **Digests refreshed** after a diff audit (no host, session or process launch added): EngineClient.swift, StreamingDownload.swift, and Rust bulk.rs, prewarm.rs, restructure.rs, trash.rs, server.rs, deep_scope.rs. SpotlightIndexer reads its local record with `FileManager.contents(atPath:)`.
+- A flaky app test (`ReadStorePresentationTests`, "database is locked") got a busy timeout on its writer; 12 clean runs.
+
 ## 2026-11-12 — Mac app audit fixes: destructive actions, models, plain language, app and scan waste
 
 Five agents fixed the audit's open items on disjoint files; integrated on `agent/engine-tagging-breakthroughs`. Both products build; 980 Swift tests pass (181 shared, 128 app, 663 engine, 8 other); the egress gate passes. **Nothing was run on screen**: every behaviour is compile- and test-checked only.

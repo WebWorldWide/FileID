@@ -47,10 +47,18 @@ public final class EngineClient {
 
     private var catalogWaiters: [String: CheckedContinuation<CatalogResponse?, Never>] = [:]
 
-    /// Resumes when the engine replies to `id`; nil on timeout or cancellation.
-    private func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
+    /// Sends `request` and waits for its reply; nil when it can't be sent,
+    /// on timeout, on cancellation or when the engine stops.
+    func catalogReply(to request: CatalogRequest, timeout: Duration) async -> CatalogResponse? {
+        guard send(.catalogRequest(request: request)) else { return nil }
+        return await catalogResponse(for: request.requestID, timeout: timeout)
+    }
+
+    /// Resumes when the engine replies to `id`; nil on timeout, cancellation or engine exit.
+    func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
             self?.resumeCatalogWaiter(id, with: nil)
         }
         defer { timer.cancel() }
@@ -71,6 +79,34 @@ public final class EngineClient {
 
     private func resumeCatalogWaiter(_ id: String, with response: CatalogResponse?) {
         catalogWaiters.removeValue(forKey: id)?.resume(returning: response)
+    }
+
+    private var bulkResultWaiters: [UUID: (prefix: String, continuation: CheckedContinuation<BulkActionResult?, Never>)] = [:]
+
+    /// The first bulk result after `signal` whose action starts with `prefix`;
+    /// nil on timeout or engine exit. A cancelled caller still gets the result:
+    /// the files were already moved, and the undo needs the batch it names.
+    func bulkActionResult(after signal: Int, prefix: String, timeout: Duration) async -> BulkActionResult? {
+        if bulkActionResultSignal != signal, let result = bulkActionResult, result.action.hasPrefix(prefix) {
+            return result
+        }
+        let token = UUID()
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.bulkResultWaiters.removeValue(forKey: token)?.continuation.resume(returning: nil)
+        }
+        defer { timer.cancel() }
+        return await withCheckedContinuation { continuation in
+            bulkResultWaiters[token] = (prefix, continuation)
+        }
+    }
+
+    private func resumeBulkResultWaiters(with result: BulkActionResult?) {
+        for (token, waiter) in bulkResultWaiters where result.map({ $0.action.hasPrefix(waiter.prefix) }) ?? true {
+            bulkResultWaiters.removeValue(forKey: token)
+            waiter.continuation.resume(returning: result)
+        }
     }
 
     private let queryReplies = EngineQueryReplies()
@@ -211,15 +247,15 @@ public final class EngineClient {
     // strict receipt order. The previous per-event `Task { @MainActor }` dispatch
     // had no ordering guarantee, so events could be applied out of order — e.g.
     // wedging the Deep Analyze / face-clustering in-flight flag.
-    private let eventContinuation: AsyncStream<IPCEvent>.Continuation
+    private let eventContinuation: AsyncStream<InboundEvent>.Continuation
     private var eventPump: Task<Void, Never>?
 
     public init() {
-        let (stream, continuation) = AsyncStream.makeStream(of: IPCEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(of: InboundEvent.self)
         eventContinuation = continuation
         eventPump = Task { @MainActor [weak self] in
-            for await event in stream {
-                self?.handleEvent(event)
+            for await inbound in stream {
+                self?.handleEvent(inbound.event, videoFrame: inbound.videoFrame)
             }
         }
     }
@@ -526,8 +562,13 @@ public final class EngineClient {
                     continue
                 }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
-                    // Serial, ordered hand-off to the @MainActor pump.
-                    continuation.yield(event)
+                    // Serial, ordered hand-off to the @MainActor pump. A video
+                    // frame's base64 is decoded here, off the main actor.
+                    var videoFrame: DecodedVideoFrame?
+                    if case .thumbnailGenerated(let reply) = event.payload {
+                        videoFrame = EngineQueryReplies.decode(reply)
+                    }
+                    continuation.yield(InboundEvent(event: event, videoFrame: videoFrame))
                 } else {
                     Self.debug("ENGINE: undecodable frame: \(Self.redactFrameSample(line))")
                 }
@@ -602,7 +643,7 @@ public final class EngineClient {
         }
     }
 
-    private func handleEvent(_ event: IPCEvent) {
+    func handleEvent(_ event: IPCEvent, videoFrame: DecodedVideoFrame? = nil) {
         switch event.payload {
         case .chatResponse(let response):
             latestChatResponse = response
@@ -771,6 +812,7 @@ public final class EngineClient {
         case .bulkActionResult(let result):
             bulkActionResult = result
             bulkActionResultSignal &+= 1
+            resumeBulkResultWaiters(with: result)
         // ── Remaining Windows-originated reply events. The mac app's
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
@@ -799,7 +841,7 @@ public final class EngineClient {
         case .mergeSuggestions(let reply):
             queryReplies.deliver(reply)
         case .thumbnailGenerated(let reply):
-            queryReplies.deliver(reply)
+            queryReplies.deliver(videoFrame ?? EngineQueryReplies.decode(reply))
         case .faceReview(let page):
             queryReplies.deliver(page)
         case .healthCheckResult,
@@ -824,6 +866,8 @@ public final class EngineClient {
         deepAnalyzeProgress = nil
         faceClusteringInFlight = false
         queryReplies.abandonAll()
+        for id in Array(catalogWaiters.keys) { resumeCatalogWaiter(id, with: nil) }
+        resumeBulkResultWaiters(with: nil)
         // A dead engine emits no terminal event, so release both App-Nap
         // tokens here — this is the crash/exit leg that keeps the begin/end
         // pairs balanced. Both helpers no-op when their token isn't held.

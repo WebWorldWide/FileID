@@ -525,31 +525,17 @@ struct TakeReview: View {
 
 // MARK: - Request helpers
 
-/// Catalog and bulk replies awaited by polling the engine's published state;
-/// EngineClient's own waiter is private to search.
+/// Catalog and bulk replies, awaited through EngineClient's waiters.
 @MainActor
 enum TakeRequests {
     static let lastTrashBatchKey = "takes.lastTrashBatch"
-    private static let poll = Duration.milliseconds(150)
 
     static func send(_ engine: EngineClient, _ request: CatalogRequest, timeout: Double) async -> CatalogResponse? {
-        guard engine.send(.catalogRequest(request: request)) else { return nil }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let response = engine.catalogResponses[request.requestID] { return response }
-            try? await Task.sleep(for: poll)
-            if Task.isCancelled { return nil }
-        }
-        return nil
+        await engine.catalogReply(to: request, timeout: .seconds(timeout))
     }
 
     static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, timeout: Double) async -> BulkActionResult? {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if engine.bulkActionResultSignal != signal, let result = engine.bulkActionResult, result.action.hasPrefix(prefix) { return result }
-            try? await Task.sleep(for: poll)
-        }
-        return nil
+        await engine.bulkActionResult(after: signal, prefix: prefix, timeout: .seconds(timeout))
     }
 }
 

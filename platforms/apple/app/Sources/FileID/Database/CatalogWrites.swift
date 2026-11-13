@@ -3,6 +3,7 @@
 // writer, so each edit is an engine command and this awaits its
 // bulkActionResult. ReadStore only reads.
 import Foundation
+import Observation
 import FileIDShared
 
 @MainActor
@@ -85,6 +86,7 @@ enum CatalogWrites {
                            progress: MergeProgress? = nil, shouldStop: MergeStop? = nil) async -> Int {
         let total = plan.reduce(0) { sum, group in sum + group.sources.filter { $0 != group.target }.count }
         var merged = 0, started = 0
+        var operations: [String] = []
         outer: for group in plan {
             for source in group.sources where source != group.target {
                 if shouldStop?() == true { break outer }
@@ -92,11 +94,15 @@ enum CatalogWrites {
                 progress?(started, total)
                 let result = await request(engine, .mergeClusters(sourcePersonID: source, destinationPersonID: group.target),
                                            action: "mergeClusters", id: source, timeout: 120)
-                if result.succeeded == 1 { merged += 1 }
+                if result.succeeded == 1 {
+                    merged += 1
+                    if let operation = result.messages.first?.operationID { operations.append(operation) }
+                }
                 if !answered(result) { break outer }
             }
         }
         if !plan.isEmpty { store.notifyChanged() }
+        if !operations.isEmpty { await MergeUndoModel.shared.offer(engine, store: store, operations: operations) }
         return merged
     }
 
@@ -335,5 +341,64 @@ enum CatalogWrites {
         let request = NameStyle.unlearnRequest(id: "names-unlearn-" + UUID().uuidString, edits: split.forget)
         guard let response = await TakeRequests.send(engine, request, timeout: 15), response.status == "ok" else { return }
         if let data = try? JSONEncoder().encode(split.keep) { UserDefaults.standard.set(data, forKey: NameStyle.learnedEditsKey) }
+    }
+}
+
+/// Undo for People merges. The helper keeps a record of each merge; this
+/// offers the batch just made in a toast and tracks the newest merge that
+/// can still be undone for the People header.
+@MainActor
+@Observable
+final class MergeUndoModel {
+    static let shared = MergeUndoModel()
+    static let failed = "The merge couldn't be undone. Try again in a moment."
+
+    private(set) var operationID: String?
+    private(set) var busy = false
+
+    func refresh(_ engine: EngineClient) async {
+        let page = await engine.faceReview { .listFaceReview(requestID: $0, personID: nil, offset: nil, limit: nil, queue: "mergeUndo") }
+        operationID = page?.status == "ok" && (page?.total ?? 0) > 0 ? page?.operationID : nil
+    }
+
+    func offer(_ engine: EngineClient, store: ReadStore, operations: [String]) async {
+        await refresh(engine)
+        let text = operations.count == 1 ? "Merged into one person." : "Finished \(operations.count) merges."
+        ToastCenter.shared.show(text, actionLabel: "Undo", duration: 10) {
+            Task { @MainActor in
+                let result = await self.undo(engine, store: store, operations: operations)
+                ToastCenter.shared.show(Self.summary(result, of: operations.count), duration: 6)
+            }
+        }
+    }
+
+    static func summary(_ result: (undone: Int, message: String?), of total: Int) -> String {
+        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(total) merges undone." }
+        if result.undone > 0 { return "\(result.undone) of \(total) merges undone. \(result.message ?? failed)" }
+        return result.message ?? failed
+    }
+
+    /// Undoes the newest merge first, so a chain of merges unwinds in order.
+    func undo(_ engine: EngineClient, store: ReadStore, operations: [String]) async -> (undone: Int, message: String?) {
+        guard !busy else { return (0, nil) }
+        busy = true
+        defer { busy = false }
+        var undone = 0
+        var message: String?
+        for operation in operations.reversed() {
+            guard let page = await engine.faceReview({ .undoFaceReview(requestID: $0, operationID: operation) }) else {
+                message = CatalogWrites.notReady
+                break
+            }
+            if page.status == "ok" { undone += 1 } else if message == nil { message = page.message }
+        }
+        store.notifyChanged()
+        await refresh(engine)
+        return (undone, message)
+    }
+
+    func undoLatest(_ engine: EngineClient, store: ReadStore) async -> (undone: Int, message: String?) {
+        guard let operationID else { return (0, nil) }
+        return await undo(engine, store: store, operations: [operationID])
     }
 }

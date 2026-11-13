@@ -148,6 +148,8 @@ mod tests {
             file_id: Some(1),
             ok,
             message: message.map(str::to_owned),
+            reason: None,
+            operation_id: None,
         }
     }
 

@@ -66,9 +66,10 @@ struct AtmosphereTimeline<Content: View>: View {
     }
 
     var body: some View {
-        // The wax drifts over tens of seconds; 30 fps is visually identical to
-        // 120 and quarters the GPU/compositor work behind every other view.
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: AtmosphereMotionScheduling.isPaused(
+        // The wax drifts over tens of seconds (about a point per frame at its
+        // fastest), so 20 fps reads the same as 120 and every frosted pane
+        // above it re-blurs that much less often.
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: AtmosphereMotionScheduling.isPaused(
             localSuspension: suspension, windowActive: windowActive
         ))) { _ in
             content(delivery.elapsed(at: ProcessInfo.processInfo.systemUptime))

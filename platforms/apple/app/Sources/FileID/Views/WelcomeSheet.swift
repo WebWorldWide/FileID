@@ -222,13 +222,15 @@ struct WelcomeSheet: View {
             // not an install failure. Real load issues resurface on
             // first VLM use, where the banner has actual context.
             if ModelInstallStatus.isInstalled(kind: selectedVLM) { return }
+            if let kind = err.modelKind, kind != selectedVLM.rawValue { return }
             // `unknown_model` is the canonical unrecognized-model-kind error
             // (renamed from the macOS-only `prewarm_invalid_kind` for cross-
             // platform parity,); route it like the prewarm_*
             // family so the row flips to Failed instead of spinning.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
                 || ModelFailureText.isModelFailure(err)
-                || err.message.contains(selectedVLM.displayName) {
+                || err.modelKind == selectedVLM.rawValue
+                || (err.modelKind == nil && err.message.contains(selectedVLM.displayName)) {
                 vlmLastError = ModelFailureText.plain(err)
                 vlmRequested = false
             }

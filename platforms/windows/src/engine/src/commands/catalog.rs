@@ -40,13 +40,13 @@ pub async fn handle(
     let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         if request.action == "scoreTakes" {
             let Some(database) = database else {
-                bail!("The catalog database is unavailable")
+                bail!("FileID couldn't open its library. Quit and reopen FileID.")
             };
             return score_takes(&database, &request).map(|response| (response, None));
         }
         if request.action == "enqueueTimeline" {
             let Some(database) = database else {
-                bail!("The catalog database is unavailable")
+                bail!("FileID couldn't open its library. Quit and reopen FileID.")
             };
             let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
             let (id, response) = super::timeline::enqueue(&mut database.lock(), &request, model, ffmpeg)?;
@@ -100,7 +100,7 @@ fn execute_with_index(
     request: CatalogRequest,
 ) -> Result<CatalogResponse> {
     let Some(database) = database else {
-        bail!("The catalog database is unavailable")
+        bail!("FileID couldn't open its library. Quit and reopen FileID.")
     };
     if let Some(index) = index {
         if request.action == "search" {
@@ -175,7 +175,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "search" => {
             let (mode, query, limit, files_only) = super::catalog_search::validate(request)?;
             if mode != "keyword" {
-                bail!("Visual search requires the engine catalog runtime")
+                bail!("Picture search isn't available right now. Search by keyword instead.")
             }
             let root = super::roots::RootScope::load(conn, request.root_id)?;
             result.hits = super::catalog_search::select(search(conn, query, &[], root.as_ref())?, limit, files_only);

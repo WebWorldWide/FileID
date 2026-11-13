@@ -4739,3 +4739,15 @@ Measured on the private 499-photo set against 72 labelled search subjects (`tag_
 - **Speech permission stays with the helper.** Moving the prompt to the app needs a check that the app's grant covers the helper process; until then prompting mid-scan beats speech being off.
 - **Rename paths converge on `applyNames`:** a taken name fails for that file instead of getting a `_2` suffix, matching Preview names.
 - **Egress digests** for six Mac files were refreshed after a diff audit (no host, session or process added); the owner's instruction to fix all open problems is the approval.
+
+## 2026-11-12 — People merge undo reuses the catalog operation journal; IPC 1.27.0
+
+Under the owner's delegation. A merge's undo record is a `person_merge` operation in the existing `catalog_operations` / `catalog_corrections` tables, written in the merge's own transaction, so no migration was needed and the catalog stays byte-identical across engines. Undo is refused when the merged-in person's id exists again or none of its faces can return; faces deleted or moved since are skipped. The header button and `"lastPersonMerge"` only reach merges from the last 24 hours so an old merge is never one click from reversal; undo by explicit id has no age limit. IPC additions are optional fields and new string values on existing shapes, so older apps and the Rust engine (which does not write the journal yet) keep working: a Mac app on the Rust backend simply shows no Undo.
+
+## 2026-11-12 — Mac identical-photo reuse keeps results in memory, in-scan only
+
+Unlike the Rust engine (the writer copies the twin's rows), the Swift engine holds the first copy's finished result in a per-scan registry (128 MB cap, oldest dropped) and builds each copy's row from it, so DBWriter is unchanged. Identical bytes carry identical EXIF, so camera, GPS and capture time come from the twin; the Year tag is recomputed from the copy's own creation date when there is no EXIF time. A result is shared only while the same models are loaded. Seeding from earlier scans is left for a Storage read helper.
+
+## 2026-11-12 — Lava lamp drawn at a third of the size, 20 fps
+
+The wax is six soft radial gradients, so drawing the float16 layer at one third of the window's size and stretching it back gives the same picture for a ninth of the pixels; its fastest motion is about a point per frame, so 20 fps replaces 30. The colour mode and blend are unchanged to keep the look. The Detail pane's material under its 80 % fill was removed (it re-blurred the lava every frame while mostly hidden). All three need the owner's eyes; revert `waxDownscale` to 1 or the interval to 1/30 if the wax looks soft or steppy.

@@ -548,6 +548,8 @@ mod tests {
                     file_id: Some(*id),
                     ok: true,
                     message: None,
+                    reason: None,
+                    operation_id: None,
                 })
                 .collect(),
         }

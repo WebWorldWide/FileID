@@ -24,7 +24,6 @@ struct Detail: View {
             }
         }
         .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
-        .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed, spotlightEnabled {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }

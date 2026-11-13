@@ -3544,6 +3544,8 @@ mod tests {
                 file_id: person_id,
                 ok,
                 message: None,
+                reason: None,
+                operation_id: None,
             }],
         }
     }

@@ -8,7 +8,9 @@
 //      enforced to return 206 (else falls back to single-stream).
 //   4. Streams part files into the destination, fsyncs, atomic-renames.
 // Staging entries orphaned by process death are swept on the next
-// download into the same directory (see sweepStaleStagingEntries).
+// download into the same directory (see sweepStaleStagingEntries), except
+// the finished pieces of a hash-pinned download, which a later launch
+// reuses (see ResumableStaging).
 //
 // Nonisolated by design — runs off the main thread. SwiftUI callers
 // hop to MainActor inside their own onTick if they need it.
@@ -158,11 +160,15 @@ public func streamingDownload(
 /// download in this process may own them), a dead pid's entries are
 /// reclaimed immediately, and a live foreign pid is trusted only up to
 /// `maxAge` (pid reuse). Un-prefixed names can't belong to any live
-/// download and are removed.
+/// download and are removed. `resume-…` folders hold the finished pieces of
+/// a hash-pinned download for a later launch: they stay unless a download
+/// is using them, their manifest is unreadable, or nothing has touched them
+/// for `resumableMaxAge`.
 public func sweepStaleStagingEntries(
     in stagingDir: URL,
     currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
     maxAge: TimeInterval = 48 * 60 * 60,
+    resumableMaxAge: TimeInterval = resumableStagingMaxAge,
     isProcessAlive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
 ) {
     guard (try? ReadOnlyLocations.requireWritable(stagingDir)) != nil else { return }
@@ -173,6 +179,10 @@ public func sweepStaleStagingEntries(
     ) else { return }
     let cutoff = Date().addingTimeInterval(-maxAge)
     for entry in entries {
+        if entry.lastPathComponent.hasPrefix(ResumableStaging.folderPrefix) {
+            ResumableStaging.removeIfAbandoned(entry, maxAge: resumableMaxAge)
+            continue
+        }
         let pid = entry.lastPathComponent
             .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
             .first.flatMap { Int32($0) }
@@ -211,11 +221,9 @@ public func parallelStreamingDownload(
     let stagingDir = dest.deletingLastPathComponent()
         .appendingPathComponent(".fileid-staging", isDirectory: true)
     let pid = ProcessInfo.processInfo.processIdentifier
-    // A pinned SHA-256 makes finished parts safe to keep after a network
-    // failure: the assembled file is hashed in full before it is trusted.
-    let resumeKey = expectedSHA256.flatMap { ResumableStaging.shared.claim($0) }
-    defer { if let resumeKey { ResumableStaging.shared.release(resumeKey) } }
-    let stagedBytes = resumeKey.map { stagedPartBytes(in: stagingDir, prefix: "\(pid)-\($0)-part-") } ?? 0
+    let stagedBytes = expectedSHA256.map {
+        ResumableStaging.stagedBytes(in: stagingDir, dest: dest, sha256: $0)
+    } ?? 0
     // Parallel staging keeps every part plus the concat'd final on the
     // destination volume → peak transient use is ~2× the file.
     try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2,
@@ -278,19 +286,26 @@ public func parallelStreamingDownload(
     let tracker = MultiPartProgressTracker(partCount: chunkCount, totalBytes: total)
     // pid prefix lets the next run's sweep prove the owner is dead.
     let runID = "\(pid)-\(UUID().uuidString)"
-    let partPrefix = resumeKey.map { "\(pid)-\($0)" } ?? runID
     try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-    sweepStaleStagingEntries(in: stagingDir)
-    let partSuffix = "-of-\(chunkCount)"
-    if resumeKey != nil {
-        removeStagedParts(in: stagingDir, prefix: "\(partPrefix)-part-", exceptSuffix: partSuffix)
+    // A pinned SHA-256 makes finished pieces safe to keep after a network
+    // failure or a quit: the assembled file is hashed in full before it is
+    // trusted. nil when another download already holds this artifact's pieces.
+    let resumable = expectedSHA256.flatMap {
+        ResumableStaging.open(stagingDir: stagingDir, dest: dest, sha256: $0,
+                              totalBytes: total, pieceBytes: chunkSize, pieceCount: chunkCount)
     }
+    defer { resumable?.unlock() }
+    sweepStaleStagingEntries(in: stagingDir)
     let partURLs: [URL] = (0..<chunkCount).map { i in
-        stagingDir.appendingPathComponent("\(partPrefix)-part-\(i)\(partSuffix)")
+        resumable?.pieceURL(i) ?? stagingDir.appendingPathComponent("\(runID)-part-\(i)")
     }
 
     func cleanupParts() {
-        for u in partURLs { try? FileManager.default.removeItem(at: u) }
+        if let resumable {
+            resumable.discard()
+        } else {
+            for u in partURLs { try? FileManager.default.removeItem(at: u) }
+        }
         // posix rmdir only succeeds on an empty dir — never recursively
         // deletes a concurrent sibling run's parts.
         _ = rmdir(stagingDir.path)
@@ -307,7 +322,7 @@ public func parallelStreamingDownload(
                     let range = ranges[i]
                     let partURL = partURLs[i]
                     let length = range.end - range.start + 1
-                    if resumeKey != nil, stagedFileSize(partURL) == length {
+                    if let resumable, resumable.hasFinishedPiece(i, length: length) {
                         tracker.update(part: i, written: length, bytesPerSec: 0)
                         tracker.markComplete(part: i)
                         continue
@@ -339,21 +354,50 @@ public func parallelStreamingDownload(
                                     expectedSHA256: expectedSHA256, onTick: onTick)
         return
     } catch {
-        // Finished parts stay for the next attempt in this process only when
-        // the whole file will be re-hashed; a cancel gives the space back.
-        if resumeKey == nil || error is CancellationError || Task.isCancelled { cleanupParts() }
+        // Finished pieces stay for the next attempt, in this launch or a
+        // later one, only when the whole file will be re-hashed; a cancel
+        // gives the space back.
+        if resumable == nil || error is CancellationError || Task.isCancelled { cleanupParts() }
         throw error
     }
 
     let finalTemp = stagingDir.appendingPathComponent("\(runID)-final")
+    try assembleStagedPieces(partURLs, into: finalTemp, total: total,
+                             expectedSHA256: expectedSHA256, approxBytes: approxBytes,
+                             discardPieces: cleanupParts)
+    cleanupParts()
+
+    do {
+        try moveAtomically(from: finalTemp, to: dest, fsync: false)
+    } catch {
+        try? FileManager.default.removeItem(at: finalTemp)
+        _ = rmdir(stagingDir.path)
+        throw StreamingDownloadError.underlying(error)
+    }
+    _ = rmdir(stagingDir.path)
+
+    onTick(DownloadTick(written: total, total: total,
+                         bytesPerSecond: tracker.combinedBytesPerSec(),
+                         etaSeconds: 0))
+}
+
+/// Concatenates the staged pieces into `finalTemp` and proves the result:
+/// exact size, then the pinned SHA-256 (or the loose size gate without one).
+/// Any failure removes `finalTemp` and calls `discardPieces`, so a piece that
+/// has the right length but the wrong bytes can never be reused.
+func assembleStagedPieces(
+    _ pieceURLs: [URL], into finalTemp: URL, total: Int64,
+    expectedSHA256: String?, approxBytes: Int64,
+    discardPieces: () -> Void
+) throws {
     FileManager.default.createFile(atPath: finalTemp.path, contents: nil)
     guard let writer = try? FileHandle(forWritingTo: finalTemp) else {
-        cleanupParts()
+        discardPieces()
         throw StreamingDownloadError.underlying(NSError(domain: "FileID", code: -1))
     }
     var hasher: SHA256? = expectedSHA256 != nil ? SHA256() : nil
     do {
-        for u in partURLs {
+        for u in pieceURLs {
             let reader = try FileHandle(forReadingFrom: u)
             while true {
                 // Propagate read errors instead of swallowing them as EOF —
@@ -371,7 +415,7 @@ public func parallelStreamingDownload(
     } catch {
         try? writer.close()
         try? FileManager.default.removeItem(at: finalTemp)
-        cleanupParts()
+        discardPieces()
         throw StreamingDownloadError.underlying(error)
     }
     // Verify the assembled file is exactly the advertised size before trusting
@@ -379,7 +423,7 @@ public func parallelStreamingDownload(
     let assembledSize = ((try? FileManager.default.attributesOfItem(atPath: finalTemp.path))?[.size] as? NSNumber)?.int64Value ?? -1
     guard assembledSize == total else {
         try? FileManager.default.removeItem(at: finalTemp)
-        cleanupParts()
+        discardPieces()
         throw StreamingDownloadError.underlying(NSError(
             domain: "FileID", code: -2,
             userInfo: [NSLocalizedDescriptionKey: "Download size mismatch: assembled \(assembledSize) bytes, expected \(total)"]))
@@ -388,7 +432,7 @@ public func parallelStreamingDownload(
         let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard actual == expectedSHA256.lowercased() else {
             try? FileManager.default.removeItem(at: finalTemp)
-            cleanupParts()
+            discardPieces()
             throw StreamingDownloadError.checksumMismatch(
                 expected: expectedSHA256.lowercased(), actual: actual)
         }
@@ -403,66 +447,168 @@ public func parallelStreamingDownload(
             try checkSizePlausible(actual: assembledSize, approxBytes: approxBytes)
         } catch {
             try? FileManager.default.removeItem(at: finalTemp)
-            cleanupParts()
+            discardPieces()
             throw error
         }
     }
-    cleanupParts()
-
-    do {
-        try moveAtomically(from: finalTemp, to: dest, fsync: false)
-    } catch {
-        try? FileManager.default.removeItem(at: finalTemp)
-        _ = rmdir(stagingDir.path)
-        throw StreamingDownloadError.underlying(error)
-    }
-    _ = rmdir(stagingDir.path)
-
-    onTick(DownloadTick(written: total, total: total,
-                         bytesPerSecond: tracker.combinedBytesPerSec(),
-                         etaSeconds: 0))
 }
 
 private let resumablePieceBytes: Int64 = 32 * 1024 * 1024
 private let maxResumablePieces: Int64 = 1024
 private let connectivityGraceSeconds: TimeInterval = 15
 
-/// One resumable staging set per pinned hash in this process: a second
-/// concurrent download of the same file gets nil and stages under a unique name.
-private final class ResumableStaging: @unchecked Sendable {
-    static let shared = ResumableStaging()
-    private let lock = NSLock()
-    private var active: Set<String> = []
+public let resumableStagingMaxAge: TimeInterval = 7 * 24 * 60 * 60
 
-    func claim(_ sha256: String) -> String? {
-        let hex = sha256.lowercased()
-        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
-        let key = "r\(hex.prefix(24))"
-        lock.lock(); defer { lock.unlock() }
-        return active.insert(key).inserted ? key : nil
+struct ResumableStagingManifest: Codable, Equatable, Sendable {
+    var version = 1
+    let destination: String
+    let sha256: String
+    let totalBytes: Int64
+    let pieceBytes: Int64
+    let pieceCount: Int
+}
+
+/// Finished pieces of one hash-pinned artifact, kept in
+/// `.fileid-staging/resume-<destination+hash>-<size+piece layout>/` so a later
+/// launch continues instead of starting over. An advisory lock on the folder's
+/// `lock` file marks it in use: the lock dies with its process, so a relaunch
+/// can take the folder over while a second live download of the same file
+/// cannot.
+struct ResumableStaging: Sendable {
+    static let folderPrefix = "resume-"
+    private static let manifestName = "manifest.json"
+    private static let lockName = "lock"
+    private static let piecePrefix = "piece-"
+
+    let folder: URL
+    let manifest: ResumableStagingManifest
+    private let lockFD: Int32
+
+    private enum LockAttempt {
+        case acquired(Int32)
+        case held
+        case unavailable
     }
 
-    func release(_ key: String) {
-        lock.lock(); defer { lock.unlock() }
-        active.remove(key)
+    private static func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func normalizedHash(_ sha256: String) -> String? {
+        let hex = sha256.lowercased()
+        return hex.count == 64 && hex.allSatisfy(\.isHexDigit) ? hex : nil
+    }
+
+    private static func artifactPrefix(dest: URL, sha256: String) -> String? {
+        guard let hex = normalizedHash(sha256) else { return nil }
+        return folderPrefix + digest("\(dest.standardizedFileURL.path)\n\(hex)") + "-"
+    }
+
+    private static func lock(_ folder: URL, create: Bool) -> LockAttempt {
+        let fd = Darwin.open(folder.appendingPathComponent(lockName).path,
+                             (create ? O_CREAT : 0) | O_RDWR | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return .unavailable }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { return .acquired(fd) }
+        let busy = errno == EWOULDBLOCK
+        close(fd)
+        return busy ? .held : .unavailable
+    }
+
+    private static func readManifest(_ folder: URL) -> ResumableStagingManifest? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent(manifestName)) else { return nil }
+        return try? JSONDecoder().decode(ResumableStagingManifest.self, from: data)
+    }
+
+    static func stagedBytes(in stagingDir: URL, dest: URL, sha256: String) -> Int64 {
+        guard let prefix = artifactPrefix(dest: dest, sha256: sha256) else { return 0 }
+        let fm = FileManager.default
+        let folders = ((try? fm.contentsOfDirectory(atPath: stagingDir.path)) ?? [])
+            .filter { $0.hasPrefix(prefix) }
+        // A changed size or piece layout discards the old folder, so only the
+        // fullest one can count toward space already used.
+        return folders.map { name -> Int64 in
+            let folder = stagingDir.appendingPathComponent(name, isDirectory: true)
+            return ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? [])
+                .filter { $0.hasPrefix(piecePrefix) }
+                .reduce(0) { $0 + (stagedFileSize(folder.appendingPathComponent($1)) ?? 0) }
+        }.max() ?? 0
+    }
+
+    static func open(stagingDir: URL, dest: URL, sha256: String,
+                     totalBytes: Int64, pieceBytes: Int64, pieceCount: Int) -> ResumableStaging? {
+        guard let hex = normalizedHash(sha256),
+              let prefix = artifactPrefix(dest: dest, sha256: sha256) else { return nil }
+        let fm = FileManager.default
+        let manifest = ResumableStagingManifest(
+            destination: dest.standardizedFileURL.path, sha256: hex,
+            totalBytes: totalBytes, pieceBytes: pieceBytes, pieceCount: pieceCount)
+        let name = prefix + digest("\(totalBytes)\n\(pieceBytes)\n\(pieceCount)")
+        let folder = stagingDir.appendingPathComponent(name, isDirectory: true)
+        guard (try? fm.createDirectory(at: folder, withIntermediateDirectories: true)) != nil,
+              case .acquired(let fd) = lock(folder, create: true) else { return nil }
+
+        let valid = Set((0..<pieceCount).map { "\(piecePrefix)\($0)" })
+        let keepPieces = readManifest(folder) == manifest
+        for entry in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+        where entry != lockName && !(keepPieces && valid.contains(entry)) {
+            try? fm.removeItem(at: folder.appendingPathComponent(entry))
+        }
+        // Rewritten on every use: its date is what the stale sweep reads.
+        guard let data = try? JSONEncoder().encode(manifest),
+              (try? data.write(to: folder.appendingPathComponent(manifestName), options: .atomic)) != nil
+        else {
+            close(fd)
+            return nil
+        }
+
+        for other in (try? fm.contentsOfDirectory(atPath: stagingDir.path)) ?? []
+        where other.hasPrefix(prefix) && other != name {
+            let stale = stagingDir.appendingPathComponent(other, isDirectory: true)
+            switch lock(stale, create: false) {
+            case .held: continue
+            case .acquired(let otherFD):
+                try? fm.removeItem(at: stale)
+                close(otherFD)
+            case .unavailable:
+                try? fm.removeItem(at: stale)
+            }
+        }
+        return ResumableStaging(folder: folder, manifest: manifest, lockFD: fd)
+    }
+
+    static func removeIfAbandoned(_ folder: URL, maxAge: TimeInterval) {
+        let fm = FileManager.default
+        let attempt = lock(folder, create: false)
+        if case .held = attempt { return }
+        defer { if case .acquired(let fd) = attempt { close(fd) } }
+        func modified(_ url: URL) -> Date {
+            ((try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date) ?? .distantPast
+        }
+        let lastUsed = max(modified(folder), modified(folder.appendingPathComponent(manifestName)))
+        if readManifest(folder) == nil || lastUsed < Date().addingTimeInterval(-maxAge) {
+            try? fm.removeItem(at: folder)
+        }
+    }
+
+    func pieceURL(_ index: Int) -> URL {
+        folder.appendingPathComponent("\(Self.piecePrefix)\(index)")
+    }
+
+    func hasFinishedPiece(_ index: Int, length: Int64) -> Bool {
+        stagedFileSize(pieceURL(index)) == length
+    }
+
+    func discard() {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    func unlock() {
+        close(lockFD)
     }
 }
 
 func stagedFileSize(_ url: URL) -> Int64? {
     ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value
-}
-
-func stagedPartBytes(in stagingDir: URL, prefix: String) -> Int64 {
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: stagingDir.path)) ?? []
-    return names.filter { $0.hasPrefix(prefix) }
-        .reduce(0) { $0 + (stagedFileSize(stagingDir.appendingPathComponent($1)) ?? 0) }
-}
-
-func removeStagedParts(in stagingDir: URL, prefix: String, exceptSuffix: String) {
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: stagingDir.path)) ?? []
-    for name in names where name.hasPrefix(prefix) && !name.hasSuffix(exceptSuffix) {
-        try? FileManager.default.removeItem(at: stagingDir.appendingPathComponent(name))
-    }
 }
 
 /// A dropped or stalled connection, or a busy server: worth another try.

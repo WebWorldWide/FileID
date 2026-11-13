@@ -1116,8 +1116,9 @@ struct FileIDEngineMain {
         )))
     }
 
-    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil) -> BulkActionItem {
-        BulkActionItem(fileID: id, ok: ok, message: message)
+    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil, reason: String? = nil,
+                     operationID: String? = nil) -> BulkActionItem {
+        BulkActionItem(fileID: id, ok: ok, message: message, reason: reason, operationID: operationID)
     }
 
     static func applyTags(database: Database, fileIDs: [Int64], tags: [String], mode: String) async -> BulkActionResult {
@@ -1505,17 +1506,17 @@ struct FileIDEngineMain {
         } catch {
             return BulkActionResult(
                 action: "trashFiles", succeeded: 0, failed: uniqueIDs.count,
-                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription) })
+                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription, reason: "failed") })
         }
         for id in uniqueIDs {
             guard let state = states[id] else {
-                messages.append(item(id, ok: false, "File row not found."))
+                messages.append(item(id, ok: false, "File row not found.", reason: "missing"))
                 continue
             }
             let url = URL(fileURLWithPath: state.path)
             guard !Restructure.fileRefSwapped(
                 dbRef: state.fileRef, currentRef: Discovery.inode(of: url)) else {
-                messages.append(item(id, ok: false, "File changed since it was indexed."))
+                messages.append(item(id, ok: false, "File changed since it was indexed.", reason: "changed"))
                 continue
             }
             var verifiedCopy: ExactFileDigest.CacheKey?
@@ -1523,7 +1524,7 @@ struct FileIDEngineMain {
                 switch verifyExactDuplicate(expected, state: state) {
                 case .success(let identity): verifiedCopy = identity
                 case .failure(let refusal):
-                    messages.append(item(id, ok: false, refusal.message))
+                    messages.append(item(id, ok: false, refusal.message, reason: "changed"))
                     continue
                 }
             }
@@ -1531,7 +1532,7 @@ struct FileIDEngineMain {
                 try ReadOnlyLocations.requireSourceMutation(url)
                 let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
                 if let verifiedCopy, !ExactFileDigest.pathStillMatches(verifiedCopy) {
-                    messages.append(item(id, ok: false, "This copy changed since it was checked. Nothing was moved."))
+                    messages.append(item(id, ok: false, "This copy changed since it was checked. Nothing was moved.", reason: "changed"))
                     continue
                 }
                 // Write-ahead: record the file before it moves, so a kill right after the move
@@ -1558,7 +1559,8 @@ struct FileIDEngineMain {
                 }
                 messages.append(item(id, ok: true))
             } catch {
-                messages.append(item(id, ok: false, error.localizedDescription))
+                let protected = error is ReadOnlyLocations.ProtectionError || error is ReadOnlyLocations.ManagedLibraryError
+                messages.append(item(id, ok: false, error.localizedDescription, reason: protected ? "protected" : "failed"))
             }
         }
         writeJournal()
@@ -1576,8 +1578,11 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true, "No-op self merge.")])
         }
         do {
-            _ = try await database.mergePersons(target: destination, sources: [source])
-            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
+            let operation = try await database.pool.write { db in
+                try PersonMergeJournal.merge(db, target: destination, source: source)
+            }
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0,
+                                    messages: [item(source, ok: true, operationID: operation)])
         } catch {
             return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
         }
@@ -1919,6 +1924,7 @@ struct FileIDEngineMain {
         }
 
         let session = await coordinator.startSession(rootDisplayPath: (rootPath as NSString).lastPathComponent, epoch: epoch)
+        TwinReuse.reset()
         await sink.emit(.phaseChanged(.discovering))
         JSONLog.shared.info(ev: "scan_started", sess: session.id, path: redactPathForLog(url.path))
 
@@ -2593,6 +2599,7 @@ struct FileIDEngineMain {
         sink: IPCSink,
         totalSeconds: Double
     ) async {
+        TwinReuse.reset()
         let cancelled = await coordinator.isCancelled
         let finalPhase: ScanPhase = cancelled ? .cancelled : .completed
         let snap = await coordinator.snapshot()

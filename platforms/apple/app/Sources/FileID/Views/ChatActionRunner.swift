@@ -592,7 +592,7 @@ struct ChatActionCard: View {
                 }
             }
             if action.kind == "mergePeople" {
-                MetaText("Merging can't be undone here. To separate them again you would move the photos back by hand in People.", color: Theme.warning, size: 12)
+                MetaText("You can undo a merge right after, here or with Undo last merge in People.", color: Theme.warning, size: 12)
                     .fixedSize(horizontal: false, vertical: true)
             } else if let undo = action.undo {
                 MetaText("Undo: \(undo)", color: Theme.text2, size: 12)

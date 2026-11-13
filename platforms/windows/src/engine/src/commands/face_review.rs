@@ -1030,7 +1030,7 @@ where
         return;
     }
     let Some(db) = db else {
-        sink.send(reply_event(failed(&request_id, action, "The library database is unavailable."))).await;
+        sink.send(reply_event(failed(&request_id, action, "FileID couldn't open its library. Quit and reopen FileID."))).await;
         return;
     };
     let id = request_id.clone();

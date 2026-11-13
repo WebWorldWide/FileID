@@ -166,7 +166,7 @@ pub(crate) async fn handle_deep_analyze_file(
         DeepAnalyzeStarting {
             model_kind: payload.model_kind.clone(),
             phase: DeepAnalyzeStartingPhase::LoadingModel,
-            message: format!("Captioning file #{}…", payload.file_id),
+            message: "Describing 1 file…".to_string(),
         },
     ))))
     .await;
@@ -174,7 +174,8 @@ pub(crate) async fn handle_deep_analyze_file(
     let backend = match single_file_backend(&payload.model_kind, &cancel).await {
         Ok(backend) => backend,
         Err(err) => {
-            sink.send(EngineError::event("llama_cpp_missing", format!("{err:#}")))
+            tracing::warn!(?err, "[VLM] no usable runtime for a single-file pass");
+            sink.send(EngineError::event("llama_cpp_missing", "Describe Files can't run because its AI runtime isn't installed or isn't working. Install it again in Settings, under Performance."))
             .await;
             // Always send a terminal Complete so the UI clears the
             // "Loading model…" card instead of stranding forever (#6).
@@ -282,7 +283,8 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
         }
         Err(err) => {
-            sink.send(EngineError::event("deep_analyze_failed", format!("{err}")))
+            tracing::warn!(?err, "[VLM] single-file pass failed");
+            sink.send(EngineError::event("deep_analyze_failed", "FileID couldn't describe this file. Try again."))
             .await;
             // Terminal Complete on the analyze failure too, mirroring the batch
             // handler's convention so the card clears / Analyze-All re-enables (#6).
@@ -627,9 +629,7 @@ async fn run_deep_analyze_batch(
     if weights.is_none() {
         sink.send(EngineError::new(
             "vlm_model_missing",
-            format!(
-                "The {model_kind} model isn't installed yet. Install it from the Deep Analyze tab, then try again."
-            ),
+            "That AI model isn't installed yet. Install it on the Describe Files page, then try again.",
         )
         .with_model(model_kind.to_string())
         .into_event())
@@ -660,7 +660,7 @@ async fn run_deep_analyze_batch(
         DeepAnalyzeStarting {
             model_kind: model_kind.to_string(),
             phase: DeepAnalyzeStartingPhase::LoadingModel,
-            message: format!("Analyzing {} file(s)…", file_ids.len()),
+            message: format!("Describing {} file(s)…", file_ids.len()),
         },
     ))))
     .await;
@@ -698,9 +698,7 @@ async fn run_deep_analyze_batch(
                             tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
                             sink.send(EngineError::event(
                                 "vlm_server_payload_rejected",
-                                format!(
-                                    "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
-                                ),
+                                "Describe Files is using a slower method for this run because the fast one didn't start.",
                             ))
                             .await;
                             None
@@ -751,9 +749,7 @@ async fn run_deep_analyze_batch(
     if server.is_none() && runner.is_none() {
         sink.send(EngineError::event(
             "llama_cpp_missing",
-            "The llama.cpp runtime isn't usable for image analysis (no working \
-                      llama-server.exe or llama-mtmd-cli.exe). Update it from \
-                      Settings -> Performance -> 'Install llama.cpp runtime'.",
+            "Describe Files can't run because its AI runtime isn't installed or isn't working. Install it again in Settings, under Performance.",
         ))
         .await;
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(

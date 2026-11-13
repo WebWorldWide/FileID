@@ -593,7 +593,8 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Err(err) => {
             release_active_before_terminal(&active);
-            sink.send(EngineError::event("face_clustering_failed", format!("Face clustering task did not complete: {err}"))).await;
+            tracing::warn!(?err, "face clustering task did not complete");
+            sink.send(EngineError::event("face_clustering_failed", "FileID couldn't finish grouping faces. Try again.")).await;
             return;
         }
     }
@@ -1252,7 +1253,7 @@ pub(crate) async fn handle_run_face_clustering(
             tracing::warn!(?err, "face clustering failed");
             sink.send(EngineError::event(
                 "face_clustering_failed",
-                format!("Face clustering failed: {err}"),
+                "FileID couldn't finish grouping faces. Try again.",
             ))
             .await;
         }
@@ -1265,7 +1266,7 @@ pub(crate) async fn handle_run_face_clustering(
             // session.
             sink.send(EngineError::event(
                 "face_clustering_failed",
-                format!("Face clustering task did not complete: {err}"),
+                "FileID couldn't finish grouping faces. Try again.",
             ))
             .await;
         }

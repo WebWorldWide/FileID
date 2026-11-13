@@ -1027,6 +1027,7 @@ private struct FilePreviewSheet: View {
     @State private var tags: [String] = []
     @State private var people: [String] = []
     @State private var renaming = false
+    @State private var pendingRename: PendingPreviewRename?
     @AppStorage("preview.showInfo") private var showInfo = true
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
@@ -1056,6 +1057,59 @@ private struct FilePreviewSheet: View {
                 content(for: file)
             } else {
                 Color.clear.onAppear { dismiss() }
+            }
+        }
+        .confirmationDialog("Rename this file?", isPresented: Binding(
+            get: { pendingRename != nil },
+            set: { if !$0 { pendingRename = nil } }
+        ), titleVisibility: .visible, presenting: pendingRename) { pending in
+            Button("Rename") { applyRename(pending) }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            Text(pending.summary)
+        }
+    }
+
+    /// Asks for the name in the saved Name style, the same way the suggested-names sheet does.
+    private func prepareRename(_ file: FileRow) {
+        guard !renaming else { return }
+        renaming = true
+        Task {
+            defer { renaming = false }
+            let naming = StyledNames.savedNaming()
+            switch await StyledNames.rows(engine: engine, fileIDs: [file.id], naming: naming) {
+            case .failed(let why):
+                ToastCenter.shared.show(why)
+            case .rows(let rows):
+                let renames = NameStyle.renames(rows)
+                guard let own = renames.first(where: { $0.fileID == file.id }) else {
+                    ToastCenter.shared.show(rows.contains { $0.fileID == file.id && $0.canCheck }
+                        ? "This file already has that name."
+                        : "FileID has no name to suggest for this file yet.")
+                    return
+                }
+                guard selectedID == file.id else { return }
+                pendingRename = PendingPreviewRename(fileID: file.id, oldName: file.url.lastPathComponent, newName: own.newName,
+                                                     renames: renames, rows: rows, naming: naming)
+            }
+        }
+    }
+
+    private func applyRename(_ pending: PendingPreviewRename) {
+        guard !renaming else { return }
+        renaming = true
+        Task {
+            let result = await CatalogWrites.applyNames(pending.renames, engine: engine, store: store)
+            // Same journal slot as the bulk-rename sheet, so
+            // Library's "Undo last rename" can revert it.
+            BulkRenameSheet.saveLastBatch(result.renamed)
+            await StyledNames.learn(engine: engine, shown: pending.rows, renamed: result.renamed, naming: pending.naming)
+            renaming = false
+            if result.renamed.isEmpty {
+                ToastCenter.shared.show(result.firstError.map { "The file wasn't renamed: \($0)" } ?? "The file wasn't renamed. Try again in a moment.")
+            } else {
+                onEdit()
+                dismiss()
             }
         }
     }
@@ -1236,21 +1290,10 @@ private struct FilePreviewSheet: View {
                                         .lineLimit(2).textSelection(.enabled)
                                 }
                                 Spacer(minLength: 6)
-                                Button("Rename") {
-                                    renaming = true
-                                    Task {
-                                        let result = await CatalogWrites.applyProposedNames([file], engine: engine, store: store)
-                                        // Same journal slot as the bulk-rename sheet, so
-                                        // Library's "Undo last rename" can revert it.
-                                        BulkRenameSheet.saveLastBatch(result.renamed)
-                                        if !result.renamed.isEmpty { onEdit() }
-                                        renaming = false
-                                        dismiss()
-                                    }
-                                }
+                                Button("Rename…") { prepareRename(file) }
                                 .buttonStyle(.dsSecondary)
                                 .disabled(renaming)
-                                .help("Renames the file to the suggested name. Undo last rename at the top of Library puts the old name back.")
+                                .help("Renames the file using your Name style, after you confirm. Undo last rename at the top of Library puts the old name back.")
                             }
                             .padding(10)
                             .background(Theme.gold.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
@@ -1791,5 +1834,20 @@ private struct LibrarySelectedPane: View {
             guard !Task.isCancelled else { return }
             thumbnail = image
         }
+    }
+}
+
+private struct PendingPreviewRename {
+    let fileID: Int64
+    let oldName: String
+    let newName: String
+    let renames: [CatalogWrites.NamedRename]
+    let rows: [NameStyle.Row]
+    let naming: CatalogNaming
+
+    var summary: String {
+        let others = renames.count - 1
+        return "\(oldName) → \(newName)"
+            + (others > 0 ? "\n\(others.formatted()) matching file\(others == 1 ? "" : "s") shot with it \(others == 1 ? "is" : "are") renamed to match." : "")
     }
 }

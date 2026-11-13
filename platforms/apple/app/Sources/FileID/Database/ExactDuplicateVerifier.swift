@@ -297,21 +297,27 @@ extension ExactDuplicateVerifier {
         }
         outcome.trashed = result.messages.filter(\.ok).compactMap(\.fileID).map { ($0, sizes[$0] ?? 0) }
         SpotlightIndexer.deindex(ids: outcome.trashed.map(\.id))
-        // The reply carries only a sentence per file, so the reason is read from the
-        // helper's own fixed wording (ReadOnlyLocations and the trash checks).
         for refusal in result.messages where !refusal.ok {
-            let text = refusal.message ?? ""
-            if text.hasPrefix("This file belongs to a managed media library")
-                || text.hasPrefix("This location is read-only") {
-                outcome.protectedLocation += 1
-            } else if text.hasPrefix("File changed since") || text.hasSuffix("Nothing was moved.") {
-                outcome.verificationFailed += 1
-            } else {
-                outcome.failed += 1
+            switch trashRefusal(refusal) {
+            case "protected": outcome.protectedLocation += 1
+            case "changed": outcome.verificationFailed += 1
+            default: outcome.failed += 1
             }
         }
         outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         return outcome
+    }
+
+    /// The helper's reason code; a helper that sends none is read from its fixed
+    /// wording (ReadOnlyLocations and the trash checks).
+    nonisolated static func trashRefusal(_ item: BulkActionItem) -> String {
+        if let reason = item.reason { return reason }
+        let text = item.message ?? ""
+        if text.hasPrefix("This file belongs to a managed media library") || text.hasPrefix("This location is read-only") {
+            return "protected"
+        }
+        if text.hasPrefix("File changed since") || text.hasSuffix("Nothing was moved.") { return "changed" }
+        return "failed"
     }
 
     /// Puts a Cleanup batch back: files return to where they were and their catalog
