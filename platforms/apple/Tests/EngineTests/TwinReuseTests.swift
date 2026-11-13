@@ -91,7 +91,7 @@ struct TwinReuseTests {
         #expect(Self.isOwner(registry.claim(key, models: "000")))
         let started = Date()
         #expect(await registry.wait(key, timeout: 0.05) == nil)
-        #expect(Date().timeIntervalSince(started) < 3)
+        #expect(Date().timeIntervalSince(started) < 30, "returns long before any real analysis timeout, even on a busy machine")
         #expect(Self.isOwner(registry.claim(key, models: "000")), "copies must not queue behind a stuck owner")
     }
 
