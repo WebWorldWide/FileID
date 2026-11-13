@@ -122,6 +122,7 @@ enum TrashJournal {
     /// The Trash folders a file from `original` can land in: the user's Trash, and for other
     /// volumes that volume's `.Trashes/<uid>`.
     static func trashFolders(for original: URL) -> [URL] {
+        if let test = EngineTrash.folders(for: original) { return test }
         var folders = [UserHome.trashURL]
         if let volume = (try? original.deletingLastPathComponent().resourceValues(forKeys: [.volumeURLKey]))?.volume,
            volume.path != "/" {

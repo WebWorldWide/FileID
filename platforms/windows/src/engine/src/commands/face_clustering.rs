@@ -575,6 +575,11 @@ pub(crate) async fn handle_run_face_clustering(
     active: Arc<AtomicBool>,
 ) {
     let _sleep = SleepGuard::acquire();
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        let extract_db = db.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::apple::faces::extract_before_clustering(&extract_db)).await;
+    }
     let mac_db = db.clone();
     let mac = tokio::task::spawn_blocking(move || {
         let space = super::face_clustering_mac::selected_space(&mac_db.lock())?;

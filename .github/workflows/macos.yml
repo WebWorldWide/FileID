@@ -33,7 +33,7 @@ jobs:
   build:
     name: Build app + engine (SwiftPM)
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     defaults:
       run:
@@ -70,19 +70,29 @@ jobs:
         run: swift package resolve
 
       - name: Build engine (release)
-        run: |
-          swift build -c release --product FileIDEngine
-          # The App Store variant below rebuilds the same product path; keep the
-          # Developer ID engine (no bookmark requirement) for the conformance run.
-          cp .build/release/FileIDEngine "$RUNNER_TEMP/FileIDEngine-swift"
+        run: swift build -c release --product FileIDEngine
 
       - name: Build app (release)
         run: swift build -c release --product FileID
+
+      # Conformance-only Swift engine with the test Trash root (compile-time
+      # condition, never shipped; assemble_app.sh refuses it), so the Trash
+      # round trip runs with the Swift engine as the trashing side too.
+      - name: Build Swift engine with the test Trash root (conformance only)
+        run: |
+          swift build -c release -Xswiftc -DFILEID_TEST_TRASH_ROOT --product FileIDEngine
+          cp .build/release/FileIDEngine "$RUNNER_TEMP/FileIDEngine-swift-test-trash"
 
       - name: Build App Store sandbox variant
         run: |
           swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileIDEngine
           swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
+
+      - name: Build tests
+        # Compile the test targets outside the 12-minute run cap below: with
+        # FileIDImaging, FileIDVLMCore, FileIDModelInfo and FileIDAppleKit the
+        # debug test build alone takes ~9-10 min on hosted runners.
+        run: swift build --build-tests
 
       - name: Run tests
         # Swift Testing framework. SharedTests + EngineTests. Corpus tests
@@ -118,7 +128,7 @@ jobs:
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
           set +e
-          FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+          FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --skip-build --no-parallel
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -138,7 +148,7 @@ jobs:
       # fail the run when they stop reproducing.
       - name: Engine conformance — Swift
         timeout-minutes: 15
-        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/FileIDEngine-swift" --peer-engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/FileIDEngine-swift-test-trash" --test-trash-root --peer-engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
 
       - name: Engine conformance — Rust
         timeout-minutes: 15
@@ -160,7 +170,7 @@ jobs:
 
       - name: Engine conformance — Rust (app-hosted adapters build)
         timeout-minutes: 15
-        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" --flavor rust --test-trash-root --peer-engine "$RUNNER_TEMP/FileIDEngine-swift"
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" --flavor rust --test-trash-root --peer-engine "$RUNNER_TEMP/FileIDEngine-swift-test-trash"
 
       - name: Verify catalog index recovery
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"

@@ -24,6 +24,13 @@
 # USAGE
 #   shared/scripts/install_onnxruntime_macos.sh [--force]
 #
+# FILEID_ORT_ARCHIVE=<onnxruntime-osx-arm64-1.22.0.tgz> installs from an archive
+# already on disk (no download), checked against the same pinned hashes: the
+# official GitHub release archive (Microsoft publishes no digest for it; its
+# dylib is byte-identical, apart from the code signature, to the Developer ID
+# signed one in Microsoft's NuGet package, see DECISIONS 2026-11-11). The Mac
+# app bundles that dylib: FILEID_RUNTIME_DIR=platforms/apple/.build/cache.
+#
 # Override the destination with FILEID_RUNTIME_DIR. FILEID_ORT_DYLIB_URL must
 # point to a HuggingFace-hosted mirror of the official archive. The arm64
 # archive and extracted dylib hashes are pinned below; a different artifact is
@@ -74,18 +81,26 @@ esac
 
 # HuggingFace-hosted mirror. Ships lib/libonnxruntime.<ver>.dylib.
 URL="${FILEID_ORT_DYLIB_URL:-}"
-if [[ -z "$URL" ]]; then
+LOCAL_ARCHIVE="${FILEID_ORT_ARCHIVE:-}"
+if [[ -n "$LOCAL_ARCHIVE" ]]; then
+  if [[ ! -f "$LOCAL_ARCHIVE" ]]; then
+    echo "error: FILEID_ORT_ARCHIVE is not a file: $LOCAL_ARCHIVE" >&2
+    exit 1
+  fi
+elif [[ -z "$URL" ]]; then
   echo "error: FILEID_ORT_DYLIB_URL is required and must point at a HuggingFace-hosted ONNX Runtime .tgz." >&2
   echo "  Simplest install: brew install onnxruntime" >&2
   exit 1
 fi
-case "$URL" in
-  https://huggingface.co/*|https://*.huggingface.co/*|https://hf.co/*|https://*.hf.co/*) ;;
-  *)
-    echo "error: runtime downloads must come from huggingface.co or hf.co: $URL" >&2
-    exit 1
-    ;;
-esac
+if [[ -z "$LOCAL_ARCHIVE" ]]; then
+  case "$URL" in
+    https://huggingface.co/*|https://*.huggingface.co/*|https://hf.co/*|https://*.hf.co/*) ;;
+    *)
+      echo "error: runtime downloads must come from huggingface.co or hf.co: $URL" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 EXPECTED_SHA256="${EXPECTED_SHA256:-$DEFAULT_ARCHIVE_SHA256}"
 EXPECTED_DYLIB_SHA256="${EXPECTED_DYLIB_SHA256:-$DEFAULT_DYLIB_SHA256}"
@@ -127,10 +142,15 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Downloading ONNX Runtime ${ORT_VERSION} (macOS ${ARCH}, MIT)…"
-echo "  $URL"
-curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors \
-  -o "${TMP}/${ARCHIVE}" "$URL"
+if [[ -n "$LOCAL_ARCHIVE" ]]; then
+  echo "Installing ONNX Runtime ${ORT_VERSION} (macOS ${ARCH}, MIT) from $LOCAL_ARCHIVE…"
+  cp "$LOCAL_ARCHIVE" "${TMP}/${ARCHIVE}"
+else
+  echo "Downloading ONNX Runtime ${ORT_VERSION} (macOS ${ARCH}, MIT)…"
+  echo "  $URL"
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors \
+    -o "${TMP}/${ARCHIVE}" "$URL"
+fi
 
 GOT_SHA="$(shasum -a 256 "${TMP}/${ARCHIVE}" | awk '{print $1}')"
 if [[ "$(printf '%s' "$GOT_SHA" | tr '[:upper:]' '[:lower:]')" != \

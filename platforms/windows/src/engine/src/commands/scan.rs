@@ -23,10 +23,18 @@ enum BlockingWait<T> {
     TimedOut(tokio::task::JoinHandle<T>),
 }
 
-struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>);
+struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>, ScanCoordinator);
 impl Drop for ScanStateGuard {
     fn drop(&mut self) {
-        *self.0.lock() = None;
+        clear_scan_slot(&self.0, &self.1);
+        self.1.release_slot();
+    }
+}
+
+fn clear_scan_slot(state: &Mutex<Option<ScanCoordinator>>, coord: &ScanCoordinator) {
+    let mut guard = state.lock();
+    if guard.as_ref().is_some_and(|c| c.same_scan(coord)) {
+        *guard = None;
     }
 }
 
@@ -91,6 +99,7 @@ pub(crate) async fn handle_start_scan(
     scan_state: Arc<Mutex<Option<ScanCoordinator>>>,
     payload: ipc::StartScanPayload,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    slot: Option<Box<dyn Send>>,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
@@ -121,10 +130,35 @@ pub(crate) async fn handle_start_scan(
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
         return;
     }
-    let _state_guard = ScanStateGuard(scan_state.clone());
+    let _state_guard = ScanStateGuard(scan_state.clone(), coord.clone());
+    {
+        let state = scan_state.clone();
+        let this = coord.clone();
+        coord.on_release(move || {
+            clear_scan_slot(&state, &this);
+            drop(slot);
+        });
+    }
+
+    let Some(_root_access) =
+        super::folder_access::scan_access(&payload.root_path, payload.root_bookmark.as_deref())
+    else {
+        sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
+        coord.release_slot();
+        sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
+            session_id: String::new(),
+            total_files: 0,
+            processed_files: 0,
+            failed_files: 0,
+            total_seconds: 0.0,
+        }))))
+        .await;
+        return;
+    };
 
     if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
         coord.request_cancel();
+        coord.release_slot();
         sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
             ScanPhase::Cancelled,
         ))))
@@ -227,11 +261,7 @@ pub(crate) async fn handle_start_scan(
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let load_result = wait_for_blocking(
         tokio::task::spawn_blocking(move || {
-            if runtime_available {
-                ModelStack::load_default(models_worker_count)
-            } else {
-                ModelStack::empty()
-            }
+            ModelStack::load_for_scan(models_worker_count, runtime_available)
         }),
         Duration::from_secs(120),
     )
@@ -317,11 +347,12 @@ pub(crate) async fn handle_start_scan(
     // re-processes them once the model loads.
     if runtime_available {
         let mut failed_to_load: Vec<&str> = Vec::new();
-        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") {
+        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") && !models.apple_scan {
             failed_to_load.push("face detection + recognition");
         }
         if models.mobileclip_pool.is_none()
             && models.mobileclip_batch.is_none()
+            && !models.apple_clip
             && !missing_models.contains(&"mobileclip_s2")
         {
             failed_to_load.push("image embedding");
@@ -431,11 +462,12 @@ mod tests {
 
     #[test]
     fn scan_state_guard_clears_a_preflight_panic() {
-        let scan_state = Arc::new(Mutex::new(Some(ScanCoordinator::new())));
+        let coord = ScanCoordinator::new();
+        let scan_state = Arc::new(Mutex::new(Some(coord.clone())));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
             let scan_state = scan_state.clone();
             move || {
-                let _guard = ScanStateGuard(scan_state);
+                let _guard = ScanStateGuard(scan_state, coord);
                 panic!("injected preflight panic");
             }
         }));
@@ -483,6 +515,7 @@ mod tests {
             scan_state.clone(),
             payload,
             cancel_requested,
+            None,
         )
         .await;
 

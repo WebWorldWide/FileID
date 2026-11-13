@@ -1,0 +1,11 @@
+{
+  "comment": "Where the Mac app's ONNX models live, relative to Application Support/FileID/Models, by the prewarmModel kind the engine the app hosts installs them as. The app's own installers (Swift engine) and the Rust engine (apple-adapters) both check this table.",
+  "kinds": {
+    "ram_plus": ["ram_plus/ram_plus.onnx", "ram_plus/ram_plus_tags.txt", "ram_plus/ram_plus_thresholds.txt"],
+    "bge_text": ["bge_text/bge_small.onnx", "bge_text/vocab.txt"],
+    "arcface": ["face_recognition_sface_2021dec.onnx"],
+    "face_mesh": ["face_mesh/face_landmarks.onnx"],
+    "mobileclip_s2": ["mobileclip_image/clip_vitb32_image.onnx"],
+    "clip_text": ["clip_text/clip_text.onnx", "clip_text/vocab.json", "clip_text/merges.txt"]
+  }
+}

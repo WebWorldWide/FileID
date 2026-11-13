@@ -4,13 +4,19 @@
 
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) mod deep_analyze_mlx;
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) mod mlx_models;
 pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;
 pub(crate) mod face_clustering_mac;
+pub mod face_extract_mac;
 pub(crate) mod face_queues;
 pub(crate) mod face_refresh;
 pub(crate) mod face_review;
+pub(crate) mod folder_access;
 pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;
@@ -44,6 +50,9 @@ pub mod models;
 pub mod roots;
 pub mod benchmark;
 pub mod timeline;
+mod timeline_media;
+// The Mac app's engine exports and analyses video with AVFoundation instead.
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) mod video_export;
 mod media_recipes;
 

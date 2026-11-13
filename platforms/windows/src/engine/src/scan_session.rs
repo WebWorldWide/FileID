@@ -817,6 +817,7 @@ impl ScanSession {
             // "completed" from this event.
             // totalFiles = discovered (can exceed processed when the
             // cancel landed mid-tagging) — macOS emits the same split.
+            self.coordinator.release_slot();
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),
@@ -834,6 +835,7 @@ impl ScanSession {
             // Terminal Completed phase via the guaranteed path so the
             // app's terminal state can never be lost under backpressure.
             emit_phase_guaranteed(&sink, SessionPhase::Completed).await;
+            self.coordinator.release_slot();
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),

@@ -1,0 +1,19 @@
+{
+  "comment": "One verified MLX install as each engine records it (.fileid-verified-<revision>). Both engines' tests build the two files, check their own writer produces their manifest byte for byte, and accept the other engine's. The -v2 identity record (size, device, inode, mtime, ctime per file plus manifestSHA256) is machine-specific, so it is checked live, not pinned.",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "files": [
+    {
+      "path": "config.json",
+      "text": "{}"
+    },
+    {
+      "path": "weights/model.safetensors",
+      "byte": 7,
+      "count": 4096
+    }
+  ],
+  "swiftManifest": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"c9ac7b0624824f844f6c7f3d50fab9741a8914e878467e8daaedca143a34d90b\",\"size\":4096}],\"revision\":\"0123456789abcdef0123456789abcdef01234567\",\"version\":1}",
+  "swiftManifestSHA256": "13c78e8fd064d5fe5232ddbe4304c5b0693b408cf80823d76a462ad9205b43ea",
+  "rustManifest": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights/model.safetensors\",\"sha256\":\"c9ac7b0624824f844f6c7f3d50fab9741a8914e878467e8daaedca143a34d90b\",\"size\":4096}],\"revision\":\"0123456789abcdef0123456789abcdef01234567\",\"version\":1}",
+  "rustManifestSHA256": "ab54a0bba626a43ab74f7c5aa1abdf6c6e67bad9e176f3285d40c0d6f4bff775"
+}

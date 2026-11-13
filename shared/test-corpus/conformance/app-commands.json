@@ -1,0 +1,102 @@
+[
+  {
+    "name": "app-controls-with-nothing-running-are-quiet",
+    "description": "Pause, resume and cancel controls the Mac app sends while nothing runs (scan, restructure, Deep Analyze, benchmark, prewarm) change nothing and report nothing; an idle tool cancel answers as the Swift engine does.",
+    "env": {"FILEID_HF_CACHE_ROOT": "{state}/hf"},
+    "steps": [
+      {"label": "settle", "command": {"healthCheck": {"requestID": "settle"}}, "await": "healthCheckResult"},
+      {"label": "pause", "command": {"pauseScan": {}}},
+      {"label": "resume", "command": {"resumeScan": {}}},
+      {"label": "cancel scan", "command": {"cancelScan": {}}},
+      {"label": "cancel restructure", "command": {"cancelRestructure": {}}},
+      {"label": "cancel Deep Analyze", "command": {"deepAnalyzeCancel": {}}},
+      {"label": "cancel benchmark", "command": {"cancelBenchmark": {}}},
+      {"label": "cancel every prewarm", "command": {"cancelPrewarm": {}}},
+      {"label": "cancel one prewarm", "command": {"cancelPrewarm": {"modelKind": "qwen3_vl_2b"}}},
+      {"label": "nothing reported", "command": {"healthCheck": {"requestID": "after-controls"}}, "await": "healthCheckResult", "collect": {"error": {"$tol": "count", "value": 0}, "scanComplete": {"$tol": "count", "value": 0}, "restructureApplyResult": {"$tol": "count", "value": 0}, "deepAnalyzeComplete": {"$tol": "count", "value": 0}, "benchmarkResult": {"$tol": "count", "value": 0}}},
+      {"label": "idle tool cancel", "tool": {"action": "cancel", "operationID": "00000000-0000-4000-8000-000000000000"}, "expect": {"status": "error", "message": "No running export matches this request."}},
+      {"label": "shutdown", "shutdown": {"exitCode": 0}}
+    ]
+  },
+  {
+    "name": "app-hosted-refusals-without-models-match-the-swift-engine",
+    "description": "With no local model installed: an idle chat cancel and video analysis answer with the Swift engine's words; Deep Analyze of a file that isn't in the catalog, an empty folder or an empty library says \"Queued\" and \"Finding files to analyze…\" and finishes with nothing to do (no model load); an unknown model kind is refused with unknown_model and one failure for every Deep Analyze command; a benchmark of a model that isn't downloaded, or of an unknown kind, answers with Swift's messages and never downloads.",
+    "appHosted": true,
+    "env": {"FILEID_HF_CACHE_ROOT": "{state}/hf"},
+    "steps": [
+      {"label": "idle chat cancel", "chat": {"action": "cancel"}, "expect": {"status": "cancelled", "message": "Model response stopped.", "messages": [], "hits": []}},
+      {"label": "video analysis without a visual model", "catalog": {"action": "enqueueTimeline", "fileIDs": [1]}, "expect": {"status": "error", "message": "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.", "jobs": []}},
+      {"label": "Deep Analyze a missing file", "command": {"deepAnalyzeFile": {"fileID": 41, "modelKind": "qwen3_vl_2b"}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false, "modelKind": "qwen3_vl_2b"}, "collect": {"error": {"$tol": "count", "value": 0}, "deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}}},
+      {"label": "Deep Analyze an empty folder", "command": {"deepAnalyzeFolder": {"pathPrefix": "{root}/nothing-here", "modelKind": "qwen3_vl_2b"}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false}, "collect": {"deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}, "error": {"$tol": "count", "value": 0}}},
+      {"label": "Deep Analyze an empty library", "command": {"deepAnalyzeAll": {"modelKind": "qwen3_vl_2b", "skipExisting": true}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false}, "collect": {"deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}, "error": {"$tol": "count", "value": 0}}},
+      {"label": "unknown kind, all", "command": {"deepAnalyzeAll": {"modelKind": "not_a_model", "skipExisting": true}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 1, "totalSeconds": 0, "cancelled": false}, "collect": {"error": {"$tol": "exact", "value": [{"kind": "unknown_model", "message": "Unknown Deep Analyze model: not_a_model.", "modelKind": "not_a_model"}]}, "deepAnalyzeStarting": {"$tol": "count", "value": 0}}},
+      {"label": "unknown kind, file", "command": {"deepAnalyzeFile": {"fileID": 1, "modelKind": "not_a_model"}}, "await": "deepAnalyzeComplete", "expect": {"failed": 1}, "collect": {"error": {"$tol": "contains", "value": [{"kind": "unknown_model"}]}, "deepAnalyzeStarting": {"$tol": "count", "value": 0}}},
+      {"label": "unknown kind, folder", "command": {"deepAnalyzeFolder": {"pathPrefix": "{root}", "modelKind": "not_a_model"}}, "await": "deepAnalyzeComplete", "expect": {"failed": 1}, "collect": {"error": {"$tol": "contains", "value": [{"kind": "unknown_model"}]}, "deepAnalyzeStarting": {"$tol": "count", "value": 0}}},
+      {"label": "benchmark a model that isn't downloaded", "command": {"benchmarkModel": {"requestID": "bench-1", "modelKind": "qwen3_vl_2b", "tune": false}}, "await": "benchmarkResult", "expect": {"$tol": "exact", "value": {"requestID": "bench-1", "modelKind": "qwen3_vl_2b", "status": "error", "message": "Qwen3-VL 2B (4-bit) isn't downloaded. Benchmarks only run on installed models and never download."}}},
+      {"label": "benchmark an unknown kind", "command": {"benchmarkModel": {"requestID": "bench-2", "modelKind": "not_a_model", "tune": false}}, "await": "benchmarkResult", "expect": {"$tol": "exact", "value": {"requestID": "bench-2", "modelKind": "not_a_model", "status": "error", "message": "benchmarkModel needs a valid request ID and model kind."}}},
+      {"label": "nothing downloaded", "fs": {"absent": ["{state}/hf/models"]}},
+      {"label": "shutdown", "shutdown": {"exitCode": 0}}
+    ]
+  },
+  {
+    "name": "people-mark-different-records-a-verdict-and-refuses-stale-anchors",
+    "description": "Mark as different records one user verdict keyed by the ordered person pair with each anchor face's file and box; anchors that no longer belong to their people (a suggestion from before a recluster) are refused as stale and change nothing.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,123,1,1),(2,123,2,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0.1,0.1,0.2,0.2]',X'0000803f',0.9),(2,2,2,X'00','[0.3,0.3,0.2,0.2]',X'0000803f',0.9)"
+    ],
+    "steps": [
+      {"label": "stale anchors", "command": {"markPersonsDifferent": {"sourcePersonID": 2, "destinationPersonID": 1, "sourceAnchorFaceID": 1, "destinationAnchorFaceID": 2}}, "await": "bulkActionResult", "expect": {"$tol": "exact", "value": {"action": "markPersonsDifferent", "succeeded": 0, "failed": 1, "messages": [{"ok": false, "message": "The suggested face pair is stale; refresh People and try again."}]}}},
+      {"label": "missing anchor", "command": {"markPersonsDifferent": {"sourcePersonID": 2, "destinationPersonID": 1, "sourceAnchorFaceID": 9, "destinationAnchorFaceID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "nothing recorded", "db": "SELECT COUNT(*) FROM face_verifications", "expect": [[0]]},
+      {"label": "mark different", "command": {"markPersonsDifferent": {"sourcePersonID": 2, "destinationPersonID": 1, "sourceAnchorFaceID": 2, "destinationAnchorFaceID": 1}}, "await": "bulkActionResult", "expect": {"$tol": "exact", "value": {"action": "markPersonsDifferent", "succeeded": 1, "failed": 0, "messages": [{"ok": true}]}}},
+      {"label": "verdict", "db": "SELECT person_a,person_b,same_person,confidence,vlm_model,face_a,face_b,file_a,bbox_a,file_b,bbox_b FROM face_verifications", "expect": [[1, 2, 0, 1.0, "user-verified", 1, 2, 1, "[0.1,0.1,0.2,0.2]", 2, "[0.3,0.3,0.2,0.2]"]]},
+      {"label": "people unchanged", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 2]]}
+    ]
+  },
+  {
+    "name": "cross-tools-swift-previews-chapters-rust-executes",
+    "description": "A chapter-marker export (VTT) previewed by swift is executed by rust and undone by swift, with the same outputs, names and states in both engines; the video is never modified.",
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
+    "start": "swift",
+    "tree": [
+      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+      {"path": "out/keep.txt", "content": "keep\n"}
+    ],
+    "steps": [
+      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
+      {"label": "swift previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "vtt", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.vtt}", "sourcePath": "{path:Clip.mov}"}]}},
+      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.vtt"]}},
+      {"restart": "rust"},
+      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.vtt}"}]}},
+      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+      {"restart": "swift"},
+      {"label": "swift undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+    ]
+  },
+  {
+    "name": "cross-tools-rust-previews-chapters-swift-executes",
+    "description": "A chapter-marker export (JSON) previewed by rust is executed by swift and undone by rust, with the same outputs, names and states in both engines; the video is never modified.",
+    "requires": ["swift", "rust"],
+    "engines": ["rust"],
+    "start": "rust",
+    "tree": [
+      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+      {"path": "out/keep.txt", "content": "keep\n"}
+    ],
+    "steps": [
+      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
+      {"label": "rust previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "json", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.json}", "sourcePath": "{path:Clip.mov}"}]}},
+      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.json"]}},
+      {"restart": "swift"},
+      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.json}"}]}},
+      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+      {"restart": "rust"},
+      {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+    ]
+  }
+]

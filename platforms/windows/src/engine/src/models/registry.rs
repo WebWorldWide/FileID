@@ -65,6 +65,9 @@ struct Bundle {
 /// destination under the models root. URLs, SHA256 pins, sizes and licenses
 /// come only from `shared/models/manifest.json`.
 fn bundle(model_kind: &str) -> Option<Bundle> {
+    if paths::APP_HOSTED && let Some(bundle) = mac_app_bundle(model_kind) {
+        return Some(bundle);
+    }
     let (id, display_name, files): (_, _, &'static [_]) = match model_kind {
         // YuNet detection + SFace recognition. The id "arcface" and its
         // aliases keep the C# install slot, sentinel and pre-scan gate unchanged.
@@ -140,6 +143,25 @@ fn bundle(model_kind: &str) -> Option<Bundle> {
     Some(Bundle { id, display_name, files })
 }
 
+/// The engine the Mac app hosts installs what the app's own installers did
+/// (`ModelInstaller`, `CLIPModelInstaller`), where they put it: faces need
+/// only SFace (Vision detects them), and SFace and the CLIP image encoder use
+/// the app's file names. The other bundles already share their paths.
+fn mac_app_bundle(model_kind: &str) -> Option<Bundle> {
+    let (id, display_name, files): (_, _, &'static [_]) = match model_kind {
+        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" | "yunet_sface" | "sface" => {
+            ("arcface", "Face recognition", &[("sface_embedder", "face_recognition_sface_2021dec.onnx")])
+        }
+        "mobileclip_s2" | "mobileclip" => (
+            "mobileclip_s2",
+            "CLIP ViT-B/32 image encoder",
+            &[("clip_vitb32_image", "mobileclip_image/clip_vitb32_image.onnx")],
+        ),
+        _ => return None,
+    };
+    Some(Bundle { id, display_name, files })
+}
+
 /// Resolve a model_kind string into a downloadable bundle: a curated manifest
 /// bundle, else a runnable catalog model. Every file carries its mandatory
 /// SHA256 pin, which the downloader verifies. A manifest that fails validation
@@ -152,6 +174,8 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
     };
     let model = match bundle(vlm_dir_name(model_kind).unwrap_or(model_kind)) {
         Some(bundle) => manifest_model(&models_root, &bundle),
+        // The Mac app runs no GGUF models; its MLX models resolve in `mlx`.
+        None if paths::APP_HOSTED => None,
         None => catalog_model(&models_root, model_kind),
     };
     model.map_or(LookupResult::Unknown, LookupResult::Found)
@@ -162,7 +186,8 @@ fn manifest_model(models_root: &Path, bundle: &Bundle) -> Option<Model> {
         .files
         .iter()
         .map(|&(artifact_id, dest)| {
-            let artifact = super::manifest::artifact(artifact_id).filter(|artifact| artifact.platforms.iter().any(|p| p == "windows"))?;
+            let platform = if paths::APP_HOSTED { "macos" } else { "windows" };
+            let artifact = super::manifest::artifact(artifact_id).filter(|artifact| artifact.platforms.iter().any(|p| p == platform))?;
             Some(FileEntry {
                 url: artifact.url(),
                 dest: dest.split('/').fold(models_root.to_path_buf(), |path, part| path.join(part)),
@@ -497,6 +522,7 @@ mod tests {
     /// snake-vs-dotted split is what made vlm::find_weights (and the app's
     /// Deep Analyze cards) report installed VLMs as missing.
     #[test]
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), ignore = "the Mac app registers MLX models, not GGUF bundles")]
     fn vlm_kind_aliases_and_dirs_agree() {
         for (snake, dotted) in [
             ("mistral_small_3_2", "mistral-small-3.2"),
@@ -734,12 +760,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The engine the Mac app hosts installs each ONNX model where the app's own
+    /// installers put it (`shared/test-corpus/mac-model-layout.json`).
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn mac_app_bundles_follow_the_shared_layout() {
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let dir = unique_sentinel_dir("mac-layout");
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let layout: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../../shared/test-corpus/mac-model-layout.json")).unwrap();
+        for (kind, files) in layout["kinds"].as_object().unwrap() {
+            let LookupResult::Found(model) = lookup_full(kind) else { panic!("{kind} did not resolve") };
+            let dests: Vec<String> =
+                model.files.iter().map(|f| f.dest.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+            let expected: Vec<String> = files.as_array().unwrap().iter().map(|f| f.as_str().unwrap().to_string()).collect();
+            assert_eq!(dests, expected, "{kind}");
+        }
+        assert!(matches!(lookup_full("qwen2_5_vl_7b"), LookupResult::Unknown), "no GGUF models on the Mac app");
+        match saved {
+            Some(value) => unsafe { std::env::set_var("FILEID_MODELS_DIR", value) },
+            None => unsafe { std::env::remove_var("FILEID_MODELS_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A model the Mac app installed (no sentinel, Swift file names) counts as
     /// installed when every file matches its pin, and not when one differs.
     #[cfg(target_os = "macos")]
     #[test]
     fn swift_layout_install_is_verified_by_sha_without_a_sentinel() {
-        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let _g = crate::paths::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let dir = unique_sentinel_dir("swift-layout");
         std::fs::create_dir_all(&dir).unwrap();

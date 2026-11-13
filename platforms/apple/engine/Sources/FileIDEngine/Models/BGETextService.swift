@@ -8,6 +8,7 @@
 import Foundation
 import OnnxRuntimeBindings
 import FileIDShared
+import FileIDImaging
 
 // `@unchecked Sendable`: `lock` guards all mutable state; `loadLock` serializes the
 // one-time session build; `inferenceSem` bounds concurrent ANE inferences. Mirrors

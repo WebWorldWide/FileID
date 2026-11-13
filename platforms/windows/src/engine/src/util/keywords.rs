@@ -126,7 +126,12 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     };
     for raw in text.split(|c: char| !c.is_alphanumeric()) {
         let w = raw.trim().to_ascii_lowercase();
-        if w.is_empty() || stops.contains(w.as_str()) || starts_with_digit(&w) {
+        // Runs of separators ("checklist: brake") are one gap, not a phrase
+        // boundary, as in the Swift engine's `DocumentKeywords`.
+        if w.is_empty() {
+            continue;
+        }
+        if stops.contains(w.as_str()) || starts_with_digit(&w) {
             // A digit-starting token (year, ID, ISO-8601 chunk like "02t09")
             // is never a useful keyword on its own AND, left in the stream,
             // chains adjacent digit-tokens into noise tags like
@@ -148,6 +153,13 @@ fn starts_with_digit(w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn punctuation_runs_do_not_split_phrases() {
+        let tags = extract("Bicycle repair checklist: brake pads, chain oil, tyre pressure.");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].0, "bicycle repair checklist brake pads chain oil tyre pressure");
+    }
 
     #[test]
     fn empty_text_yields_no_tags() {
@@ -193,7 +205,7 @@ mod tests {
 
     #[test]
     fn equal_scores_use_label_order() {
-        let tags = extract("gamma. alpha. beta.");
+        let tags = extract("gamma and alpha and beta");
         let labels: Vec<&str> = tags.iter().map(|tag| tag.0.as_str()).collect();
         assert_eq!(labels, vec!["alpha", "beta", "gamma"]);
     }

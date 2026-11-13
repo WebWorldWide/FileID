@@ -1,0 +1,1063 @@
+[
+  {
+    "name": "video-tools-capabilities-app-hosted",
+    "description": "The Rust engine the Mac app hosts offers the Swift engine's AVFoundation video and media tools.",
+    "engines": [
+      "swift",
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "capabilities",
+        "tool": {
+          "action": "capabilities"
+        },
+        "expect": {
+          "status": "ok",
+          "capabilities": [
+            {
+              "id": "photo"
+            },
+            {
+              "id": "chapters"
+            },
+            {
+              "id": "video",
+              "available": true,
+              "outputFormats": [
+                "mp4"
+              ]
+            },
+            {
+              "id": "videoEnhancement",
+              "available": false
+            },
+            {
+              "id": "trim",
+              "available": true
+            },
+            {
+              "id": "remux",
+              "available": true
+            },
+            {
+              "id": "audio",
+              "available": true
+            },
+            {
+              "id": "proxy",
+              "available": true
+            },
+            {
+              "id": "rotate",
+              "available": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "video-tools-preview-notes-app-hosted",
+    "description": "Video export previews on the Rust engine the Mac app hosts carry the Swift engine's summary, output names and per-output framing, stabilization and follow-people notes, and refuse the same recipes.",
+    "engines": [
+      "swift",
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "fit",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoAspectRatio": "1:1",
+            "videoFraming": "fit"
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "message": "Creates 1 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.",
+          "outputs": [
+            {
+              "message": "",
+              "outputPath": "{std_path:Clip - Export - 1x1 Fit.mp4}",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "label": "stabilized",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoAspectRatio": "9:16",
+            "videoFraming": "fit",
+            "videoStabilization": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "message": "Creates 1 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.",
+          "outputs": [
+            {
+              "message": "Stabilization analyzes translation and rotation during export, with up to 12% edge-covering zoom. Unsafe or unavailable registrations remain uncorrected.",
+              "outputPath": "{std_path:Clip - Export - 9x16 Fit - Stabilized.mp4}",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "label": "people",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoAspectRatio": "9:16",
+            "videoFraming": "auto"
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "message": "Creates 1 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.",
+          "outputs": [
+            {
+              "message": "People framing: 0 followed samples, 7 full-picture samples. Detection is sampled twice per second; review the exported framing.",
+              "outputPath": "{std_path:Clip - Export - 9x16 People.mp4}",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "label": "upscale",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1920,
+            "allowUpscale": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "message": "Creates 1 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.",
+          "outputs": [
+            {
+              "message": "",
+              "outputPath": "{std_path:Clip - Export.mp4}",
+              "state": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "label": "refused source framing",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoFraming": "auto"
+          }
+        },
+        "expect": {
+          "status": "error",
+          "message": "Choose files, an output folder, and a supported recipe."
+        }
+      },
+      {
+        "label": "nothing written",
+        "fs": {
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-video-swift-preview-rust-execute-fit",
+    "description": "A 1:1 fit video export previewed by swift is executed by the app-hosted rust engine and undone by swift; the source is never modified.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "swift",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoAspectRatio": "1:1",
+            "videoFraming": "fit"
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Export - 1x1 Fit.mp4}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Export - 1x1 Fit.mp4"
+          ]
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Export - 1x1 Fit.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Export - 1x1 Fit.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-video-rust-preview-swift-execute-stabilized",
+    "description": "A stabilized 9:16 video export previewed by the app-hosted rust engine is executed by swift and undone by rust.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "rust",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "rust preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "video",
+            "format": "mp4",
+            "maxDimension": 1280,
+            "videoAspectRatio": "9:16",
+            "videoFraming": "fit",
+            "videoStabilization": true
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Export - 9x16 Fit - Stabilized.mp4}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Export - 9x16 Fit - Stabilized.mp4"
+          ]
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Export - 9x16 Fit - Stabilized.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Export - 9x16 Fit - Stabilized.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-media-rust-preview-swift-execute-remux",
+    "description": "A MOV to MP4 remux previewed by the app-hosted rust engine is executed by swift and undone by rust.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "rust",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "rust preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "remux",
+            "format": "mp4",
+            "maxDimension": 1920
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Remux.mp4}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Remux.mp4"
+          ]
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Remux.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Remux.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-media-swift-preview-rust-execute-rotate",
+    "description": "A 90 degree rotation previewed by swift is executed by the app-hosted rust engine and undone by swift.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "swift",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "rotate",
+            "format": "mov",
+            "maxDimension": 1920,
+            "rotationDegrees": 90
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Rotated 90.mov}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Rotated 90.mov"
+          ]
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Rotated 90.mov"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Rotated 90.mov"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-media-rust-preview-swift-execute-audio",
+    "description": "Audio extraction previewed by the app-hosted rust engine is executed by swift and undone by rust.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "rust",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "rust preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "audio",
+            "format": "m4a",
+            "maxDimension": 1920
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Audio.m4a}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Audio.m4a"
+          ]
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Audio.m4a"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Audio.m4a"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "cross-media-swift-preview-rust-execute-trim",
+    "description": "A keyframe trim previewed by swift is executed by the app-hosted rust engine and undone by swift.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "swift",
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift preview",
+        "tool": {
+          "action": "preview",
+          "fileIDs": [
+            1
+          ],
+          "destination": "{root}",
+          "recipe": {
+            "kind": "trim",
+            "format": "mp4",
+            "maxDimension": 1920,
+            "trimStartSeconds": 0,
+            "trimEndSeconds": 2,
+            "trimMode": "keyframe"
+          }
+        },
+        "save": [
+          {
+            "name": "op",
+            "path": "operationID"
+          },
+          {
+            "name": "out",
+            "path": "outputs.0.outputPath"
+          }
+        ],
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "outputPath": "{std_path:Clip - Trim.mp4}"
+            }
+          ]
+        }
+      },
+      {
+        "label": "preview writes nothing",
+        "fs": {
+          "absent": [
+            "Clip - Trim.mp4"
+          ]
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust executes",
+        "tool": {
+          "action": "execute",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "completed",
+              "outputPath": {
+                "$var": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "label": "exported, source intact",
+        "fs": {
+          "exists": [
+            "Clip - Trim.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift undo",
+        "tool": {
+          "action": "undo",
+          "operationID": {
+            "$var": "op"
+          },
+          "destination": "{root}"
+        },
+        "expect": {
+          "status": "ok",
+          "outputs": [
+            {
+              "state": "undone"
+            }
+          ]
+        }
+      },
+      {
+        "label": "output removed, source intact",
+        "fs": {
+          "absent": [
+            "Clip - Trim.mp4"
+          ],
+          "sha256": {
+            "Clip.mov": "{sha256:Clip.mov}"
+          }
+        }
+      }
+    ]
+  }
+]

@@ -6,6 +6,7 @@ import Testing
 import Foundation
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("Deep Analyze metadata naming (audio + 3D)")
 struct DeepAnalyzeNamingTests {
@@ -158,7 +159,7 @@ struct DeepAnalyzeNamingTests {
         #expect(FileTypes.kind(forExtension: "obj") == .model)
         #expect(FileTypes.kind(forExtension: "OBJ") == .model)
         #expect(FileTypes.kind(forExtension: "mp3") == .audio)
-        #expect(DiscoveredFile.Kind.model.rawValue == "model") // DB string lockstep
+        #expect(FileIDEngine.DiscoveredFile.Kind.model.rawValue == "model") // DB string lockstep
         #expect(FileTypes.isTaggable("obj"), "an .obj must be scanned, not dropped")
         // Source code + e-books cluster by their extracted text (doc); 3D formats beyond
         // .obj group under 3D Models/. Lockstep with the Rust FileKind::from_extension.

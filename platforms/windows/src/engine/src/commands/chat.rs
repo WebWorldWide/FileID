@@ -91,7 +91,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     if request.action == "send" && request.scope_file_ids.is_some() {
         let model = model.and_then(|requested| {
             let available = crate::platform::available_memory_mb() as f64 / 1024.0;
-            super::chat_selection::check_model(available, |kind| crate::models::vlm::find_weights(kind).is_some(), Some(requested))
+            super::chat_selection::check_model(available, crate::models::resident_model::installed, Some(requested))
         });
         match database {
             Some(database) => super::chat_selection::send(sink, database, request, model).await,
@@ -169,7 +169,7 @@ pub(super) fn failed(request_id: String, conversation_id: String, message: Strin
 fn summary_model(requested: Option<&str>) -> Option<String> {
     match requested {
         Some(kind) => (crate::models::catalog::runnable_speech(kind).is_none()
-            && crate::models::vlm::find_weights(kind).is_some())
+            && crate::models::resident_model::installed(kind))
         .then(|| kind.to_owned()),
         None => super::timeline::installed_model().map(str::to_owned),
     }
@@ -224,8 +224,21 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     }
     let hits = queued.hits.clone();
     emit(sink, queued).await;
-    let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
-    let answer = summarize(model, &plain, cancel.clone()).await;
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    let answer = if crate::apple::vlm::model_spec(model).is_ok() {
+        // The Swift engine's chat answer: the evidence system prompt is its own
+        // message and the reply streams (`DeepAnalyze.answerCatalog`).
+        let prompt = format!("{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        summarize_mlx(sink, &database, &request, &hits, model, &prompt, cancel.clone()).await
+    } else {
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        summarize(model, &plain, cancel.clone()).await
+    };
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    let answer = {
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        summarize(model, &plain, cancel.clone()).await
+    };
     let cancelled = cancel.load(Ordering::Acquire);
     let (status, message) = match answer {
         _ if cancelled => ("cancelled", prepared.message.clone()),
@@ -291,6 +304,56 @@ async fn summarize(model: &str, plain: &str, cancel: Arc<AtomicBool>) -> Result<
         tracing::warn!(?error, "releasing the chat summary model failed");
     }
     result.map_err(Summary::Failed)
+}
+
+/// `summarize` on the MLX model, streaming the visible answer as `streaming`
+/// chat responses at most every 150 ms, as the Swift engine does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+async fn summarize_mlx(
+    sink: &Sink,
+    database: &Arc<Mutex<Connection>>,
+    request: &ChatRequest,
+    hits: &[CatalogHit],
+    model: &str,
+    prompt: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<String, Summary> {
+    let resident = crate::apple::vlm::Resident::shared();
+    let lease = resident.acquire(model, &cancel, |_| {}).await.map_err(Summary::NotStarted)?;
+    let lease = tokio::sync::Mutex::new(lease);
+    let complete = |prompt: String| {
+        let cancel = cancel.clone();
+        let lease = &lease;
+        async move {
+            let (chunks, mut received) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let generate = async move {
+                let mut lease = lease.lock().await;
+                lease.chat(&prompt, &cancel, |chunk| {
+                    let _ = chunks.send(chunk.to_owned());
+                })
+                .await
+            };
+            let stream = async {
+                let mut text = String::new();
+                let mut last: Option<std::time::Instant> = None;
+                while let Some(chunk) = received.recv().await {
+                    text.push_str(&chunk);
+                    if last.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150)) {
+                        continue;
+                    }
+                    last = Some(std::time::Instant::now());
+                    let visible = text.split("<actions>").next().unwrap_or_default().to_owned();
+                    let (db, req, shown) = (database.clone(), request.clone(), hits.to_vec());
+                    if let Ok(response) = blocking(move || respond(&db.lock(), &req, "streaming", visible, shown, vec![])).await {
+                        emit(sink, response).await;
+                    }
+                }
+            };
+            let (answer, ()) = tokio::join!(generate, stream);
+            answer.map(|text| text.trim().to_owned())
+        }
+    };
+    answer_or_retry_plainly(prompt, &cancel, complete).await.map_err(Summary::Failed)
 }
 
 /// Asks with the action format; a model that answers with only an `<actions>`
@@ -812,6 +875,12 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
     execute_with(conn, request, &no_semantic)
 }
 
+/// A cancel with nothing running. The Mac app's engine answers as the Swift engine does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const IDLE_CANCEL: &str = "Model response stopped.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const IDLE_CANCEL: &str = "No model response is running on this adapter.";
+
 fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semantic) -> Result<ChatResponse> {
     validate(request)?;
     let (status, message, hits, actions) = match request.action.as_str() {
@@ -823,7 +892,7 @@ fn execute_with(conn: &mut Connection, request: &ChatRequest, semantic: &Semanti
             )?;
             ("completed", "Conversation deleted.".to_owned(), vec![], vec![])
         }
-        "cancel" => ("cancelled", "No model response is running on this adapter.".to_owned(), vec![], vec![]),
+        "cancel" => ("cancelled", IDLE_CANCEL.to_owned(), vec![], vec![]),
         "send" if request.scope_file_ids.is_some() => {
             let (message, hits) = super::chat_selection::evidence_answer(conn, request)?;
             save_turn(conn, &request.conversation_id, &[("user", request.text.as_deref().unwrap_or_default()), ("assistant", &message)])?;

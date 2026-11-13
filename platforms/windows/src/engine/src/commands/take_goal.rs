@@ -197,6 +197,22 @@ pub(crate) async fn rank(database: Arc<Mutex<Connection>>, goal: String, order: 
     let Some(sheet) = sheet else { bail!("Goal ranking needs at least two readable photos") };
     let sheet = Removing(sheet);
     let cancel = Arc::new(AtomicBool::new(false));
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if crate::apple::vlm::model_spec(model).is_ok() {
+        // The Swift engine's goal check: the contact sheet at 448 px through `benchmarkPass`.
+        let reply = match crate::apple::vlm::Resident::shared().acquire(model, &cancel, |_| {}).await {
+            Ok(mut lease) => lease.generate(&goal_prompt(&goal, candidates.len()), crate::apple::vlm::Image::File(&sheet.0, None), 160, 448, &cancel).await,
+            Err(error) => {
+                tracing::warn!(?error, "goal ranking model did not start");
+                return Ok(plain(&goal, &order, "unavailable", "The description model couldn't start, so the order stays on photo quality.", Some(model)));
+            }
+        };
+        let parsed = reply.ok().and_then(|text| parse_goal_reply(&text, candidates.len()));
+        return Ok(match parsed {
+            Some(reply) => ranking(&goal, &order, &candidates, &reply, model),
+            None => plain(&goal, &order, "unclear", "The model's answer was unclear. The ranking stays on photo quality.", Some(model)),
+        });
+    }
     let lease = match crate::models::resident_service::ResidentService::shared().acquire(model, cancel.clone()).await {
         Ok(lease) => lease,
         Err(error) => {

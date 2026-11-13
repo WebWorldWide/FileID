@@ -5,7 +5,7 @@
 //! Unexamined footage stays explicitly incomplete; nothing here claims an
 //! event did not happen.
 
-use super::video_export;
+use super::{timeline_media, video_export};
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogChapter, CatalogRequest, CatalogResponse, EventPayload, IpcEvent, Wrap};
 use crate::models::resident_service::{ResidentLease, ResidentService};
@@ -72,6 +72,58 @@ pub(crate) trait FrameModel: Sync {
         tokens: u32,
         cancel: Arc<AtomicBool>,
     ) -> impl Future<Output = Result<String>> + Send;
+    /// A moment window: `sequence` with the frames' times, which the Swift
+    /// engine's MLX path needs to label the frames itself.
+    fn moment(
+        &self,
+        images: &[&Path],
+        _times: &[f64],
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send {
+        self.sequence(images, prompt, tokens, cancel)
+    }
+}
+
+/// The Mac app's engine: the Swift engine's MLX scene captions
+/// (`DeepAnalyze.analyze(sceneCaption:)`) and moment sequences
+/// (`analyzeMomentSequence`), which build their own prompts.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) struct MlxFrames(tokio::sync::Mutex<crate::apple::vlm::MlxLease>);
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl FrameModel for MlxFrames {
+    fn caption(&self, image: &Path, _prompt: &str, _tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let request = crate::apple::vlm::AnalyzeRequest {
+            path: image.to_path_buf(),
+            media_kind: "video".into(),
+            scene_caption: true,
+            ..Default::default()
+        };
+        async move {
+            let reply = self.0.lock().await.analyze(&request, &cancel, |_| {}).await?;
+            if reply.description_failed() {
+                bail!(reply.description)
+            }
+            Ok(reply.description)
+        }
+    }
+    fn sequence(&self, images: &[&Path], _prompt: &str, _tokens: u32, _cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let count = images.len();
+        async move { bail!("MLX sequences need frame times ({count} frames)") }
+    }
+    fn moment(&self, images: &[&Path], times: &[f64], _prompt: &str, _tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let frames: Vec<PathBuf> = images.iter().map(|path| path.to_path_buf()).collect();
+        let times = times.to_vec();
+        async move {
+            let reply = self.0.lock().await.sequence(&frames, &times, None, &cancel).await?;
+            if reply.starts_with("Inference failed") || reply == "Model not loaded." {
+                bail!(reply)
+            }
+            Ok(reply)
+        }
+    }
 }
 
 impl FrameModel for ResidentLease {
@@ -119,8 +171,14 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
+/// Frames in flight for this engine's catalog. Scoped by the state root so an
+/// engine opening another catalog (the app's engine beside a CLI run, or two
+/// test engines) sweeps only its own frames at start, never a running job's.
 fn frames_root() -> PathBuf {
-    std::env::temp_dir().join("fileid-timeline-frames")
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    crate::paths::root().ok().hash(&mut hasher);
+    std::env::temp_dir().join("fileid-timeline-frames").join(format!("{:016x}", hasher.finish()))
 }
 
 /// The visual model for timelines: a curated model when installed, otherwise
@@ -128,8 +186,13 @@ fn frames_root() -> PathBuf {
 pub(crate) fn installed_model() -> Option<&'static str> {
     VLM_PREFERENCE
         .into_iter()
-        .find(|kind| crate::models::vlm::find_weights(kind).is_some())
+        .find(|kind| crate::models::resident_model::installed(kind))
         .or_else(|| {
+            if crate::models::resident_model::MLX {
+                return ["qwen3_vl_2b", "qwen3_5_2b", "gemma_3_12b", "paligemma_3b"]
+                    .into_iter()
+                    .find(|kind| crate::models::resident_model::installed(kind));
+            }
             let mut installed: Vec<&'static crate::models::catalog::CatalogEntry> = crate::models::catalog::entries()
                 .iter()
                 .filter(|e| {
@@ -178,6 +241,31 @@ pub(crate) fn is_timeline_job(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Validates and records a new timeline job; returns its id for scheduling.
+/// The Mac app's engine runs the Swift engine's scene-pool timeline (one
+/// caption per CLIP scene, versioned with the pinned model revision), so either
+/// engine resumes the other's coverage; other builds sample a frame every
+/// interval.
+const SCENE_PREFIX: &str = "timeline-scene-v1/";
+
+fn frame_model_version(model: &str) -> String {
+    if timeline_media::FRAME_POOL {
+        let revision = crate::models::manifest::manifest()
+            .vlm_repos
+            .iter()
+            .find(|repo| repo.kind == model && repo.platforms.iter().any(|platform| platform == "macos"))
+            .map_or("unversioned", |repo| repo.revision.as_str());
+        return format!("{SCENE_PREFIX}{model}@{revision}");
+    }
+    format!("timeline-frame-v2/{model}@portable")
+}
+
+/// The Mac app's engine refuses as the Swift engine does, which asks for a loaded model.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+const NO_VISUAL_MODEL: &str =
+    "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+const NO_VISUAL_MODEL: &str =
+    "Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
 pub(crate) fn enqueue(
     conn: &mut Connection,
     request: &CatalogRequest,
@@ -200,7 +288,7 @@ pub(crate) fn enqueue(
         bail!("Timeline analysis needs the vetted local FFmpeg runtime, which is not installed with this build.")
     }
     let Some(model) = model else {
-        bail!("Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.")
+        bail!(NO_VISUAL_MODEL)
     };
     let mut unique = ids.to_vec();
     unique.sort_unstable();
@@ -217,7 +305,7 @@ pub(crate) fn enqueue(
     let job_id = uuid::Uuid::new_v4().to_string();
     let recipe = Recipe {
         model_kind: model.to_owned(),
-        model_version: format!("timeline-frame-v2/{model}@portable"),
+        model_version: frame_model_version(model),
         interval_seconds: INTERVAL_SECONDS,
         timeline_mode: mode.map(str::to_owned),
     };
@@ -231,7 +319,14 @@ pub(crate) fn enqueue(
         Some(_) => " Speech is transcribed on this device in 30-second passages after the visual pass.",
         None => " Install a speech model from the model catalog to add searchable transcripts.",
     };
-    let message = if mode == Some("moments") {
+    let message = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
+        // The Swift engine's wording: Apple Speech needs no model install.
+        if mode == Some("moments") {
+            "Queued significant-moment drafts from overlapping frame sequences and on-device speech. Review every proposal; sampled frames can still miss actions or hidden outcomes.".to_owned()
+        } else {
+            "Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed. When on-device speech recognition is available, timestamped transcript passages are added.".to_owned()
+        }
+    } else if mode == Some("moments") {
         format!("Queued significant-moment drafts from overlapping frame sequences. Review every proposal; sampled frames can still miss actions or hidden outcomes.{speech}")
     } else {
         format!("Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed.{speech}")
@@ -321,14 +416,35 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             return Ok(());
         };
         publish(id, sink, database).await;
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        if crate::apple::vlm::model_spec(&job.recipe.model_kind).is_ok() {
+            // Speech on the Mac is Apple Speech (Stage 8), not the GGUF ASR model.
+            // The visual pass then the speech pass, as in the Swift engine; the
+            // lease is released before speech so other model users can run.
+            let apple_speech = apple_speech::enabled();
+            let visual_share = if apple_speech { 0.8 } else { 1.0 };
+            let lease = crate::apple::vlm::Resident::shared().acquire(&job.recipe.model_kind, &cancel, |_| {}).await?;
+            let model = MlxFrames(tokio::sync::Mutex::new(lease));
+            process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
+            drop(model);
+            if apple_speech {
+                apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+            }
+            return Ok(());
+        }
         let speech = installed_speech_model();
-        let visual_share = if speech.is_some() { 0.8 } else { 1.0 };
+        let apple_speech = apple_speech::enabled();
+        let visual_share = if speech.is_some() || apple_speech { 0.8 } else { 1.0 };
         let lease = ResidentService::shared()
             .acquire(&job.recipe.model_kind, cancel.clone())
             .await?;
         let result = process(id, &job, &lease, &frames, &cancel, sink, database, visual_share).await;
         let cleanup = lease.finish(result.is_ok()).await;
         result.and(cleanup)?;
+        if apple_speech {
+            apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+            return Ok(());
+        }
         // The speech model loads only after the visual model is released, so
         // the two never need to be resident together.
         if let Some(speech) = speech {
@@ -541,6 +657,7 @@ fn set_progress(conn: &Connection, id: &str, progress: f64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_jpeg(path: &Path, rgb: Vec<u8>, width: u32, height: u32) -> Result<()> {
     let image = image::RgbImage::from_raw(width, height, rgb).context("Invalid decoded frame")?;
     image.save_with_format(path, image::ImageFormat::Jpeg)?;
@@ -556,8 +673,7 @@ async fn decode_jpeg(
 ) -> Result<PathBuf> {
     let (source, flag) = (source.to_owned(), cancel.clone());
     blocking(move || {
-        let rgb = video_export::frame_rgb(&source, seconds, size.0, size.1, &flag)?;
-        write_jpeg(&output, rgb, size.0, size.1)?;
+        timeline_media::frame_jpeg(&source, seconds, size, &output, &flag)?;
         Ok(output)
     })
     .await
@@ -577,11 +693,12 @@ async fn process<M: FrameModel>(
 ) -> Result<()> {
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
+    let mut next_pool: Option<(i64, PoolTask)> = None;
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
         let source = running_source(database, id, file_id).await?;
         let probe = {
             let (path, flag) = (source.path.clone(), cancel.clone());
-            blocking(move || video_export::analysis_probe(&path, &flag))
+            blocking(move || timeline_media::probe(&path, &flag))
                 .await
                 .map_err(|error| interrupted_or(cancel, error))?
         };
@@ -595,11 +712,39 @@ async fn process<M: FrameModel>(
             .await?;
         }
 
-        let scan = scan_signals(id, file_id, &source, duration, cancel, database).await?;
+        let pool_folder = frames.join(format!("pool-{file_id}"));
+        let scan = if timeline_media::FRAME_POOL {
+            let prefetched = match next_pool.take() {
+                Some((next, task)) if next == file_id => Some(task),
+                Some((_, stale)) => {
+                    stale.abort();
+                    None
+                }
+                None => None,
+            };
+            let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
+            if let Some(&next) = job.ids.get(index + 1)
+                && let Ok(next_source) = running_source(database, id, next).await
+            {
+                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
+            }
+            scan
+        } else {
+            scan_signals(id, file_id, &source, duration, cancel, database).await?
+        };
         let signals = scan.signals;
         let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
         let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
-        for seconds in analysis::sample_times(duration, job.recipe.interval_seconds, &signals) {
+        let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
+        if let Some(pool) = &scene_pool {
+            scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
+        }
+        let frame_times = if scene_pool.is_some() {
+            Vec::new()
+        } else {
+            analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
+        };
+        for seconds in frame_times {
             let evidence = format!(
                 "frame:{file_id}:{}:{version}:{}",
                 source.revision,
@@ -656,12 +801,12 @@ async fn process<M: FrameModel>(
         }
 
         if job.recipe.timeline_mode.as_deref() == Some("moments") {
-            let grid = if scan.complete {
-                activity_grid(&source, duration, scan.signatures, cancel).await?
-            } else {
-                None
+            let grid = match &scan.pool {
+                Some(pool) => Some(pool.frames.iter().map(|(seconds, signature, _)| (*seconds, signature.clone())).collect()),
+                None if scan.complete => activity_grid(&source, duration, scan.signatures, cancel).await?,
+                None => None,
             };
-            analyze_moments(
+            let moments = analyze_moments(
                 id,
                 file_id,
                 &source,
@@ -675,10 +820,13 @@ async fn process<M: FrameModel>(
                 cancel,
                 sink,
                 database,
-                decode_frame,
+                moment_decoder(scan.pool.clone()),
             )
-            .await?;
+            .await;
+            let _ = std::fs::remove_dir_all(&pool_folder);
+            moments?;
         }
+        let _ = std::fs::remove_dir_all(&pool_folder);
         let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
         while_running(database, id, move |conn| {
             persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
@@ -699,11 +847,152 @@ async fn process<M: FrameModel>(
     Ok(())
 }
 
+/// Logs the scene pass's timing however it ends.
+struct TimingOnDrop<F: FnMut(u64)>(F, std::time::Instant);
+
+impl<F: FnMut(u64)> Drop for TimingOnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)(self.1.elapsed().as_millis() as u64);
+    }
+}
+
+/// The Swift engine's `analyzeScenes` captions: CLIP scenes over the frame
+/// pool, one caption of each scene's representative frame covering the whole
+/// scene, with the Swift evidence ids so either engine skips the other's.
+#[allow(clippy::too_many_arguments)]
+async fn scene_captions<M: FrameModel>(
+    id: &str,
+    file_id: i64,
+    source: &Source,
+    duration: f64,
+    pool: &Arc<timeline_media::Pool>,
+    version: &str,
+    model: &M,
+    prompt: &str,
+    cancel: &Arc<AtomicBool>,
+    database: &Arc<Mutex<Connection>>,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let frames = {
+        let pool = pool.clone();
+        blocking(move || Ok(timeline_media::scene_frames(&pool))).await?
+    };
+    let embed_ms = started.elapsed().as_millis() as u64;
+    let scenes = crate::pipeline::video_scene_selection::scenes(&frames, duration);
+    let (scene_count, frame_count) = (scenes.len(), frames.len());
+    let _timing = TimingOnDrop(move |total: u64| {
+        tracing::info!(file_id, frames = frame_count, scenes = scene_count, embed_ms, total_ms = total, "timeline_scene_timing");
+    }, started);
+    for scene in scenes {
+        let evidence = format!("scene:{file_id}:{}:{version}:{}", source.revision, analysis::millis(scene.start));
+        let (lookup, revision) = (evidence.clone(), source.revision.clone());
+        let exists: bool = while_running(database, id, move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
+                params![lookup, revision],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
+        if exists {
+            continue;
+        }
+        let frame = &pool.frames.get(scene.representative).context("Missing scene frame")?.2;
+        let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
+        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
+        let caption = caption.trim();
+        if caption.is_empty() {
+            return Err(unreadable());
+        }
+        let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
+        while_running(database, id, move |conn| {
+            checked.verify(conn, file_id)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                params![evidence, file_id, scene.start, scene.end, caption, checked.revision, model_version],
+            )?;
+            upsert_coverage(conn, &evidence, file_id, scene.start, scene.end, "sampled", &checked.revision, &model_version)
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// A frame pool decoding in the background for the job's next video, so its
+/// hardware decode overlaps this video's captions (the Swift engine's `nextPool`).
+type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
+
+fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
+    let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
+    tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_dir_all(&directory);
+        // The duration is only the worker's time limit here (Swift: one hour).
+        // CLIP vectors are not computed here: on the GPU they would compete
+        // with this video's captions (the Swift engine embeds per video too).
+        timeline_media::pool(&path, 3_600.0, &directory, &flag)
+    })
+}
+
 struct SignalScan {
     signals: Vec<analysis::Signal>,
     /// The 1 fps grayscale signatures the signals came from.
     signatures: Vec<(f64, Vec<u8>)>,
     complete: bool,
+    /// The half-second frame pool, when this engine samples one.
+    pool: Option<Arc<timeline_media::Pool>>,
+}
+
+/// Signals from one frame pool for the whole video. Signal coverage keeps the
+/// chunked decoder's 60-second rows, all sampled by the one pass; if the pool
+/// fails, uniform sampling still covers the file and the rows stay incomplete.
+#[allow(clippy::too_many_arguments)]
+async fn pool_signals(
+    id: &str,
+    file_id: i64,
+    source: &Source,
+    duration: f64,
+    folder: &Path,
+    prefetched: Option<PoolTask>,
+    cancel: &Arc<AtomicBool>,
+    database: &Arc<Mutex<Connection>>,
+) -> Result<SignalScan> {
+    // One row for the whole video, as the Swift engine's pool path records.
+    let chunks = vec![(format!("visual-change:{file_id}:{}:signal-v1:0", source.revision), 0.0, duration)];
+    let (pending, revision) = (chunks.clone(), source.revision.clone());
+    while_running(database, id, move |conn| {
+        for (coverage, start, end) in &pending {
+            upsert_coverage(conn, coverage, file_id, *start, *end, "incomplete", &revision, analysis::SIGNAL_MODEL_VERSION)?;
+        }
+        Ok(())
+    })
+    .await?;
+    let waited = std::time::Instant::now();
+    let was_prefetched = prefetched.is_some();
+    let decoded = match prefetched {
+        Some(task) => task.await.map_err(|error| anyhow!(error)).and_then(|pool| pool),
+        None => {
+            let _ = std::fs::remove_dir_all(folder);
+            let (path, directory, flag) = (source.path.clone(), folder.to_owned(), cancel.clone());
+            blocking(move || timeline_media::pool(&path, duration, &directory, &flag)).await
+        }
+    };
+    tracing::info!(file_id, prefetched = was_prefetched, wait_ms = waited.elapsed().as_millis() as u64, "timeline_pool_timing");
+    let pool = match decoded {
+        Ok(pool) => pool,
+        Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
+        Err(_) => return Ok(SignalScan { signals: Vec::new(), signatures: Vec::new(), complete: false, pool: None }),
+    };
+    let checked = source.clone();
+    with_db(database, move |conn| {
+        checked.verify(conn, file_id)?;
+        for (coverage, start, end) in &chunks {
+            upsert_coverage(conn, coverage, file_id, *start, *end, "sampled", &checked.revision, analysis::SIGNAL_MODEL_VERSION)?;
+        }
+        Ok(())
+    })
+    .await?;
+    let signatures = timeline_media::whole_seconds(&pool);
+    Ok(SignalScan { signals: analysis::signals_from_frames(&signatures, None), signatures, complete: true, pool: Some(Arc::new(pool)) })
 }
 
 async fn scan_signals(
@@ -753,7 +1042,7 @@ async fn scan_signals(
         signatures.extend(chunk);
         start = end;
     }
-    Ok(SignalScan { signals, signatures, complete })
+    Ok(SignalScan { signals, signatures, complete, pool: None })
 }
 
 /// Grayscale signatures every `POOL_INTERVAL` seconds, the grid the macOS engine's
@@ -911,8 +1200,18 @@ pub(crate) trait FrameDecoder: Fn(&Path, f64, (u32, u32), &Path, &AtomicBool) ->
 impl<T: Fn(&Path, f64, (u32, u32), &Path, &AtomicBool) -> Result<()> + Clone + Send + Sync + 'static> FrameDecoder for T {}
 
 fn decode_frame(source: &Path, seconds: f64, size: (u32, u32), output: &Path, cancel: &AtomicBool) -> Result<()> {
-    let rgb = video_export::frame_rgb(source, seconds, size.0, size.1, cancel)?;
-    write_jpeg(output, rgb, size.0, size.1)
+    timeline_media::frame_jpeg(source, seconds, size, output, cancel)
+}
+
+/// Moment frames: from the frame pool (the pool frame nearest each time, as
+/// the Swift engine's pool moments use) or decoded one by one.
+fn moment_decoder(pool: Option<Arc<timeline_media::Pool>>) -> impl FrameDecoder {
+    move |source: &Path, seconds: f64, size: (u32, u32), output: &Path, cancel: &AtomicBool| -> Result<()> {
+        let Some(pool) = &pool else { return decode_frame(source, seconds, size, output, cancel) };
+        let frame = pool.nearest(seconds).context("The frame pool is empty")?;
+        std::fs::copy(frame, output)?;
+        Ok(())
+    }
 }
 
 /// Decodes every planned frame in order; on failure, cancellation or `stop`
@@ -1032,11 +1331,16 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
             }
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             let raw = model
-                .sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())
+                .moment(&refs, &kept, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())
                 .await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-            let moments = analysis::parse_moments(&raw, &kept)?;
+            // One malformed reply leaves only its window incomplete (written
+            // above), as in the Swift engine; the job goes on.
+            let Ok(moments) = analysis::parse_moments(&raw, &kept) else {
+                tracing::info!(file_id, start = window.start, "moment reply unparsable; window left incomplete");
+                continue;
+            };
             let chapters = analysis::moment_chapters(&moments, &kept, window, file_id, &source.revision, &version);
             let prefix = analysis::moment_prefix(file_id, &source.revision, window.start);
             let (job_id, checked, model_version, (start, end)) = (id.to_owned(), source.clone(), version.clone(), (window.start, window.end));
@@ -1090,7 +1394,7 @@ async fn transcribe<M: FrameModel>(
         let source = running_source(database, id, file_id).await?;
         let probe = {
             let (path, flag) = (source.path.clone(), cancel.clone());
-            blocking(move || video_export::analysis_probe(&path, &flag))
+            blocking(move || timeline_media::probe(&path, &flag))
                 .await
                 .map_err(|error| interrupted_or(cancel, error))?
         };
@@ -1226,6 +1530,11 @@ fn persist_chapter_suggestions(
     }
     Ok(())
 }
+
+// Portable and tested everywhere; only the Mac app's engine has a recogniser.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+#[path = "timeline_speech.rs"]
+mod apple_speech;
 
 #[cfg(test)]
 #[path = "timeline_tests.rs"]

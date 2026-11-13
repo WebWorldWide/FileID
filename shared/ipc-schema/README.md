@@ -47,7 +47,7 @@ IPC v1.8 adds optional `CatalogRequest.timelineMode` for `enqueueTimeline`: `sam
 |---|---|---|
 | Rust (engine; Windows, Linux, CLI, TUI) | `platforms/windows/src/engine/src/ipc/generated.rs` | Generated. Do not edit. |
 | C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/*.cs` | Hand-written; `--check` compares every type's wire keys with the schema |
-| Swift (macOS) | `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift`, `CatalogProtocol.swift`, `ChatProtocol.swift`, `ToolProtocol.swift` | Hand-written; `--check` compares every type's wire keys with the schema |
+| Swift (macOS) | `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift`, `CatalogProtocol.swift`, `ChatProtocol.swift`, `ToolProtocol.swift`, and `FileIDModelInfo/ModelInfoDTOs.swift` (`ModelBenchmark`, `CatalogChapter`) | Hand-written; `--check` compares every type's wire keys with the schema |
 
 When adding or changing a variant or field:
 

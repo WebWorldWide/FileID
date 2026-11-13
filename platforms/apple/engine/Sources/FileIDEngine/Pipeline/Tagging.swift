@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // Tagging stage — Stage B of the pipeline.
 //
 // Per-file work: load CGImage, run Vision primary pass, optionally OCR,
@@ -9,6 +10,7 @@
 // All work happens on a concurrent GCD queue so a slow file (corrupt JPEG,
 // network volume hiccup) doesn't park a Swift cooperative thread.
 import Foundation
+import FileIDImaging
 import CoreImage
 import ImageIO
 import AVFoundation
@@ -269,7 +271,8 @@ public enum Tagging {
                     let ramStart = CFAbsoluteTimeGetCurrent()
                     let ramTags = TagAgreement.combine(ram: RamPlusService.shared.tag(cgImage),
                                                        vision: pass.classifyConfidences,
-                                                       faceCount: pass.faceCount)
+                                                       faceCount: pass.faceCount,
+                                                       peopleWords: RamPlusService.peopleWords)
                     let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
 
                     // OCR — fast read when the classifiers or the page shape suggest
@@ -677,12 +680,7 @@ public enum Tagging {
 
     // MARK: - Helpers
 
-    final class ScanSideResult<T>: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: T?
-        func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
-        func get() -> T? { lock.lock(); defer { lock.unlock() }; return value }
-    }
+    typealias ScanSideResult = FileIDImaging.ScanSideResult
 
     // EXIF is read from the SAME CGImageSource as the decode — a separate
     // CGImageSourceCreateWithURL re-opened and re-parsed every file, which

@@ -55,6 +55,30 @@ impl FaceMesh {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
         let (session, input_name) = commit_chain_session("FaceMesh", path)?;
+        Self::checked(session, input_name)
+    }
+
+    /// ORT's CPU provider with `intra_threads` threads, for callers that keep one
+    /// session per worker (the Mac's take workers): sessions sized for every
+    /// core each would oversubscribe the CPU.
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+    pub fn load_cpu<P: AsRef<Path>>(weights: P, intra_threads: usize) -> Result<Self> {
+        use anyhow::Context;
+        let path = weights.as_ref();
+        anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
+        crate::ort_runtime::commit_environment().context("ORT environment")?;
+        let session = Session::builder()
+            .context("ORT session builder")?
+            .with_log_level(ort::logging::LogLevel::Error)?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
+            .with_intra_threads(intra_threads.max(1))?
+            .commit_from_file(path)
+            .context("ORT session commit (FaceMesh)")?;
+        let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.name.clone();
+        Self::checked(session, input_name)
+    }
+
+    fn checked(session: Session, input_name: String) -> Result<Self> {
         let names: Vec<&str> = session.outputs.iter().map(|o| o.name.as_str()).collect();
         anyhow::ensure!(
             names.contains(&LANDMARKS) && names.contains(&PRESENCE),

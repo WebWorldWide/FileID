@@ -83,8 +83,8 @@ RAW_NETWORK_FILES = {
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
     "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
     "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
-    "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift",
+    "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
+    "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
     "platforms/apple/app/Sources/FileID/EngineClient.swift",
@@ -127,21 +127,21 @@ RAW_NETWORK_FILES = {
 REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/client.rs": "7fd2ec8192f167c89322230f17a3e304802a7133f445c5b8bc2ec0985e8a08f4",
   "platforms/windows/src/engine/src/shell/thumbnail.rs": "b45ae1e8953defb4d2dbc73687f61fb942d77758666824f3493cc5c7fcff6b4f",
-  "platforms/windows/src/engine/src/models/native_process.rs": "495e360aab90eb0c42c78de1bdd87e0ecf87c35b5deaac01522a1a2c6a9674c7",
+  "platforms/windows/src/engine/src/models/native_process.rs": "3ad2cf599df1884712dd6630c53347ce219ecad0c6c68fe5636d472cc2f7e98d",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "fa983d18f910b15e830adc64f18040039f49d06301607c622fc0f61c38ae51f7",
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "0a564f7125845b2ed697fb64f8a2d78d2968a5652ba02d6fa47067bfb3b32a87",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "82573f40be15c75c087190ecfa95ceae627b40c854767de6a2f03ccea844fa96",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "5ea71c5cdb780ee61ab6fb865887be963dc8c2e8b24d1eaf0583e4d792e6b0e8",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "2acb357c84a8e751973a7d70a36220b5f3180f73059cfaa67df6b017c7157168",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "aee124c5d2a989a05788550ee5a01da69a24a42b3de818feedc6e69ed6e2e879",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "efb0ee6123f7bdf3c82eba9e9f1da3334abc781efdf1c56f3186f1ad36f3c2ac",
+  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "bdd8604b92da837691b3281ccd2d20f3040c0948280eda3acf4a4502a4b8076a",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "f7809c1d0ad7d98de0314d4c0645dd8e0dd697cc43554a541bdd9ef4e5c6b8eb",
+  "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "cd2b439f2cc44b12d5ab1416736d32c06e5ae2cb2eb303a4ae4e8588caf14d0b",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "59d2fdaa2f53f55ddca503e585d16411ceac7cec376d0d74d236fa25cd9dbd28",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "1e18c99a52e9e4caefe6cd17431f573c99d1a81c00cb2a963d2f1eb4ee69e761",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "00fecf9ed22732df4b5410313007970bb655849f0d6c8bd3910f92f0c0aedf2a",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "ac78fb243c41ad79e39a337456a50ba72629082f3d6c8f7f76309c72c81e1f96",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "cdb382c6f6003f6c9d2b1d8e08d3a3032acd3162312fcfd170489f8244beeedc",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
-  "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
+  "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "8220ffe36dcf6fd60c9afa9ab203e926b7a4e5a8ab2d18e7e0fcc6ce2a4b34ca",
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
   "platforms/cli/src/runtime.rs": "e86dcc98ce5482b51f23a79b59d567319c1a22d72cae535c7eaeca91e73346af",
@@ -157,16 +157,16 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "5c0676c686170d430e3d99d77857e28d57a793caaab96f125580f9e855b86a16",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "45176dfdb9dff2fad4c192e3f0c7e11fe399e2db5db06228b5fa6aea5c0125bd",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "71797eb7ddc4944cafa74210618a2c37deffb167b2493ad8afa78a54d8f95400",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "d9c0d0aa40cbd85ee23927aaac3edfc5963137d3a4f16735e6ccd86a519e3c62",
-  "platforms/windows/src/engine/src/commands/prewarm.rs": "ea0c1ce27ccc5bfdd54ecf0c6e16425f19a60716dd81f1451c11edbdf6b508ee",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "4f40c56225ad2fdbe53b331282c61da168c5bbc8368a3c4d6c6cb328f0143d1c",
+  "platforms/windows/src/engine/src/commands/prewarm.rs": "8e4a292b6158797e0cd37cf7f24f52096ca17b5ecf23bd397bf670442ab2f035",
   "platforms/windows/src/engine/src/commands/restructure.rs": "01787c96027d30df5d60bcf88cc7e02a2998f150c1b61189bbe14838215877d2",
   "platforms/windows/src/engine/src/commands/trash.rs": "04d8de99c8c882dfc43bc8538b50964bdab5f73a6d62cb8e65cd2fd91f2521de",
-  "platforms/windows/src/engine/src/downloader.rs": "5195c88965e11864e11078e59051f44bdab37a8ad7ca0a9c559bde409b4d12a4",
-  "platforms/windows/src/engine/src/server.rs": "5986a21270e65969f81a3ad66600ee2888aa854327a61fe688c90c887e570950",
+  "platforms/windows/src/engine/src/downloader.rs": "9d8dbe7ec8abacc2679afcb5c255cfc2fdf65411827699d8681ffd05cf11da84",
+  "platforms/windows/src/engine/src/server.rs": "30a8badb5b5b5087abcabdafdebc48443cd94f6f40fefd23609377597d354202",
   "platforms/windows/src/engine/src/models/runtime.rs": "43727589ba0752588d3532adf357f64c5814597ee2f3bfb754a03f3fa3ab5306",
   "platforms/windows/src/engine/src/models/vlm.rs": "da06866186668cb34ef298152cf4d4d2bad7fd0ede656313c43fa59d5967444f",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "93ef5e06c33f8f97b44116785053ca2460028ae91bc199f6bea0eb1fad3cbf6d",
-  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "4495e266f81959e85dda6e68dc5d8bf5b2fb5eccd3ffcfa5645aaf8ede6ffd0a",
+  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "75feed9218be822737f7419bca9716c049386ed854b40aee083b7b86a43f63e1",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "be3c426f5411a60ca7a91cc9387e578432aef5e9b9d932978fd12f1be46a41bd",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "1a70f493e8139f275c4a0e966ccd0b9c881b72c5c21ca0aaa75d45269622651e",
   "platforms/windows/src/engine/src/platform.rs": "e2103002ec874afd8a2efbd76a7b09547ec7df010fe7159bf33b0bb60d30679e",
@@ -178,7 +178,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
   "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
-  "platforms/windows/src/engine/src/apple/ffi.rs": "6ed36654cd4483c57e1012aec6fb76b409f3b99848ea2940b6e34fbad944bc5f",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "4f8b92425df1f76d41fb29224b7cb3b962f878e72dc77d15a7364504b903fe35",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
@@ -214,7 +214,7 @@ RAW_NETWORK_PATTERNS = {
     ),
 }
 SAFE_NETWORK_SINK_PATTERNS = {
-    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel)\s*\("),
+    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel|fetch_repo_listing)\s*\("),
     ".swift": re.compile(r"\b(?:streamingDownload|parallelStreamingDownload)\s*\("),
     ".cs": re.compile(r"$^"),
 }
@@ -418,6 +418,11 @@ def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
         if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts) or path.stem.endswith(("_test", "_tests")):
             continue
         files.append(path)
+    # A symlink to another production source in the tree (the Swift engine's
+    # MLX code compiled into FileIDAppleVLM) is checked once, at its target's
+    # path, where reviewed digests apply. Any other symlink is checked as a file.
+    real = {path.resolve() for path in files if not path.is_symlink()}
+    files = [path for path in files if not (path.is_symlink() and path.resolve() in real)]
     return sorted(set(files)), []
 
 
@@ -591,8 +596,8 @@ def source_boundary_violations(root: Path) -> list[str]:
     local_data_inventory = {
         "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": 1,
         "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
-        "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": 2,
-        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 1,
+        "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": 2,
+        "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": 1,
         "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
         "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
     }

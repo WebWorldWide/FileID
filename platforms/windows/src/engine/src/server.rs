@@ -1436,7 +1436,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             d.restructure_mutation("undoRestructure", "undo_restructure", "Could not undo the restructure", payload, commands::restructure::handle_undo_restructure)
                 .await;
         }
-        CommandPayload::GrantFolderAccess(_) => {}
+        CommandPayload::GrantFolderAccess(payload) => commands::folder_access::grant(sink, payload).await,
         CommandPayload::StartScan(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "startScan").await;
@@ -1453,7 +1453,6 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let state_c = scan_state.clone();
             let pending_cancel = scan_cancel_requested.clone();
             spawn_mutation(mutation_gate, sink, scan_state, async move {
-                let _active_guard = active_guard;
                 let _track = track;
                 commands::scan::handle_start_scan(
                     sink_c,
@@ -1461,6 +1460,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     state_c,
                     payload,
                     pending_cancel,
+                    Some(Box::new(active_guard)),
                 )
                 .await;
             })

@@ -2,6 +2,16 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
+/// The next event other than the "Queued"/"Finding files" lines the app-hosted build sends first.
+async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
+    loop {
+        let event = rx.recv().await.unwrap();
+        if !matches!(event.payload, EventPayload::DeepAnalyzeStarting(_)) {
+            return event.payload;
+        }
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -37,7 +47,7 @@ impl Fixture {
 }
 fn payload(ids: Option<Vec<i64>>, folders: Option<Vec<String>>) -> ipc::DeepAnalyzeAllPayload {
     ipc::DeepAnalyzeAllPayload {
-        model_kind: "generated-no-installed-model".into(), skip_existing: false,
+        model_kind: "qwen3_vl_2b".into(), skip_existing: false,
         tags_only: false, propose_renames: false, file_ids: ids, excluded_folders: folders,
     }
 }
@@ -52,9 +62,11 @@ fn handler_scope_selected_order_dedup_and_supported_nonfailed_filter() {
     f.row(3, &f.file(&public, "audio.bin"), "audio", 0);
     f.row(4, &f.file(&public, "failed.png"), "image", 1);
     let scope = DeepScope::from_fields(Some(&[2, 1, 2, 99, 3, 4]), Some(&[private.to_str().unwrap().into()])).unwrap();
-    assert_eq!(collect_scoped_file_ids(&f.db, &scope).unwrap(), vec![2, 1]);
+    // The Mac app's engine also analyzes audio, as the Swift engine does.
+    let audio = cfg!(all(target_os = "macos", feature = "apple-adapters"));
+    assert_eq!(collect_scoped_file_ids(&f.db, &scope).unwrap(), if audio { vec![2, 1, 3] } else { vec![2, 1] });
     assert!(scoped_catalog_path(&f.db, &scope, 2).is_ok());
-    assert!(scoped_catalog_path(&f.db, &scope, 3).is_err());
+    assert_eq!(scoped_catalog_path(&f.db, &scope, 3).is_ok(), audio);
 }
 
 #[test]
@@ -86,7 +98,7 @@ async fn handler_scope_empty_selection_has_only_terminal_without_model_lookup() 
     f.row(1, &f.file(&f.root, "one.png"), "image", 0);
     let (sink, mut rx) = Sink::channel_for_test(8);
     handle_deep_analyze_all(sink, f.db, payload(Some(vec![]), None), Arc::new(AtomicBool::new(false))).await;
-    match rx.recv().await.unwrap().payload {
+    match next_payload(&mut rx).await {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed), (0, 0));
             assert!(!c.inner.cancelled);
@@ -101,15 +113,15 @@ async fn handler_scope_invalid_fields_emit_owned_error_then_terminal() {
     let f = Fixture::new();
     let (sink, mut rx) = Sink::channel_for_test(8);
     handle_deep_analyze_all(sink, f.db, payload(Some(vec![0]), None), Arc::new(AtomicBool::new(false))).await;
-    match rx.recv().await.unwrap().payload {
+    match next_payload(&mut rx).await {
         EventPayload::Error(e) => {
             assert_eq!(e.inner.kind, "deep_analyze_failed");
-            assert_eq!(e.inner.model_kind.as_deref(), Some("generated-no-installed-model"));
+            assert_eq!(e.inner.model_kind.as_deref(), Some("qwen3_vl_2b"));
             assert!(e.inner.message.contains("positive"));
         }
         _ => panic!("Invalid scope must emit an owned analysis error"),
     }
-    match rx.recv().await.unwrap().payload {
+    match next_payload(&mut rx).await {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed), (0, 1));
             assert!(!c.inner.cancelled);

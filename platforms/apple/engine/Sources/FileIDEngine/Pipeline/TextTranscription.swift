@@ -1,3 +1,4 @@
+import FileIDVLMCore
 // Deep Analyze's text transcription: when the scan flagged an image (or an
 // image-only PDF) as text-bearing but its OCR is missing or mangled, the loaded
 // VLM transcribes it into ocr_text with source 'vlm'. Mirrors the Rust engine's
@@ -6,6 +7,7 @@ import Foundation
 import CoreGraphics
 import GRDB
 import FileIDShared
+import FileIDImaging
 
 extension DeepAnalyzeRunner {
     static func transcriptionCandidate(_ db: GRDB.Database, fileID: Int64) throws -> Bool {

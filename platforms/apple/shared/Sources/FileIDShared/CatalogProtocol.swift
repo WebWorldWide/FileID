@@ -1,31 +1,5 @@
 import Foundation
 
-public struct CatalogChapter: Codable, Sendable, Equatable {
-    public var id: String
-    public var fileID: Int64
-    public var startSeconds: Double
-    public var endSeconds: Double
-    public var title: String
-    public var summary: String
-    public var sourceRevision: String
-    public var modelVersion: String
-    public var confidence: Double
-    public var userEdited: Bool
-    public var stale: Bool
-    public init(id: String, fileID: Int64, startSeconds: Double, endSeconds: Double, title: String, summary: String, sourceRevision: String, modelVersion: String, confidence: Double, userEdited: Bool, stale: Bool) {
-        self.id = id
-        self.fileID = fileID
-        self.startSeconds = startSeconds
-        self.endSeconds = endSeconds
-        self.title = title
-        self.summary = summary
-        self.sourceRevision = sourceRevision
-        self.modelVersion = modelVersion
-        self.confidence = confidence
-        self.userEdited = userEdited
-        self.stale = stale
-    }
-}
 
 public struct CatalogHit: Codable, Sendable, Equatable {
     public var fileID: Int64

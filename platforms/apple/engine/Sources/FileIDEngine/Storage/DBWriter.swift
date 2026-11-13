@@ -12,6 +12,7 @@ import Foundation
 import GRDB
 import AsyncAlgorithms
 import FileIDShared
+import FileIDImaging
 
 /// What the tagging stage emits per file. M2 carries face/OCR/dHash/EXIF
 /// only — embeddings join the struct in M3.

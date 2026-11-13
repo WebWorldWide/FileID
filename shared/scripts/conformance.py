@@ -10,13 +10,20 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "exact", "value": V}   deep equality, including every object key
   {"$tol": "set", "value": [..]}  same elements in any order
   {"$tol": "count", "value": N}   a list of N elements
+  {"$tol": "prefix", "value": [..]}  a list that starts with these elements
+  {"$tol": "contains", "value": [..]}  a list holding a match for each element
   {"$tol": "present"}             any non-null value
-  {"$engine": {"swift": A, "rust": B}}  per-engine expectation
+  {"$tol": "hamming", "value": N, "bits": B}  an integer hash within B differing bits (default 4)
+  {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
+      "rustHosted" applies to the Rust engine the Mac app hosts (the
+      apple-adapters build, events on stderr) instead of "rust"
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
-Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation} and {clip_model} (the CLIP
-embedding model id both engines derive from the model manifest); {"$var": "name.key"}
+Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
+macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {clip_model} (the CLIP
+embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
+bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
 
@@ -25,18 +32,26 @@ time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
 also checks "symlinks".
+A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
+A case with "appHosted": true runs only when every engine it uses (the one under
+test and any it "requires") is one the Mac app hosts, i.e. writes events on stderr:
+the Swift engine and the Rust engine built with the Apple adapters. Case "env"
+values expand {state} and {root}.
 A case may list knownDivergences ({"engine", "reason", optional "os" list and
 "run": false when running it is unsafe}). A divergent case is expected to fail on
 that engine; if it passes, the marker is stale and the run fails so the tracker
 stays honest.
 
---test-trash-root is for a Rust engine built with the `test-trash-root` cargo
-feature (test builds only, never shipped): each case's engine moves trashed
+--test-trash-root is for engines built with a test Trash root (the Rust
+`test-trash-root` cargo feature, the Swift FILEID_TEST_TRASH_ROOT compile
+condition; test builds only, never shipped): each case's engine moves trashed
 files into <state>/Trash instead of the user's Trash, divergences marked
 "liftedByTestTrashRoot" no longer apply, and cases marked "requiresTestTrashRoot"
-run (they are skipped otherwise, so no engine ever reaches the user's Trash).
+(true, or a list of OS names such as ["darwin"] where only that OS needs it) run;
+they are skipped otherwise, so no engine ever reaches the user's Trash. The Swift
+engine has the same root when built with -Xswiftc -DFILEID_TEST_TRASH_ROOT.
 """
 from __future__ import annotations
 
@@ -66,6 +81,34 @@ CASES = ROOT / "shared/test-corpus/conformance"
 TIMEOUT = 30.0
 FORBIDDEN_ROOTS = ("/volumes/adlon", "/srv/data")
 PLACEHOLDER = re.compile(r"\{([a-z0-9_]+(?::[^{}]*)?)\}")
+
+
+BOOKMARK_JXA = (
+    "ObjC.import('Foundation');"
+    "function run(argv) {"
+    " const url = $.NSURL.fileURLWithPath(argv[0]);"
+    " const data = url.bookmarkDataWithOptionsIncludingResourceValuesForKeysRelativeToURLError(0, $(), $(), $());"
+    " return data.base64EncodedStringWithOptions(0).js; }"
+)
+
+
+def bookmark(path):
+    """A plain base64 bookmark of `path`, the kind the Mac app sends (macOS only)."""
+    result = subprocess.run(["osascript", "-l", "JavaScript", "-e", BOOKMARK_JXA, path],
+                            capture_output=True, text=True, timeout=30, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise Failure(f"could not make a bookmark for {path}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def foundation_standardized(path):
+    """An output file as the Swift engine names it: its folder through
+    `URL.standardizedFileURL`, which on macOS drops a leading /private when the rest
+    exists (/private/var/… → /var/…), then the file name."""
+    folder, name = os.path.split(path)
+    if sys.platform == "darwin" and folder.startswith("/private/") and os.path.exists(folder[len("/private"):]):
+        folder = folder[len("/private"):]
+    return os.path.join(folder, name)
 
 
 def clip_model():
@@ -110,8 +153,14 @@ def case_env(state, case):
     home = Path(state) / "home"
     home.mkdir(exist_ok=True)
     trash = {"FILEID_TEST_TRASH_ROOT": str(Path(state) / "Trash")} if TEST_TRASH_ROOT else {}
+    places = {"{state}": str(Path(state)), "{root}": str((Path(state).parent / "tree").resolve())}
+    extra = {}
+    for key, value in case.get("env", {}).items():
+        for token, replacement in places.items():
+            value = value.replace(token, replacement)
+        extra[key] = value
     return {"TZ": "UTC", "FILEID_MODELS_DIR": str(Path(state) / "Models"), "CFFIXED_USER_HOME": str(home),
-            **trash, **case.get("env", {})}
+            **trash, **extra}
 
 
 class Engine:
@@ -199,7 +248,9 @@ class Engine:
                     self.send({"shutdown": {}})
                 except (BrokenPipeError, OSError):
                     pass
-                self.process.wait(timeout=10)
+                # The engine allows itself 30 s to quiesce active work at shutdown; a
+                # slow hosted Windows runner has taken longer than 10 s to exit.
+                self.process.wait(timeout=30)
         finally:
             if self.process.poll() is None:
                 self.process.kill()
@@ -313,6 +364,7 @@ class Context:
     def __init__(self, case, flavor, os_name, directory):
         self.case = case
         self.flavor = flavor
+        self.hosted = False
         self.os = os_name
         self.state = directory / "state"
         self.root = (directory / "tree")
@@ -337,6 +389,8 @@ class Context:
             return self.pid
         if name == "path":
             return self.path(argument)
+        if name == "std_path":
+            return foundation_standardized(self.path(argument))
         if name == "nfc_path":
             return unicodedata.normalize("NFC", self.path(argument))
         if name == "path_hash":
@@ -353,6 +407,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "bookmark":
+            return bookmark(self.path(argument))
         raise Failure(f"unknown placeholder {{{token}}}")
 
     def expand(self, value):
@@ -380,6 +436,8 @@ class Context:
             return self.lookup(expected["$var"])
         if isinstance(expected, dict) and set(expected) == {"$engine"}:
             options = expected["$engine"]
+            if self.flavor == "rust" and self.hosted and "rustHosted" in options:
+                return self.select(options["rustHosted"])
             return self.select(options.get(self.flavor, options.get("default")))
         if isinstance(expected, dict) and set(expected) == {"$os"}:
             options = expected["$os"]
@@ -399,6 +457,14 @@ def same(expected, actual):
     return expected == actual
 
 
+def _matches(expected, actual, ctx, where):
+    try:
+        match(expected, actual, ctx, where)
+    except Failure:
+        return False
+    return True
+
+
 def match(expected, actual, ctx, where="$"):
     expected = ctx.select(expected)
     if isinstance(expected, dict) and "$tol" in expected:
@@ -408,6 +474,13 @@ def match(expected, actual, ctx, where="$"):
             if actual is None:
                 raise Failure(f"{where}: expected a value, got null/absent")
             return
+        if tolerance == "hamming":
+            # Perceptual hashes: CoreGraphics' resampling can move a bit between
+            # macOS releases; engines are compared exactly in cross-engine cases.
+            bits = expected.get("bits", 4)
+            if not isinstance(actual, int) or bin((actual ^ value) & (2**64 - 1)).count("1") > bits:
+                raise Failure(f"{where}: expected {value} within {bits} bits, got {canonical(actual)}")
+            return
         if tolerance == "count":
             if not isinstance(actual, list) or len(actual) != value:
                 raise Failure(f"{where}: expected {value} elements, got {canonical(actual)}")
@@ -415,6 +488,19 @@ def match(expected, actual, ctx, where="$"):
         if tolerance == "exact":
             if canonical(value) != canonical(actual) and not same(value, actual):
                 raise Failure(f"{where}: expected exactly {canonical(value)}, got {canonical(actual)}")
+            return
+        if tolerance == "prefix":
+            if not isinstance(actual, list) or len(actual) < len(value):
+                raise Failure(f"{where}: expected a list starting with {canonical(value)}, got {canonical(actual)}")
+            for index, item in enumerate(value):
+                match(item, actual[index], ctx, f"{where}[{index}]")
+            return
+        if tolerance == "contains":
+            if not isinstance(actual, list):
+                raise Failure(f"{where}: expected a list, got {canonical(actual)}")
+            for item in value:
+                if not any(_matches(item, candidate, ctx, where) for candidate in actual):
+                    raise Failure(f"{where}: no element matches {canonical(item)}")
             return
         if tolerance == "set":
             if not isinstance(actual, list) or len(actual) != len(value):
@@ -468,6 +554,8 @@ def build_tree(ctx, entries):
             wav_bytes(target)
         elif generator == "pdf":
             target.write_bytes(pdf_bytes(entry.get("content", "FileID conformance")))
+        elif "copy" in entry:
+            target.write_bytes((ROOT / entry["copy"]).read_bytes())
         elif "contentHex" in entry:
             target.write_bytes(bytes.fromhex(entry["contentHex"]))
         else:
@@ -640,6 +728,7 @@ def start(binaries, flavor, ctx):
     engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
+    ctx.hosted = engine.stream.get("ready") == "stderr"
     return engine
 
 
@@ -692,12 +781,14 @@ def load_cases(selected):
             if not selected or any(fnmatch.fnmatch(case["name"], pattern) for pattern in selected)]
 
 
-def detect_flavor(binary, parent):
+def detect_engine(binary, parent):
+    """The engine's flavour and whether it writes events on stderr (the Swift
+    engine and the Rust engine the Mac app hosts)."""
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         engine = Engine(binary, temporary)
         try:
             engine.wait("ready")
-            return engine.flavor
+            return engine.flavor, engine.stream.get("ready") == "stderr"
         finally:
             engine.close()
 
@@ -719,28 +810,35 @@ def main():
     parser.add_argument("--os", default=host_os(), help=argparse.SUPPRESS)
     parser.add_argument("--fixture-parent", type=Path, default=Path(tempfile.gettempdir()))
     parser.add_argument("--test-trash-root", action="store_true",
-                        help="the Rust engine was built with the test-trash-root feature (see above)")
+                        help="the engines were built with a test Trash root (see above)")
     args = parser.parse_args()
     global TEST_TRASH_ROOT
     TEST_TRASH_ROOT = args.test_trash_root
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
-    flavor = detect_flavor(binary, parent) if args.flavor == "auto" else args.flavor
+    detected, hosted_engine = detect_engine(binary, parent)
+    flavor = detected if args.flavor == "auto" else args.flavor
     binaries = {flavor: binary}
+    hosted = {flavor: hosted_engine}
     if args.peer_engine:
         peer = args.peer_engine.resolve(strict=True)
-        binaries[detect_flavor(peer, parent)] = peer
+        peer_flavor, peer_hosted = detect_engine(peer, parent)
+        binaries[peer_flavor] = peer
+        hosted[peer_flavor] = peer_hosted
     counts = {"pass": 0, "fail": 0, "known": 0, "stale": 0, "skip": 0}
     print(f"conformance: {flavor} engine {binary} on {args.os}")
     for case in load_cases(args.case):
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
-        needs_trash_root = case.get("requiresTestTrashRoot") and not TEST_TRASH_ROOT
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root \
+        trash_root = case.get("requiresTestTrashRoot")
+        needs_trash_root = not TEST_TRASH_ROOT and (args.os in trash_root if isinstance(trash_root, list) else bool(trash_root))
+        unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
+        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted \
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
             reason = (f"needs {', '.join(sorted(missing))} engine" if missing
-                      else "needs a test-trash-root Rust build (--test-trash-root)" if needs_trash_root
+                      else "needs test-trash-root engine builds (--test-trash-root)" if needs_trash_root
+                      else "needs engines the Mac app hosts" if unhosted
                       else "not applicable here")
             print(f"SKIP   {name} ({reason})")
             continue

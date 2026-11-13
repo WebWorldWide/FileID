@@ -2,6 +2,7 @@
 import Testing
 import Foundation
 @testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("redactPathForLog")
 struct PathRedactionTests {

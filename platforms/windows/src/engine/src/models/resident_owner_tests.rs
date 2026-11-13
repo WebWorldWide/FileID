@@ -374,6 +374,7 @@ async fn resident_owner_waiting_checkout_cancel_preserves_current_job() {
     );
     finish(&o, &f).await;
 }
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), ignore = "the Mac app registers MLX models, not GGUF bundles")]
 #[tokio::test]
 async fn resident_owner_actual_missing_registered_weights_refuse_before_runtime() {
     let f = fixture();

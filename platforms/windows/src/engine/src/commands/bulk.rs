@@ -2171,10 +2171,33 @@ pub(crate) async fn handle_mark_persons_different(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let conn = db.lock();
+        // Each anchor face must still belong to its person, as in the Swift
+        // engine: a suggestion shown before a recluster or merge is stale.
+        let anchored = |face: i64, person: i64| -> bool {
+            conn.query_row(
+                "SELECT person_id FROM face_prints WHERE id = ?1 AND file_id IS NOT NULL AND bbox IS NOT NULL",
+                [face],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .is_ok_and(|owner| owner == Some(person))
+        };
+        if !anchored(payload.source_anchor_face_id, payload.source_person_id)
+            || !anchored(payload.destination_anchor_face_id, payload.destination_person_id)
+        {
+            return Ok(BulkActionResult {
+                action: "markPersonsDifferent".into(),
+                succeeded: 0,
+                failed: 1,
+                messages: vec![BulkActionItem {
+                    file_id: None,
+                    ok: false,
+                    message: Some("The suggested face pair is stale; refresh People and try again.".into()),
+                }],
+            });
+        }
         // Resolve the churn-stable (file_id, bbox) key for each anchor face
         // so the verdict survives a faces_evaluated re-scan that DELETE+re-INSERTs
-        // face_print ids. NULL when the face row is somehow already gone — the
-        // apply path then falls back to the legacy face_a/face_b id.
+        // face_print ids.
         let stable_key = |id: i64| -> (Option<i64>, Option<String>) {
             conn.query_row(
                 "SELECT file_id, bbox FROM face_prints WHERE id = ?1",

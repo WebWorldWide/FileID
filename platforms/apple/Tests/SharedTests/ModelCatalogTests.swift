@@ -1,13 +1,14 @@
 import Foundation
 import Testing
 @testable import FileIDShared
+@testable import FileIDModelInfo
 
 @Suite("Offline model catalog")
 struct ModelCatalogTests {
     private var canonical: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("shared/Sources/FileIDShared/Resources/model-catalog.json")
+            .appendingPathComponent("shared/Sources/FileIDModelInfo/Resources/model-catalog.json")
     }
     @Test func bundledCatalogPinsLicensesAndWireIDs() throws {
         let entries = try MLXModelCatalog.load(data: Data(contentsOf: canonical))

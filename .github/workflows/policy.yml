@@ -38,6 +38,10 @@ jobs:
         run: python shared/scripts/check_current_docs.py
       - name: Enforce catalog migration parity
         run: python shared/scripts/check_catalog_schema.py
+      - name: Test Mac app command coverage check
+        run: python shared/scripts/test_check_app_command_coverage.py
+      - name: Enforce every Mac app command is served by the hosted Rust engine
+        run: python shared/scripts/check_app_command_coverage.py
       - name: Test IPC DTO generator
         run: python shared/scripts/test_gen_ipc_dtos.py
       - name: Enforce IPC DTOs match ipc.schema.json
@@ -52,3 +56,5 @@ jobs:
         run: python shared/scripts/test_gen_model_manifest.py
       - name: Enforce macOS model table matches manifest.json
         run: python shared/scripts/gen_model_manifest.py --check
+      - name: Enforce the compiled-in Mac model catalog matches model-catalog.json
+        run: python shared/scripts/gen_model_catalog_swift.py --check

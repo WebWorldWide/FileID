@@ -113,7 +113,11 @@ else
     swift build -c release --product FileIDEngine
 fi
 
-bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
+# Developer ID builds bundle the shared Rust engine (fileidd, the default
+# engine since Stage 10) with the pinned ONNX Runtime; the Swift engine stays
+# bundled and selectable. FILEID_WITH_RUST_ENGINE=0 ships the Swift engine only.
+FILEID_WITH_RUST_ENGINE="${FILEID_WITH_RUST_ENGINE:-1}" FILEID_REQUIRE_ORT=1 \
+    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
 
 # ── Strip + scrub (must precede signing — both invalidate the cdhash) ────────
 echo "🧹 Stripping debug symbols…"
@@ -150,12 +154,19 @@ SIGNED_APP="$SIGN_TMP/$APP"
 find "$SIGN_TMP/$APP" -exec xattr -c {} \; 2>/dev/null || true
 
 # Nested code first (inside-out, no --deep): the metallibs live in
-# Contents/MacOS (MLX loads them colocated with the engine binary), so
+# Contents/MacOS and, for fileidd's FileIDAppleKit, Contents/Frameworks (MLX
+# loads them colocated with the binary that links it), so
 # codesign treats them as nested code that must carry its own signature
 # before the bundle seal. They sign as Format=generic.
-for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib; do
+for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib "$SIGN_TMP/$APP/Contents/Frameworks/"*.metallib; do
     [ -f "$lib" ] || continue
     codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
+done
+# SwiftPM resource bundles carry an ad-hoc
+# signature from the build; re-sign them with the release identity.
+for resource_bundle in "$SIGN_TMP/$APP/Contents/Resources/"*.bundle; do
+    [ -d "$resource_bundle" ] || continue
+    codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$resource_bundle"
 done
 for lib in "$SIGN_TMP/$APP/Contents/Frameworks/"*.dylib; do
     [ -f "$lib" ] || continue
@@ -168,8 +179,8 @@ done
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
-# Shared Rust engine (dogfood, bundled with FILEID_WITH_RUST_ENGINE=1): same
-# identity and entitlements as the Swift engine.
+# Shared Rust engine (bundled unless FILEID_WITH_RUST_ENGINE=0): same identity
+# and entitlements as the Swift engine.
 if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
     codesign --force --options runtime $TIMESTAMP_FLAG \
         --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
@@ -202,9 +213,14 @@ if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
     fi
     PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
 fi
+ORT_CHECK=()
+if [ -f "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
+    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+    ORT_CHECK=(--ort-runtime "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+fi
 
 echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "${PRIVACY_BINARIES[@]}"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" ${ORT_CHECK[@]+"${ORT_CHECK[@]}"} "${PRIVACY_BINARIES[@]}"
 
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then

@@ -3,6 +3,7 @@ import Foundation
 import CoreImage
 import FileIDShared
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 
 @Suite("MLX model benchmark")
 struct ModelBenchmarkTests {

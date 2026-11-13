@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import FileIDEngine
+@testable import FileIDVLMCore
 import FileIDShared
 
 @Suite("VLM scene captions and loop guard")

@@ -3,24 +3,602 @@
     "name": "scan-tiny-tree-catalogs-every-file",
     "description": "A scan of a generated tree classifies each kind, catalogs unknown types as other and skips unfinished downloads, records exact sizes, mtimes and SHA-256 content hashes and inode file_refs, applies the per-OS path_hash rule, stores NFC path_search for a decomposed name and fails nothing.",
     "tree": [
-      {"path": "docs/notes.txt", "content": "conformance notes\n", "mtime": 1789812000},
-      {"path": "docs/Café menu.txt", "content": "decomposed name\n", "mtime": 1789812060},
-      {"path": "docs/paper.pdf", "generate": "pdf", "mtime": 1789812120},
-      {"path": "images/red.png", "generate": "png", "dimensions": [32, 32], "mtime": 1789812180},
-      {"path": "images/UPPER Case.PNG", "generate": "png", "dimensions": [24, 16], "mtime": 1789812240},
-      {"path": "audio/tone.wav", "generate": "wav", "mtime": 1789812300},
-      {"path": "misc/blob.bin", "content": "opaque", "size": 4096, "mtime": 1789812360},
-      {"path": "misc/movie.mp4.part", "content": "partial", "mtime": 1789812420}
+      {
+        "path": "docs/notes.txt",
+        "content": "conformance notes\n",
+        "mtime": 1789812000
+      },
+      {
+        "path": "docs/Café menu.txt",
+        "content": "decomposed name\n",
+        "mtime": 1789812060
+      },
+      {
+        "path": "docs/paper.pdf",
+        "generate": "pdf",
+        "mtime": 1789812120
+      },
+      {
+        "path": "images/red.png",
+        "generate": "png",
+        "dimensions": [
+          32,
+          32
+        ],
+        "mtime": 1789812180
+      },
+      {
+        "path": "images/UPPER Case.PNG",
+        "generate": "png",
+        "dimensions": [
+          24,
+          16
+        ],
+        "mtime": 1789812240
+      },
+      {
+        "path": "audio/tone.wav",
+        "generate": "wav",
+        "mtime": 1789812300
+      },
+      {
+        "path": "misc/blob.bin",
+        "content": "opaque",
+        "size": 4096,
+        "mtime": 1789812360
+      },
+      {
+        "path": "misc/movie.mp4.part",
+        "content": "partial",
+        "mtime": 1789812420
+      }
     ],
     "steps": [
-      {"label": "scan", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 180, "abortOnError": true, "expect": {"totalFiles": 7, "processedFiles": 7, "failedFiles": 0}},
-      {"label": "rows", "db": "SELECT path_text,kind,extension,size_bytes,modified_at,failed FROM files ORDER BY path_text", "expect": {"$tol": "set", "value": [["{path:audio/tone.wav}", "audio", "wav", "{size:audio/tone.wav}", 1789812300, 0], ["{path:docs/Café menu.txt}", "doc", "txt", 16, 1789812060, 0], ["{path:docs/notes.txt}", "doc", "txt", 18, 1789812000, 0], ["{path:docs/paper.pdf}", "pdf", "pdf", "{size:docs/paper.pdf}", 1789812120, 0], ["{path:images/UPPER Case.PNG}", "image", "png", "{size:images/UPPER Case.PNG}", 1789812240, 0], ["{path:images/red.png}", "image", "png", "{size:images/red.png}", 1789812180, 0], ["{path:misc/blob.bin}", "other", "bin", 4096, 1789812360, 0]]}},
-      {"label": "path_hash", "db": "SELECT path_text,path_hash FROM files", "expect": {"$tol": "set", "value": [["{path:audio/tone.wav}", "{path_hash:audio/tone.wav}"], ["{path:docs/Café menu.txt}", "{path_hash:docs/Café menu.txt}"], ["{path:docs/notes.txt}", "{path_hash:docs/notes.txt}"], ["{path:docs/paper.pdf}", "{path_hash:docs/paper.pdf}"], ["{path:images/UPPER Case.PNG}", "{path_hash:images/UPPER Case.PNG}"], ["{path:images/red.png}", "{path_hash:images/red.png}"], ["{path:misc/blob.bin}", "{path_hash:misc/blob.bin}"]]}},
-      {"label": "path_search", "db": "SELECT path_search FROM files WHERE path_text LIKE '%menu.txt'", "expect": [["{nfc_path:docs/Café menu.txt}"]]},
-      {"label": "content_hash", "db": "SELECT path_text,content_hash FROM files", "expect": {"$tol": "set", "value": [["{path:audio/tone.wav}", "{sha256:audio/tone.wav}"], ["{path:docs/Café menu.txt}", "{sha256:docs/Café menu.txt}"], ["{path:docs/notes.txt}", "{sha256:docs/notes.txt}"], ["{path:docs/paper.pdf}", "{sha256:docs/paper.pdf}"], ["{path:images/UPPER Case.PNG}", "{sha256:images/UPPER Case.PNG}"], ["{path:images/red.png}", "{sha256:images/red.png}"], ["{path:misc/blob.bin}", "{sha256:misc/blob.bin}"]]}},
-      {"label": "file_ref", "db": "SELECT path_text,file_ref FROM files", "expect": {"$tol": "set", "value": [["{path:audio/tone.wav}", "{inode:audio/tone.wav}"], ["{path:docs/Café menu.txt}", "{inode:docs/Café menu.txt}"], ["{path:docs/notes.txt}", "{inode:docs/notes.txt}"], ["{path:docs/paper.pdf}", "{inode:docs/paper.pdf}"], ["{path:images/UPPER Case.PNG}", "{inode:images/UPPER Case.PNG}"], ["{path:images/red.png}", "{inode:images/red.png}"], ["{path:misc/blob.bin}", "{inode:misc/blob.bin}"]]}},
-      {"label": "rescan is incremental", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "benignErrors": ["rescan_no_changes", "deep_analyze_unavailable"], "expect": {"failedFiles": 0}},
-      {"label": "no duplicate rows", "db": "SELECT COUNT(*), COUNT(DISTINCT path_hash) FROM files", "expect": [[7, 7]]}
+      {
+        "label": "scan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 7,
+          "processedFiles": 7,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "rows",
+        "db": "SELECT path_text,kind,extension,size_bytes,modified_at,failed FROM files ORDER BY path_text",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "audio",
+              "wav",
+              "{size:audio/tone.wav}",
+              1789812300,
+              0
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "doc",
+              "txt",
+              16,
+              1789812060,
+              0
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "doc",
+              "txt",
+              18,
+              1789812000,
+              0
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "pdf",
+              "pdf",
+              "{size:docs/paper.pdf}",
+              1789812120,
+              0
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "image",
+              "png",
+              "{size:images/UPPER Case.PNG}",
+              1789812240,
+              0
+            ],
+            [
+              "{path:images/red.png}",
+              "image",
+              "png",
+              "{size:images/red.png}",
+              1789812180,
+              0
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "other",
+              "bin",
+              4096,
+              1789812360,
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "label": "path_hash",
+        "db": "SELECT path_text,path_hash FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{path_hash:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{path_hash:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{path_hash:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{path_hash:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{path_hash:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{path_hash:images/red.png}"
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "{path_hash:misc/blob.bin}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "path_search",
+        "db": "SELECT path_search FROM files WHERE path_text LIKE '%menu.txt'",
+        "expect": [
+          [
+            "{nfc_path:docs/Café menu.txt}"
+          ]
+        ]
+      },
+      {
+        "label": "content_hash",
+        "db": "SELECT path_text,content_hash FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{sha256:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{sha256:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{sha256:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{sha256:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{sha256:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{sha256:images/red.png}"
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "{sha256:misc/blob.bin}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "file_ref",
+        "db": "SELECT path_text,file_ref FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{inode:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{inode:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{inode:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{inode:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{inode:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{inode:images/red.png}"
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "{inode:misc/blob.bin}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "rescan is incremental",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "benignErrors": [
+          "rescan_no_changes",
+          "deep_analyze_unavailable"
+        ],
+        "expect": {
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "no duplicate rows",
+        "db": "SELECT COUNT(*), COUNT(DISTINCT path_hash) FROM files",
+        "expect": [
+          [
+            7,
+            7
+          ]
+        ]
+      }
     ]
-  }
+  },
+  {
+    "name": "scan-mac-adapters-store-what-the-swift-scan-stores",
+    "description": "On the Mac, the Rust engine the app hosts decodes, reads text and tags through the Apple adapters and stores what the Swift engine's scan stores: kinds, auto tags (Vision classifier, Year and camera family, document keywords, kind labels), EXIF camera, GPS and capture time, the CoreGraphics dHash of the working image (camera JPEG and HEIC), OCR text with its source and handwriting flag for a screenshot, a HEIC and an image-only PDF, document text for RTF and text files, zip member names, and no faces. No models are installed and the accurate text tier is not compiled (FILEID_OCR_WARMUP=0), so tags come from Vision and text from the fast tier.",
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "tree": [
+      {
+        "path": "photos/camera.jpg",
+        "copy": "shared/test-corpus/conformance-media/camera.jpg",
+        "mtime": 1789812000
+      },
+      {
+        "path": "photos/text.heic",
+        "copy": "shared/test-corpus/conformance-media/text.heic",
+        "mtime": 1789812060
+      },
+      {
+        "path": "screens/known-text.png",
+        "copy": "shared/test-corpus/ocr/known-text.png",
+        "mtime": 1789812120
+      },
+      {
+        "path": "docs/scanned.pdf",
+        "copy": "shared/test-corpus/conformance-media/scanned.pdf",
+        "mtime": 1789812180
+      },
+      {
+        "path": "docs/report.pdf",
+        "generate": "pdf",
+        "content": "Compost tomatoes garden report",
+        "mtime": 1789812240
+      },
+      {
+        "path": "docs/letter.rtf",
+        "content": "{\\rtf1\\ansi Dear neighbour,\\par the orchard ladder is back in the shed.}",
+        "mtime": 1789812300
+      },
+      {
+        "path": "docs/notes.txt",
+        "content": "Bicycle repair checklist: brake pads, chain oil, tyre pressure.\n",
+        "mtime": 1789812360
+      },
+      {
+        "path": "audio/tone.wav",
+        "generate": "wav",
+        "mtime": 1789812420
+      },
+      {
+        "path": "misc/bundle.zip",
+        "contentHex": "504b030414000000000066b96a5d7747df8e0a0000000a00000018000000696e736964652f686f6c696461792070686f746f2e6a706778787878787878787878504b030414000000000066b96a5d86a6103605000000050000000a000000726561646d652e74787468656c6c6f504b030414000000000066b96a5de7066b910100000001000000070000002e68696464656e68504b0102140314000000000066b96a5d7747df8e0a0000000a000000180000000000000000000000800100000000696e736964652f686f6c696461792070686f746f2e6a7067504b0102140314000000000066b96a5d86a6103605000000050000000a0000000000000000000000800140000000726561646d652e747874504b0102140314000000000066b96a5de7066b91010000000100000007000000000000000000000080016d0000002e68696464656e504b05060000000003000300b3000000930000000000",
+        "mtime": 1789812480
+      },
+      {
+        "path": "misc/blob.bin",
+        "content": "opaque",
+        "size": 4096,
+        "mtime": 1789812540
+      }
+    ],
+    "steps": [
+      {
+        "label": "scan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 240,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 10,
+          "processedFiles": 10,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "kinds",
+        "db": "SELECT path_text,kind,failed FROM files ORDER BY path_text",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "audio",
+              0
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "doc",
+              0
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "doc",
+              0
+            ],
+            [
+              "{path:docs/report.pdf}",
+              "pdf",
+              0
+            ],
+            [
+              "{path:docs/scanned.pdf}",
+              "pdf",
+              0
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "other",
+              0
+            ],
+            [
+              "{path:misc/bundle.zip}",
+              "other",
+              0
+            ],
+            [
+              "{path:photos/camera.jpg}",
+              "image",
+              0
+            ],
+            [
+              "{path:photos/text.heic}",
+              "image",
+              0
+            ],
+            [
+              "{path:screens/known-text.png}",
+              "image",
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "label": "tags",
+        "db": "SELECT f.path_text,t.tag FROM tags t JOIN files f ON f.id=t.file_id WHERE t.source='auto' ORDER BY f.path_text,t.tag",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "Audio"
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "Doc"
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "back"
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "dear neighbour"
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "orchard ladder"
+            ],
+            [
+              "{path:docs/letter.rtf}",
+              "shed"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "Doc"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "bicycle repair checklist brake pads chain oil tyre pressure"
+            ],
+            [
+              "{path:docs/report.pdf}",
+              "PDF"
+            ],
+            [
+              "{path:docs/report.pdf}",
+              "compost tomatoes garden report"
+            ],
+            [
+              "{path:docs/scanned.pdf}",
+              "PDF"
+            ],
+            [
+              "{path:misc/blob.bin}",
+              "Other"
+            ],
+            [
+              "{path:misc/bundle.zip}",
+              "Other"
+            ],
+            [
+              "{path:photos/camera.jpg}",
+              "Year_2024"
+            ],
+            [
+              "{path:photos/text.heic}",
+              "Year_2026"
+            ],
+            [
+              "{path:photos/text.heic}",
+              "document"
+            ],
+            [
+              "{path:screens/known-text.png}",
+              "Year_2026"
+            ],
+            [
+              "{path:screens/known-text.png}",
+              "document"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "images",
+        "db": "SELECT path_text,phash,camera_model,round(location_lat,6),round(location_lon,6),round(created_at,3),has_faces,has_text FROM files WHERE kind='image' ORDER BY path_text",
+        "expect": [
+          [
+            "{path:photos/camera.jpg}",
+            {"$tol": "hamming", "value": 1212696624},
+            "ILCE-7M3",
+            52.52,
+            -13.41,
+            1717230030.25,
+            0,
+            0
+          ],
+          [
+            "{path:photos/text.heic}",
+            {"$tol": "hamming", "value": 25362134204416},
+            null,
+            null,
+            null,
+            1789812060.0,
+            0,
+            1
+          ],
+          [
+            "{path:screens/known-text.png}",
+            {"$tol": "hamming", "value": 25362134204416},
+            null,
+            null,
+            null,
+            1789812120.0,
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "label": "text reads",
+        "db": "SELECT f.path_text,o.source,o.handwritten,o.text FROM ocr_text o JOIN files f ON f.id=o.file_id ORDER BY f.path_text",
+        "expect": [
+          [
+            "{path:docs/scanned.pdf}",
+            "ocr",
+            0,
+            "FilelD OCR 12345"
+          ],
+          [
+            "{path:photos/text.heic}",
+            "ocr",
+            0,
+            "FilelD OCR 12345"
+          ],
+          [
+            "{path:screens/known-text.png}",
+            "ocr",
+            0,
+            "FilelD OCR 12345"
+          ]
+        ]
+      },
+      {
+        "label": "document text",
+        "db": "SELECT f.path_text,d.text FROM doc_text d JOIN files f ON f.id=d.file_id ORDER BY f.path_text",
+        "expect": [
+          [
+            "{path:docs/letter.rtf}",
+            "Dear neighbour,\nthe orchard ladder is back in the shed."
+          ],
+          [
+            "{path:docs/notes.txt}",
+            "Bicycle repair checklist: brake pads, chain oil, tyre pressure."
+          ],
+          [
+            "{path:docs/report.pdf}",
+            "Compost tomatoes garden report"
+          ],
+          [
+            "{path:misc/bundle.zip}",
+            "inside/holiday photo.jpg\nreadme.txt"
+          ]
+        ]
+      },
+      {
+        "label": "no faces",
+        "db": "SELECT COUNT(*) FROM face_prints",
+        "expect": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "env": {
+      "FILEID_OCR_WARMUP": "0"
+    }
+  },
+  {"name": "cross-scan-swift-then-rust-same-image-hashes", "description": "On one Mac the swift engine and the rust engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: swift scans, rust rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "swift scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "swift hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "rust"}, {"label": "rust rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]},
+  {"name": "cross-scan-rust-then-swift-same-image-hashes", "description": "On one Mac the rust engine and the swift engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: rust scans, swift rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["rust"], "start": "rust", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "rust scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "rust hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "swift"}, {"label": "swift rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]}
 ]

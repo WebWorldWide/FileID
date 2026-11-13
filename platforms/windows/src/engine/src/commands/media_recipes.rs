@@ -33,6 +33,7 @@ pub(super) mod message {
     pub const COPY_CODECS: &str = "Lossless copy supports H.264 or HEVC video with AAC audio; these codecs would need re-encoding, which this recipe does not do.";
     pub const TRIM_PAST_END: &str = "The trim end is after the end of this video.";
     pub const HDR: &str = "HDR sources need a color-managed adapter; this recipe would re-encode them to SDR.";
+    #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
     pub const LIMITS: &str = "Unsupported media duration or dimensions.";
     pub fn already_container(format: &str) -> String {
         format!("This file is already {}; remuxing would only copy it.", format.to_uppercase())
@@ -133,10 +134,12 @@ pub(super) struct MediaProbe {
     pub(super) hdr: bool,
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 fn number(value: &Value) -> Option<f64> {
     value.as_f64().or_else(|| value.as_str()?.parse().ok()).filter(|value: &f64| value.is_finite())
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
     let document: Value = serde_json::from_slice(data).context("Invalid media metadata")?;
     let streams = document["streams"].as_array().context("Missing media streams")?;
@@ -160,7 +163,7 @@ pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
                 probe.rotation = ((((-counter_clockwise / 90.0).round() as i64) * 90).rem_euclid(360)) as u32;
                 (probe.width, probe.height) = if probe.rotation % 180 == 90 { (height as f64, width as f64) } else { (width as f64, height as f64) };
                 probe.video_codec = stream["codec_name"].as_str().map(str::to_owned);
-                probe.video_start = Some(number(&stream["start_time"]).context("Invalid video timestamps")?);
+                probe.video_start = Some(number(&stream["start_time"]).context("Invalid video timestamps.")?);
                 let sdr = ["unknown", "bt709", "bt470bg", "smpte170m"];
                 probe.hdr = !(sdr.contains(&stream["color_transfer"].as_str().unwrap_or("unknown"))
                     && sdr.contains(&stream["color_primaries"].as_str().unwrap_or("unknown"))
@@ -171,9 +174,9 @@ pub(super) fn parse_probe(data: &[u8]) -> Result<MediaProbe> {
                 probe.audio_count += 1;
                 if probe.audio_count > 1 { continue; }
                 probe.audio_codec = stream["codec_name"].as_str().map(str::to_owned);
-                probe.audio_start = Some(number(&stream["start_time"]).context("Invalid audio timestamps")?);
-                let length = number(&stream["duration"]).context("Invalid audio timestamps")?;
-                ensure!(length > 0.0, "Invalid audio timestamps");
+                probe.audio_start = Some(number(&stream["start_time"]).context("Invalid audio timestamps.")?);
+                let length = number(&stream["duration"]).context("Invalid audio timestamps.")?;
+                ensure!(length > 0.0, "Invalid audio timestamps.");
                 probe.audio_duration = Some(length);
             }
             _ => probe.other_count += 1,
@@ -336,6 +339,95 @@ pub(super) fn summary(recipe: &ToolRecipe) -> &'static str {
 pub(super) trait MediaRuntime: Send + Sync {
     fn probe(&self, path: &Path) -> Result<MediaProbe>;
     fn run(&self, args: &[String], stage: &File, cancelled: &AtomicBool) -> Result<()>;
+    /// Writes the recipe's output for `source` to the empty, just-created
+    /// `stage`. FFmpeg runtimes stream into `stage_file`.
+    fn export(&self, recipe: &ToolRecipe, source: &Path, probe: &MediaProbe, _stage: &Path, stage_file: &File, cancelled: &AtomicBool) -> Result<()> {
+        self.run(&ffmpeg_args(recipe, source, probe)?, stage_file, cancelled)
+    }
+    /// Probes a staged output, whose `.part` name carries no media type.
+    fn probe_stage(&self, path: &Path, _recipe: &ToolRecipe) -> Result<MediaProbe> {
+        self.probe(path)
+    }
+    fn summary(&self, recipe: &ToolRecipe) -> &'static str {
+        summary(recipe)
+    }
+    fn detail(&self, kind: &str) -> &'static str {
+        detail(kind)
+    }
+}
+
+pub(super) fn detail(kind: &str) -> &'static str {
+    match kind {
+        "trim" => "Keep a start-to-end interval. Keyframe mode copies H.264/HEVC video and AAC audio without re-encoding and may start at the preceding keyframe; exact mode re-encodes to H.264/AAC MP4 and refuses HDR.",
+        "remux" => "Move H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. Other codecs are refused rather than converted.",
+        "audio" => "Write the single audio track as AAC in an M4A file. Files without audio are refused.",
+        "proxy" => "Make a 640 or 960 pixel H.264/AAC preview copy linked to its source. Smaller sources are not enlarged. SDR only.",
+        _ => "Turn the displayed picture 90, 180 or 270 degrees clockwise by changing its orientation metadata. H.264/HEVC video and AAC audio are copied without re-encoding.",
+    }
+}
+
+/// AVFoundation in the Mac app's engine (FileIDAppleKit): the Swift engine's
+/// `CommonMediaTools`, with its summaries and capability details. Exports
+/// run in process, as in the Swift engine.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(super) struct AppleRuntime;
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl AppleRuntime {
+    fn convert(probe: crate::apple::media::Probe) -> MediaProbe {
+        MediaProbe {
+            duration: probe.duration, video_count: probe.video_count, audio_count: probe.audio_count, other_count: probe.other_count,
+            width: probe.width, height: probe.height, rotation: probe.rotation, video_codec: probe.video_codec,
+            audio_codec: probe.audio_codec, video_start: probe.video_start, audio_start: probe.audio_start,
+            audio_duration: probe.audio_duration, hdr: probe.hdr,
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl MediaRuntime for AppleRuntime {
+    fn probe(&self, path: &Path) -> Result<MediaProbe> {
+        crate::apple::media::probe(path, None, true).map(Self::convert)
+    }
+
+    fn run(&self, _: &[String], _: &File, _: &AtomicBool) -> Result<()> {
+        bail!("Unsupported media worker arguments")
+    }
+
+    fn export(&self, recipe: &ToolRecipe, source: &Path, _: &MediaProbe, stage: &Path, _: &File, cancelled: &AtomicBool) -> Result<()> {
+        // AVAssetExportSession creates its output; the placeholder is ours and empty.
+        ensure!(std::fs::metadata(stage)?.len() == 0, "The staged output is occupied.");
+        std::fs::remove_file(stage)?;
+        crate::apple::media::export_common(recipe, source, stage, cancelled)?;
+        File::open(stage)?.sync_all()?;
+        Ok(())
+    }
+
+    fn probe_stage(&self, path: &Path, recipe: &ToolRecipe) -> Result<MediaProbe> {
+        let mime = match recipe.format.as_str() {
+            "mov" => "video/quicktime",
+            "m4a" => "audio/mp4",
+            _ => "video/mp4",
+        };
+        crate::apple::media::probe(path, Some(mime), true).map(Self::convert)
+    }
+
+    fn summary(&self, recipe: &ToolRecipe) -> &'static str {
+        match (recipe.kind.as_str(), recipe.trim_mode.as_deref()) {
+            ("trim", Some("exact")) => "Re-encoded to H.264/AAC for a frame-accurate cut.",
+            ("trim", _) => "Streams copied without re-encoding.",
+            _ => summary(recipe),
+        }
+    }
+
+    fn detail(&self, kind: &str) -> &'static str {
+        match kind {
+            "trim" => "Keep a start-to-end interval. Keyframe mode copies H.264/HEVC video and AAC audio without re-encoding; exact mode re-encodes to H.264/AAC MP4 for a frame-accurate cut and refuses HDR. Outputs are reopened to check streams, duration and audio/video sync. Originals are preserved.",
+            "remux" => "Move H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. Other codecs are refused rather than converted. Camera/location metadata is stripped; timed metadata and timecode tracks are not carried over.",
+            "rotate" => "Turn the displayed picture 90, 180 or 270 degrees clockwise by changing its orientation matrix. H.264/HEVC video and AAC audio are copied without re-encoding.",
+            other => detail(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +437,7 @@ thread_local! {
 
 /// The reviewed launcher in `video_export`: the vetted LGPL/OpenH264 build
 /// with networking compiled out, run in the engine's lifetime job.
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 struct VettedRuntime;
 
 impl MediaRuntime for VettedRuntime {
@@ -362,6 +455,9 @@ pub(super) fn runtime() -> Option<Arc<dyn MediaRuntime>> {
     if let Some(runtime) = TEST_RUNTIME.with(|slot| slot.borrow().clone()) {
         return Some(runtime);
     }
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    return Some(Arc::new(AppleRuntime));
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     super::video_export::available().then(|| Arc::new(VettedRuntime) as Arc<dyn MediaRuntime>)
 }
 
@@ -369,20 +465,20 @@ pub(super) fn preview(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, source: &
     validate(recipe)?;
     source_container(source).context(message::INPUT)?;
     check_source(recipe, source, &runtime.probe(source)?)?;
-    Ok(summary(recipe))
+    Ok(runtime.summary(recipe))
 }
 
-pub(super) fn export(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, source: &Path, stage: &File, cancelled: &AtomicBool) -> Result<MediaProbe> {
+pub(super) fn export(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, source: &Path, stage: (&Path, &File), cancelled: &AtomicBool) -> Result<MediaProbe> {
     validate(recipe)?;
     let before = runtime.probe(source)?;
     check_source(recipe, source, &before)?;
-    runtime.run(&ffmpeg_args(recipe, source, &before)?, stage, cancelled)?;
-    stage.sync_all()?;
+    runtime.export(recipe, source, &before, stage.0, stage.1, cancelled)?;
+    stage.1.sync_all()?;
     Ok(before)
 }
 
 pub(super) fn verify_stage(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, before: &MediaProbe, stage: &Path) -> Result<()> {
-    verify(recipe, before, &runtime.probe(stage)?)
+    verify(recipe, before, &runtime.probe_stage(stage, recipe)?)
 }
 
 #[cfg(test)]
@@ -563,7 +659,7 @@ mod tests {
 
     fn run_recipe(runtime: &VettedRuntime, recipe: &ToolRecipe, source: &Path, stage: &Path) -> MediaProbe {
         let file = File::create(stage).unwrap();
-        let before = export(runtime, recipe, source, &file, &AtomicBool::new(false)).unwrap_or_else(|error| panic!("{recipe:?}: {error}"));
+        let before = export(runtime, recipe, source, (stage, &file), &AtomicBool::new(false)).unwrap_or_else(|error| panic!("{recipe:?}: {error}"));
         drop(file);
         verify_stage(runtime, recipe, &before, stage).unwrap_or_else(|error| panic!("{recipe:?}: {error}"));
         runtime.probe(stage).unwrap()
