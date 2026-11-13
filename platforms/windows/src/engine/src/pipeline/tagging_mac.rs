@@ -16,6 +16,7 @@ use super::{
     STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
 };
 use crate::apple::scan;
+use crate::pipeline::catch_up;
 use crate::pipeline::audio_meta::AudioTags;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -385,9 +386,14 @@ async fn image_row(
     let info = image.info.clone();
     let has_camera = info.camera_model.is_some();
     let vision_started = Instant::now();
+    // Deferred (the default): the row gets the classifier's tags now and the
+    // catch-up pass adds RAM++'s after the main pass, so the scan runs at the
+    // classifier's speed. `FILEID_RAMPLUS_INLINE=1` keeps RAM++ in the scan.
+    let ram_ready = RAM_PLUS_READY.load(Ordering::Acquire);
+    let deferred = ram_ready && catch_up::ram_plus_deferred(true);
     let analysis = blocking(move || {
         let pass = image.primary_pass().filter(|pass| pass.complete)?;
-        let ram = if RAM_PLUS_READY.load(Ordering::Acquire) { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
+        let ram = if ram_ready && !deferred { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
         Some((pass, ram, read, image.dhash()))
@@ -431,17 +437,89 @@ async fn image_row(
     row.ocr_text = read.text;
     row.clip_embedding = clip;
     row.clip_ms = clip_elapsed.as_secs_f64() * 1000.0;
-    let mut tags: Vec<(String, Option<f32>)> = if ram.is_empty() {
-        pass.classify_tags.into_iter().map(|tag| (tag, None)).collect()
-    } else {
-        ram.into_iter().map(|(tag, score)| (tag, Some(score))).collect()
-    };
-    tags.extend(extra_tags(created, info.camera_model.as_deref()).into_iter().map(|tag| (tag, None)));
-    let mut seen = std::collections::HashSet::new();
-    tags.retain(|(tag, _)| seen.insert(tag.to_lowercase()));
-    tags.truncate(16);
-    row.tags = tags;
+    let extras = extra_tags(created, info.camera_model.as_deref());
+    if deferred {
+        let confidences = pass.classify_confidences.iter().map(|(name, value)| (name.clone(), *value as f32));
+        row.catch_up = Some(catch_up::Marker {
+            stages: catch_up::TAGS_OWED | if read.ran { catch_up::TEXT_READ_AT_SCAN } else { 0 },
+            vision: catch_up::Context {
+                x: Some(extras.clone()),
+                ..catch_up::Context::from_classifier(&pass.classify_tags, confidences)
+            }
+            .encoded(),
+            face_count: pass.face_count as i64,
+        });
+    }
+    let classify = pass.classify_tags.into_iter().map(|tag| (tag, None)).collect();
+    row.tags = catch_up::assemble_tags(ram, classify, extras, 16, catch_up::unicode_fold);
     row.tags_evaluated = true;
+}
+
+/// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
+pub(super) struct CatchUp;
+
+impl CatchUp {
+    fn read(image: &scan::Image, classify: &[String], text_tags: &[String], has_camera: bool) -> catch_up::TextRead {
+        let read = image.text_read(classify, text_tags, has_camera).unwrap_or_default();
+        catch_up::TextRead { ran: read.ran, text: read.text, handwritten: read.handwritten }
+    }
+}
+
+impl catch_up::Analyzer for CatchUp {
+    fn ready(&self, phase: catch_up::Phase) -> bool {
+        match phase {
+            catch_up::Phase::Tags => RAM_PLUS_READY.load(Ordering::Acquire),
+            catch_up::Phase::CarefulText => scan::ocr_ready(),
+        }
+    }
+
+    fn parallelism(&self) -> usize {
+        4
+    }
+
+    fn analyse(&self, file: &catch_up::Pending, phase: catch_up::Phase, context: Option<&catch_up::Context>) -> catch_up::Outcome {
+        use catch_up::Outcome;
+        if file.kind == "pdf" {
+            return match scan::pdf_ocr(&file.path) {
+                Some(read) if read.opened => Outcome::Done(catch_up::Update {
+                    tags: None,
+                    text: Some(catch_up::TextUpdate { handwritten: read.handwritten && read.text.is_some(), text: read.text }),
+                    stages: file.stages & !catch_up::CAREFUL_TEXT_OWED,
+                    vision: file.vision.clone(),
+                }),
+                _ => Outcome::Failed,
+            };
+        }
+        let Some(context) = context else { return Outcome::Stale };
+        let Some(image) = scan::decode_image(&file.path, file.size_bytes.max(0) as u64) else {
+            return Outcome::Failed;
+        };
+        let has_camera = image.info.camera_model.is_some();
+        match phase {
+            catch_up::Phase::Tags => {
+                let pass = scan::PrimaryPass {
+                    complete: true,
+                    classify_tags: context.k.clone(),
+                    classify_confidences: context.confidences(),
+                    face_count: file.face_count.max(0) as usize,
+                    faces: Vec::new(),
+                };
+                let ram = image.ram_plus_tags(Some(&pass)).unwrap_or_default();
+                // A marker the Swift engine wrote carries no extras: work them
+                // out as the scan does, from the capture time or the file's birth.
+                let extras = context.x.clone().unwrap_or_else(|| {
+                    let born = std::fs::metadata(&file.path).ok().and_then(|meta| meta.created().ok()).and_then(crate::util::catalog_unix_seconds);
+                    extra_tags(image.info.captured_at.or(born), image.info.camera_model.as_deref())
+                });
+                Outcome::Done(catch_up::classifier_update(file, context, ram, extras, |text_tags| {
+                    Self::read(&image, &context.k, text_tags, has_camera)
+                }))
+            }
+            catch_up::Phase::CarefulText => Outcome::Done(catch_up::careful_update(file, context, |text_tags| {
+                Self::read(&image, &context.k, text_tags, has_camera)
+            })),
+        }
+    }
 }
 
 #[cfg(test)]

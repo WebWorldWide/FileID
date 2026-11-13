@@ -409,6 +409,11 @@ impl DbWriter {
             let mut failure_clear = tx
                 .prepare_cached(crate::pipeline::catch_up::CLEAR_FAILURE_SQL)
                 .context("preparing failure memory clear")?;
+            let mut owed_write = tx.prepare_cached(OWED_WRITE_SQL).context("preparing catch-up marker")?;
+            let mut owed_clear = tx
+                .prepare_cached("DELETE FROM scan_catchup WHERE file_id = ?1")
+                .context("preparing catch-up marker clear")?;
+            let mut owed_copy = tx.prepare_cached(OWED_COPY_SQL).context("preparing catch-up marker copy")?;
             for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -797,6 +802,15 @@ impl DbWriter {
                                 .with_context(|| format!("twin face copy for {}", redacted()))?;
                             crop_copies.push((face.id, new_id));
                         }
+                        // The copy owes what its twin owes (`Tagging.twinCopy`): the
+                        // catch-up pass then tags both. The twin's Year and camera
+                        // tags are its own, so the copy's are worked out again.
+                        let owes = owed_copy
+                            .execute(params![file_id, twin_id, f.size_bytes as i64, f.modified_unix, f.scanned_unix])
+                            .with_context(|| format!("twin catch-up marker for {}", redacted()))?;
+                        if owes == 0 {
+                            owed_clear.execute(params![file_id]).with_context(|| format!("twin catch-up clear for {}", redacted()))?;
+                        }
                         reused_twins += 1;
                     } else {
                         let has_results: bool = twin_children
@@ -825,6 +839,29 @@ impl DbWriter {
                             ])
                             .with_context(|| format!("failure memory for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     }
+                } else if let Some(owed) = f
+                    .catch_up
+                    .as_ref()
+                    .filter(|owed| owed.stages & crate::pipeline::catch_up::OWED_MASK != 0 && (f.tags_evaluated || f.ocr_stage_ran))
+                {
+                    // What the scan still owes this file (the Swift writer's step
+                    // 2b), in the same transaction as the tags it describes.
+                    owed_write
+                        .execute(params![
+                            file_id,
+                            owed.stages,
+                            f.size_bytes as i64,
+                            f.modified_unix,
+                            owed.vision,
+                            owed.face_count,
+                            f.scanned_unix,
+                        ])
+                        .with_context(|| format!("catch-up marker for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                } else if f.tags_evaluated || f.ocr_stage_ran {
+                    // A full analysis replaces any earlier marker.
+                    owed_clear
+                        .execute(params![file_id])
+                        .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 } else {
                     failure_clear
                         .execute(params![file_id])
@@ -1153,6 +1190,17 @@ impl TwinFace {
         Self { print_data: Vec::new(), embedding: None, model: None, processing: None, ..self }
     }
 }
+
+const OWED_WRITE_SQL: &str = "INSERT OR REPLACE INTO scan_catchup \
+     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)";
+
+// ?1 the copy, ?2 its twin, ?3/?4 the copy's size and date, ?5 now.
+const OWED_COPY_SQL: &str = "INSERT OR REPLACE INTO scan_catchup \
+     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+     SELECT ?1, stages, ?3, ?4, CASE WHEN json_valid(vision) THEN json_remove(vision, '$.x') ELSE vision END, \
+            face_count, 0, ?5 \
+     FROM scan_catchup WHERE file_id = ?2 AND (stages & 3) != 0";
 
 const CATALOG_REVISION_SQL: &str = "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) \
      VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at \
@@ -2837,6 +2885,76 @@ mod twin_reuse_tests {
         assert_eq!(revisions, 0, "the Mac face pipeline records the file revision itself");
         let tags: i64 = db.query_row("SELECT count(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
         assert_eq!(tags, 3);
+    }
+
+    fn owed(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, f64, Option<String>, i64)> {
+        conn.lock()
+            .query_row(
+                "SELECT c.stages, c.size_bytes, c.modified_at, c.vision, c.face_count FROM scan_catchup c \
+                 JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn work_owed_is_stored_with_the_row_and_replaced_by_a_full_analysis() {
+        use crate::pipeline::catch_up::{Marker, CAREFUL_TEXT_OWED, TAGS_OWED, TEXT_READ_AT_SCAN};
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut deferred = analyzed("/lib/a.jpg", [21u8; 32]);
+        deferred.catch_up = Some(Marker { stages: TAGS_OWED | TEXT_READ_AT_SCAN, vision: Some("{\"k\":[],\"c\":[],\"u\":false}".into()), face_count: 2 });
+        writer.flush(&mut vec![deferred.clone()], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert_eq!(
+            owed(&conn, "/lib/a.jpg"),
+            Some((TAGS_OWED | TEXT_READ_AT_SCAN, 1234, 1_700_000_000.0, Some("{\"k\":[],\"c\":[],\"u\":false}".to_string()), 2))
+        );
+
+        // A marker that owes nothing is not stored, and clears an earlier one.
+        let mut settled = deferred.clone();
+        settled.catch_up = Some(Marker { stages: TEXT_READ_AT_SCAN, vision: None, face_count: 0 });
+        writer.flush(&mut vec![settled], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg"), None);
+
+        // A row whose stages did not run (a timeout) leaves an earlier marker alone.
+        writer.flush(&mut vec![deferred], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let mut timed_out = image("/lib/a.jpg", [21u8; 32]);
+        timed_out.catch_up = Some(Marker { stages: CAREFUL_TEXT_OWED, vision: None, face_count: 0 });
+        writer.flush(&mut vec![timed_out], &mut 0, &mut 0, &mut 0, 3).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg").map(|m| m.0), Some(TAGS_OWED | TEXT_READ_AT_SCAN));
+
+        // An inline analysis (no marker) replaces it.
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", [21u8; 32])], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg"), None);
+    }
+
+    #[test]
+    fn a_copy_owes_what_its_twin_owes_without_the_twins_own_year_and_camera_tags() {
+        use crate::pipeline::catch_up::{Context, Marker, TAGS_OWED};
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [22u8; 32];
+        let mut twin = analyzed("/lib/a.jpg", hash);
+        let context = Context { k: vec!["park".into()], f: Some(true), x: Some(vec!["Year_2020".into()]), ..Context::default() };
+        twin.catch_up = Some(Marker { stages: TAGS_OWED, vision: context.encoded(), face_count: 1 });
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.size_bytes = 1234;
+        copy.modified_unix = 1_711_111_111.0;
+        writer.flush(&mut vec![twin, copy], &mut 0, &mut 0, &mut 0, 0).unwrap();
+
+        let (stages, size, modified, vision, faces) = owed(&conn, "/lib/b.jpg").expect("the copy owes the tags too");
+        assert_eq!((stages, size, modified, faces), (TAGS_OWED, 1234, 1_711_111_111.0, 1));
+        let copied = Context::decode(vision.as_deref()).unwrap();
+        assert_eq!(copied, Context { x: None, ..context });
+
+        // Once the twin is settled, a later copy takes its final tags and owes nothing.
+        conn.lock().execute("DELETE FROM scan_catchup WHERE file_id = (SELECT id FROM files WHERE path_text = '/lib/a.jpg')", []).unwrap();
+        let mut again = reused("/lib/b.jpg", hash, "Year_2021");
+        again.modified_unix = 1_711_111_111.0;
+        writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(owed(&conn, "/lib/b.jpg"), None);
     }
 
     #[test]

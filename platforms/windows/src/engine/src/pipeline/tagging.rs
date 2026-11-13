@@ -2741,6 +2741,7 @@ async fn process_file_predecoded(
     perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
     let mut ram_plus_ran = false;
+    let mut defer_ram = false;
     if let Some((rgb, w, h)) = image_source {
         tagged.image_width = w;
         tagged.image_height = h;
@@ -2956,7 +2957,12 @@ async fn process_file_predecoded(
                 // computed regardless of which tagger is active. Shares the
                 // `vision_sem` GPU budget; device-removed → cancel the scan.
                 ram_plus_ran = false;
-                if !coord.is_gpu_dead() {
+                // Deferred mode leaves RAM++ (and the text read its tags decide)
+                // to the catch-up pass: the row gets the scene labels now.
+                defer_ram = matches!(file.kind, FileKind::Image)
+                    && crate::pipeline::catch_up::ram_plus_deferred(false)
+                    && (models.ram_plus.is_some() || models.ram_plus_batch.is_some());
+                if !coord.is_gpu_dead() && !defer_ram {
                     // Tags come from EITHER the batch coordinator (one batched
                     // Session — HW-4 throughput path; no vision_sem because the
                     // coordinator owns the Session and serializes batches itself,
@@ -3007,15 +3013,7 @@ async fn process_file_predecoded(
                                 let redacted = crate::platform::redact_path_for_log(&file.path);
                                 // Faces ran and saw nobody: generic people words are
                                 // the detector's say, as on the Mac (TagAgreement).
-                                let tags: Vec<(String, f32)> = if tagged.faces_evaluated && tagged.faces.is_empty() {
-                                    tags.into_iter()
-                                        .filter(|(label, _)| {
-                                            !crate::models::ram_plus::PEOPLE_WORDS.contains(&label.to_ascii_lowercase().as_str())
-                                        })
-                                        .collect()
-                                } else {
-                                    tags
-                                };
+                                let tags = without_people_words(tags, tagged.faces_evaluated && tagged.faces.is_empty());
                                 let ram_emit_count = tags.len();
                                 let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
                                 for (label, score) in tags {
@@ -3125,7 +3123,7 @@ async fn process_file_predecoded(
                 // useful, so skip. Documents/screenshots still run OCR.
                 // Also short-circuit when the GPU is already known dead, to
                 // avoid any recursive device-init after a TDR.
-                if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
+                if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && !defer_ram && should_run_ocr(&file.path, &tagged, file.size_bytes) {
                     // The OCR stage ran this session regardless of whether text
                     // came back — lets the dbwriter clear stale ocr_text/ocr_fts
                     // on a re-process that now yields nothing (#11).
@@ -3150,17 +3148,22 @@ async fn process_file_predecoded(
     // scene tags didn't clear the threshold. (Aspect and the generic "Has
     // Faces/Text/Location" capability tags were removed — see
     // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
-    push_enriched_extras(&mut tagged);
+    let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
+    // What the scan stored in RAM++'s place, for the catch-up pass.
+    let stored_in_place: Vec<String> = tagged.tags.iter().map(|(tag, _)| tag.clone()).collect();
     // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
     // the classifier's confidence-ordered output; cap at 16 to avoid
     // exploding the tags table on noisy classifier outputs. Case-insensitive
     // matters because the classifier may emit "Dog" and a hypothetical
-    // synonym path may push "dog"; we want the first to win.
-    {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        tagged.tags.retain(|(t, _)| seen.insert(t.to_ascii_lowercase()));
-        tagged.tags.truncate(stored_tag_cap());
-    }
+    // synonym path may push "dog"; we want the first to win. The catch-up
+    // pass builds its list with the same function.
+    tagged.tags = crate::pipeline::catch_up::assemble_tags(
+        Vec::new(),
+        std::mem::take(&mut tagged.tags),
+        extras.clone(),
+        stored_tag_cap(),
+        crate::pipeline::catch_up::ascii_fold,
+    );
 
     tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     record_stage(&STATS_TOTAL_US, started);
@@ -3213,7 +3216,132 @@ async fn process_file_predecoded(
         && !tagged.failed
         && !file.online_only
         && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
+    if defer_ram && !tagged.failed && !coord.is_gpu_dead() {
+        // RAM++ will supply the tags, so the set stored now (scene labels, or
+        // only the Year and camera tags) stands in for it and is authoritative.
+        tagged.tags_evaluated = true;
+        tagged.catch_up = Some(crate::pipeline::catch_up::Marker {
+            stages: crate::pipeline::catch_up::TAGS_OWED,
+            vision: crate::pipeline::catch_up::Context {
+                k: stored_in_place,
+                f: Some(tagged.faces_evaluated),
+                m: Some(tagged.camera_model.is_some()),
+                x: Some(extras),
+                ..Default::default()
+            }
+            .encoded(),
+            face_count: tagged.faces.len() as i64,
+        });
+    }
     tagged
+}
+
+/// Faces ran and saw nobody: generic people words are the detector's say, as
+/// on the Mac (TagAgreement).
+fn without_people_words(tags: Vec<(String, f32)>, no_face_found: bool) -> Vec<(String, f32)> {
+    if !no_face_found {
+        return tags;
+    }
+    tags.into_iter()
+        .filter(|(label, _)| !crate::models::ram_plus::PEOPLE_WORDS.contains(&label.to_ascii_lowercase().as_str()))
+        .collect()
+}
+
+/// The scan's decoder and RAM++ behind the catch-up pass (portable pipeline).
+struct PortableCatchUp {
+    models: Arc<ModelStack>,
+    runtime: tokio::runtime::Handle,
+    coord: ScanCoordinator,
+}
+
+impl PortableCatchUp {
+    fn ram_plus(&self, rgb: &[u8], w: u32, h: u32, preferred: usize) -> Option<anyhow::Result<Vec<(String, f32)>>> {
+        use crate::models::ram_plus::RamPlusTagger;
+        if let Some(batch) = &self.models.ram_plus_batch {
+            let side = crate::models::ram_plus::INPUT_SIZE;
+            Some(RamPlusTagger::resize_to_input(rgb, w, h).and_then(|input| self.runtime.block_on(batch.tag(input, side, side))))
+        } else {
+            let pool = self.models.ram_plus.as_ref()?;
+            Some(RamPlusTagger::preprocess_tensor(rgb, w, h).and_then(|chw| crate::models::checkout(pool, preferred).tag_prepared(chw)))
+        }
+    }
+}
+
+impl crate::pipeline::catch_up::Analyzer for PortableCatchUp {
+    fn ready(&self, phase: crate::pipeline::catch_up::Phase) -> bool {
+        phase == crate::pipeline::catch_up::Phase::Tags
+            && (self.models.ram_plus.is_some() || self.models.ram_plus_batch.is_some())
+            && !self.coord.is_gpu_dead()
+    }
+
+    fn parallelism(&self) -> usize {
+        // One file per pooled session; a batched session wants several at once.
+        if self.models.ram_plus_batch.is_some() { 8 } else { self.models.pool_size.max(1) }
+    }
+
+    fn analyse(
+        &self,
+        file: &crate::pipeline::catch_up::Pending,
+        phase: crate::pipeline::catch_up::Phase,
+        context: Option<&crate::pipeline::catch_up::Context>,
+    ) -> crate::pipeline::catch_up::Outcome {
+        use crate::pipeline::catch_up::{Outcome, Phase};
+        let (Some(context), Phase::Tags) = (context, phase) else {
+            return Outcome::Stale;
+        };
+        if self.coord.is_gpu_dead() {
+            return Outcome::Leave;
+        }
+        let Ok((rgb, w, h)) = decode_image_sync(&file.path, None) else {
+            return Outcome::Failed;
+        };
+        let ram = match self.ram_plus(&rgb, w, h, file.file_id as usize) {
+            Some(Ok(tags)) => tags,
+            Some(Err(err)) if error_has_device_removed_marker(&err) => {
+                if self.coord.mark_gpu_dead() {
+                    tracing::error!(?err, "[GPU-TDR] RAM++ device-removed during catch-up");
+                }
+                return Outcome::Leave;
+            }
+            Some(Err(err)) => {
+                tracing::warn!(?err, "RAM++ tag failed during catch-up");
+                return Outcome::Failed;
+            }
+            None => return Outcome::Leave,
+        };
+        let ram = without_people_words(ram, context.f == Some(true) && file.face_count == 0);
+        let has_camera = context.m.unwrap_or(file.camera_model.is_some());
+        let extras = context.x.clone().unwrap_or_else(|| {
+            enriched_extras(file.created_at, file.modified_at.unwrap_or(0.0), file.camera_model.as_deref())
+        });
+        Outcome::Done(crate::pipeline::catch_up::portable_update(
+            file,
+            context,
+            ram,
+            extras,
+            stored_tag_cap(),
+            |names| ocr_gate(&file.path, names, w, h, has_camera),
+            || match shell::ocr::recognize(&rgb, w, h) {
+                Ok(text) => Some(text),
+                Err(err) => {
+                    tracing::warn!(?err, "OCR failed");
+                    None
+                }
+            },
+        ))
+    }
+}
+
+/// The analyzer the catch-up pass runs after a scan with these models.
+pub(crate) fn catch_up_analyzer(
+    models: Arc<ModelStack>,
+    coord: ScanCoordinator,
+) -> Box<dyn crate::pipeline::catch_up::Analyzer + Send> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if models.apple_scan {
+        return Box::new(mac::CatchUp);
+    }
+    Box::new(PortableCatchUp { models, runtime: tokio::runtime::Handle::current(), coord })
 }
 
 /// Persisted tags per file (16 on both engines); `FILEID_TAG_CAP` widens it
@@ -3232,16 +3360,21 @@ fn stored_tag_cap() -> usize {
 /// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
 /// is wasted CPU; skip in that case but keep running for documents/screenshots.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
+    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
+    ocr_gate(path, &tag_names, tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+}
+
+/// [`should_run_ocr`] over the facts it reads, for the catch-up pass.
+fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32, has_camera: bool) -> bool {
     // Paper, whiteboard and handwriting tags read even on camera photos; the
     // OCR has no handwriting tier, so Deep Analyze's transcription picks up what
     // it mangles (text_reading::needs_transcription).
-    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
-    if super::text_reading::is_text_bearing(&tag_names)
-        || super::text_reading::is_document_shape(tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+    if super::text_reading::is_text_bearing(tag_names)
+        || super::text_reading::is_document_shape(width, height, has_camera)
     {
         return true;
     }
-    if tagged.camera_model.is_some() {
+    if has_camera {
         return false;
     }
     // Filenames that strongly suggest documents/screenshots.
@@ -3282,6 +3415,13 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
 ///   emitted — they read as noise; descriptive content comes from CLIP scene
 ///   tags (and, when installed, the optional Deep-Analyze VLM pass).
 fn push_enriched_extras(tagged: &mut TaggedFile) {
+    let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
+    tagged.tags.extend(extras.into_iter().map(|tag| (tag, None)));
+}
+
+/// The Year and camera-family tags for a file with these dates and camera.
+fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: Option<&str>) -> Vec<String> {
+    let mut extras = Vec::new();
     // Order matters: the Library card's `TopTwoTags` slice takes the first
     // two tags it sees. Classifier output (when installed) appears first
     // in the vec; enriched-extras fill the remainder. We deliberately
@@ -3312,16 +3452,13 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // local `gregorianCalendar`; Windows mirrors that here (creation-time
     // wins over modified-at — the latter only fills in when the platform
     // reported no birth time).
-    let year_source = tagged
-        .created_unix
-        .filter(|&c| c > 0.0)
-        .unwrap_or(tagged.modified_unix);
+    let year_source = created_unix.filter(|&c| c > 0.0).unwrap_or(modified_unix);
     if year_source > 0.0
         && let Some(year) = local_unix_seconds_to_year(year_source)
             && year > 1990 && year < 2100 {
-                tagged.tags.push((format!("Year_{year}"), None));
+                extras.push(format!("Year_{year}"));
             }
-    if let Some(cm) = tagged.camera_model.as_deref() {
+    if let Some(cm) = camera_model {
         let lower = cm.to_ascii_lowercase();
         let family = if lower.contains("iphone") { Some("iPhone") }
             else if lower.contains("ipad") { Some("iPad") }
@@ -3335,9 +3472,10 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
             else if lower.contains("pixel") { Some("Pixel") }
             else { None };
         if let Some(f) = family {
-            tagged.tags.push((f.to_string(), None));
+            extras.push(f.to_string());
         }
     }
+    extras
 }
 
 /// Unix-seconds → calendar year in the machine's **local** timezone. macOS

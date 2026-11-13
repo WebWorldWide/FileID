@@ -796,6 +796,48 @@ impl ScanSession {
             tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
         }
 
+        // What the main pass left owed (RAM++ tags in deferred mode, careful
+        // text reads), and what an earlier cancelled or interrupted scan of
+        // this folder still owes. A cancel here ends the scan as cancelled; the
+        // rest stays owed.
+        let mut post_scan_announced = false;
+        if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            let (owed_tags, owed_careful) = crate::pipeline::catch_up::owed(&self.db_conn.lock(), Some(root));
+            if owed_tags + owed_careful > 0 {
+                on_phase(SessionPhase::PostScan);
+                emit_phase(SessionPhase::PostScan);
+                post_scan_announced = true;
+                match self.models.get().await {
+                    Some(stack) => {
+                        let analyzer = crate::pipeline::tagging::catch_up_analyzer(stack, self.coordinator.clone());
+                        let report = CatchUpProgress {
+                            sink: sink.clone(),
+                            session_id: session_id.clone(),
+                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
+                            processed: total,
+                            failed,
+                            state: Mutex::new((0, 0, Instant::now())),
+                        };
+                        let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::pipeline::catch_up::run(
+                                &conn,
+                                Some(&root),
+                                analyzer.as_ref(),
+                                &|| coordinator.is_cancelled(),
+                                &|| coordinator.is_paused(),
+                                &|event| report.report(event),
+                            )
+                        });
+                        if let Err(error) = pass.await {
+                            tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
+                        }
+                    }
+                    None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
+                }
+            }
+        }
+
         let elapsed = started.elapsed().as_secs_f64();
 
         // Stamp the scan_sessions row with completed_at + status. gpu-dead
@@ -871,8 +913,10 @@ impl ScanSession {
             ))))
             .await;
         } else {
-            on_phase(SessionPhase::PostScan);
-            emit_phase(SessionPhase::PostScan);
+            if !post_scan_announced {
+                on_phase(SessionPhase::PostScan);
+                emit_phase(SessionPhase::PostScan);
+            }
             on_phase(SessionPhase::Completed);
             // Terminal Completed phase via the guaranteed path so the
             // app's terminal state can never be lost under backpressure.
@@ -898,6 +942,51 @@ impl ScanSession {
             capture_dates_current,
         })
     }
+}
+
+/// Progress of the catch-up pass, reported in the post-scan phase the way the
+/// Swift engine does: `total` grows above `discovered` by the pass's size and
+/// `processed` advances by what it has done, so the counters only ever grow.
+struct CatchUpProgress {
+    sink: Sink,
+    session_id: String,
+    discovered: u64,
+    processed: u64,
+    failed: u64,
+    /// (owed, done, started)
+    state: Mutex<(u64, u64, Instant)>,
+}
+
+impl CatchUpProgress {
+    fn report(&self, event: crate::pipeline::catch_up::Progress) {
+        let (owed, done, started) = {
+            let mut state = self.state.lock();
+            match event {
+                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.1),
+                crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
+            }
+            *state
+        };
+        let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
+        let seconds = started.elapsed().as_secs_f64();
+        let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
+        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
+            session_id: self.session_id.clone(),
+            phase: ScanPhase::PostScan,
+            total,
+            discovered: self.discovered,
+            processed,
+            failed: self.failed,
+            files_per_second: rate,
+            eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
+            resident_mb: crate::platform::process_memory_mb(),
+            available_mb: 0,
+        }))));
+    }
+}
+
+fn catch_up_counters(discovered: u64, processed: u64, owed: u64, done: u64) -> (u64, u64) {
+    (discovered.max(processed) + owed, processed + done.min(owed))
 }
 
 /// Throttle state for progress emission. The DBWriter callback fires per
@@ -1587,6 +1676,15 @@ mod tests {
         let fresh = dir.join("fresh");
         assert!(!legacy_hash_rows_possible(&crate::db::test_support::memory_db(), Some(&fresh)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catch_up_progress_only_grows_past_the_scans_own_counts() {
+        assert_eq!(catch_up_counters(100, 100, 40, 0), (140, 100));
+        assert_eq!(catch_up_counters(100, 100, 40, 25), (140, 125));
+        assert_eq!(catch_up_counters(100, 100, 40, 99), (140, 140));
+        // A rescan that found nothing new but still owes an earlier scan's files.
+        assert_eq!(catch_up_counters(0, 0, 12, 4), (12, 4));
     }
 
     #[test]
