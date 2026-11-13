@@ -160,53 +160,6 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
     }
 }
 
-fn now_unix() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()
-}
-
-fn base_row(file: &DiscoveredFile) -> TaggedFile {
-    TaggedFile {
-        path: file.path.clone(),
-        kind: file.kind,
-        size_bytes: file.size_bytes,
-        modified_unix: file.modified_unix,
-        created_unix: file.created_unix,
-        captured_from_exif: false,
-        scanned_unix: now_unix(),
-        has_faces: false,
-        faces: Vec::new(),
-        vision_faces: None,
-        has_text: false,
-        ocr_text: None,
-        ocr_handwritten: false,
-        phash: None,
-        aesthetic: None,
-        image_width: 0,
-        image_height: 0,
-        clip_embedding: None,
-        camera_model: None,
-        location_lat: None,
-        location_lon: None,
-        vision_ms: 0.0,
-        clip_ms: 0.0,
-        total_ms: 0.0,
-        failed: false,
-        error_message: None,
-        file_ref: file.file_ref,
-        content_hash: None,
-        legacy_hashes: None,
-        text_embedding: None,
-        doc_text: None,
-        tags: Vec::new(),
-        faces_evaluated: false,
-        ocr_stage_ran: false,
-        doc_stage_ran: false,
-        text_stage_done: false,
-        tags_evaluated: false,
-        reuse_twin: false,
-    }
-}
-
 /// `Tagging.lightweightAesthetic` over the working image's size.
 fn aesthetic(width: u32, height: u32, size_bytes: u64) -> f64 {
     let megapixels = f64::from(width) * f64::from(height) / 1_000_000.0;
@@ -269,7 +222,7 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     let started = Instant::now();
     let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, mac, .. } = predecoded;
     let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
-    let mut row = base_row(&file);
+    let mut row = TaggedFile::bare(&file);
     // A cloud placeholder is catalogued from its metadata only (reading it
     // would download it), as the portable pipeline does.
     if file.online_only {

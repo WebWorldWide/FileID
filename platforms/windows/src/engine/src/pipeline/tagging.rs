@@ -283,6 +283,68 @@ pub struct TaggedFile {
     /// results. Stage flags stay false so nothing of a prior scan at this path
     /// is deleted before the copy.
     pub reuse_twin: bool,
+    /// The file is a known row that moved (same file id, size and date, old
+    /// path gone): nothing was read or analysed. The writer re-binds the row
+    /// to this path, or writes nothing when it no longer can.
+    pub heal_only: bool,
+    /// `failed` came from the machine's state (cancelled, admission refused,
+    /// graphics device lost), not from the file; it is not counted toward the
+    /// "stop retrying this file" memory.
+    pub failure_is_transient: bool,
+    /// Work this scan defers to the catch-up pass, stored with the row.
+    pub catch_up: Option<crate::pipeline::catch_up::Marker>,
+}
+
+impl TaggedFile {
+    /// The row for `file` before any stage has run.
+    pub(crate) fn bare(file: &DiscoveredFile) -> Self {
+        Self {
+            path: file.path.clone(),
+            kind: file.kind,
+            size_bytes: file.size_bytes,
+            modified_unix: file.modified_unix,
+            created_unix: file.created_unix,
+            captured_from_exif: false,
+            scanned_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+            has_faces: false,
+            faces: Vec::new(),
+            vision_faces: None,
+            has_text: false,
+            ocr_text: None,
+            ocr_handwritten: false,
+            phash: None,
+            aesthetic: None,
+            image_width: 0,
+            image_height: 0,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+            file_ref: file.file_ref,
+            content_hash: None,
+            legacy_hashes: None,
+            text_embedding: None,
+            doc_text: None,
+            tags: Vec::new(),
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
+            text_stage_done: false,
+            tags_evaluated: false,
+            reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
+        }
+    }
 }
 
 /// A face from Apple Vision's primary pass, stored the way the Swift engine's
@@ -1260,11 +1322,15 @@ impl Tagger {
                     if coord.check().await.is_err() {
                         break;
                     }
-                    let path_for_timeout = predecoded.file.path.clone();
-                    let timeout_kind = predecoded.file.kind;
-                    let timeout_size = predecoded.file.size_bytes;
-                    let timeout_modified = predecoded.file.modified_unix;
-                    let timeout_created = predecoded.file.created_unix;
+                    if predecoded.file.moved_from_known_row {
+                        let moved = TaggedFile { heal_only: true, ..TaggedFile::bare(&predecoded.file) };
+                        if tx.send(moved).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    let file_for_failure = predecoded.file.clone();
+                    let path_for_timeout = &file_for_failure.path;
                     let twin_hash = predecoded
                         .content_hash
                         .filter(|_| !matches!(predecoded.twin, TwinClaim::None));
@@ -1302,14 +1368,14 @@ impl Tagger {
                             Ok(Ok(t)) => Ok(t),
                             Ok(Err(_panic)) => {
                                 tracing::error!(
-                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file processing panicked; marking failed and continuing"
                                 );
                                 Err(("the file could not be analyzed (internal error)".to_string(), 0.0))
                             }
                             Err(_elapsed) => {
                                 tracing::warn!(
-                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file timeout after 60s; marking failed and continuing"
                                 );
                                 Err(("per-file timeout after 60s".to_string(), 60000.0))
@@ -1320,47 +1386,11 @@ impl Tagger {
                         Ok(t) => t,
                         Err((message, total_ms)) => {
                             TaggedFile {
-                                path: path_for_timeout,
-                                kind: timeout_kind,
-                                size_bytes: timeout_size,
-                                modified_unix: timeout_modified,
-                                created_unix: timeout_created,
-                                captured_from_exif: false,
-                                scanned_unix: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs_f64(),
-                                has_faces: false,
-                                faces: Vec::new(),
-                                vision_faces: None,
-                                has_text: false,
-                                ocr_text: None,
-                                ocr_handwritten: false,
-                                phash: None,
-                                aesthetic: None,
-                                image_width: 0,
-                                image_height: 0,
-                                clip_embedding: None,
-                                camera_model: None,
-                                location_lat: None,
-                                location_lon: None,
-                                vision_ms: 0.0,
-                                clip_ms: 0.0,
                                 total_ms,
                                 failed: true,
                                 error_message: Some(message),
                                 file_ref: None,
-                                content_hash: None,
-                                legacy_hashes: None,
-                                text_embedding: None,
-                                doc_text: None,
-                                tags: Vec::new(),
-                                faces_evaluated: false,
-                                ocr_stage_ran: false,
-                                doc_stage_ran: false,
-                                text_stage_done: false,
-                                tags_evaluated: false,
-                                reuse_twin: false,
+                                ..TaggedFile::bare(&file_for_failure)
                             }
                         }
                     };
@@ -1423,6 +1453,11 @@ type MacFrame = mac::Frame;
 enum MacFrame {}
 
 impl PreDecoded {
+    /// A file passed to the writer without being opened.
+    fn unread(file: DiscoveredFile) -> Self {
+        Self { decoded: None, ..Self::failed(file, "") }
+    }
+
     fn failed(file: DiscoveredFile, message: &str) -> Self {
         Self {
             file,
@@ -1619,6 +1654,9 @@ fn predecode_one(
         file.path.file_name().is_none_or(|name| name != "fileid-test-decoder-panic"),
         "injected decoder panic"
     );
+    if file.moved_from_known_row {
+        return Some(PreDecoded::unread(file));
+    }
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if mac::enabled() {
         let _ = (coord, budget);
@@ -2324,51 +2362,7 @@ async fn process_file_predecoded(
         predecoded;
     let file = &file;
     let started = Instant::now();
-    let scanned_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
-    let mut tagged = TaggedFile {
-        path: file.path.clone(),
-        kind: file.kind,
-        size_bytes: file.size_bytes,
-        modified_unix: file.modified_unix,
-        created_unix: file.created_unix,
-        captured_from_exif: false,
-        scanned_unix,
-        has_faces: false,
-        faces: Vec::new(),
-        vision_faces: None,
-        has_text: false,
-        ocr_text: None,
-        ocr_handwritten: false,
-        phash: None,
-        aesthetic: None,
-        image_width: 0,
-        image_height: 0,
-        clip_embedding: None,
-        camera_model: None,
-        location_lat: None,
-        location_lon: None,
-        vision_ms: 0.0,
-        clip_ms: 0.0,
-        total_ms: 0.0,
-        failed: false,
-        error_message: None,
-        file_ref: file.file_ref,
-        content_hash: None,
-        legacy_hashes: None,
-        text_embedding: None,
-        doc_text: None,
-        tags: Vec::new(),
-        faces_evaluated: false,
-        ocr_stage_ran: false,
-        doc_stage_ran: false,
-        text_stage_done: false,
-        tags_evaluated: false,
-        reuse_twin: false,
-    };
+    let mut tagged = TaggedFile::bare(file);
 
     // Content identity for rename/move heal. The decoder thread already
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
@@ -3662,6 +3656,7 @@ mod tests {
                 modified_unix: 1.0,
                 created_unix: None,
                 online_only: false,
+                moved_from_known_row: false,
                 file_ref: None,
             })
             .await
@@ -3687,6 +3682,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_moved_file_reaches_the_writer_unread() {
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        tx.send(DiscoveredFile {
+            path: PathBuf::from("/fileid-missing/moved.jpg"),
+            kind: FileKind::Image,
+            size_bytes: 1024,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: true,
+            file_ref: Some(7),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let got = tokio::time::timeout(Duration::from_secs(2), out.recv()).await.unwrap().unwrap();
+        assert!(got.heal_only);
+        assert!(!got.failed, "the missing file was never opened");
+        assert_eq!(got.file_ref, Some(7));
+        assert!(got.content_hash.is_none() && !got.tags_evaluated && !got.faces_evaluated);
+        drop(out);
+        decoder_join.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn tagger_passes_discovered_through_to_tagged() {
         let coord = ScanCoordinator::new();
         let (tx, rx) = mpsc::channel(8);
@@ -3701,6 +3723,7 @@ mod tests {
             modified_unix: 1.0,
             created_unix: None,
             online_only: false,
+            moved_from_known_row: false,
             file_ref: None,
         })
         .await
@@ -3875,6 +3898,7 @@ mod tests {
                     modified_unix: 0.0,
                     created_unix: None,
                     online_only: true,
+                    moved_from_known_row: false,
                     file_ref: None,
                 })
                 .unwrap();
@@ -3907,6 +3931,7 @@ mod tests {
                     modified_unix: 0.0,
                     created_unix: None,
                     online_only: false,
+                    moved_from_known_row: false,
                     file_ref: None,
                 })
                 .unwrap();
@@ -3939,6 +3964,7 @@ mod tests {
                 modified_unix: 0.0,
                 created_unix: None,
                 online_only: false,
+                moved_from_known_row: false,
                 file_ref: None,
             },
             &ScanCoordinator::new(),
@@ -3972,6 +3998,7 @@ mod tests {
                         modified_unix: 0.0,
                         created_unix: None,
                         online_only: false,
+                        moved_from_known_row: false,
                         file_ref: None,
                     })
                     .unwrap();
@@ -4387,6 +4414,9 @@ mod tests {
             text_stage_done: false,
             tags_evaluated: true,
             reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
         }
     }
 

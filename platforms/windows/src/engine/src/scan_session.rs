@@ -376,7 +376,13 @@ impl ScanSession {
             skip_paths,
             Arc::new(excl_norm),
         )
-        .with_known_placeholders(known_placeholders);
+        .with_known_placeholders(known_placeholders)
+        // A forced rescan analyses everything again, moved files included.
+        .with_move_index(if self.rescan {
+            None
+        } else {
+            crate::pipeline::discovery::MoveIndex::load(&self.db_conn)
+        });
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_heavy = handle.heavy_count.clone();

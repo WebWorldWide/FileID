@@ -268,6 +268,96 @@ pub struct DiscoveredFile {
     /// open failed (permission, race, ...) — the heal then falls through to
     /// content_hash. Always `None` on non-Windows for now.
     pub file_ref: Option<u64>,
+    /// The catalog already holds this exact file (same file id, size and
+    /// date) at a path that no longer exists: it was moved or renamed, so its
+    /// row is re-bound and nothing is read, decoded or analysed again.
+    pub moved_from_known_row: bool,
+}
+
+/// Successfully scanned rows by volume-local file id, for spotting a file
+/// that only moved (the Swift engine's `Discovery.isMoveOfKnownRow`). Holds
+/// 32 bytes per row; paths are read from the catalog only for a candidate.
+pub(crate) struct MoveIndex {
+    /// `(file_ref, size, modified, row id)`, sorted by `file_ref`.
+    rows: Vec<(u64, i64, f64, i64)>,
+    conn: Arc<Mutex<rusqlite::Connection>>,
+}
+
+impl MoveIndex {
+    const CANDIDATE_LIMIT: usize = 8;
+
+    /// `None` when the catalog has no row a moved file could match.
+    pub(crate) fn load(conn: &Arc<Mutex<rusqlite::Connection>>) -> Option<Arc<Self>> {
+        let mut rows: Vec<(u64, i64, f64, i64)> = {
+            let db = conn.lock();
+            let mut stmt = db
+                .prepare(
+                    "SELECT file_ref, size_bytes, modified_at, id FROM files \
+                     WHERE failed = 0 AND file_ref IS NOT NULL AND modified_at IS NOT NULL",
+                )
+                .ok()?;
+            stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .ok()?
+                .flatten()
+                .collect()
+        };
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort_unstable_by_key(|row| row.0);
+        rows.shrink_to_fit();
+        Some(Arc::new(Self { rows, conn: conn.clone() }))
+    }
+
+    fn candidates(&self, file_ref: u64, size: u64, modified: f64) -> Vec<i64> {
+        let start = self.rows.partition_point(|row| row.0 < file_ref);
+        self.rows[start..]
+            .iter()
+            .take_while(|row| row.0 == file_ref)
+            .filter(|row| row.1 == size as i64 && (row.2 - modified).abs() < 0.000_001)
+            .map(|row| row.3)
+            .take(Self::CANDIDATE_LIMIT)
+            .collect()
+    }
+
+    /// True when no row sits at `path` and a successfully scanned row with
+    /// the same file id, size and date sits at a path that is gone from disk.
+    /// Any error means "not a move": the file is analysed.
+    pub(crate) fn is_move(&self, path: &str, file_ref: u64, size: u64, modified: f64) -> bool {
+        let ids = self.candidates(file_ref, size, modified);
+        if ids.is_empty() {
+            return false;
+        }
+        let old_paths: Vec<String> = {
+            let db = self.conn.lock();
+            let occupied = db
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1)")
+                .and_then(|mut stmt| stmt.query_row([path], |r| r.get::<_, bool>(0)))
+                .unwrap_or(true);
+            if occupied {
+                return false;
+            }
+            let Ok(mut stmt) = db.prepare_cached(
+                "SELECT path_text FROM files \
+                 WHERE id = ?1 AND file_ref = ?2 AND size_bytes = ?3 AND failed = 0 AND path_text != ?4",
+            ) else {
+                return false;
+            };
+            ids.iter()
+                .filter_map(|id| {
+                    stmt.query_row(rusqlite::params![id, file_ref as i64, size as i64, path], |r| r.get(0)).ok()
+                })
+                .collect()
+        };
+        old_paths.iter().any(|old| path_is_gone(old))
+    }
+}
+
+/// `lstat` says the path does not exist. A dangling symlink is present, and a
+/// dead mount (any other error) proves nothing.
+fn path_is_gone(path: &str) -> bool {
+    let long = crate::util::path_safety::to_extended_length(std::path::Path::new(path));
+    matches!(std::fs::symlink_metadata(long), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub struct Discovery {
@@ -281,6 +371,7 @@ pub struct Discovery {
     /// Rows already catalogued as cloud placeholders, by path: a file that is
     /// still a placeholder with the same size and date is not written again.
     known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    moves: Option<Arc<MoveIndex>>,
     /// User-excluded folders in `normalize_for_exclusion` form. The walk
     /// prunes an excluded directory at its parent's read_dir, so equality
     /// matching suffices — nothing beneath it is ever visited.
@@ -330,8 +421,10 @@ struct ClassifiedEntry {
 struct WalkContext {
     skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
     known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    moves: Option<Arc<MoveIndex>>,
     error_count: Arc<AtomicU64>,
     cloud_only_count: Arc<AtomicU64>,
+    moved_count: Arc<AtomicU64>,
 }
 
 impl WalkContext {
@@ -340,8 +433,10 @@ impl WalkContext {
         Self {
             skip_paths: Arc::new(skip_paths.clone()),
             known_placeholders: Arc::new(HashMap::new()),
+            moves: None,
             error_count: Arc::new(AtomicU64::new(0)),
             cloud_only_count: Arc::new(AtomicU64::new(0)),
+            moved_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -363,8 +458,14 @@ impl Discovery {
             coordinator,
             skip_paths,
             known_placeholders: Arc::new(HashMap::new()),
+            moves: None,
             exclusions: Arc::new(exclusions.iter().cloned().collect()),
         }
+    }
+
+    pub(crate) fn with_move_index(mut self, moves: Option<Arc<MoveIndex>>) -> Self {
+        self.moves = moves;
+        self
     }
 
     pub(crate) fn with_known_placeholders(
@@ -392,11 +493,14 @@ impl Discovery {
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
         let cloud_only_count = Arc::new(AtomicU64::new(0));
+        let moved_count = Arc::new(AtomicU64::new(0));
         let context = Arc::new(WalkContext {
             skip_paths: skip_paths.clone(),
             known_placeholders: self.known_placeholders.clone(),
+            moves: self.moves.clone(),
             error_count: error_count.clone(),
             cloud_only_count: cloud_only_count.clone(),
+            moved_count: moved_count.clone(),
         });
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
         let seen_dirs: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
@@ -640,6 +744,11 @@ impl Discovery {
                     break;
                 }
             }
+            let (cloud_only, moved) =
+                (context.cloud_only_count.load(Ordering::Relaxed), context.moved_count.load(Ordering::Relaxed));
+            if cloud_only > 0 || moved > 0 {
+                tracing::info!(cloud_only, moved, "[DISCOVERY] files left out as cloud-only or re-bound as moved");
+            }
             done_inner.store(true, Ordering::Release);
             // Channel auto-closes when tx drops here.
         });
@@ -815,6 +924,15 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
     // via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors (the
     // heal then falls through to content_hash).
     let file_ref = crate::platform::file_ref(entry_path);
+    let moved_from_known_row = match (file_ref, context.moves.as_deref()) {
+        (Some(file_ref), Some(moves)) if !online_only => {
+            moves.is_move(&path.to_string_lossy(), file_ref, size, modified)
+        }
+        _ => false,
+    };
+    if moved_from_known_row {
+        context.moved_count.fetch_add(1, Ordering::Relaxed);
+    }
     ClassifiedEntry {
         discovered: Some(DiscoveredFile {
             path,
@@ -824,6 +942,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
             created_unix,
             online_only,
             file_ref,
+            moved_from_known_row,
         }),
         zero_byte: None,
         seen_path_hash: Some(seen_path_hash),
@@ -942,6 +1061,93 @@ mod tests {
         assert_eq!(FileKind::from_extension("jpg"), FileKind::Image);
         assert_eq!(FileKind::from_extension("HEIC"), FileKind::Image);
         assert_eq!(FileKind::from_extension("png"), FileKind::Image);
+    }
+
+    fn move_catalog() -> Arc<Mutex<rusqlite::Connection>> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT UNIQUE, size_bytes INTEGER, \
+             modified_at DOUBLE, failed INTEGER NOT NULL DEFAULT 0, file_ref INTEGER);",
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn insert_row(conn: &Arc<Mutex<rusqlite::Connection>>, path: &str, size: i64, modified: f64, failed: i64, file_ref: u64) {
+        conn.lock()
+            .execute(
+                "INSERT INTO files (path_text, size_bytes, modified_at, failed, file_ref) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![path, size, modified, failed, file_ref as i64],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn move_index_is_absent_for_a_catalog_without_file_ids() {
+        let conn = move_catalog();
+        assert!(MoveIndex::load(&conn).is_none());
+        conn.lock().execute("INSERT INTO files (path_text, size_bytes, modified_at) VALUES ('/a', 1, 1.0)", []).unwrap();
+        assert!(MoveIndex::load(&conn).is_none());
+    }
+
+    #[test]
+    fn a_move_needs_the_same_file_id_size_and_date_and_a_vanished_old_path() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-move-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let still_here = dir.join("still-here.jpg");
+        std::fs::write(&still_here, b"x").unwrap();
+        let gone = dir.join("gone.jpg").to_string_lossy().into_owned();
+        let new_path = dir.join("renamed.jpg").to_string_lossy().into_owned();
+
+        let conn = move_catalog();
+        insert_row(&conn, &gone, 100, 50.0, 0, 7);
+        insert_row(&conn, &still_here.to_string_lossy(), 200, 60.0, 0, 8);
+        insert_row(&conn, &dir.join("failed-before.jpg").to_string_lossy(), 300, 70.0, 1, 9);
+        // A file id above i64::MAX round-trips through the signed column.
+        insert_row(&conn, &dir.join("high-gone.jpg").to_string_lossy(), 400, 80.0, 0, u64::MAX - 5);
+        let index = MoveIndex::load(&conn).expect("rows with file ids");
+
+        assert!(index.is_move(&new_path, 7, 100, 50.0));
+        assert!(index.is_move(&new_path, 7, 100, 50.000_000_4), "dates compare within a microsecond");
+        assert!(index.is_move(&new_path, u64::MAX - 5, 400, 80.0));
+        assert!(!index.is_move(&new_path, 7, 101, 50.0), "a different size is another file on a reused id");
+        assert!(!index.is_move(&new_path, 7, 100, 51.0), "a different date is another file on a reused id");
+        assert!(!index.is_move(&new_path, 8, 200, 60.0), "the old path still exists: a hard link or copy");
+        assert!(!index.is_move(&new_path, 9, 300, 70.0), "a row that never scanned cleanly is analysed");
+        assert!(!index.is_move(&new_path, 77, 100, 50.0));
+        assert!(!index.is_move(&gone, 7, 100, 50.0), "a row already sits at this path");
+
+        // The row changed after the index was loaded: the catalog is asked again.
+        conn.lock().execute("UPDATE files SET failed = 1 WHERE file_ref = 7", []).unwrap();
+        assert!(!index.is_move(&new_path, 7, 100, 50.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_renamed_file_is_discovered_as_a_move_and_a_new_file_is_not() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.jpg");
+        std::fs::write(&old, b"jpegbytes").unwrap();
+        let before = classify_entry(&old, &HashMap::new(), &AtomicU64::new(0)).discovered.unwrap();
+        assert!(!before.moved_from_known_row);
+
+        let conn = move_catalog();
+        insert_row(&conn, &old.to_string_lossy(), 9, before.modified_unix, 0, before.file_ref.unwrap());
+        let renamed = dir.join("renamed.jpg");
+        std::fs::rename(&old, &renamed).unwrap();
+        let fresh = dir.join("fresh.jpg");
+        std::fs::write(&fresh, b"jpegbytes").unwrap();
+
+        let mut context = WalkContext::for_skip(&HashMap::new());
+        context.moves = MoveIndex::load(&conn);
+        let moved = classify_entry_in(&renamed, &context).discovered.unwrap();
+        assert!(moved.moved_from_known_row);
+        assert!(!classify_entry_in(&fresh, &context).discovered.unwrap().moved_from_known_row);
+        assert_eq!(context.moved_count.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

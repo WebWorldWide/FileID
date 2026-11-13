@@ -324,6 +324,12 @@ impl DbWriter {
             let mut heal_recheck_stmt = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)")
                 .context("preparing rename-heal recheck")?;
+            let mut heal_only_check_stmt = tx
+                .prepare_cached(HEAL_ONLY_CHECK_SQL)
+                .context("preparing heal-only check")?;
+            let mut heal_only_touch_stmt = tx
+                .prepare_cached("UPDATE files SET scanned_at = ?2 WHERE id = ?1")
+                .context("preparing heal-only touch")?;
             let mut heal_update_stmt = tx
                 .prepare_cached(HEAL_UPDATE_SQL)
                 .context("preparing rename-heal update")?;
@@ -431,18 +437,28 @@ impl DbWriter {
                     let still_there: bool = heal_recheck_stmt
                         .query_row(params![id, old], |r| r.get(0))
                         .context("rename-heal recheck")?;
-                    if still_there {
+                    // A file nobody analysed may only take over a row that
+                    // still describes it: scanned cleanly, same size and date.
+                    let trusted = !f.heal_only
+                        || heal_only_check_stmt
+                            .query_row(params![id, f.size_bytes as i64, f.modified_unix], |r| r.get(0))
+                            .context("heal-only check")?;
+                    if still_there && trusted {
                         healable = Some(*id);
                         break;
                     }
                 }
+                let mut healed = None;
                 if let Some(id) = healable {
                     match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
-                        Ok(_) => tracing::info!(
-                            id,
-                            new_path = %crate::platform::redact_path_for_log(&f.path),
-                            "[RENAME-HEAL] re-bound existing row to new path"
-                        ),
+                        Ok(_) => {
+                            healed = Some(id);
+                            tracing::info!(
+                                id,
+                                new_path = %crate::platform::redact_path_for_log(&f.path),
+                                "[RENAME-HEAL] re-bound existing row to new path"
+                            );
+                        }
                         // A content-identical COPY already occupies the new path
                         // (scanned there independently). Skip the heal rather than
                         // OR REPLACE-deleting that row — which silently orphaned its
@@ -468,6 +484,33 @@ impl DbWriter {
                             })?;
                         }
                     }
+                }
+
+                if f.heal_only {
+                    match healed {
+                        Some(id) => {
+                            heal_only_touch_stmt
+                                .execute(params![id, f.scanned_unix])
+                                .context("heal-only touch")?;
+                        }
+                        // The old path came back or the new one was taken
+                        // between the walk and this write. No row is made
+                        // from an unanalysed file; the next scan sees it as new.
+                        None => tracing::info!(
+                            path = %crate::platform::redact_path_for_log(&f.path),
+                            "[RENAME-HEAL] move could not be re-bound; the next scan analyses the file"
+                        ),
+                    }
+                    *total += 1;
+                    if matches!(
+                        f.kind,
+                        crate::pipeline::discovery::FileKind::Image
+                            | crate::pipeline::discovery::FileKind::Video
+                            | crate::pipeline::discovery::FileKind::Model
+                    ) {
+                        *heavy += 1;
+                    }
+                    continue;
                 }
 
                 let file_id: i64 = file_stmt
@@ -960,6 +1003,9 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
 // query, mirroring the INSERT path.
+const HEAL_ONLY_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND failed = 0 \
+     AND size_bytes = ?2 AND modified_at IS NOT NULL AND abs(modified_at - ?3) < 0.000001)";
+
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE OR ABORT files
        SET path_text = ?1, path_hash = ?2, path_search = ?4
@@ -1323,6 +1369,9 @@ mod tests {
             text_stage_done: false,
             tags_evaluated: true,
             reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
         }
     }
 
@@ -2618,6 +2667,9 @@ mod twin_reuse_tests {
             text_stage_done: false,
             tags_evaluated: false,
             reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
         }
     }
 
@@ -2726,5 +2778,108 @@ mod twin_reuse_tests {
             .query_row("SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((failed, tags), (0, 3));
+    }
+}
+
+#[cfg(test)]
+mod heal_only_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn discovered(path: &str, file_ref: u64) -> DiscoveredFile {
+        DiscoveredFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: Some(file_ref),
+            moved_from_known_row: false,
+        }
+    }
+
+    fn analyzed(path: &str, file_ref: u64) -> TaggedFile {
+        let mut file = TaggedFile::bare(&discovered(path, file_ref));
+        file.scanned_unix = 1_700_000_100.0;
+        file.content_hash = Some([3u8; 32]);
+        file.tags = vec![("dog".to_owned(), Some(0.9))];
+        file.tags_evaluated = true;
+        file
+    }
+
+    fn moved(path: &str, file_ref: u64) -> TaggedFile {
+        let mut file = TaggedFile::bare(&discovered(path, file_ref));
+        file.scanned_unix = 1_700_009_000.0;
+        file.heal_only = true;
+        file
+    }
+
+    fn seeded() -> (Arc<Mutex<Connection>>, DbWriter) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        conn.lock().execute("INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES ('/seed', 0, 1, 0, 'other', '')", []).unwrap();
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        assert!(writer.rename_heal_enabled());
+        (conn, writer)
+    }
+
+    fn rows(conn: &Arc<Mutex<Connection>>) -> Vec<(i64, String, f64, i64)> {
+        let db = conn.lock();
+        let mut stmt = db
+            .prepare("SELECT f.id, f.path_text, f.scanned_at, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE f.path_text != '/seed' ORDER BY f.id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn a_moved_file_rebinds_its_row_without_any_analysis() {
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        let (mut total, mut heavy, mut failed) = (0, 0, 0);
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut total, &mut heavy, &mut failed, 1).unwrap();
+        let after = rows(&conn);
+        assert_eq!(after, vec![(before[0].0, "/fileid-missing/new.jpg".to_string(), 1_700_009_000.0, 1)]);
+        assert_eq!((total, heavy, failed), (1, 1, 0));
+        let hash: Vec<u8> = conn.lock().query_row("SELECT content_hash FROM files WHERE id = ?1", [before[0].0], |r| r.get(0)).unwrap();
+        assert_eq!(hash, vec![3u8; 32], "the stored analysis is untouched");
+    }
+
+    #[test]
+    fn a_move_that_can_no_longer_be_rebound_writes_nothing() {
+        // The row changed since the walk: it no longer describes this file.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock().execute("UPDATE files SET modified_at = modified_at + 5 WHERE file_ref = 42", []).unwrap();
+        let before = rows(&conn);
+        let mut total = 0;
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut total, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+        assert_eq!(total, 1, "the file still counts toward the scan's progress");
+
+        // The new path was taken by another row in the meantime.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42), analyzed("/fileid-missing/new.jpg", 43)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+
+        // The old path is back on disk (a hard link or a copy with the same id).
+        let dir = std::env::temp_dir().join(format!("fileid-heal-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.jpg");
+        std::fs::write(&old, b"x").unwrap();
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed(&old.to_string_lossy(), 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        writer.flush(&mut vec![moved(&dir.join("new.jpg").to_string_lossy(), 42)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No candidate at all.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 99)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert!(rows(&conn).is_empty());
     }
 }
