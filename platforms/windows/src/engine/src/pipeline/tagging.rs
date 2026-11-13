@@ -2708,10 +2708,7 @@ async fn process_file_predecoded(
                         let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
                         let arcface_mu = &arcface_pool[worker_idx % arcface_pool.len()];
                         let scrfd_started = Instant::now();
-                        let detections = {
-                            let mut s = scrfd_mu.lock();
-                            s.detect(&rgb, w, h)
-                        };
+                        let detections = YuNet::detect_shared(scrfd_mu, &rgb, w, h);
                         perf_trace("scrfd_done", &file.path, scrfd_started.elapsed().as_secs_f64() * 1000.0);
                         let arcface_started = Instant::now();
                         match detections {
