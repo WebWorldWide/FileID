@@ -21,6 +21,7 @@ pub(crate) mod smart_name_learning;
 pub(crate) mod smart_name_style;
 pub(crate) mod model_memory;
 pub(crate) mod qos;
+pub(crate) mod vector_math;
 
 /// File timestamps as catalog seconds since 1970. The app-hosted Mac engine
 /// shares its catalog with the Swift engine, which compares stored mtimes
