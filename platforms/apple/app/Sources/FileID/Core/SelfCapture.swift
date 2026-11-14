@@ -8,10 +8,46 @@
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom];...   extra captures after the pages
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
 import FileIDShared
+
+/// One extra capture: a page plus optional Library kind filter, Library search text and a scroll to the bottom.
+struct SelfShotView: Equatable {
+    var name: String
+    var page: String
+    var kind: String?
+    var query: String?
+    var scrollToBottom = false
+
+    /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
+    static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
+        (raw ?? "").split(separator: ";").compactMap { entry in
+            guard let eq = entry.firstIndex(of: "=") else { return nil }
+            let name = SelfShotPlan.slug(String(entry[..<eq]))
+            let rest = entry[entry.index(after: eq)...]
+            let pageText = rest.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+            guard !name.isEmpty, let page = available.first(where: { SelfShotPlan.slug($0) == SelfShotPlan.slug(String(pageText[0])) }) else { return nil }
+            var view = SelfShotView(name: name, page: page)
+            if pageText.count == 2 {
+                for pair in pageText[1].split(separator: "&") {
+                    let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard kv.count == 2 else { continue }
+                    let value = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                    switch kv[0] {
+                    case "kind": view.kind = value
+                    case "query": view.query = value.isEmpty ? nil : value
+                    case "scroll": view.scrollToBottom = value == "bottom"
+                    default: break
+                    }
+                }
+            }
+            return view
+        }
+    }
+}
 
 struct SelfShotPlan: Equatable {
     var dir: URL
@@ -20,6 +56,7 @@ struct SelfShotPlan: Equatable {
     var settle: Double
     var windowSize: CGSize?
     var query: String?
+    var views: [SelfShotView] = []
 
     static let dirKey = "FILEID_SELF_SHOT_DIR"
 
@@ -31,7 +68,8 @@ struct SelfShotPlan: Equatable {
                             pages: parsePages(environment["FILEID_SELF_SHOT_PAGES"], available: available),
                             folder: folder, settle: settle,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
-                            query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 })
+                            query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
+                            views: SelfShotView.parse(environment["FILEID_SELF_SHOT_VIEWS"], available: available))
     }
 
     /// "Search & Moments" -> "search-moments".
@@ -101,8 +139,33 @@ enum SelfShot {
                 try? await Task.sleep(for: .seconds(plan.settle))
                 write(name: SelfShotPlan.slug(page), plan: plan)
             }
+            for view in plan.views {
+                let defaults = UserDefaults.standard
+                defaults.set(view.kind ?? "", forKey: "library.kindFilter")
+                if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
+                navigate(view.page)
+                try? await Task.sleep(for: .seconds(plan.settle))
+                if view.scrollToBottom { scrollContentToBottom(); try? await Task.sleep(for: .seconds(0.6)) }
+                write(name: view.name, plan: plan)
+            }
             NSApp.terminate(nil)
         }
+    }
+
+    /// Scrolls the tallest scroll view in the content area (right of the sidebar) to its end.
+    private static func scrollContentToBottom() {
+        guard let root = window()?.contentView else { return }
+        var best: NSScrollView?
+        func visit(_ view: NSView) {
+            if let scroll = view as? NSScrollView, scroll.documentView != nil, scroll.convert(scroll.bounds, to: nil).minX > 200,
+               (best?.documentView?.frame.height ?? 0) < scroll.documentView!.frame.height { best = scroll }
+            view.subviews.forEach(visit)
+        }
+        visit(root)
+        guard let scroll = best, let document = scroll.documentView else { return }
+        let y = document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private static func waitUntil(timeout: Double, _ condition: @MainActor () -> Bool) async {

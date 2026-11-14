@@ -40,5 +40,14 @@ struct SelfShotPlanTests {
         #expect(SelfShotPlan.parseSize("bad") == nil)
         #expect(SelfShotPlan.parseSize("10x10") == nil)
     }
+
+    @Test func views_parse_page_and_options() {
+        let views = SelfShotView.parse("docs=Library?kind=doc;found=Library?query=invoice%20total&kind=pdf;lower=Settings?scroll=bottom;bad=Nowhere;noequals", available: all)
+        #expect(views.map(\.name) == ["docs", "found", "lower"])
+        #expect(views[0].kind == "doc" && views[0].query == nil)
+        #expect(views[1].query == "invoice total" && views[1].kind == "pdf")
+        #expect(views[2].page == "Settings" && views[2].scrollToBottom)
+        #expect(SelfShotView.parse(nil, available: all).isEmpty)
+    }
 }
 #endif
