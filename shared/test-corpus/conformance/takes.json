@@ -778,5 +778,151 @@
         }
       }
     ]
+  },
+  {
+    "name": "takes-auto-groups-ignore-byte-identical-copies",
+    "description": "autoTakeGroups: two byte-identical images 1 s apart with the same CLIP vector are copies, not tries (Duplicates owns them), so they form no group. A burst of the two copies plus a different third picture has two tries (the lower file id of the copies, and the other picture), never three. scoreTakes on copies alone recommends one and gives neither a reason chip.",
+    "tree": [
+      {
+        "path": "burst/a.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 100
+        }
+      },
+      {
+        "path": "burst/a again.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 101
+        }
+      },
+      {
+        "path": "burst/b.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "blur": 3,
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 102
+        }
+      },
+      {
+        "path": "pair/c.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 9000
+        }
+      },
+      {
+        "path": "pair/c again.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 9001
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES (1,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(2,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(3,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(5,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}')"
+    ],
+    "steps": [
+      {
+        "label": "the pair of copies is no group; the burst has two tries led by the lower id of its copies",
+        "catalog": {
+          "action": "autoTakeGroups"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": {
+            "$tol": "count",
+            "value": 1
+          }
+        }
+      },
+      {
+        "label": "the burst's tries",
+        "catalog": {
+          "action": "autoTakeGroups"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": [
+            {
+              "kind": "photos",
+              "status": "open",
+              "shots": [
+                {
+                  "primaryFileID": 1,
+                  "fileIDs": [
+                    1
+                  ]
+                },
+                {
+                  "primaryFileID": 3,
+                  "fileIDs": [
+                    3
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "copies score the same and get no chip",
+        "catalog": {
+          "action": "scoreTakes",
+          "fileIDs": [
+            4,
+            5
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "takeQualities": [
+            {
+              "primaryFileID": 4,
+              "rank": 1,
+              "recommended": true,
+              "reasons": []
+            },
+            {
+              "primaryFileID": 5,
+              "rank": 2,
+              "recommended": false,
+              "reasons": []
+            }
+          ]
+        }
+      }
+    ]
   }
 ]

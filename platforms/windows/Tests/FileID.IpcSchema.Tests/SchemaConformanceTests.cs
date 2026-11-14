@@ -304,7 +304,7 @@ public class SchemaConformanceTests
         new RestructureApplyResultEvent(new RestructureApplyResult(5, 1, "Developer Mode required for symlinks")),
         new BulkActionResultEvent(new BulkActionResult(
             "trashFiles:00000000-0000-0000-0000-000000000000", 2, 1,
-            new[] { new BulkActionItem(1, true, null), new BulkActionItem(2, false, "file locked") })),
+            new[] { new BulkActionItem(1, true, null), new BulkActionItem(2, false, "file locked") }, "linux-7")),
         new ClipTextEmbeddingEvent(new ClipTextEmbedding("q-1", "sunset at the beach", _embedding512)),
         new MergeSuggestionsEvent(new MergeSuggestions(new[] { new MergeSuggestion(1, 2, 0.93f, 10, 20, 4, 7) })),
         new HardwareReprobedEvent(new HardwareReprobed(ExampleHardware(), "cuDNN missing from PATH")),

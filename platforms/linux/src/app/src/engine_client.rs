@@ -648,6 +648,12 @@ impl EngineClient {
     }
 
     pub fn send(&mut self, payload: CommandPayload) -> Result<()> {
+        self.send_with_id(payload).map(drop)
+    }
+
+    /// Sends a command and returns the id it went out under, which the engine
+    /// echoes on a bulk result so the sender can recognise its reply.
+    pub fn send_with_id(&mut self, payload: CommandPayload) -> Result<String> {
         let shutdown = matches!(payload, CommandPayload::Shutdown(_));
         self.next_id = self.next_id.wrapping_add(1);
         let command = IpcCommand {
@@ -663,7 +669,7 @@ impl EngineClient {
         if shutdown {
             self.shutting_down.store(true, Ordering::Release);
         }
-        Ok(())
+        Ok(command.id)
     }
 
     /// Queue a read on the query worker. Within one `QueryChannel` the latest

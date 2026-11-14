@@ -614,6 +614,7 @@ pub(crate) async fn handle_purge_excluded(
                 crate::scan_session::purge_excluded_rows(&conn, &resolved)
             };
             Ok(crate::ipc::BulkActionResult {
+                command_id: None,
                 action: "purgeExcluded".into(),
                 succeeded: purged.min(u32::MAX as u64) as u32,
                 failed: 0,

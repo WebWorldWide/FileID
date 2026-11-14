@@ -50,6 +50,9 @@ struct FileIDApp: App {
                     }
                     ModelInstaller.ramPlus.refreshStatus()
                     ModelInstaller.face.refreshStatus()
+                    #if DEBUG
+                    if SelfShot.isActive { return }
+                    #endif
                     if !welcomeSheetSeen { showWelcome = true }
                 }
                 .sheet(isPresented: $showWelcome) {

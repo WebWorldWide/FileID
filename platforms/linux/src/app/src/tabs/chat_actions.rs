@@ -703,10 +703,10 @@ mod tests {
         assert!(line.ends_with(" · 1 skipped because the file changed since the scan · 2 couldn't be moved."));
         assert_eq!(rename_summary(4, 1, 2), "Renamed 4 files · 1 failed · 2 skipped because their suggestion changed.");
         assert_eq!(rename_summary(1, 0, 0), "Renamed 1 file.");
-        let result = BulkActionResult { action: "trashFiles:batch-9".into(), succeeded: 1, failed: 0, messages: vec![] };
+        let result = BulkActionResult { command_id: None, action: "trashFiles:batch-9".into(), succeeded: 1, failed: 0, messages: vec![] };
         assert_eq!(trash_batch(&result).as_deref(), Some("batch-9"));
         assert!(is_trash_result(&result));
-        let plain = BulkActionResult { action: "trashFiles".into(), ..result };
+        let plain = BulkActionResult { command_id: None, action: "trashFiles".into(), ..result };
         assert_eq!(trash_batch(&plain), None);
         let applied = RestructureApplyResult { applied: 5, failed: 1, privilege_error: None, cancelled: false, planned: None, remaining: None, shortcut_undo_token: None };
         assert_eq!(apply_summary(&applied), "Moved 5 files · 1 couldn't move.");

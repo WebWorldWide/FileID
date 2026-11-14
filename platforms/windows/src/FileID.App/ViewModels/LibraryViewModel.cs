@@ -274,6 +274,21 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private string? _searchSummary;
+
+    /// <summary>The helper's "3 good matches, 1 weaker." for the search on screen;
+    /// null when there is none, and the view then shows the plain count.</summary>
+    public string? SearchSummary
+    {
+        get => _searchSummary;
+        private set
+        {
+            if (_searchSummary == value) return;
+            _searchSummary = value;
+            OnPropertyChanged();
+        }
+    }
+
     private int? _totalCount;
 
     /// <summary>Library files matching the kind filter, for "X of Y shown".
@@ -346,6 +361,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
             IReadOnlyList<FileRow> rows;
             int? total = null;
+            string? summary = null;
             bool pageable = false;
             bool headOnly = false;
             string? listedKind = null;
@@ -376,7 +392,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
+                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter, text => summary = text).ConfigureAwait(false);
             }
 
             if (_disposed || token.IsCancellationRequested) return;
@@ -397,7 +413,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind);
+                ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind, summary);
             }
         }
         catch (OperationCanceledException)
@@ -530,7 +546,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     internal static int RefreshWindow(bool sameListing, int loadedRows) =>
         sameListing ? Math.Min(Math.Max(PageSize, loadedRows), RefreshCap) : PageSize;
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null, string? summary = null)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -538,6 +554,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
+            SearchSummary = summary;
             ReplaceItems(next);
             TotalCount = total;
             _listedKind = listedKind;

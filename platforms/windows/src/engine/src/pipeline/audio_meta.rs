@@ -18,6 +18,17 @@ use symphonia::core::probe::Hint;
 /// a pathological ID3 dump from drowning the Library chip row.
 const MAX_TAGS: usize = 6;
 
+/// The probe, with a panic from a malformed header (symphonia's WAV reader
+/// builds a `TimeBase` that panics on a zero sample rate) read as "no tags" so
+/// the file is still catalogued instead of failing as a decoder error.
+fn probe(hint: &Hint, mss: MediaSourceStream) -> Option<symphonia::core::probe::ProbeResult> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        symphonia::default::get_probe().format(hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+    }))
+    .ok()?
+    .ok()
+}
+
 /// Extract artist / album / title / genre / year tags from `path`. Returns
 /// an empty Vec on any decode/probe failure — audio metadata is best-effort.
 ///
@@ -53,14 +64,8 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let mut probed = match symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
+    let Some(mut probed) = probe(&hint, mss) else {
+        return Vec::new();
     };
     let mut format = probed.format;
     let mut out: Vec<(String, Option<f32>)> = Vec::new();
@@ -112,14 +117,8 @@ pub(crate) fn extract_structured(path: &Path) -> AudioTags {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let mut probed = match symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return AudioTags::default(),
+    let Some(mut probed) = probe(&hint, mss) else {
+        return AudioTags::default();
     };
     let mut format = probed.format;
     let mut tags = AudioTags::default();
@@ -231,6 +230,41 @@ impl symphonia::core::io::MediaSource for BytesMediaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wav_with_sample_rate(rate: u32) -> Vec<u8> {
+        let data = [0u8, 1].repeat(2000);
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&(rate * 2).to_le_bytes());
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        let mut body = b"WAVEfmt ".to_vec();
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&fmt);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&data);
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn a_wav_with_a_zero_sample_rate_gives_no_tags_instead_of_panicking() {
+        let bytes = wav_with_sample_rate(0);
+        assert!(extract(Path::new("zero-rate.wav"), Some(&bytes)).is_empty());
+        let dir = std::env::temp_dir().join(format!("fileid-zero-rate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zero-rate.wav");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(extract(&path, None).is_empty());
+        let tags = extract_structured(&path);
+        assert!(tags.title.is_none() && tags.artist.is_none() && tags.album.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn tag_text_strips_nul_padding() {

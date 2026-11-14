@@ -337,6 +337,7 @@ fn decoder_fuzzer_never_panics_hangs_or_overruns_the_pixel_cap() {
     let seed = iterations("FILEID_FUZZ_SEED", 0x0DEC_0DE5) as u64;
     let (panics, restore_hook) = record_panics("fileid-fuzz-decoders");
     let worker_scratch = scratch.clone();
+    let worker_panics = panics.clone();
     let (failures, stats) = std::thread::Builder::new()
         .name("fileid-fuzz-decoders".into())
         .stack_size(8 * 1024 * 1024)
@@ -350,9 +351,19 @@ fn decoder_fuzzer_never_panics_hangs_or_overruns_the_pixel_cap() {
                 let bytes = if round < seeds.len() { base.clone() } else { mutate(base.clone(), &mut rng) };
                 let started = Instant::now();
                 let mut problems = Vec::new();
+                let panics_before: usize = worker_panics.lock().values().sum();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(*kind, &bytes, &worker_scratch, &mut problems)));
                 if outcome.is_err() {
                     problems.push("panic escaped the decoder".into());
+                }
+                if worker_panics.lock().values().sum::<usize>() > panics_before {
+                    // The hook only knows the panic's location; name the input that raised it and, when
+                    // FILEID_FUZZ_SAVE_DIR is set, keep its bytes so it can be replayed.
+                    problems.push(format!("input {round} raised a panic ({} bytes)", bytes.len()));
+                    if let Some(dir) = std::env::var_os("FILEID_FUZZ_SAVE_DIR") {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{kind:?}-{round}.bin")), &bytes);
+                    }
                 }
                 if started.elapsed() > Duration::from_secs(10) {
                     problems.push(format!("took {:?}", started.elapsed()));
