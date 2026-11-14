@@ -7,6 +7,7 @@
 //   FILEID_SELF_SHOT_PAGES=a,b     page names or slugs (default: every page)
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
+//   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -18,6 +19,7 @@ struct SelfShotPlan: Equatable {
     var folder: URL?
     var settle: Double
     var windowSize: CGSize?
+    var query: String?
 
     static let dirKey = "FILEID_SELF_SHOT_DIR"
 
@@ -28,7 +30,8 @@ struct SelfShotPlan: Equatable {
         return SelfShotPlan(dir: URL(fileURLWithPath: dir, isDirectory: true),
                             pages: parsePages(environment["FILEID_SELF_SHOT_PAGES"], available: available),
                             folder: folder, settle: settle,
-                            windowSize: parseSize(environment["FILEID_WIN_SIZE"]))
+                            windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
+                            query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// "Search & Moments" -> "search-moments".
@@ -87,9 +90,13 @@ enum SelfShot {
                     let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
                     write(name: "\(SelfShotPlan.slug(plan.pages.first ?? "library"))-scanning\(scanning ? "" : "-finished")", plan: plan)
                     await waitUntil(timeout: 600) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
+                    let done = Date()
+                    await waitUntil(timeout: 10) { store.totalFiles >= (engine.lastProgress?.processed ?? 0) }
+                    FileHandle.standardError.write(Data("self-shot: files counter \(store.totalFiles) \(Int(Date().timeIntervalSince(done) * 1000)) ms after the scan completed\n".utf8))
                 }
             }
             for page in plan.pages {
+                if page == MainWindow.Tab.moments.rawValue, let query = plan.query { ChatHandoff.shared.momentsQuery = query }
                 navigate(page)
                 try? await Task.sleep(for: .seconds(plan.settle))
                 write(name: SelfShotPlan.slug(page), plan: plan)
