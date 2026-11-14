@@ -170,8 +170,10 @@ impl FileKind {
 
 /// `SF_DATALESS`: macOS sets it on a file whose contents live only in iCloud
 /// (or another File Provider); reading it downloads the file.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SF_DATALESS: u32 = 0x4000_0000;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn flags_are_dataless(st_flags: u32) -> bool {
     st_flags & SF_DATALESS != 0
 }
