@@ -281,7 +281,11 @@ fn swift_record_is_accepted_and_gains_an_identity_record() {
     assert!(identity_matches(&dir, revision, &manifest, &paths));
     assert!(installed(repo));
 
-    std::fs::write(dir.join("weights/model.safetensors"), vec![8u8; 4096]).unwrap();
+    let rewritten = dir.join("weights/model.safetensors");
+    std::fs::write(&rewritten, vec![8u8; 4096]).unwrap();
+    // Coarse-timestamp filesystems can leave mtime and ctime unchanged inside one tick.
+    let earlier = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    std::fs::OpenOptions::new().write(true).open(&rewritten).unwrap().set_modified(earlier).unwrap();
     assert!(!identity_matches(&dir, revision, &manifest, &paths));
     assert!(!installed(repo), "a same-size change fails the hash");
     assert!(!verified_record_path(&dir, revision).exists(), "a record that fails is removed");

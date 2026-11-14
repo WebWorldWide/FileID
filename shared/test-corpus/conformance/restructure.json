@@ -130,6 +130,7 @@
   },
   {
     "name": "restructure-shortcut-apply-and-undo",
+    "requiresSymlinks": true,
     "description": "Shortcut mode (useSymlinks) links each planned destination to its file and leaves the originals and rows in place; undo with the run's token removes exactly those links.",
     "extends": "restructure-respect-stage",
     "knownDivergences": [{"engine": "swift", "reason": "The Swift engine has no shortcut mode and refuses useSymlinks: true (DECISIONS 2026-06-14); the Mac app never sends it. The Rust engine keeps it for Windows and Linux and on the Mac it is checked here."}],

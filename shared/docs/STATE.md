@@ -1,5 +1,8 @@
 # FileID — State
 
+## 2026-11-13 — Fix main CI on the self-hosted runners (`agent/main-ci-fix`)
+
+- **Four main-only failures:** conformance prints UTF-8 now (a cp1252 console crashed on a non-ASCII failure message and hid the case); `restructure-shortcut-apply-and-undo` is skipped (`requiresSymlinks`) when the runner account cannot create symlinks (the likely Windows failure, to be confirmed by the next main run); the two `archive_names` zip tests build their archives in-process (no `zip` tool, also run on Windows); the identity test sets an explicit mtime after rewriting; the Windows app job installs the 10.0.1xx SDK band because the runner's VS 2022 MSBuild 17.14 rejects SDK 10.0.4xx.
 ## 2026-11-12 — Swift startup reconcile reads Rust's Trash log (`agent/left-trash-reconcile`)
 
 - `TrashJournal.reconcile` now also walks the valid entries of `trash_log.json` (HMAC-checked with the shared key, never modified) and drops catalog rows of files provably in the Trash (original path gone, Trash entry found by recorded path or inode), the same rules as for its own journal. It no longer returns early when its own journal is empty. `RustTrashLog.verifiedBatches` is shared with `find`.
