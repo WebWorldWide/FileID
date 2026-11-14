@@ -1391,7 +1391,7 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                                 .as_deref()
                                 .unwrap_or("FileID didn't answer in time. Try again in a moment."),
                         ),
-                        "goal" => ui.goal_finished(r),
+                        "goal" => ui.goal_finished(r.clone()),
                         "decision" => ui.finish_decision(ok),
                         "reopen" | "keep-rest" => {
                             ui.request_groups();

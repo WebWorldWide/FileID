@@ -760,21 +760,17 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     let query = searched.trim().to_owned();
     let request = fileid_engine::ipc::EmbedTextQueryPayload { query: query.clone(), query_id: super::workbench_state::request_id() };
     let events = ctx.engine.borrow_mut().subscribe();
-    let closer = events.clone();
     let query_id = request.query_id.clone();
     if ctx.engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::EmbedTextQuery(request)).is_err() {
-        events.close();
         return;
     }
-    let timeout = glib::timeout_add_seconds_local_once(15, move || {
-        closer.close();
-    });
+    let deadline = events.deadline(Duration::from_secs(15));
     let mut vector = None;
     while let Ok(event) = events.recv().await {
-        match event {
+        match &*event {
             EngineEvent::ClipTextEmbedding(reply) if reply.query_id == query_id => {
                 if fileid_engine::models::clip_space::valid(&reply.embedding) {
-                    vector = Some(reply.embedding);
+                    vector = Some(reply.embedding.clone());
                 }
                 break;
             }
@@ -782,8 +778,8 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
             _ => {}
         }
     }
-    timeout.remove();
-    events.close();
+    drop(deadline);
+    drop(events);
     let Some(vector) = vector else { return };
     if ctx.query_gen.get() != generation {
         return;
