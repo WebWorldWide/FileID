@@ -87,11 +87,9 @@ pub(crate) async fn benchmark(kind: &str, cancel: Arc<AtomicBool>, mut progress:
             }
         })
         .await?;
-    let benchmark: ModelBenchmark = serde_json::from_value(value)?;
-    let hardware = crate::models::launch_tuning::hardware_fingerprint();
-    crate::models::benchmark::save_in(
-        &crate::models::benchmark::store_path()?,
-        crate::models::benchmark::StoredBenchmark { model: kind.to_owned(), hardware, benchmark: benchmark.clone() },
-    )?;
+    let mut benchmark: ModelBenchmark = serde_json::from_value(value)?;
+    let hardware = crate::models::benchmark::hardware();
+    benchmark.hardware.clone_from(&hardware);
+    crate::models::benchmark::save_in(&crate::models::benchmark::store_path()?, kind, benchmark.clone(), &hardware)?;
     Ok(benchmark)
 }
