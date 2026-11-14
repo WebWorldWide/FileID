@@ -1564,6 +1564,12 @@ pub struct RestructureApplyResult {
 #[serde(rename_all = "camelCase")]
 pub struct BulkActionResult {
     pub action: String,
+    /// Schema 1.28.0. The id of the command this result answers, echoed from IPCCommand.id, so an
+    /// app matches a result to the request that sent it without reading action or messages. Present
+    /// on every result an engine sends in reply to a command, including refusals; omitted by
+    /// engines that do not echo it.
+    #[serde(rename = "commandID", default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
     pub succeeded: u32,
     pub failed: u32,
     pub messages: Vec<BulkActionItem>,

@@ -331,3 +331,12 @@ public actor IPCSink {
     /// full-buffer coalescing path to find the most recent progress line.
     private static let progressNeedle = Data("\"progress\"".utf8)
 }
+
+extension IPCSink {
+    /// Emits a bulk reply stamped with the id of the command it answers.
+    public func emitBulk(_ commandID: String, _ result: BulkActionResult) {
+        var stamped = result
+        stamped.commandID = commandID
+        emit(.bulkActionResult(stamped))
+    }
+}
