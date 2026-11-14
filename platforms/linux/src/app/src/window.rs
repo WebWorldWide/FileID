@@ -34,6 +34,21 @@ thread_local! {
     static ACTIVE_WINDOW: RefCell<Option<ActiveWindow>> = const { RefCell::new(None) };
 }
 
+static LAUNCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn note_launch() {
+    let _ = LAUNCH.set(std::time::Instant::now());
+}
+
+/// Dev-only: `FILEID_LAUNCH_TRACE=1` prints how long startup took so far.
+fn trace_launch(what: &str) {
+    if std::env::var_os("FILEID_LAUNCH_TRACE").is_some()
+        && let Some(start) = LAUNCH.get()
+    {
+        eprintln!("[launch] {what} {} ms", start.elapsed().as_millis());
+    }
+}
+
 pub fn on_activate(app: &adw::Application) {
     if !present_existing(None) {
         build_window(app, None);
@@ -315,6 +330,11 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
 
     EngineClient::start(&engine);
     window.present();
+    trace_launch("presented");
+    window.add_tick_callback(|_, _| {
+        trace_launch("first frame");
+        glib::ControlFlow::Break
+    });
     // GTK focuses the first focusable widget on map; the search field should
     // only light up when asked for (click or Ctrl+K), as on macOS.
     let unfocus = window.clone();
