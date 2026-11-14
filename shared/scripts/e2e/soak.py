@@ -360,6 +360,11 @@ class Soak:
             return False
         return True
 
+    def never_catalogued(self, path, root):
+        """Swift only: Discovery uses .skipsHiddenFiles, so a file with a dot-prefixed path component under the root is
+        deliberately not catalogued. Such a file must have no visible row (checked by the callers)."""
+        return self.a.flavor == "swift" and any(c.startswith(".") for c in os.path.relpath(path, root).split(os.sep))
+
     @staticmethod
     def tombstone(row):
         """A row the engine keeps but hides after the file vanished: failed=1 with the 'no longer present' message."""
@@ -372,7 +377,10 @@ class Soak:
         disk = {os.path.join(root, r) for r in model}
         visible = {p for p, v in rows.items() if not self.tombstone(v)}
         stale = sorted(visible - disk)
-        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0)
+        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
+        hidden_rows = sorted(p for p in visible & disk if self.never_catalogued(p, root))
+        if hidden_rows:
+            fail(rnd, f"{name}: hidden files are not catalogued (swift)", [os.path.relpath(h, root) for h in hidden_rows[:4]])
         zero_rows = sorted(p for p in visible & disk if os.path.getsize(p) == 0)
         hidden_present = sorted(p for p, v in rows.items() if self.tombstone(v) and p in disk)
         if first:
@@ -813,8 +821,9 @@ class Soak:
             stale = {p for p, v in rows.items() if not self.tombstone(v)} - disk
             if stale:
                 fail(rnd, "victim catalog has no rows for missing files", sorted(stale)[:3])
-            if [d for d in disk - set(rows) if os.path.getsize(d) != 0]:
-                fail(rnd, "victim catalog covers its files", len([d for d in disk - set(rows) if os.path.getsize(d) != 0]))
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            if uncovered:
+                fail(rnd, "victim catalog covers its files", len(uncovered))
             k, res = v.scan(self.victim_lib)
             if k != "scanComplete":
                 fail(rnd, "second scan after restart completes", (k, res))
