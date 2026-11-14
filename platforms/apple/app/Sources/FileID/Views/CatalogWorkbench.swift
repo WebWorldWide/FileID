@@ -138,15 +138,18 @@ struct CatalogWorkbench: View {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
                     } else {
-                        MetaText(resultsMeta, size: 12).lineLimit(1)
+                        MetaText(resultsMeta, size: 12)
                     }
                     Spacer(minLength: 4)
+                }
+                HStack(spacing: 8) {
                     askButton
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .fixedSize()
                         .disabled(hitFileCount < 2)
                         .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
+                    Spacer(minLength: 0)
                 }
             }
             .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 14)

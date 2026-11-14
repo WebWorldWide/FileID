@@ -83,7 +83,7 @@ enum SelfShot {
                 if needsScan {
                     await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
                     navigate(plan.pages.first ?? MainWindow.Tab.library.rawValue)
-                    try? await Task.sleep(for: .seconds(min(plan.settle, 0.4)))
+                    try? await Task.sleep(for: .seconds(min(plan.settle, 1.0)))
                     let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
                     write(name: "\(SelfShotPlan.slug(plan.pages.first ?? "library"))-scanning\(scanning ? "" : "-finished")", plan: plan)
                     await waitUntil(timeout: 600) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
