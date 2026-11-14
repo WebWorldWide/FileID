@@ -153,7 +153,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "b23698d76e9f5bf37117477b9d541fb8577e54c1e1bb59a709225064ce78c7c0",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "3193b3308a99d19f10479ae9d1485c088a55880b6862161213ec8d1415c86731",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "c35afc3d4c377ca791f2b92871eac24aea40b99e950141ef8d473f4086c3b626",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "630a85060ab28c0691f9c3e5b5c64be9865864817c3d9520c64a307fc2f90695",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "9b264a34ac14bb157b623a1ad370506562fd8596a8973386e181d04dc505c34f",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "06d8ce706dfe6031ebc2165d25d91cd0ab2328a3ad69639a0edb4a3c3f41fd39",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "bbd632e6861c4061de32bcbf22b28d51bd2d84d7a5783979aabc86d70172c5a7",
