@@ -646,8 +646,12 @@ public final class EngineClient {
 
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
     nonisolated public static func debug(_ msg: String) {
+        guard !runningTests else { return }
         debugLog.withLock { $0.write(msg) }
     }
+
+    /// A test run must not append to the person's real app.log.
+    nonisolated private static let runningTests = NSClassFromString("XCTestCase") != nil
 
     nonisolated private static let debugLog = MutexBox(DebugLog())
 

@@ -52,7 +52,7 @@ async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
         return false;
     }
     sink.send(
-        EngineError::new("unknown_model", format!("Unknown Deep Analyze model: {model_kind}."))
+        EngineError::new("unknown_model", "This copy of FileID doesn't have that AI model. Pick another one in Settings.")
             .with_model(model_kind.to_owned())
             .into_event(),
     )

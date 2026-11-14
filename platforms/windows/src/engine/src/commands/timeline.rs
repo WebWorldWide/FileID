@@ -262,10 +262,10 @@ fn frame_model_version(model: &str) -> String {
 /// The Mac app's engine refuses as the Swift engine does, which asks for a loaded model.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const NO_VISUAL_MODEL: &str =
-    "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
+    "Pick and load an AI model in Describe Files first. FileID won't download one by itself.";
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const NO_VISUAL_MODEL: &str =
-    "Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.";
+    "Install an AI model in Describe Files first. FileID won't download one by itself.";
 pub(crate) fn enqueue(
     conn: &mut Connection,
     request: &CatalogRequest,
