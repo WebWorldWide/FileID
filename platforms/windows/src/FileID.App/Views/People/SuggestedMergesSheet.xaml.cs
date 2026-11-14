@@ -179,7 +179,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
 
     // This sheet is shown inside a dialog, and only one dialog can be open at
     // a time, so the confirmation is a flyout on the button that was pressed.
-    private static Task<bool> ConfirmMergeAsync(FrameworkElement anchor)
+    internal static Task<bool> ConfirmMergeAsync(FrameworkElement anchor)
     {
         var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var merge = new Button { Content = "Merge" };
