@@ -9,6 +9,7 @@ use crate::ipc::{
     CatalogTakeShot,
 };
 use crate::pipeline::near_duplicate_grouping::{self as ndg, Item, Thresholds, CLIPS, TAKES};
+use crate::util::content_hash::FULL_HASH_MAX_BYTES;
 use crate::pipeline::take_scoring::{self, Box2, Face, Luma, Shot, Signals};
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -24,12 +25,33 @@ struct Row1 {
     time: f64,
     phash: Option<u64>,
     kind: String,
+    content: Option<(Vec<u8>, i64)>,
+}
+
+/// Copies of one file are one try: keep the lowest file id of each content
+/// (stored hash and size, only for files small enough to be hashed in full, the
+/// same identity Duplicates verifies). Swift `CatalogTakeAuto.distinctContents`
+/// applies the same rule.
+fn distinct_contents<'a>(members: Vec<&'a Item>, contents: &HashMap<i64, (Vec<u8>, i64)>) -> Vec<&'a Item> {
+    let mut by_id: Vec<&Item> = members.clone();
+    by_id.sort_by_key(|m| m.id);
+    let mut seen: HashSet<&(Vec<u8>, i64)> = HashSet::new();
+    let mut keep: HashSet<i64> = HashSet::new();
+    for member in by_id {
+        match contents.get(&member.id) {
+            Some(content) if !seen.insert(content) => {}
+            _ => {
+                keep.insert(member.id);
+            }
+        }
+    }
+    members.into_iter().filter(|m| keep.contains(&m.id)).collect()
 }
 
 pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGroup>> {
     ensure!((1..=100).contains(&limit), "Invalid take group limit");
     let mut statement = conn.prepare(
-        "SELECT f.id, f.path_text, f.created_at, f.phash, f.kind FROM files f
+        "SELECT f.id, f.path_text, f.created_at, f.phash, f.kind, f.content_hash, f.size_bytes FROM files f
          WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
            AND f.id NOT IN (SELECT derived_id FROM catalog_assets)
            AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
@@ -43,9 +65,15 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
                 time: r.get(2)?,
                 phash: r.get::<_, Option<i64>>(3)?.map(|p| p as u64),
                 kind: r.get(4)?,
+                content: match (r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<i64>>(6)?) {
+                    (Some(hash), Some(size)) if (0..=FULL_HASH_MAX_BYTES as i64).contains(&size) => Some((hash, size)),
+                    _ => None,
+                },
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let contents: HashMap<i64, (Vec<u8>, i64)> =
+        rows.iter().filter_map(|r| r.content.clone().map(|c| (r.id, c))).collect();
     let mut groups = Vec::new();
     for (kind, limits) in [("image", &TAKES), ("video", &CLIPS)] {
         let subset: Vec<&Row1> = rows.iter().filter(|r| r.kind == kind && r.time.is_finite()).collect();
@@ -63,6 +91,7 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
         let aligned: HashMap<i64, Item> = ndg::align_sidecar_times(&items).into_iter().map(|i| (i.id, i)).collect();
         for group in ndg::groups_with(&items, limits) {
             let members: Vec<&Item> = group.members.iter().filter_map(|id| aligned.get(id)).collect();
+            let members = distinct_contents(members, &contents);
             let shots = shots(&members);
             if shots.len() < 2 {
                 continue;
@@ -870,6 +899,50 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(plan.iter().all(|line| !line.contains("CORRELATED")), "{plan:?}");
+    }
+
+    fn insert_content(conn: &Connection, id: i64, path: &str, time: f64, angle: f32, hash: u8, size: i64) {
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension,content_hash) VALUES(?1,?2,?1,?5,?3,?3,0,'image','jpg',?4)",
+            params![id, path, time, vec![hash; 32], size],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,'mobileclip_s2')",
+            params![id, blob(angle.cos(), angle.sin())],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn byte_identical_copies_are_not_takes() {
+        let conn = crate::db::test_support::memory_db();
+        insert_content(&conn, 1, "/c/dup b.jpg", 100.0, 0.0, 7, 5000);
+        insert_content(&conn, 2, "/c/dup b again.jpg", 101.0, 0.0, 7, 5000);
+        assert!(discover(&conn, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_group_of_three_with_two_copies_shows_two_tries_and_keeps_the_lowest_id() {
+        let conn = crate::db::test_support::memory_db();
+        insert_content(&conn, 5, "/c/one.jpg", 100.0, 0.0, 7, 5000);
+        insert_content(&conn, 2, "/c/one copy.jpg", 99.0, 0.0, 7, 5000);
+        insert_content(&conn, 3, "/c/other.jpg", 101.0, 0.05, 8, 5000);
+        let groups = discover(&conn, 100).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].file_ids(), vec![2, 3]);
+        assert_eq!(groups[0].shots.len(), 2);
+    }
+
+    #[test]
+    fn files_too_large_for_a_full_hash_and_files_without_a_hash_are_never_collapsed() {
+        let conn = crate::db::test_support::memory_db();
+        insert_content(&conn, 1, "/c/a.jpg", 100.0, 0.0, 7, 17 * 1024 * 1024);
+        insert_content(&conn, 2, "/c/b.jpg", 101.0, 0.0, 7, 17 * 1024 * 1024);
+        assert_eq!(discover(&conn, 100).unwrap().len(), 1);
+        insert(&conn, 3, "/c/c.jpg", 5000.0, 0.0);
+        insert(&conn, 4, "/c/d.jpg", 5001.0, 0.0);
+        assert_eq!(discover(&conn, 100).unwrap().len(), 2);
     }
 
     #[test]

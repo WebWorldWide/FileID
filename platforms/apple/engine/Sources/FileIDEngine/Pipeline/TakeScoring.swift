@@ -544,6 +544,13 @@ enum TakeScoring {
         let shared = Set(readableDrafts.first?.3.reasons ?? []).filter { reason in
             readableDrafts.count > 1 && readableDrafts.allSatisfy { $0.3.reasons.contains(reason) }
         }
+        // A chip names a difference: it needs a readable rival that scores lower on that measure.
+        func beats(_ index: Int, _ measure: (Quality) -> Double?) -> Bool {
+            guard let mine = measure(drafts[index].3) else { return false }
+            return drafts.indices.contains { other in
+                other != index && drafts[other].1 >= 0 && (measure(drafts[other].3).map { $0 < mine } ?? false)
+            }
+        }
         let anyEyesClosed = drafts.contains { $0.3.eyesClosed }
         let maxExposure = drafts.compactMap { $0.3.exposure }.max() ?? 0
         let secondExposure = drafts.compactMap { $0.3.exposure }.sorted(by: >).dropFirst().first ?? maxExposure
@@ -553,11 +560,11 @@ enum TakeScoring {
             if index == winner, shots.count > 1 {
                 var positives: [String] = []
                 if isVideo {
-                    if let s = q.stability, s >= (drafts.compactMap { $0.3.stability }.max() ?? 0) { positives.append(Reason.steadiest) }
-                    if let a = q.action, a >= 1 { positives.append(Reason.mostAction) }
-                    if q.sharpness == 1 && positives.isEmpty { positives.append(Reason.sharpest) }
+                    if let s = q.stability, s >= (drafts.compactMap { $0.3.stability }.max() ?? 0), beats(index, { $0.stability }) { positives.append(Reason.steadiest) }
+                    if let a = q.action, a >= 1, beats(index, { $0.action }) { positives.append(Reason.mostAction) }
+                    if q.sharpness == 1 && positives.isEmpty && beats(index, { $0.sharpness }) { positives.append(Reason.sharpest) }
                 } else {
-                    if q.sharpness == 1 { positives.append(everyFace ? Reason.sharpestFace : Reason.sharpest) }
+                    if q.sharpness == 1 && beats(index, { $0.sharpness }) { positives.append(everyFace ? Reason.sharpestFace : Reason.sharpest) }
                     if anyEyesClosed && !q.eyesClosed { positives.append(Reason.eyesOpen) }
                     if groupHasFaces && q.faceCount == maxVisible && drafts.contains(where: { $0.3.faceCount < maxVisible && $0.1 >= 0 }) {
                         positives.append(Reason.allFaces)
