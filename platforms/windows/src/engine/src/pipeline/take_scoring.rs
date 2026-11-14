@@ -787,6 +787,13 @@ pub fn score(shots: &[Shot]) -> Vec<Quality> {
     let max_exposure = exposures.first().copied().unwrap_or(0.0);
     let second_exposure = exposures.get(1).copied().unwrap_or(max_exposure);
     let max_stability = drafts.iter().filter_map(|d| d.quality.stability).fold(0.0, f64::max);
+    // A chip names a difference: it needs a readable rival that scores lower on that measure.
+    let beats = |index: usize, measure: fn(&Quality) -> Option<f64>| {
+        let mine = measure(&drafts[index].quality);
+        drafts.iter().enumerate().any(|(other, d)| {
+            other != index && d.total >= 0.0 && matches!((mine, measure(&d.quality)), (Some(a), Some(b)) if b < a)
+        })
+    };
     let mut out = Vec::with_capacity(drafts.len());
     for (index, draft) in drafts.iter().enumerate() {
         let q = &draft.quality;
@@ -795,17 +802,17 @@ pub fn score(shots: &[Shot]) -> Vec<Quality> {
         if is_winner {
             let mut positives: Vec<String> = Vec::new();
             if is_video {
-                if q.stability.is_some_and(|s| s >= max_stability) {
+                if q.stability.is_some_and(|s| s >= max_stability) && beats(index, |q| q.stability) {
                     positives.push(reason::STEADIEST.into());
                 }
-                if q.action.is_some_and(|a| a >= 1.0) {
+                if q.action.is_some_and(|a| a >= 1.0) && beats(index, |q| q.action) {
                     positives.push(reason::MOST_ACTION.into());
                 }
-                if q.sharpness == Some(1.0) && positives.is_empty() {
+                if q.sharpness == Some(1.0) && positives.is_empty() && beats(index, |q| q.sharpness) {
                     positives.push(reason::SHARPEST.into());
                 }
             } else {
-                if q.sharpness == Some(1.0) {
+                if q.sharpness == Some(1.0) && beats(index, |q| q.sharpness) {
                     positives.push(if every_face { reason::SHARPEST_FACE } else { reason::SHARPEST }.into());
                 }
                 if any_eyes_closed && !q.eyes_closed {
@@ -924,6 +931,15 @@ mod tests {
 
     fn shot(id: i64, s: Signals) -> Shot {
         Shot { primary_file_id: id, file_ids: vec![id], path: format!("/t/{id}.png"), signals: Some(s) }
+    }
+
+    #[test]
+    fn identical_tries_get_no_chip() {
+        let one = signals(&pattern(96, 64, 0, 0), vec![], None);
+        let scored = score(&[shot(1, one.clone()), shot(2, one)]);
+        assert_eq!(scored[0].score, scored[1].score);
+        assert!(scored.iter().all(|q| q.reasons.is_empty()), "{:?}", scored.iter().map(|q| &q.reasons).collect::<Vec<_>>());
+        assert!(scored[0].recommended);
     }
 
     #[test]
