@@ -295,6 +295,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     }
     let initial = launch_page(crate::app_settings::active_tab().as_deref());
     shell.navigate(initial);
+    // Organize Folders learns of a move applied from a Chat card only from that
+    // apply's own replies, which are not replayed to a page built later; built
+    // here, it always has its Undo move button.
+    let _ = shell.page_content("restructure");
     shell.settings_requested.set(false);
     shell.refresh();
     shell.count_files();
