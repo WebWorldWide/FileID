@@ -85,12 +85,12 @@ public sealed partial class SidebarProcessingControl : UserControl
                               or nameof(EngineClient.DeepAnalyzeComplete)
                               or nameof(EngineClient.QueueState))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
             }
             if (e.PropertyName == nameof(EngineClient.LastWarning))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncWarningBanner);
             }
             // No per-batch CompletionRipple: at ~5 Hz its 0.9 s rings stacked
@@ -360,7 +360,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             WarningBanner.Visibility = Visibility.Collapsed;
             return;
         }
-        WarningBannerText.Text = warning.Message;
+        WarningBannerText.Text = EngineErrorText.Text(warning.Kind, warning.Message);
         WarningBanner.Visibility = Visibility.Visible;
     }
 

@@ -103,7 +103,7 @@ internal sealed partial class TakesWorkbench
         if (e.PropertyName != nameof(EngineClient.LastCatalogResponse)) return;
         var response = Engine.LastCatalogResponse;
         if (!TakeProposalPolicy.IsJobPush(response)) return;
-        DebugLog.Debug($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=takeGrouping");
+        DebugLog.Info($"[ENGINE-SUB:TakesWorkbench] {e.PropertyName}=takeGrouping");
         var job = TakeProposalPolicy.Job(response!.Jobs);
         DispatcherQueue.TryEnqueue(() =>
         {

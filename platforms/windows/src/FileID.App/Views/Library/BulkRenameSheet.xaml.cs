@@ -91,6 +91,7 @@ public sealed partial class BulkRenameSheet : UserControl
             {
                 Services.UndoStack.Instance.Push(
                     $"rename {inverse.Count} file{(inverse.Count == 1 ? "" : "s")}",
+                    Services.ChangePage.Library,
                     async () =>
                     {
                         try

@@ -46,7 +46,7 @@ public sealed partial class SidebarEngineStatus : UserControl
                               or nameof(EngineClient.CrashReason)
                               or nameof(EngineClient.LastError))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarEngineStatus] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarEngineStatus] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
             }
         });
@@ -69,8 +69,8 @@ public sealed partial class SidebarEngineStatus : UserControl
             case EngineClient.LifecycleState.Ready:
                 // Ready but with a recent error — show red so the user notices.
                 ApplyStatus(StatusAccent.Red,
-                    ec.LastError?.Message ?? "Engine reported an error",
-                    ec.LastError?.Message ?? "See app.log for details.");
+                    EngineErrorText.Title(ec.LastError?.Kind),
+                    EngineErrorText.Text(ec.LastError?.Kind, ec.LastError?.Message));
                 break;
             case EngineClient.LifecycleState.Crashed:
                 ApplyStatus(StatusAccent.Red,
@@ -83,14 +83,15 @@ public sealed partial class SidebarEngineStatus : UserControl
     private enum StatusAccent { Gold, Red }
 
     internal static string ResolveCrashedStatusText(string? reason) =>
-        string.IsNullOrWhiteSpace(reason) ? "Engine crashed" : reason;
+        reason == EngineClient.StoppedReason ? "FileID's helper is off" : "FileID's helper stopped";
 
+    // The tooltip may carry the technical reason; the label never does.
     internal static string ResolveCrashedStatusTip(string? reason) =>
         string.IsNullOrWhiteSpace(reason)
-            ? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log."
-            : reason == "Engine stopped"
-                ? "Engine stopped. Restart it from Settings."
-                : reason;
+            ? "FileID's helper stopped unexpectedly. Quit and reopen FileID."
+            : reason == EngineClient.StoppedReason
+                ? "FileID's helper is off. Turn it back on in Settings."
+                : "FileID's helper stopped. Quit and reopen FileID. Details: " + reason;
 
     /// <summary>
     /// Sets the dot, glow ring, label, and tooltip in one shot. Glow ring
@@ -107,6 +108,6 @@ public sealed partial class SidebarEngineStatus : UserControl
         ToolTipService.SetToolTip(this, tip);
         // Screen-reader name for the status pill — the live engine state
         // plus its detail line, so the dot+text reads as one announcement.
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"Engine status: {text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"FileID status: {text}");
     }
 }

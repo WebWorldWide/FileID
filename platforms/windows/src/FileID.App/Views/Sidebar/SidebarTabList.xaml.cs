@@ -194,7 +194,7 @@ public sealed partial class SidebarTabList : UserControl
                               or nameof(EngineClient.QueueState)
                               or nameof(EngineClient.LastRestructurePlan))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarTabList] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarTabList] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncBadges);
             }
         });

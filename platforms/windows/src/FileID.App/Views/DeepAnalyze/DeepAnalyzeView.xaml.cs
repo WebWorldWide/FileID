@@ -330,11 +330,11 @@ public sealed partial class DeepAnalyzeView : UserControl
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeLast):
                 case nameof(EngineClient.DeepAnalyzeComplete):
-                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
                 case nameof(EngineClient.DeepAnalyzeCommandInFlight):
-                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     var ec = EngineClient.Instance;
                     var attemptId = ec.DeepAnalyzeCommandAttemptId;
                     DispatcherQueue.TryEnqueue(() =>
@@ -348,13 +348,13 @@ public sealed partial class DeepAnalyzeView : UserControl
                     break;
                 case nameof(EngineClient.Phase):
                 case nameof(EngineClient.LastFaceClustering):
-                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
                     break;
                 case nameof(EngineClient.Info):
                     // The engine just reported physical RAM — re-gate the model
                     // cards so any VLM that would OOM-kill the engine is disabled.
-                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
                     break;
             }

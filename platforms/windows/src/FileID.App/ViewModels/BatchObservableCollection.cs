@@ -62,6 +62,29 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
             NotifyCollectionChangedAction.Add, (System.Collections.IList)new List<T>(more), start));
     }
 
+    /// <summary>Inserts a run of items at the front with one multi-item Add
+    /// event at index 0. Realized elements are kept.</summary>
+    public void PrependRange(IReadOnlyList<T> more)
+    {
+        if (more.Count == 0) return;
+        _suspend = true;
+        try
+        {
+            for (int i = 0; i < more.Count; i++)
+            {
+                Items.Insert(i, more[i]);
+            }
+        }
+        finally
+        {
+            _suspend = false;
+        }
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(
+            NotifyCollectionChangedAction.Add, (System.Collections.IList)new List<T>(more), 0));
+    }
+
     protected override void OnCollectionChanged(NotifyCollectionChangedEventArgs e)
     {
         if (_suspend) return;

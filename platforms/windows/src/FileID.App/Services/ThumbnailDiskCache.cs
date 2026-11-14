@@ -64,6 +64,10 @@ internal static class ThumbnailDiskCache
     public static long CachedBytes => Interlocked.Read(ref _cachedBytes);
     public static int IndexedEntries => _index.Count;
 
+    /// <summary>Image thumbnails cached before sizes were display-scaled
+    /// were all asked for at this size and carry no size in their key.</summary>
+    internal const int LegacyImagePixelSize = 192;
+
     private static string CacheRoot { get; } = Path.Combine(AppPaths.ThumbsDir, "v1");
 
     /// <summary>SHA256(path|mtime), truncated to 40 hex chars for a
@@ -74,12 +78,13 @@ internal static class ThumbnailDiskCache
     /// concern here (path keying, no secrets), but consistency wins.
     /// A video keyframe also keys on the long side it was asked for, so a
     /// restart (or a different display scale) never reuses a smaller one.</summary>
-    internal static string Key(string path, double? modifiedAt, int? videoPixelSize = null)
+    internal static string Key(string path, double? modifiedAt, int? videoPixelSize = null, int imagePixelSize = LegacyImagePixelSize)
     {
         var s = modifiedAt.HasValue
             ? $"{path}|{modifiedAt.Value:R}"
             : path;
         if (videoPixelSize is { } size) s += $"|video@{size}";
+        else if (imagePixelSize != LegacyImagePixelSize) s += $"|image@{imagePixelSize}";
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(s), hash);
         // Hex-encode first 20 bytes (40 hex chars) — plenty of distinct
@@ -106,9 +111,10 @@ internal static class ThumbnailDiskCache
         double? modifiedAt,
         DispatcherQueue dispatcher,
         CancellationToken ct,
-        int? videoPixelSize = null)
+        int? videoPixelSize = null,
+        int imagePixelSize = LegacyImagePixelSize)
     {
-        var key = Key(path, modifiedAt, videoPixelSize);
+        var key = Key(path, modifiedAt, videoPixelSize, imagePixelSize);
         var cached = CachePathFor(key);
         if (!File.Exists(cached)) { return null; }
 
@@ -125,7 +131,7 @@ internal static class ThumbnailDiskCache
             return null;
         }
 
-        var bmp = await RenderFromBytesOnDispatcherAsync(bytes, videoPixelSize is null, dispatcher, ct).ConfigureAwait(false);
+        var bmp = await RenderFromBytesOnDispatcherAsync(bytes, videoPixelSize is null ? imagePixelSize : null, dispatcher, ct).ConfigureAwait(false);
         if (bmp != null)
         {
             // Only a successful decode counts as an LRU hit — a poisoned file
@@ -156,7 +162,7 @@ internal static class ThumbnailDiskCache
 
     /// <summary>Fire-and-forget write. Validates size + writes via temp + rename
     /// so a torn write never appears as a cache hit.</summary>
-    public static Task TryWriteAsync(string path, double? modifiedAt, byte[] bytes, int? videoPixelSize = null)
+    public static Task TryWriteAsync(string path, double? modifiedAt, byte[] bytes, int? videoPixelSize = null, int imagePixelSize = LegacyImagePixelSize)
     {
         if (bytes.Length == 0 || bytes.Length > MaxBytesToCache)
         {
@@ -166,7 +172,7 @@ internal static class ThumbnailDiskCache
         {
             try
             {
-                var key = Key(path, modifiedAt, videoPixelSize);
+                var key = Key(path, modifiedAt, videoPixelSize, imagePixelSize);
                 var cached = CachePathFor(key);
                 var dir = Path.GetDirectoryName(cached)!;
                 Directory.CreateDirectory(dir);
@@ -287,7 +293,7 @@ internal static class ThumbnailDiskCache
     /// fired.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,
-        bool atTileSize,
+        int? decodePixelWidth,
         DispatcherQueue dispatcher,
         CancellationToken ct)
     {
@@ -311,11 +317,10 @@ internal static class ThumbnailDiskCache
                     writer.DetachStream();
                 }
                 stream.Seek(0);
-                // Match ThumbnailService.ThumbnailRequestPx (192). DPI-aware
-                // sampling was reverted — see the comment in
-                // ThumbnailService.cs for the rationale. Video keyframes are
-                // stored at the display-scaled size they were asked for.
-                var bmp = atTileSize ? new BitmapImage { DecodePixelWidth = 192 } : new BitmapImage();
+                // Image tiles decode at the size ThumbnailService asked the
+                // shell for; video keyframes are stored at the display-scaled
+                // size they were asked for and decode as stored.
+                var bmp = decodePixelWidth is { } width ? new BitmapImage { DecodePixelWidth = width } : new BitmapImage();
                 await bmp.SetSourceAsync(stream).AsTask(ct);
                 DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(bmp);

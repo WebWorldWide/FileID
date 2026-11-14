@@ -347,21 +347,37 @@ internal sealed partial class EngineClient
     {
         return SendScanControlAsync(new ResumeScanCommand(), paused: false);
     }
-    public Task CancelScanAsync()
+    public async Task CancelScanAsync()
     {
-        // Optimistic UI flip: clear the "in-flight" indicators immediately
-        // so the sidebar drops back to Idle within microseconds. The engine
-        // will follow up with PhaseChanged(Cancelled) + a possible final
+        // Clear the "in-flight" indicators only once the cancel has been
+        // handed to the engine: clearing first left the sidebar reading Idle
+        // over a scan that was still running whenever the send failed. The
+        // engine follows up with PhaseChanged(Cancelled) + a possible final
         // Progress event; both are no-ops on the already-cleared state.
-        // Without this, _scanStartedAt + LastProgress + LastBatch + IsPaused
-        // retained their prior-scan values until the next scan started, so
-        // the sidebar's "Scan complete — N files in MM:SS" panel showed the
-        // STALE values from before the cancel.
-        IsPaused = false;
-        _scanStartedAt = null;
-        LastProgress = null;
-        LastBatch = null;
-        return SendCommandAsync(new CancelScanCommand());
+        // Without the clear, _scanStartedAt + LastProgress + LastBatch +
+        // IsPaused kept their prior-scan values until the next scan started,
+        // so the sidebar's "Scan complete — N files in MM:SS" panel showed
+        // the STALE values from before the cancel.
+        var generation = SpawnGeneration;
+        await SendCommandAsync(new CancelScanCommand()).ConfigureAwait(false);
+
+        void ClearScanState()
+        {
+            if (generation != SpawnGeneration) return;
+            IsPaused = false;
+            _scanStartedAt = null;
+            LastProgress = null;
+            LastBatch = null;
+        }
+
+        if (_ui.HasThreadAccess)
+        {
+            ClearScanState();
+        }
+        else
+        {
+            _ui.TryEnqueue(ClearScanState);
+        }
     }
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
     public async Task ShutdownAsync()
@@ -597,6 +613,7 @@ internal sealed partial class EngineClient
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
+            ReleaseAfterLateReplyHold(ReleaseOwnership);
             throw;
         }
         catch (OperationCanceledException) when (sendCompleted)
@@ -607,6 +624,7 @@ internal sealed partial class EngineClient
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
+            ReleaseAfterLateReplyHold(ReleaseOwnership);
             throw;
         }
         finally
@@ -614,6 +632,18 @@ internal sealed partial class EngineClient
             if (releaseOnExit) ReleaseOwnership();
         }
     }
+
+    // A wait that gave up keeps its prefix reserved so a late reply cannot be
+    // read as the next operation's result. A reply that never comes (and an
+    // engine that never restarts) must not block that kind of action for the
+    // rest of the session, so the reservation also ends after this hold.
+    private static void ReleaseAfterLateReplyHold(Action release) =>
+        _ = Task.Delay(BulkActionTimeout.LateReplyHold).ContinueWith(
+            _ => release(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
     /// <summary>Send deepAnalyzeFile and await the engine's terminal
     /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits

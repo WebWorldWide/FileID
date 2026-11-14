@@ -21,7 +21,7 @@ public sealed partial class PeopleView
     {
         var response = EngineClient.Instance.LastCatalogResponse;
         if (!FaceQueuePolicy.IsJobUpdate(response)) return;
-        DebugLog.Debug($"[ENGINE-SUB:PeopleView] {e.PropertyName}=faceRefresh");
+        DebugLog.Info($"[ENGINE-SUB:PeopleView] {e.PropertyName}=faceRefresh");
         var job = FaceQueuePolicy.Job(response!.Jobs);
         DispatcherQueue.TryEnqueue(() =>
         {

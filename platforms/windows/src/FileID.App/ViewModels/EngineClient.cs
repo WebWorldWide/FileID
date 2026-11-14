@@ -943,7 +943,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // best-effort: lines containing a Windows-shaped absolute
             // path (drive letter + colon + backslash) get reformatted
             // with the canonical home-tilde substitution.
-            DebugLog.Debug("[engine] " + RedactWindowsPathsInLine(line));
+            DebugLog.Info("[engine] " + RedactWindowsPathsInLine(line));
         }
     }
 

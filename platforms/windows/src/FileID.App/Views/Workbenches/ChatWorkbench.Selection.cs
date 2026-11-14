@@ -92,7 +92,7 @@ internal sealed partial class ChatWorkbench
         _chosen.RemoveWhere(id => !hits.Any(hit => hit.FileID == id));
         _selectionTiles.Clear();
         _selectionHost.Children.Clear();
-        _selectionThumbs ??= new ThumbnailService();
+        _selectionThumbs = ThumbnailService.Shared;
         AddSelectionRow("Matches", "yes", _gold, hits);
         AddSelectionRow("Not sure", "unsure", _ai, hits);
         _askSelection = Secondary(new Button { Content = "Ask about these", Height = 28, MinHeight = 28 });
@@ -231,7 +231,6 @@ internal sealed partial class ChatWorkbench
 
     private void DisposeSelection()
     {
-        _selectionThumbs?.Dispose();
         _selectionThumbs = null;
     }
 }

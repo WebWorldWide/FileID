@@ -33,7 +33,7 @@ public sealed partial class SidebarQueueList : UserControl
         => DebugLog.SafeRun("SidebarQueueList.OnEngineChanged", () =>
         {
             if (e.PropertyName != nameof(EngineClient.QueueState)) return;
-            DebugLog.Debug($"[ENGINE-SUB:SidebarQueueList] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:SidebarQueueList] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(Sync);
         });
 

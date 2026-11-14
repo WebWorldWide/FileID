@@ -102,7 +102,7 @@ internal sealed class ModelCatalogBrowser : UserControl
         => DebugLog.SafeRun("ModelCatalogBrowser.OnEngineChanged", () =>
         {
             if (e.PropertyName is not (nameof(EngineClient.BenchmarkProgress) or nameof(EngineClient.ModelDownloadProgress))) return;
-            DebugLog.Debug($"[ENGINE-SUB:ModelCatalogBrowser] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:ModelCatalogBrowser] {e.PropertyName}");
             var benchmark = _engine.BenchmarkProgress;
             var download = _engine.ModelDownloadProgress;
             var property = e.PropertyName;

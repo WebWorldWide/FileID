@@ -117,10 +117,25 @@
             </ItemsRepeater>
         </ScrollViewer>
 
-        <TextBlock Grid.Row="2"
-                   x:Name="StatusText"
-                   Style="{StaticResource CaptionTextBlockStyle}"
-                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                   TextWrapping="Wrap" />
+        <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       x:Name="StatusText"
+                       VerticalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       AutomationProperties.LiveSetting="Polite"
+                       TextWrapping="Wrap" />
+            <Button Grid.Column="1"
+                    x:Name="UndoMergeButton"
+                    Content="Undo"
+                    Visibility="Collapsed"
+                    AutomationProperties.Name="Undo the last merge"
+                    AutomationProperties.HelpText="Puts the two people back as they were before the last merge."
+                    Click="OnUndoMergeClicked" />
+        </Grid>
     </Grid>
 </UserControl>
