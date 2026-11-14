@@ -200,6 +200,9 @@ struct MainWindow: View {
             .onChange(of: activeTabRaw) { _, _ in ChatHandoff.shared.activeTab = activeTab }
             .onChange(of: engine.libraryRoots, initial: true) { _, roots in applyScope(roots) }
             .onChange(of: scopeRootID) { _, _ in applyScope(engine.libraryRoots) }
+            // The counts in the sidebar and page header must catch up when a scan ends on any
+            // page, not only while the Library page is the one on screen.
+            .onChange(of: engine.lastTerminalEventAt) { _, _ in store.notifyChanged() }
             .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
