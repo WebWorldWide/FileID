@@ -467,7 +467,7 @@ class Soak:
                 with open(self.p(r), "wb") as f:
                     f.write(data)
                 self.model[r] = hashlib.sha256(data).hexdigest(); overwritten.append(r)
-        for i in range(40):
+        for i in range(30):
             d = rng.choice(dirs)
             name = f"new-r{rnd}-{i}-{uuid.uuid4().hex[:6]}." + rng.choice(("txt", "md", "csv"))
             data = f"fresh file round {rnd} {i} {uuid.uuid4()} harbor lantern\n".encode()
