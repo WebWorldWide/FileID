@@ -21,7 +21,7 @@ Expected values are literal (exact) or a tolerance object:
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
 macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {clip_model} (the CLIP
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {hardware} (the Mac's benchmark hardware string), {clip_model} (the CLIP
 embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
@@ -39,6 +39,11 @@ A case with "appHosted": true runs only when every engine it uses (the one under
 test and any it "requires") is one the Mac app hosts, i.e. writes events on stderr:
 the Swift engine and the Rust engine built with the Apple adapters. Case "env"
 values expand {state} and {root}.
+A case with "model": {"repo": "<org>/<name>"} needs that MLX model installed
+($FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface, read only) and is skipped
+without it: a real model is too large to ship in the repo and no engine may download
+one here. The harness clones the install into the case's scratch Hugging Face root and
+sets FILEID_HF_CACHE_ROOT for every engine it starts.
 A case may list knownDivergences ({"engine", "reason", optional "os" list and
 "run": false when running it is unsafe}). A divergent case is expected to fail on
 that engine; if it passes, the marker is stale and the run fails so the tracker
@@ -64,6 +69,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import sqlite3
 import struct
 import subprocess
@@ -119,6 +125,16 @@ def clip_model():
     return "clip-vitb32-openai-v1:" + hashlib.sha256(descriptor.encode()).hexdigest()
 
 
+def mac_hardware():
+    """The hardware string the Mac engines file benchmarks under
+    (ModelBenchmarkRunner.hardwareFingerprint in the Swift engine)."""
+    def sysctl(name):
+        return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, check=True).stdout.strip()
+    memory = round(int(sysctl("hw.memsize")) / 1073741824)
+    version = ".".join(sysctl("kern.osproductversion").split(".")[:2])
+    return f"{sysctl('machdep.cpu.brand_string')} \u00b7 {memory} GB \u00b7 {sysctl('hw.activecpu')} cores \u00b7 macOS {version}"
+
+
 def host_os():
     if sys.platform.startswith("linux"):
         return "linux"
@@ -146,7 +162,7 @@ def engine_env(state):
 TEST_TRASH_ROOT = False
 
 
-def case_env(state, case):
+def case_env(state, case, extra_env=None):
     """Per-case defaults: UTC day boundaries, an empty Rust model directory and an
     empty CoreFoundation home (where the macOS engine looks for models), so results
     never depend on the runner's clock zone or installed models."""
@@ -160,7 +176,7 @@ def case_env(state, case):
             value = value.replace(token, replacement)
         extra[key] = value
     return {"TZ": "UTC", "FILEID_MODELS_DIR": str(Path(state) / "Models"), "CFFIXED_USER_HOME": str(home),
-            **trash, **extra}
+            **trash, **extra, **(extra_env or {})}
 
 
 class Engine:
@@ -375,6 +391,7 @@ class Context:
         self.pid = None
         self.conversation = str(uuid.uuid4())
         self.saved = {}
+        self.extra_env = {}
 
     def path(self, relative):
         return str(self.root / relative) if relative else str(self.root)
@@ -407,6 +424,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "hardware":
+            return mac_hardware()
         if name == "bookmark":
             return bookmark(self.path(argument))
         raise Failure(f"unknown placeholder {{{token}}}")
@@ -559,7 +578,7 @@ def build_tree(ctx, entries):
         elif "contentHex" in entry:
             target.write_bytes(bytes.fromhex(entry["contentHex"]))
         else:
-            data = entry.get("content", "").encode()
+            data = ctx.expand(entry.get("content", "")).encode()
             if "size" in entry:
                 data = (data * (entry["size"] // max(len(data), 1) + 1))[:entry["size"]] if data else bytes(entry["size"])
             target.write_bytes(data)
@@ -725,7 +744,7 @@ def run_step(engine, ctx, step, binaries):
 
 def start(binaries, flavor, ctx):
     ctx.flavor = flavor
-    engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case))
+    engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case, ctx.extra_env))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
     ctx.hosted = engine.stream.get("ready") == "stderr"
@@ -741,9 +760,34 @@ def divergence_for(case, flavor, os_name):
     return None
 
 
+def model_source(case):
+    """The installed copy of the case's "model" (a Hugging Face repo such as
+    mlx-community/Qwen3-VL-2B-Instruct-4bit), or None. Looks under
+    $FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface; read only."""
+    wanted = case.get("model")
+    if not wanted:
+        return None
+    root = Path(os.environ.get("FILEID_CONFORMANCE_MODELS") or Path.home() / "Documents/huggingface")
+    folder = root / "models" / wanted["repo"]
+    return folder if (folder / "config.json").is_file() and (folder / ".fileid-installed").is_file() else None
+
+
+def stage_model(ctx, source):
+    """Clone the installed model into this case's Hugging Face root and point both
+    engines at it, so no engine touches (or writes install records into) the original."""
+    target = ctx.state.parent / "hf/models" / ctx.case["model"]["repo"]
+    target.parent.mkdir(parents=True)
+    if subprocess.run(["cp", "-cR", str(source), str(target)], capture_output=True, check=False).returncode != 0:
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(source, target)
+    ctx.extra_env["FILEID_HF_CACHE_ROOT"] = str(ctx.state.parent / "hf")
+
+
 def run_case(case, flavor, binaries, os_name, parent):
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         ctx = Context(case, flavor, os_name, Path(temporary))
+        if case.get("model"):
+            stage_model(ctx, model_source(case))
         first = case.get("start", flavor)
         start(binaries, first, ctx).close()
         rows = build_tree(ctx, case.get("tree", []))
@@ -832,13 +876,15 @@ def main():
         missing = set(case.get("requires", [])) - set(binaries)
         trash_root = case.get("requiresTestTrashRoot")
         needs_trash_root = not TEST_TRASH_ROOT and (args.os in trash_root if isinstance(trash_root, list) else bool(trash_root))
+        no_model = case.get("model") and model_source(case) is None
         unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted \
+        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted or no_model \
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
             reason = (f"needs {', '.join(sorted(missing))} engine" if missing
                       else "needs test-trash-root engine builds (--test-trash-root)" if needs_trash_root
                       else "needs engines the Mac app hosts" if unhosted
+                      else f"model {case['model']['repo']} is not installed" if no_model
                       else "not applicable here")
             print(f"SKIP   {name} ({reason})")
             continue

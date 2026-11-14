@@ -155,7 +155,6 @@ enum TrashJournal {
     /// rows of files that are provably in the Trash, and forgets entries for files that never left.
     static func reconcile(database: Database, journal url: URL = defaultURL, trashFolders folders: [URL]? = nil) async {
         let batches = loadLocked(at: url)
-        guard !batches.isEmpty else { return }
         var changed = false
         var repaired: [Batch] = []
         var staleRows: [(Int64, String)] = []
@@ -175,6 +174,14 @@ enum TrashJournal {
             }
             batch.items = items
             if !items.isEmpty { repaired.append(batch) } else { changed = true }
+        }
+        // After a rollback from the Rust engine: its log is read-only here, with the same proof rules.
+        for batch in RustTrashLog.verifiedBatches(beside: url) {
+            for item in batch.items {
+                guard !FileManager.default.fileExists(atPath: item.originalPath),
+                      locate(item, in: folders) != nil else { continue }
+                staleRows.append((item.fileID, item.originalPath))
+            }
         }
         if !staleRows.isEmpty {
             let rows = staleRows

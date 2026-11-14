@@ -182,5 +182,266 @@
     "steps": [
       {"label": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "set", "value": [{"fileID": 1, "source": "{path:Downloads/acme_invoice_0.pdf}", "destination": "{path:Acme Invoice/acme_invoice_0.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 2, "source": "{path:Downloads/acme_invoice_1.pdf}", "destination": "{path:Acme Invoice/acme_invoice_1.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 3, "source": "{path:Downloads/acme_invoice_2.pdf}", "destination": "{path:Acme Invoice/acme_invoice_2.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 4, "source": "{path:Downloads/acme_invoice_3.pdf}", "destination": "{path:Acme Invoice/acme_invoice_3.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 5, "source": "{path:Downloads/acme_invoice_4.pdf}", "destination": "{path:Acme Invoice/acme_invoice_4.pdf}", "confidence": "auto", "reason": "7 files sharing Acme, Invoice, Old"}, {"fileID": 6, "source": "{path:Downloads/hawaii_trip_itinerary_0.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_0.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 7, "source": "{path:Downloads/hawaii_trip_itinerary_1.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_1.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 8, "source": "{path:Downloads/hawaii_trip_itinerary_2.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_2.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 9, "source": "{path:Downloads/hawaii_trip_itinerary_3.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_3.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 10, "source": "{path:Downloads/hawaii_trip_itinerary_4.pdf}", "destination": "{path:Hawaii Itinerary/hawaii_trip_itinerary_4.pdf}", "confidence": "auto", "reason": "5 files sharing Hawaii, Itinerary, Trip"}, {"fileID": 11, "source": "{path:Downloads/tax_return_2025_0.pdf}", "destination": "{path:Return Tax/tax_return_2025_0.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 12, "source": "{path:Downloads/tax_return_2025_1.pdf}", "destination": "{path:Return Tax/tax_return_2025_1.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 13, "source": "{path:Downloads/tax_return_2025_2.pdf}", "destination": "{path:Return Tax/tax_return_2025_2.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 14, "source": "{path:Downloads/tax_return_2025_3.pdf}", "destination": "{path:Return Tax/tax_return_2025_3.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 15, "source": "{path:Downloads/tax_return_2025_4.pdf}", "destination": "{path:Return Tax/tax_return_2025_4.pdf}", "confidence": "auto", "reason": "5 files sharing Return, Tax"}, {"fileID": 16, "source": "{path:Downloads/meeting_notes_project_apollo_0.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_0.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 17, "source": "{path:Downloads/meeting_notes_project_apollo_1.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_1.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 18, "source": "{path:Downloads/meeting_notes_project_apollo_2.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_2.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 19, "source": "{path:Downloads/meeting_notes_project_apollo_3.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_3.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 20, "source": "{path:Downloads/meeting_notes_project_apollo_4.txt}", "destination": "{path:Apollo Meeting/meeting_notes_project_apollo_4.txt}", "confidence": "auto", "reason": "5 files sharing Apollo, Meeting, Notes"}, {"fileID": 21, "source": "{path:Downloads/guitar_lesson_0.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_0.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 22, "source": "{path:Downloads/guitar_lesson_1.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_1.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 23, "source": "{path:Downloads/guitar_lesson_2.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_2.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 24, "source": "{path:Downloads/guitar_lesson_3.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_3.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 25, "source": "{path:Downloads/guitar_lesson_4.mp3}", "destination": "{path:Guitar Lesson/guitar_lesson_4.mp3}", "confidence": "auto", "reason": "5 files sharing Guitar, Lesson"}, {"fileID": 26, "source": "{path:Downloads/recipe_lasagna_0.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_0.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 27, "source": "{path:Downloads/recipe_lasagna_1.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_1.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 28, "source": "{path:Downloads/recipe_lasagna_2.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_2.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 29, "source": "{path:Downloads/recipe_lasagna_3.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_3.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}, {"fileID": 30, "source": "{path:Downloads/recipe_lasagna_4.txt}", "destination": "{path:Lasagna Recipe/recipe_lasagna_4.txt}", "confidence": "auto", "reason": "5 files sharing Lasagna, Recipe"}]}, "folderClassifications": {"anchorFolders": 1, "mixedFolders": 0, "junkFolders": 1}}}
     ]
+  },
+  {
+    "name": "restructure-semantic-passes-without-the-respect-stage",
+    "description": "With FILEID_RESTRUCTURE_RESPECT=0 the semantic passes alone decide. Folders that already fit their files (including two identical-content twin folders) stay put; two Inbox strays route to the matching Beach folder; a Downloads folder is never a learn-your-style target, so its files and the Inbox strays of that content form a new group named by month (no tags).",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "tree": [
+      {
+        "path": "Beach/b1.jpg",
+        "content": "img1",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beach/b2.jpg",
+        "content": "img2",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1791108060
+        }
+      },
+      {
+        "path": "Beach/b3.jpg",
+        "content": "img3",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1791108120
+        }
+      },
+      {
+        "path": "Beach/b4.jpg",
+        "content": "img4",
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 1791108180
+        }
+      },
+      {
+        "path": "Twin One/t1.jpg",
+        "content": "img5",
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 1791108240
+        }
+      },
+      {
+        "path": "Twin One/t2.jpg",
+        "content": "img6",
+        "row": {
+          "id": 6,
+          "kind": "image",
+          "created_at": 1791108300
+        }
+      },
+      {
+        "path": "Twin One/t3.jpg",
+        "content": "img7",
+        "row": {
+          "id": 7,
+          "kind": "image",
+          "created_at": 1791108360
+        }
+      },
+      {
+        "path": "Twin One/t4.jpg",
+        "content": "img8",
+        "row": {
+          "id": 8,
+          "kind": "image",
+          "created_at": 1791108420
+        }
+      },
+      {
+        "path": "Twin Two/u1.jpg",
+        "content": "img9",
+        "row": {
+          "id": 9,
+          "kind": "image",
+          "created_at": 1791108480
+        }
+      },
+      {
+        "path": "Twin Two/u2.jpg",
+        "content": "img10",
+        "row": {
+          "id": 10,
+          "kind": "image",
+          "created_at": 1791108540
+        }
+      },
+      {
+        "path": "Twin Two/u3.jpg",
+        "content": "img11",
+        "row": {
+          "id": 11,
+          "kind": "image",
+          "created_at": 1791108600
+        }
+      },
+      {
+        "path": "Twin Two/u4.jpg",
+        "content": "img12",
+        "row": {
+          "id": 12,
+          "kind": "image",
+          "created_at": 1791108660
+        }
+      },
+      {
+        "path": "Downloads/d1.jpg",
+        "content": "img13",
+        "row": {
+          "id": 13,
+          "kind": "image",
+          "created_at": 1791108720
+        }
+      },
+      {
+        "path": "Downloads/d2.jpg",
+        "content": "img14",
+        "row": {
+          "id": 14,
+          "kind": "image",
+          "created_at": 1791108780
+        }
+      },
+      {
+        "path": "Downloads/d3.jpg",
+        "content": "img15",
+        "row": {
+          "id": 15,
+          "kind": "image",
+          "created_at": 1791108840
+        }
+      },
+      {
+        "path": "Downloads/d4.jpg",
+        "content": "img16",
+        "row": {
+          "id": 16,
+          "kind": "image",
+          "created_at": 1791108900
+        }
+      },
+      {
+        "path": "Inbox/s1.jpg",
+        "content": "img17",
+        "row": {
+          "id": 17,
+          "kind": "image",
+          "created_at": 1791108960
+        }
+      },
+      {
+        "path": "Inbox/s2.jpg",
+        "content": "img18",
+        "row": {
+          "id": 18,
+          "kind": "image",
+          "created_at": 1791109020
+        }
+      },
+      {
+        "path": "Inbox/s3.jpg",
+        "content": "img19",
+        "row": {
+          "id": 19,
+          "kind": "image",
+          "created_at": 1791109080
+        }
+      },
+      {
+        "path": "Inbox/s4.jpg",
+        "content": "img20",
+        "row": {
+          "id": 20,
+          "kind": "image",
+          "created_at": 1791109140
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES (1,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(2,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(3,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(5,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(6,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(7,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(8,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(9,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(10,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(11,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(12,CAST(zeroblob(4)||X'0000803f'||zeroblob(2040) AS BLOB),'{clip_model}'),(13,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(14,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(15,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(16,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(17,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(18,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(19,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(20,CAST(zeroblob(8)||X'0000803f'||zeroblob(2036) AS BLOB),'{clip_model}')"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 13,
+                "source": "{path:Downloads/d1.jpg}",
+                "destination": "{path:October 2026/d1.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 14,
+                "source": "{path:Downloads/d2.jpg}",
+                "destination": "{path:October 2026/d2.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 15,
+                "source": "{path:Downloads/d3.jpg}",
+                "destination": "{path:October 2026/d3.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 16,
+                "source": "{path:Downloads/d4.jpg}",
+                "destination": "{path:October 2026/d4.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 17,
+                "source": "{path:Inbox/s1.jpg}",
+                "destination": "{path:Beach/s1.jpg}",
+                "category": "Beach"
+              },
+              {
+                "fileID": 18,
+                "source": "{path:Inbox/s2.jpg}",
+                "destination": "{path:Beach/s2.jpg}",
+                "category": "Beach"
+              },
+              {
+                "fileID": 19,
+                "source": "{path:Inbox/s3.jpg}",
+                "destination": "{path:October 2026/s3.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 20,
+                "source": "{path:Inbox/s4.jpg}",
+                "destination": "{path:October 2026/s4.jpg}",
+                "category": "October 2026"
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]
