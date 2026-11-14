@@ -85,6 +85,7 @@ impl VlmServer {
     pub async fn start_with_arguments(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>, arguments: Option<&[String]>) -> Result<Self> {
         if arguments.is_some_and(|args| !super::launch_tuning::valid(args)) { bail!("Launch flags outside the tuning allowlist"); }
         if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
+        crate::pipeline::scan_models::release_for_other_models();
         let memory_mb = crate::util::model_memory::require_model_headroom(gguf,mmproj)
             .await.map_err(super::native_admission::HostAdmissionError)?;
         let scheduler = ResourceScheduler::shared();

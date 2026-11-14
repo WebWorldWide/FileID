@@ -24,7 +24,8 @@ use crate::ipc::{
 };
 use crate::pipeline::dbwriter::{BatchStats, DbWriter};
 use crate::pipeline::discovery::{path_fingerprint_text, Discovery, SkipFingerprint};
-use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
+use crate::pipeline::scan_models::ModelSource;
+use crate::pipeline::tagging::{Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub struct ScanSession {
     db_conn: Arc<Mutex<Connection>>,
     worker_count: usize,
     sink: Sink,
-    models: Arc<ModelStack>,
+    models: Arc<ModelSource>,
     /// When true, skip the incremental-rescan skip set and reprocess
     /// every file. Plumbed from `StartScanPayload::rescan`.
     rescan: bool,
@@ -101,7 +102,7 @@ impl ScanSession {
         db_conn: Arc<Mutex<Connection>>,
         worker_count: usize,
         sink: Sink,
-        models: Arc<ModelStack>,
+        models: Arc<ModelSource>,
         rescan: bool,
         excluded_paths: Vec<String>,
     ) -> Self {
@@ -328,6 +329,13 @@ impl ScanSession {
                 }
             }
 
+            // Files that failed on enough scans, unchanged since, stay failed
+            // rows (the Library still lists them) but are not attempted again.
+            let given_up = add_given_up_failures(&conn, &mut set, &lo, hi.as_deref());
+            if given_up > 0 {
+                tracing::info!(given_up, "[SCAN] files that keep failing are left alone until they change");
+            }
+
             // Crash self-heal: face crops are written post-commit outside the
             // writer tx, so a mid-scan kill can leave committed face_prints
             // rows with no on-disk crop JPEG. Those files are size+mtime
@@ -361,17 +369,34 @@ impl ScanSession {
         // already current" — NOT an empty/unsupported folder (#21).
         let skip_count = skip_paths.len();
         let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
+        // Windows catalogs a cloud placeholder from its metadata; the content-hash
+        // gate above keeps it out of the skip set so a download is noticed. Hand
+        // discovery those rows so a file that is still a placeholder is not
+        // re-emitted and re-written on every scan.
+        let known_placeholders = if cfg!(windows) && !self.rescan {
+            known_placeholders(&self.db_conn.lock(), root)
+        } else {
+            std::collections::HashMap::new()
+        };
         let discovery = Discovery::new_with_skip_and_exclusions(
             root,
             self.coordinator.clone(),
             skip_paths,
             Arc::new(excl_norm),
-        );
+        )
+        .with_known_placeholders(known_placeholders)
+        // A forced rescan analyses everything again, moved files included.
+        .with_move_index(if self.rescan {
+            None
+        } else {
+            crate::pipeline::discovery::MoveIndex::load(&self.db_conn)
+        });
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_heavy = handle.heavy_count.clone();
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
+        let discovered_cloud_only = handle.cloud_only_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_seen_dirs = handle.seen_dirs.clone();
         let discovery_join = handle.join;
@@ -427,6 +452,7 @@ impl ScanSession {
         let coord_for_tick = self.coordinator.clone();
         let root_for_tick = root.to_string_lossy().into_owned();
         let errors_for_tick = discovered_errors.clone();
+        let cloud_only_for_tick = discovered_cloud_only.clone();
         // Clone the discovery counter for the ticker; the original stays
         // in scope so the tagging callback can also read it for Progress
         // event totals.
@@ -496,7 +522,8 @@ impl ScanSession {
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
                     // when a notice is actually delivered. (audit R3-21)
-                    let notice = discovery_notice(count, skip_count, errs, &root_for_tick);
+                    let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
+                    let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick);
                     if let Some(err) = notice {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
@@ -523,9 +550,12 @@ impl ScanSession {
             let conn = self.db_conn.lock();
             crate::pipeline::twin_reuse::known_image_hashes(&conn).unwrap_or_default()
         };
-        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
+        let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
-            .with_legacy_hashes(writer.rename_heal_enabled())
+            .with_legacy_hashes(
+                writer.rename_heal_enabled()
+                    && legacy_hash_rows_possible(&self.db_conn.lock(), crate::paths::root().ok().as_deref()),
+            )
             .with_known_twins(known_twins);
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
@@ -617,6 +647,12 @@ impl ScanSession {
             (Err(err), _, _, _) | (_, _, Err(err), _) => Err(err),
             (_, Err(err), _, _) | (_, _, _, Err(err)) => Err(err),
         };
+        // The models could not be loaded: nothing was analysed, and the caller
+        // reports the reason instead of a cancelled scan.
+        let pipeline_outcome = match self.models.failure() {
+            Some(failure) => Err(anyhow::Error::new(failure)),
+            None => pipeline_outcome,
+        };
         let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
             Ok(result) => result,
             Err(err) => {
@@ -685,7 +721,8 @@ impl ScanSession {
             let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
             let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
             let root_display = root.to_string_lossy().into_owned();
-            let notice = discovery_notice(count, skip_count, errs, &root_display);
+            let cloud_only = discovered_cloud_only.load(std::sync::atomic::Ordering::Relaxed);
+            let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_display);
             if let Some(err) = notice {
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
                     .await;
@@ -757,6 +794,48 @@ impl ScanSession {
             }
         } else {
             tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
+        }
+
+        // What the main pass left owed (RAM++ tags in deferred mode, careful
+        // text reads), and what an earlier cancelled or interrupted scan of
+        // this folder still owes. A cancel here ends the scan as cancelled; the
+        // rest stays owed.
+        let mut post_scan_announced = false;
+        if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            let (owed_tags, owed_careful) = crate::pipeline::catch_up::owed(&self.db_conn.lock(), Some(root));
+            if owed_tags + owed_careful > 0 {
+                on_phase(SessionPhase::PostScan);
+                emit_phase(SessionPhase::PostScan);
+                post_scan_announced = true;
+                match self.models.get().await {
+                    Some(stack) => {
+                        let analyzer = crate::pipeline::tagging::catch_up_analyzer(stack, self.coordinator.clone());
+                        let report = CatchUpProgress {
+                            sink: sink.clone(),
+                            session_id: session_id.clone(),
+                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
+                            processed: total,
+                            failed,
+                            state: Mutex::new((0, 0, Instant::now())),
+                        };
+                        let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::pipeline::catch_up::run(
+                                &conn,
+                                Some(&root),
+                                analyzer.as_ref(),
+                                &|| coordinator.is_cancelled(),
+                                &|| coordinator.is_paused(),
+                                &|event| report.report(event),
+                            )
+                        });
+                        if let Err(error) = pass.await {
+                            tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
+                        }
+                    }
+                    None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
+                }
+            }
         }
 
         let elapsed = started.elapsed().as_secs_f64();
@@ -834,8 +913,10 @@ impl ScanSession {
             ))))
             .await;
         } else {
-            on_phase(SessionPhase::PostScan);
-            emit_phase(SessionPhase::PostScan);
+            if !post_scan_announced {
+                on_phase(SessionPhase::PostScan);
+                emit_phase(SessionPhase::PostScan);
+            }
             on_phase(SessionPhase::Completed);
             // Terminal Completed phase via the guaranteed path so the
             // app's terminal state can never be lost under backpressure.
@@ -861,6 +942,51 @@ impl ScanSession {
             capture_dates_current,
         })
     }
+}
+
+/// Progress of the catch-up pass, reported in the post-scan phase the way the
+/// Swift engine does: `total` grows above `discovered` by the pass's size and
+/// `processed` advances by what it has done, so the counters only ever grow.
+struct CatchUpProgress {
+    sink: Sink,
+    session_id: String,
+    discovered: u64,
+    processed: u64,
+    failed: u64,
+    /// (owed, done, started)
+    state: Mutex<(u64, u64, Instant)>,
+}
+
+impl CatchUpProgress {
+    fn report(&self, event: crate::pipeline::catch_up::Progress) {
+        let (owed, done, started) = {
+            let mut state = self.state.lock();
+            match event {
+                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.1),
+                crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
+            }
+            *state
+        };
+        let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
+        let seconds = started.elapsed().as_secs_f64();
+        let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
+        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
+            session_id: self.session_id.clone(),
+            phase: ScanPhase::PostScan,
+            total,
+            discovered: self.discovered,
+            processed,
+            failed: self.failed,
+            files_per_second: rate,
+            eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
+            resident_mb: crate::platform::process_memory_mb(),
+            available_mb: 0,
+        }))));
+    }
+}
+
+fn catch_up_counters(discovered: u64, processed: u64, owed: u64, done: u64) -> (u64, u64) {
+    (discovered.max(processed) + owed, processed + done.min(owed))
 }
 
 /// Throttle state for progress emission. The DBWriter callback fires per
@@ -966,9 +1092,25 @@ fn discovery_notice(
     count: u64,
     skip_count: usize,
     errs: u64,
+    cloud_only: u64,
     root: &str,
 ) -> Option<crate::ipc::EngineError> {
-    let (kind, message) = if count == 0 && skip_count > 0 {
+    let (kind, message) = if cloud_only > 0 {
+        // The Swift engine's `Discovery.shortfallNotice`, word for word.
+        let mut parts = Vec::new();
+        if errs > 0 {
+            parts.push(format!(
+                "{errs} {} couldn't be opened (no permission, or removed during the scan)",
+                if errs == 1 { "item" } else { "items" }
+            ));
+        }
+        parts.push(format!(
+            "{cloud_only} {} stored in iCloud and not downloaded to this Mac, so {} left out",
+            if cloud_only == 1 { "file is" } else { "files are" },
+            if cloud_only == 1 { "it was" } else { "they were" }
+        ));
+        ("discovery_partial", format!("{}. Everything else was scanned.", parts.join("; ")))
+    } else if count == 0 && skip_count > 0 {
         (
             "rescan_no_changes",
             "Nothing changed in these files since the last scan. FileID is finishing a quick check of the folder.".to_string(),
@@ -1092,6 +1234,94 @@ fn reconcile_missing_face_crops_in(
         }
     }
     removed
+}
+
+/// Whether a row stamped with a pre-SHA-256 content hash can still be in the
+/// catalog, checked once per scan. The rename heal probes the frozen BLAKE3
+/// recipes only for such rows, and computing them costs a second hash of every
+/// image. Rows carry no recipe marker, so the state folder records when this
+/// engine (which stamps SHA-256, as the Swift engine does) first scanned: any
+/// hash on a row scanned before then may be a legacy one. Unknown means yes.
+fn legacy_hash_rows_possible(conn: &Connection, state_dir: Option<&Path>) -> bool {
+    let Some(marker) = state_dir.map(|dir| dir.join("sha256-content-hash-since")) else {
+        return true;
+    };
+    let since = match std::fs::read_to_string(&marker).ok().and_then(|text| text.trim().parse::<f64>().ok()) {
+        Some(since) => since,
+        None => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let written = marker
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&marker, format!("{now}")));
+            if written.is_err() || now <= 0.0 {
+                return true;
+            }
+            now
+        }
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE scanned_at < ?1 AND content_hash IS NOT NULL)",
+        [since],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
+/// Adds the failed rows that used up their retries to the skip set; discovery
+/// then skips each one only while its size and date still match.
+fn add_given_up_failures(
+    conn: &Connection,
+    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
+    lo: &str,
+    hi: Option<&str>,
+) -> usize {
+    let base = crate::pipeline::catch_up::GIVEN_UP_SQL;
+    let context = crate::pipeline::catch_up::failure_context();
+    let sql = if hi.is_some() { format!("{base} AND f.path_text >= ?2 AND f.path_text < ?3") } else { base.to_string() };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?));
+    let Ok(mut stmt) = conn.prepare(&sql) else { return 0 };
+    let rows = match hi {
+        Some(hi) => stmt.query_map(rusqlite::params![context, lo, hi], row),
+        None => stmt.query_map(rusqlite::params![context], row),
+    };
+    let mut added = 0;
+    if let Ok(rows) = rows {
+        for (path, size, modified) in rows.flatten() {
+            set.insert(path_fingerprint_text(&path), (size, modified));
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Rows under `root` that were catalogued as cloud placeholders, keyed like the
+/// skip set.
+fn known_placeholders(
+    conn: &Connection,
+    root: &Path,
+) -> std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)> {
+    let lo = root_descendant_prefix(root);
+    let hi = prefix_upper_bound(&lo);
+    let base = crate::pipeline::discovery::KNOWN_PLACEHOLDER_SQL;
+    let sql = if hi.is_some() { format!("{base} AND path_text >= ?1 AND path_text < ?2") } else { base.to_string() };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?));
+    let mut set = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        let rows = match &hi {
+            Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row),
+            None => stmt.query_map([], row),
+        };
+        if let Ok(rows) = rows {
+            for (path, size, modified) in rows.flatten() {
+                set.insert(path_fingerprint_text(&path), (size, modified));
+            }
+        }
+    }
+    set
 }
 
 pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
@@ -1363,6 +1593,118 @@ fn maybe_emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_only_files_are_reported_in_the_swift_engines_words() {
+        let one = discovery_notice(12, 0, 0, 1, "/lib").unwrap();
+        assert_eq!(one.kind, "discovery_partial");
+        assert_eq!(
+            one.message,
+            "1 file is stored in iCloud and not downloaded to this Mac, so it was left out. Everything else was scanned."
+        );
+        let many = discovery_notice(0, 40, 2, 3, "/lib").unwrap();
+        assert_eq!(many.kind, "discovery_partial");
+        assert_eq!(
+            many.message,
+            "2 items couldn't be opened (no permission, or removed during the scan); 3 files are stored in iCloud and not downloaded to this Mac, so they were left out. Everything else was scanned."
+        );
+        assert_eq!(discovery_notice(0, 40, 0, 0, "/lib").unwrap().kind, "rescan_no_changes");
+        assert!(discovery_notice(5, 0, 0, 0, "/lib").is_none());
+    }
+
+    #[test]
+    fn files_that_keep_failing_join_the_skip_set_with_their_stored_size_and_date() {
+        let conn = crate::db::test_support::memory_db();
+        let sep = std::path::MAIN_SEPARATOR;
+        let path = |name: &str| format!("{sep}lib{sep}{name}");
+        let context = crate::pipeline::catch_up::failure_context();
+        let add = |id: i64, name: &str, failed: i64, stages: i64, attempts: i64, vision: &str| {
+            crate::db::test_support::insert_file(&conn, id, &path(name), "image");
+            conn.execute("UPDATE files SET failed = ?2 WHERE id = ?1", rusqlite::params![id, failed]).unwrap();
+            conn.execute(
+                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+                 VALUES (?1, ?2, 100, 10, ?3, 0, ?4, 0)",
+                rusqlite::params![id, stages, vision, attempts],
+            )
+            .unwrap();
+        };
+        add(1, "given-up.jpg", 1, 4, 3, context);
+        add(2, "two-tries.jpg", 1, 4, 2, context);
+        add(3, "other-build.jpg", 1, 4, 5, "{\"failedBy\":\"fileid-engine 0.0.0 portable\"}");
+        add(4, "owes-tags.jpg", 0, 1, 3, "{}");
+        add(5, "fine-now.jpg", 0, 4, 3, context);
+        crate::db::test_support::insert_file(&conn, 6, &format!("{sep}elsewhere{sep}given-up.jpg"), "image");
+        conn.execute("UPDATE files SET failed = 1 WHERE id = 6", []).unwrap();
+        conn.execute(
+            "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) VALUES (6, 4, 100, 10, ?1, 0, 3, 0)",
+            [context],
+        )
+        .unwrap();
+
+        let lo = root_descendant_prefix(Path::new(&format!("{sep}lib")));
+        let hi = prefix_upper_bound(&lo);
+        let mut set = std::collections::HashMap::new();
+        assert_eq!(add_given_up_failures(&conn, &mut set, &lo, hi.as_deref()), 1);
+        assert_eq!(set.get(&path_fingerprint_text(&path("given-up.jpg"))), Some(&(100, Some(10.0))));
+
+        let mut everywhere = std::collections::HashMap::new();
+        assert_eq!(add_given_up_failures(&conn, &mut everywhere, "", None), 2);
+    }
+
+    #[test]
+    fn legacy_hashes_are_computed_only_while_a_row_predates_this_engines_first_scan() {
+        let dir = std::env::temp_dir().join(format!("fileid-legacy-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let conn = crate::db::test_support::memory_db();
+        assert!(legacy_hash_rows_possible(&conn, None), "no state folder: assume yes");
+
+        // A catalog that already has hashed rows when the marker is first written.
+        crate::db::test_support::insert_file(&conn, 1, "/lib/old.jpg", "image");
+        conn.execute("UPDATE files SET content_hash = X'01', scanned_at = 1000 WHERE id = 1", []).unwrap();
+        assert!(legacy_hash_rows_possible(&conn, Some(&dir)));
+        let since: f64 = std::fs::read_to_string(dir.join("sha256-content-hash-since")).unwrap().parse().unwrap();
+        assert!(since > 1000.0);
+        assert!(legacy_hash_rows_possible(&conn, Some(&dir)), "the old row is still there");
+
+        // Once every hashed row has been scanned since, the probe is retired.
+        conn.execute("UPDATE files SET scanned_at = ?1 WHERE id = 1", [since + 1.0]).unwrap();
+        assert!(!legacy_hash_rows_possible(&conn, Some(&dir)));
+        crate::db::test_support::insert_file(&conn, 2, "/lib/unhashed.bin", "other");
+        assert!(!legacy_hash_rows_possible(&conn, Some(&dir)), "a row without a hash cannot heal by hash");
+
+        // A new library never computes them.
+        let fresh = dir.join("fresh");
+        assert!(!legacy_hash_rows_possible(&crate::db::test_support::memory_db(), Some(&fresh)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catch_up_progress_only_grows_past_the_scans_own_counts() {
+        assert_eq!(catch_up_counters(100, 100, 40, 0), (140, 100));
+        assert_eq!(catch_up_counters(100, 100, 40, 25), (140, 125));
+        assert_eq!(catch_up_counters(100, 100, 40, 99), (140, 140));
+        // A rescan that found nothing new but still owes an earlier scan's files.
+        assert_eq!(catch_up_counters(0, 0, 12, 4), (12, 4));
+    }
+
+    #[test]
+    fn known_placeholders_are_scoped_to_the_root() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (path_text TEXT, kind TEXT, size_bytes INTEGER, modified_at DOUBLE, failed INTEGER, content_hash BLOB);",
+        )
+        .unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let inside = format!("{sep}lib{sep}cloud.jpg");
+        let outside = format!("{sep}library2{sep}cloud.jpg");
+        for path in [&inside, &outside] {
+            conn.execute("INSERT INTO files VALUES (?1, 'image', 7, 3.0, 0, NULL)", [path]).unwrap();
+        }
+        let root = format!("{sep}lib");
+        let known = known_placeholders(&conn, Path::new(&root));
+        assert_eq!(known.len(), 1);
+        assert_eq!(known.get(&path_fingerprint_text(&inside)), Some(&(7, Some(3.0))));
+    }
 
     #[test]
     fn batch_summary_sampling_bounds_ipc_volume() {

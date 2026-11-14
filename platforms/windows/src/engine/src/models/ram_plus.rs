@@ -89,15 +89,8 @@ fn is_suppressed_builtin(tag: &str) -> bool {
     SUPPRESSED_TAGS.iter().any(|s| s.eq_ignore_ascii_case(tag))
 }
 
-/// Suppressed = built-in set OR the sidecar set, both case-insensitive. Free
-/// (not a method) so the hot tag() closure can borrow `suppress_extra` as a
-/// disjoint field while `self.session` is mutably borrowed by `outputs`.
+/// Suppressed = built-in set OR the sidecar set, both case-insensitive.
 fn is_suppressed(tag: &str, extra: &HashSet<String>) -> bool {
-    // Short-circuit the common empty case (no ram_plus_suppress.txt sidecar): an
-    // empty set can never contain anything, so skip the per-tag
-    // to_ascii_lowercase() heap String allocation for the ~4573 tags not in the
-    // 12-entry built-in set. Saves ~4573 alloc/free pairs per scanned image on
-    // the primary tagger path when no sidecar is configured (the default).
     is_suppressed_builtin(tag) || (!extra.is_empty() && extra.contains(&tag.to_ascii_lowercase()))
 }
 
@@ -140,9 +133,11 @@ pub struct RamPlusTagger {
     /// Effective floor under the per-class/global cutoffs (DEFAULT_PRECISION_FLOOR
     /// or the FILEID_RAMPLUS_PRECISION_FLOOR env override).
     precision_floor: f32,
-    /// Extra suppressed tags from the `ram_plus_suppress.txt` sidecar (lowercased),
-    /// merged with the built-in SUPPRESSED_TAGS at tag time.
-    suppress_extra: HashSet<String>,
+    /// `suppressed[i]` is whether `tags[i]` is dropped (the built-in
+    /// SUPPRESSED_TAGS or the `ram_plus_suppress.txt` sidecar), decided once at
+    /// load: the name comparison for all 4,585 tags used to run for every
+    /// image while the session was locked.
+    suppressed: Vec<bool>,
     supports_dynamic_batch: bool,
     max_tags: usize,
 }
@@ -244,6 +239,7 @@ impl RamPlusTagger {
             .filter(|n| (1..=512).contains(n))
             .unwrap_or(DEFAULT_MAX_TAGS);
 
+        let suppressed = suppression_mask(&tags, &suppress_extra);
         let mut model = Self {
             session,
             input_name,
@@ -251,7 +247,7 @@ impl RamPlusTagger {
             threshold,
             per_class_threshold,
             precision_floor,
-            suppress_extra,
+            suppressed,
             supports_dynamic_batch,
             max_tags,
         };
@@ -399,29 +395,15 @@ impl RamPlusTagger {
     /// `(tag, confidence)` pairs, highest first. Shared by [`tag`] + [`tag_batch`]
     /// so both paths emit identical tags.
     fn select_tags(&self, logits: &[f32]) -> Vec<(String, f32)> {
-        let mut hits: Vec<(usize, f32)> = logits
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &z)| {
-                if is_suppressed(&self.tags[i], &self.suppress_extra) {
-                    return None;
-                }
-                let p = sigmoid(z);
-                let cut = self
-                    .per_class_threshold
-                    .as_ref()
-                    .map(|t| t[i])
-                    .unwrap_or(self.threshold)
-                    .max(self.precision_floor);
-                (p >= cut).then_some((i, p))
-            })
-            .collect();
-        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let mut named: Vec<(String, f32)> =
-            hits.into_iter().map(|(i, p)| (self.tags[i].clone(), p)).collect();
-        refine_tags(&mut named);
-        named.truncate(self.max_tags);
-        named
+        select_tags_from(
+            logits,
+            &self.tags,
+            &self.suppressed,
+            self.per_class_threshold.as_deref(),
+            self.threshold,
+            self.precision_floor,
+            self.max_tags,
+        )
     }
 
     /// Bilinear resize to 384×384 + ImageNet normalize into a (1,3,384,384)
@@ -445,6 +427,40 @@ impl RamPlusTagger {
         Ok(image::imageops::resize(&src, INPUT_SIZE, INPUT_SIZE, image::imageops::FilterType::Triangle)
             .into_raw())
     }
+}
+
+/// Which of `tags` are suppressed (built-in list or the sidecar), index-aligned.
+fn suppression_mask(tags: &[String], extra: &HashSet<String>) -> Vec<bool> {
+    tags.iter().map(|tag| is_suppressed(tag, extra)).collect()
+}
+
+/// The tag rules over one logits row; see [`RamPlusTagger::select_tags`].
+fn select_tags_from(
+    logits: &[f32],
+    tags: &[String],
+    suppressed: &[bool],
+    per_class_threshold: Option<&[f32]>,
+    threshold: f32,
+    precision_floor: f32,
+    max_tags: usize,
+) -> Vec<(String, f32)> {
+    let mut hits: Vec<(usize, f32)> = logits
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &z)| {
+            if suppressed[i] {
+                return None;
+            }
+            let p = sigmoid(z);
+            let cut = per_class_threshold.map(|t| t[i]).unwrap_or(threshold).max(precision_floor);
+            (p >= cut).then_some((i, p))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut named: Vec<(String, f32)> = hits.into_iter().map(|(i, p)| (tags[i].clone(), p)).collect();
+    refine_tags(&mut named);
+    named.truncate(max_tags);
+    named
 }
 
 /// Collapse redundancy before the cap so freed slots go to useful tags
@@ -521,6 +537,23 @@ pub fn default_tags_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_suppression_mask_matches_the_per_tag_check_and_drives_selection() {
+        let tags: Vec<String> = ["dog", "Photo", "beach", "sidecar tag", "blue", "ball"].map(String::from).to_vec();
+        let extra: HashSet<String> = ["sidecar tag".to_string()].into();
+        let mask = suppression_mask(&tags, &extra);
+        assert_eq!(mask, vec![false, true, false, true, true, false]);
+        for (tag, masked) in tags.iter().zip(&mask) {
+            assert_eq!(*masked, is_suppressed(tag, &extra));
+        }
+        // Every logit is confident; only unsuppressed tags come back, best first.
+        let logits = [3.0, 9.0, 5.0, 8.0, 7.0, 4.0];
+        let picked = select_tags_from(&logits, &tags, &mask, None, 0.5, 0.0, 16);
+        assert_eq!(picked.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["beach", "ball", "dog"]);
+        let capped = select_tags_from(&logits, &tags, &mask, Some(&[0.99, 0.0, 0.5, 0.0, 0.0, 0.5]), 0.5, 0.0, 1);
+        assert_eq!(capped.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["beach"]);
+    }
 
     fn norm(v: u8, channel: usize) -> f32 {
         ((v as f32 * INV_255) - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel]

@@ -10,12 +10,13 @@
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
-    record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, Arc, DiscoveredFile, Duration,
-    FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering, PreDecoded, TaggedFile, VisionFace,
-    STATS_CLIP_US, STATS_DECODED_FILES, STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US,
-    STATS_VISION_US,
+    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
+    DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
+    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
+    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
 };
 use crate::apple::scan;
+use crate::pipeline::catch_up;
 use crate::pipeline::audio_meta::AudioTags;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -109,15 +110,29 @@ fn stored_text(text: Option<String>) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.chars().take(STORED_TEXT_CHARS).collect())
 }
 
-/// Reads, hashes and decodes one file on a decoder thread.
-pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
+/// Reads, hashes and decodes one file on a decoder thread. A byte-identical
+/// copy of an image that is already analyzed, or being analyzed, is hashed
+/// only: the writer copies the twin's rows (pipeline/twin_reuse.rs).
+pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>, from_decoder: bool) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
+    // `bytes` is present only for a full SHA-256, the one identity worth sharing.
+    let twin = match (content_hash, file.kind, twins, bytes.as_deref()) {
+        (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => claim_twin(twins, hash, from_decoder),
+        _ => TwinClaim::None,
+    };
+    let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
+    // The copy keeps its own capture time for its date and Year tag.
+    let exif = match bytes.as_deref() {
+        Some(bytes) if awaits_twin => Some(parse_exif_fields(bytes).unwrap_or((None, None, None, None))),
+        _ => None,
+    };
     let mut frame = Frame { image: None, audio: AudioTags::default(), large_pdf: false };
     let mut decoded = None;
     let mut doc_text = None;
     if !file.online_only {
         match file.kind {
+            FileKind::Image if awaits_twin => {}
             FileKind::Image => match scan::decode_image(&file.path, file.size_bytes) {
                 Some(image) => frame.image = Some(Arc::new(image)),
                 None => decoded = Some(Err(anyhow::anyhow!(DECODE_FAILED))),
@@ -153,57 +168,10 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool) -> PreDecoded {
         audio_tags: Vec::new(),
         content_hash,
         legacy_hashes,
-        exif: None,
-        twin: crate::pipeline::twin_reuse::TwinClaim::None,
+        exif,
+        twin,
         budget: None,
         mac: Some(frame),
-    }
-}
-
-fn now_unix() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()
-}
-
-fn base_row(file: &DiscoveredFile) -> TaggedFile {
-    TaggedFile {
-        path: file.path.clone(),
-        kind: file.kind,
-        size_bytes: file.size_bytes,
-        modified_unix: file.modified_unix,
-        created_unix: file.created_unix,
-        captured_from_exif: false,
-        scanned_unix: now_unix(),
-        has_faces: false,
-        faces: Vec::new(),
-        vision_faces: None,
-        has_text: false,
-        ocr_text: None,
-        ocr_handwritten: false,
-        phash: None,
-        aesthetic: None,
-        image_width: 0,
-        image_height: 0,
-        clip_embedding: None,
-        camera_model: None,
-        location_lat: None,
-        location_lon: None,
-        vision_ms: 0.0,
-        clip_ms: 0.0,
-        total_ms: 0.0,
-        failed: false,
-        error_message: None,
-        file_ref: file.file_ref,
-        content_hash: None,
-        legacy_hashes: None,
-        text_embedding: None,
-        doc_text: None,
-        tags: Vec::new(),
-        faces_evaluated: false,
-        ocr_stage_ran: false,
-        doc_stage_ran: false,
-        text_stage_done: false,
-        tags_evaluated: false,
-        reuse_twin: false,
     }
 }
 
@@ -259,17 +227,16 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
     let pool = models.mobileclip_pool.as_ref()?;
     let (rgb, w, h) = image.rgb()?;
     let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
-    let slot = pool.iter().find_map(|m| m.try_lock()).unwrap_or_else(|| pool[0].lock());
-    let mut model = slot;
+    let mut model = crate::models::checkout(pool, 0);
     model.embed(&resized).map_err(|error| tracing::warn!(?error, "MobileCLIP embed failed")).ok()
 }
 
 /// `Tagging.processFile` for one file.
 pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) -> TaggedFile {
     let started = Instant::now();
-    let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, mac, .. } = predecoded;
+    let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, exif, twin, mac, .. } = predecoded;
     let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
-    let mut row = base_row(&file);
+    let mut row = TaggedFile::bare(&file);
     // A cloud placeholder is catalogued from its metadata only (reading it
     // would download it), as the portable pipeline does.
     if file.online_only {
@@ -278,6 +245,14 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     }
     row.content_hash = content_hash;
     row.legacy_hashes = legacy_hashes;
+    if file.kind == FileKind::Image && matches!(twin, TwinClaim::Ready) {
+        twin_row(&mut row, &file, exif);
+        row.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        STATS_TWIN_REUSED.fetch_add(1, Ordering::Relaxed);
+        record_stage(&STATS_TOTAL_US, started);
+        maybe_emit_stats();
+        return row;
+    }
     match file.kind {
         FileKind::Image => image_row(&mut row, &file, decoded, frame.image, models).await,
         FileKind::Video => {
@@ -327,6 +302,21 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     record_stage(&STATS_TOTAL_US, started);
     maybe_emit_stats();
     row
+}
+
+/// A copy of an analyzed image, as the Swift engine's `Tagging.twinCopy`
+/// builds it: the twin's model output (copied by the writer, with the camera
+/// and location the same bytes carry) under this file's own dates and Year tag.
+fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields>) {
+    let captured = exif.and_then(|(_, _, _, captured)| captured);
+    let created = captured.or(file.created_unix);
+    row.created_unix = created;
+    row.captured_from_exif = captured.is_some();
+    row.tags = extra_tags(created, None).into_iter().map(|tag| (tag, None)).collect();
+    // Marks the row as the Mac scan's for the writer: copied faces stay
+    // without vectors and the file revision is left to the Mac face pipeline.
+    row.vision_faces = Some(Vec::new());
+    row.reuse_twin = true;
 }
 
 /// Document keywords and the BGE embedding, as `Tagging.processDoc` stores them.
@@ -396,9 +386,14 @@ async fn image_row(
     let info = image.info.clone();
     let has_camera = info.camera_model.is_some();
     let vision_started = Instant::now();
+    // Deferred (the default): the row gets the classifier's tags now and the
+    // catch-up pass adds RAM++'s after the main pass, so the scan runs at the
+    // classifier's speed. `FILEID_RAMPLUS_INLINE=1` keeps RAM++ in the scan.
+    let ram_ready = RAM_PLUS_READY.load(Ordering::Acquire);
+    let deferred = ram_ready && catch_up::ram_plus_deferred(true);
     let analysis = blocking(move || {
         let pass = image.primary_pass().filter(|pass| pass.complete)?;
-        let ram = if RAM_PLUS_READY.load(Ordering::Acquire) { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
+        let ram = if ram_ready && !deferred { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
         Some((pass, ram, read, image.dhash()))
@@ -442,17 +437,89 @@ async fn image_row(
     row.ocr_text = read.text;
     row.clip_embedding = clip;
     row.clip_ms = clip_elapsed.as_secs_f64() * 1000.0;
-    let mut tags: Vec<(String, Option<f32>)> = if ram.is_empty() {
-        pass.classify_tags.into_iter().map(|tag| (tag, None)).collect()
-    } else {
-        ram.into_iter().map(|(tag, score)| (tag, Some(score))).collect()
-    };
-    tags.extend(extra_tags(created, info.camera_model.as_deref()).into_iter().map(|tag| (tag, None)));
-    let mut seen = std::collections::HashSet::new();
-    tags.retain(|(tag, _)| seen.insert(tag.to_lowercase()));
-    tags.truncate(16);
-    row.tags = tags;
+    let extras = extra_tags(created, info.camera_model.as_deref());
+    if deferred {
+        let confidences = pass.classify_confidences.iter().map(|(name, value)| (name.clone(), *value as f32));
+        row.catch_up = Some(catch_up::Marker {
+            stages: catch_up::TAGS_OWED | if read.ran { catch_up::TEXT_READ_AT_SCAN } else { 0 },
+            vision: catch_up::Context {
+                x: Some(extras.clone()),
+                ..catch_up::Context::from_classifier(&pass.classify_tags, confidences)
+            }
+            .encoded(),
+            face_count: pass.face_count as i64,
+        });
+    }
+    let classify = pass.classify_tags.into_iter().map(|tag| (tag, None)).collect();
+    row.tags = catch_up::assemble_tags(ram, classify, extras, 16, catch_up::unicode_fold);
     row.tags_evaluated = true;
+}
+
+/// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
+pub(super) struct CatchUp;
+
+impl CatchUp {
+    fn read(image: &scan::Image, classify: &[String], text_tags: &[String], has_camera: bool) -> catch_up::TextRead {
+        let read = image.text_read(classify, text_tags, has_camera).unwrap_or_default();
+        catch_up::TextRead { ran: read.ran, text: read.text, handwritten: read.handwritten }
+    }
+}
+
+impl catch_up::Analyzer for CatchUp {
+    fn ready(&self, phase: catch_up::Phase) -> bool {
+        match phase {
+            catch_up::Phase::Tags => RAM_PLUS_READY.load(Ordering::Acquire),
+            catch_up::Phase::CarefulText => scan::ocr_ready(),
+        }
+    }
+
+    fn parallelism(&self) -> usize {
+        4
+    }
+
+    fn analyse(&self, file: &catch_up::Pending, phase: catch_up::Phase, context: Option<&catch_up::Context>) -> catch_up::Outcome {
+        use catch_up::Outcome;
+        if file.kind == "pdf" {
+            return match scan::pdf_ocr(&file.path) {
+                Some(read) if read.opened => Outcome::Done(catch_up::Update {
+                    tags: None,
+                    text: Some(catch_up::TextUpdate { handwritten: read.handwritten && read.text.is_some(), text: read.text }),
+                    stages: file.stages & !catch_up::CAREFUL_TEXT_OWED,
+                    vision: file.vision.clone(),
+                }),
+                _ => Outcome::Failed,
+            };
+        }
+        let Some(context) = context else { return Outcome::Stale };
+        let Some(image) = scan::decode_image(&file.path, file.size_bytes.max(0) as u64) else {
+            return Outcome::Failed;
+        };
+        let has_camera = image.info.camera_model.is_some();
+        match phase {
+            catch_up::Phase::Tags => {
+                let pass = scan::PrimaryPass {
+                    complete: true,
+                    classify_tags: context.k.clone(),
+                    classify_confidences: context.confidences(),
+                    face_count: file.face_count.max(0) as usize,
+                    faces: Vec::new(),
+                };
+                let ram = image.ram_plus_tags(Some(&pass)).unwrap_or_default();
+                // A marker the Swift engine wrote carries no extras: work them
+                // out as the scan does, from the capture time or the file's birth.
+                let extras = context.x.clone().unwrap_or_else(|| {
+                    let born = std::fs::metadata(&file.path).ok().and_then(|meta| meta.created().ok()).and_then(crate::util::catalog_unix_seconds);
+                    extra_tags(image.info.captured_at.or(born), image.info.camera_model.as_deref())
+                });
+                Outcome::Done(catch_up::classifier_update(file, context, ram, extras, |text_tags| {
+                    Self::read(&image, &context.k, text_tags, has_camera)
+                }))
+            }
+            catch_up::Phase::CarefulText => Outcome::Done(catch_up::careful_update(file, context, |text_tags| {
+                Self::read(&image, &context.k, text_tags, has_camera)
+            })),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +539,35 @@ mod tests {
         assert_eq!(tags, vec!["Year_2024".to_string(), "Sony".to_string()]);
         assert!(extra_tags(Some(100.0), Some("Mystery Cam")).is_empty());
         assert!(extra_tags(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_twin_row_keeps_its_own_dates_and_leaves_the_analysis_to_the_writer() {
+        let file = DiscoveredFile {
+            path: "/lib/copy.jpg".into(),
+            kind: FileKind::Image,
+            size_bytes: 10,
+            modified_unix: 5.0,
+            // 2019-07-01T12:00:00Z
+            created_unix: Some(1_561_982_400.0),
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        };
+        let mut row = TaggedFile::bare(&file);
+        // 2024-06-01T12:00:00Z
+        twin_row(&mut row, &file, Some((Some("iPhone 15".into()), Some(1.0), Some(2.0), Some(1_717_243_200.0))));
+        assert!(row.reuse_twin && row.captured_from_exif);
+        assert_eq!(row.created_unix, Some(1_717_243_200.0));
+        assert_eq!(row.tags, vec![("Year_2024".to_string(), None)]);
+        assert!(row.camera_model.is_none() && row.location_lat.is_none(), "camera and location come from the twin row");
+        assert!(!row.tags_evaluated && !row.faces_evaluated && !row.ocr_stage_ran, "nothing of an earlier scan is deleted before the copy");
+        assert_eq!(row.vision_faces, Some(Vec::new()));
+
+        let mut plain = TaggedFile::bare(&file);
+        twin_row(&mut plain, &file, Some((None, None, None, None)));
+        assert!(!plain.captured_from_exif);
+        assert_eq!(plain.tags, vec![("Year_2019".to_string(), None)]);
     }
 
     #[test]

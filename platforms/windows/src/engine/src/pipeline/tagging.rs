@@ -32,7 +32,7 @@ fn composite_hashes(file: &DiscoveredFile, legacy: bool) -> (Option<[u8; 32]>, O
         .map_or((None, None), |(hash, legacy)| (Some(hash), legacy))
 }
 
-fn perf_trace_enabled() -> bool {
+pub(crate) fn perf_trace_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| {
         std::env::var("FILEID_PERF_TRACE")
@@ -59,7 +59,11 @@ use crate::models::runtime::{active_provider, error_has_device_removed_marker, E
 use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
-use crate::pipeline::twin_reuse::{TwinClaim, TwinRegistry};
+use crate::pipeline::scan_models::ModelSource;
+use crate::pipeline::twin_reuse::TwinClaim;
+
+/// The scan's twin registry; decoders park copies in it behind their owner.
+type TwinRegistry = crate::pipeline::twin_reuse::TwinRegistry<PreDecoded>;
 use crate::shell;
 use crate::util::content_hash::LegacyHashes;
 
@@ -283,6 +287,68 @@ pub struct TaggedFile {
     /// results. Stage flags stay false so nothing of a prior scan at this path
     /// is deleted before the copy.
     pub reuse_twin: bool,
+    /// The file is a known row that moved (same file id, size and date, old
+    /// path gone): nothing was read or analysed. The writer re-binds the row
+    /// to this path, or writes nothing when it no longer can.
+    pub heal_only: bool,
+    /// `failed` came from the machine's state (cancelled, admission refused,
+    /// graphics device lost), not from the file; it is not counted toward the
+    /// "stop retrying this file" memory.
+    pub failure_is_transient: bool,
+    /// Work this scan defers to the catch-up pass, stored with the row.
+    pub catch_up: Option<crate::pipeline::catch_up::Marker>,
+}
+
+impl TaggedFile {
+    /// The row for `file` before any stage has run.
+    pub(crate) fn bare(file: &DiscoveredFile) -> Self {
+        Self {
+            path: file.path.clone(),
+            kind: file.kind,
+            size_bytes: file.size_bytes,
+            modified_unix: file.modified_unix,
+            created_unix: file.created_unix,
+            captured_from_exif: false,
+            scanned_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+            has_faces: false,
+            faces: Vec::new(),
+            vision_faces: None,
+            has_text: false,
+            ocr_text: None,
+            ocr_handwritten: false,
+            phash: None,
+            aesthetic: None,
+            image_width: 0,
+            image_height: 0,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+            file_ref: file.file_ref,
+            content_hash: None,
+            legacy_hashes: None,
+            text_embedding: None,
+            doc_text: None,
+            tags: Vec::new(),
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
+            text_stage_done: false,
+            tags_evaluated: false,
+            reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
+        }
+    }
 }
 
 /// A face from Apple Vision's primary pass, stored the way the Swift engine's
@@ -392,8 +458,8 @@ pub fn face_is_excluded(
 /// optional — missing weights cause the corresponding stage to no-op so
 /// a partial install doesn't fail the whole scan.
 ///
-/// Each model is a POOL of independent Sessions; workers index by
-/// `worker_idx % pool.len()` so multiple inferences run in parallel
+/// Each model is a POOL of independent Sessions; a worker checks out an idle
+/// one (`models::checkout`) so multiple inferences run in parallel
 /// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
 /// to keep VRAM bounded.
 pub struct ModelStack {
@@ -954,11 +1020,23 @@ impl Drop for DecoderThreadGuard {
 pub struct Tagger {
     coordinator: ScanCoordinator,
     worker_count: usize,
-    models: Arc<ModelStack>,
+    models: Arc<ModelSource>,
     scan_root: Option<std::path::PathBuf>,
     legacy_hashes: bool,
     scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
     twins: Arc<TwinRegistry>,
+}
+
+/// The Mac adapters decode and analyse this process's scans.
+pub(crate) fn apple_scan_enabled() -> bool {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        mac::enabled()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        false
+    }
 }
 
 /// `FILEID_TWIN_REUSE=0` analyzes every copy itself (the A/B control).
@@ -967,10 +1045,17 @@ fn twin_reuse_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_TWIN_REUSE").map_or(true, |v| v.trim() != "0"))
 }
 
+/// One file's analysis may take this long before it is recorded as failed.
+const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How long a copy waits for the first copy's analysis before analyzing
-/// itself. The owner is ahead of it in the queue, so this only triggers when
-/// the owner's own 60 s per-file timeout fires.
-const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(120);
+/// itself. Shorter than `PER_FILE_TIMEOUT`, and spent before that timer
+/// starts, so waiting can never fail the copy.
+const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
+
+/// A copy whose owner failed claims the hash again this many times (so the
+/// copies behind it wait on it) before it analyzes itself unshared.
+const TWIN_RECLAIM_LIMIT: u32 = 2;
 
 /// How long one scan file may wait for CPU/memory admission before it is
 /// recorded as failed. Searches, residents and low free memory are transient;
@@ -991,6 +1076,11 @@ fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
 
 impl Tagger {
     pub fn new(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelStack>) -> Self {
+        Self::with_model_source(coordinator, worker_count, ModelSource::ready(models))
+    }
+
+    /// A tagger whose models load when the first file that needs them arrives.
+    pub fn with_model_source(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelSource>) -> Self {
         Self {
             coordinator,
             worker_count: worker_count.max(1),
@@ -1083,7 +1173,9 @@ impl Tagger {
         // multi-consumer async-channel so the decoder pool can fan out.
         let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
         let coordinator_pump = self.coordinator.clone();
+        let models_for_pump = self.models.clone();
         tokio::spawn(async move {
+            let mut models_requested = false;
             loop {
                 let file = tokio::select! {
                     value = input.recv() => match value {
@@ -1092,6 +1184,16 @@ impl Tagger {
                     },
                     _ = coordinator_pump.wait_cancelled() => break,
                 };
+                // The first file with work to do starts the model load, so it
+                // overlaps the walk and the first decodes. A scan with nothing
+                // to analyse never gets here.
+                if !models_requested && !file.moved_from_known_row {
+                    models_requested = true;
+                    let models = models_for_pump.clone();
+                    tokio::spawn(async move {
+                        models.get().await;
+                    });
+                }
                 tokio::select! {
                     result = raw_tx.send(file) => {
                         if result.is_err() {
@@ -1196,54 +1298,22 @@ impl Tagger {
             }
         });
 
-        // Derive the GPU-inference concurrency caps from the active EP. On
-        // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
-        // to the VRAM-clamped pool size so the semaphore doesn't throttle below
-        // the number of loaded Sessions. Cap source is the pool size the models
-        // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
-        // `resolve_pool_size` call, whose live memory-tier probe can flip
-        // between load and here (loading the sessions consumes the RAM the
-        // probe measures) and silently issue 1 permit against a 4-session pool.
-        let active_ep = crate::models::runtime::active_provider();
-        let ep_pool_size = self.models.pool_size.max(1);
-        // When the pool clamps to a SINGLE session, every vision permit-holder
-        // serializes on that one parking_lot Mutex across the GPU forward, so the
-        // extra permits just park OS threads instead of running. Issue exactly 1
-        // permit so excess workers await the ASYNC semaphore (yielding the tokio
-        // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
-        // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
-        // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
-        let vision_cap = if ep_pool_size == 1 {
-            1
-        } else {
-            ep_vision_concurrency(active_ep, ep_pool_size)
-        };
-        let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
-        tracing::info!(
-            ep = active_ep.as_str(),
-            pool_size = ep_pool_size,
-            vision_cap,
-            clip_cap,
-            "[TAGGING] EP-aware inference concurrency caps"
-        );
-        let vision_sem = Arc::new(Semaphore::new(vision_cap));
-        let clip_sem = Arc::new(Semaphore::new(clip_cap));
+        let loaded_models: Arc<tokio::sync::OnceCell<Option<WorkerModels>>> = Arc::new(tokio::sync::OnceCell::new());
 
+        let runtime = tokio::runtime::Handle::current();
+        let mut workers_started = 0usize;
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
             let tx = out_tx.clone();
             let coord = self.coordinator.clone();
-            let vision_sem = vision_sem.clone();
-            let clip_sem = clip_sem.clone();
-            let models = self.models.clone();
+            let source = self.models.clone();
+            let worker_models_cell = loaded_models.clone();
             let scheduler = self.scheduler.clone();
             let twins = self.twins.clone();
+            let budget = byte_budget.clone();
+            let legacy = self.legacy_hashes;
 
-            tokio::spawn(async move {
-                // Drop per-worker thread priority to LOWEST so foreground
-                // apps stay snappy during scans. tokio worker threads
-                // inherit the parent process priority by default.
-                crate::platform::set_worker_background_priority();
+            let worker = async move {
                 // After every YIELD_AFTER files, sleep briefly to give
                 // foreground apps + DWM breathing room. <1 % cost; keeps
                 // multi-hour scans friendly to an actively-used desktop.
@@ -1260,11 +1330,33 @@ impl Tagger {
                     if coord.check().await.is_err() {
                         break;
                     }
-                    let path_for_timeout = predecoded.file.path.clone();
-                    let timeout_kind = predecoded.file.kind;
-                    let timeout_size = predecoded.file.size_bytes;
-                    let timeout_modified = predecoded.file.modified_unix;
-                    let timeout_created = predecoded.file.created_unix;
+                    if predecoded.file.moved_from_known_row {
+                        let moved = TaggedFile { heal_only: true, ..TaggedFile::bare(&predecoded.file) };
+                        if tx.send(moved).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    // The models load on the first file that needs them. If they
+                    // cannot, no file is written as analysed: the scan stops and
+                    // reports why.
+                    let loaded = worker_models_cell
+                        .get_or_init(|| async { source.get().await.map(worker_models) })
+                        .await
+                        .clone();
+                    let Some(WorkerModels { models, vision_sem, clip_sem }) = loaded else {
+                        coord.request_cancel();
+                        break;
+                    };
+                    // A copy of an image another worker is analyzing waits here,
+                    // holding no frame, no admission and no per-file timer.
+                    let Some(predecoded) =
+                        settle_twin(predecoded, &twins, &coord, &budget, legacy, TWIN_WAIT_PATIENCE).await
+                    else {
+                        break;
+                    };
+                    let file_for_failure = predecoded.file.clone();
+                    let path_for_timeout = &file_for_failure.path;
                     let twin_hash = predecoded
                         .content_hash
                         .filter(|_| !matches!(predecoded.twin, TwinClaim::None));
@@ -1272,44 +1364,40 @@ impl Tagger {
                     // machine (a search, a resident model, low free memory)
                     // delays a file but never fails it.
                     let demand = crate::resource_scheduler::Demand { memory_mb: scan_working_mb(&predecoded), cpu: 1, io: 0 };
-                    let (admission_scheduler, admission_coord) = (scheduler.clone(), coord.clone());
-                    let admission = tokio::task::spawn_blocking(move || {
-                        admission_scheduler.reserve_patient(
-                            demand,
-                            crate::resource_scheduler::Priority::Background,
-                            || admission_coord.is_cancelled(),
-                            SCAN_ADMISSION_PATIENCE,
-                        )
-                    })
-                    .await;
+                    let admission = scheduler.reserve_patient(
+                        demand,
+                        crate::resource_scheduler::Priority::Background,
+                        || coord.is_cancelled(),
+                        SCAN_ADMISSION_PATIENCE,
+                    );
                     let (_lease, refused) = match admission {
-                        Ok(Ok(lease)) => (Some(lease), None),
-                        _ if coord.is_cancelled() => break,
-                        Ok(Err(error)) => (None, Some(error.to_string())),
+                        Ok(lease) => (Some(lease), None),
+                        Err(_) if coord.is_cancelled() => break,
                         Err(error) => (None, Some(error.to_string())),
                     };
                     // Bounds async inference after decoding; platform decoder
                     // calls enforce their own limits where the OS permits. A
                     // panic on one file becomes that file's failure so the
                     // worker keeps draining the queue.
+                    let transient = refused.is_some();
                     let outcome = if let Some(message) = refused {
                         Err((message, 0.0))
                     } else {
                         let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord, &twins),
+                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
                         ));
-                        match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                        match tokio::time::timeout(PER_FILE_TIMEOUT, fut).await {
                             Ok(Ok(t)) => Ok(t),
                             Ok(Err(_panic)) => {
                                 tracing::error!(
-                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file processing panicked; marking failed and continuing"
                                 );
                                 Err(("the file could not be analyzed (internal error)".to_string(), 0.0))
                             }
                             Err(_elapsed) => {
                                 tracing::warn!(
-                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file timeout after 60s; marking failed and continuing"
                                 );
                                 Err(("per-file timeout after 60s".to_string(), 60000.0))
@@ -1320,50 +1408,25 @@ impl Tagger {
                         Ok(t) => t,
                         Err((message, total_ms)) => {
                             TaggedFile {
-                                path: path_for_timeout,
-                                kind: timeout_kind,
-                                size_bytes: timeout_size,
-                                modified_unix: timeout_modified,
-                                created_unix: timeout_created,
-                                captured_from_exif: false,
-                                scanned_unix: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs_f64(),
-                                has_faces: false,
-                                faces: Vec::new(),
-                                vision_faces: None,
-                                has_text: false,
-                                ocr_text: None,
-                                ocr_handwritten: false,
-                                phash: None,
-                                aesthetic: None,
-                                image_width: 0,
-                                image_height: 0,
-                                clip_embedding: None,
-                                camera_model: None,
-                                location_lat: None,
-                                location_lon: None,
-                                vision_ms: 0.0,
-                                clip_ms: 0.0,
                                 total_ms,
                                 failed: true,
                                 error_message: Some(message),
                                 file_ref: None,
-                                content_hash: None,
-                                legacy_hashes: None,
-                                text_embedding: None,
-                                doc_text: None,
-                                tags: Vec::new(),
-                                faces_evaluated: false,
-                                ocr_stage_ran: false,
-                                doc_stage_ran: false,
-                                text_stage_done: false,
-                                tags_evaluated: false,
-                                reuse_twin: false,
+                                ..TaggedFile::bare(&file_for_failure)
                             }
                         }
                     };
+                    let mut tagged = tagged;
+                    #[cfg(test)]
+                    if tagged.path.file_name().is_some_and(|name| name == "fileid-test-worker-thread.txt") {
+                        tagged.camera_model = std::thread::current().name().map(str::to_owned);
+                    }
+                    if tagged.failed && !tagged.failure_is_transient {
+                        tagged.failure_is_transient = transient
+                            || coord.is_cancelled()
+                            || coord.is_gpu_dead()
+                            || !crate::pipeline::catch_up::failure_is_about_the_file(&tagged.path);
+                    }
                     let publish = twin_hash.filter(|_| !tagged.reuse_twin).map(|hash| {
                         (hash, !tagged.failed && tagged.tags_evaluated)
                     });
@@ -1378,11 +1441,124 @@ impl Tagger {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
+            };
+            // Each worker runs on its own thread, driven by the runtime's timers
+            // and wakers: detection, embedding, resizing and tagging are
+            // synchronous CPU and GPU work, and on the runtime's own threads
+            // they stalled IPC, cancel and progress on low-core machines. The
+            // semaphores, per-file timeout, panic isolation and cancellation
+            // are the same future as before.
+            let runtime = runtime.clone();
+            let spawned = std::thread::Builder::new().name(format!("fileid-tag-{worker_idx}")).spawn(move || {
+                // LOWEST priority so foreground apps stay snappy during scans.
+                crate::platform::set_worker_background_priority();
+                runtime.block_on(worker);
             });
+            match spawned {
+                Ok(_) => workers_started += 1,
+                Err(error) => tracing::warn!("fileid-tag-{worker_idx} failed to spawn ({error}); continuing with fewer workers"),
+            }
+        }
+        if workers_started == 0 {
+            tracing::error!("[TAGGING] no analysis worker could start; stopping the scan");
+            self.coordinator.request_cancel();
         }
 
         drop(out_tx);
         (out_rx, decoder_join)
+    }
+}
+
+/// The loaded stack with the inference limits that fit it.
+#[derive(Clone)]
+struct WorkerModels {
+    models: Arc<ModelStack>,
+    vision_sem: Arc<Semaphore>,
+    clip_sem: Arc<Semaphore>,
+}
+
+fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
+    // Derive the GPU-inference concurrency caps from the active EP. On
+    // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
+    // to the VRAM-clamped pool size so the semaphore doesn't throttle below
+    // the number of loaded Sessions. Cap source is the pool size the models
+    // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
+    // `resolve_pool_size` call, whose live memory-tier probe can flip
+    // between load and here (loading the sessions consumes the RAM the
+    // probe measures) and silently issue 1 permit against a 4-session pool.
+    let active_ep = crate::models::runtime::active_provider();
+    let ep_pool_size = models.pool_size.max(1);
+    // When the pool clamps to a SINGLE session, every vision permit-holder
+    // serializes on that one parking_lot Mutex across the GPU forward, so the
+    // extra permits just park OS threads instead of running. Issue exactly 1
+    // permit so excess workers await the ASYNC semaphore (yielding the tokio
+    // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
+    // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
+    // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
+    let vision_cap = if ep_pool_size == 1 {
+        1
+    } else {
+        ep_vision_concurrency(active_ep, ep_pool_size)
+    };
+    let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
+    tracing::info!(
+        ep = active_ep.as_str(),
+        pool_size = ep_pool_size,
+        vision_cap,
+        clip_cap,
+        "[TAGGING] EP-aware inference concurrency caps"
+    );
+    WorkerModels {
+        models,
+        vision_sem: Arc::new(Semaphore::new(vision_cap)),
+        clip_sem: Arc::new(Semaphore::new(clip_cap)),
+    }
+}
+
+/// Settles a copy that is waiting on the first copy of its image. Returns the
+/// item as `Ready` when the owner's analysis can be copied; otherwise reads
+/// and decodes the copy now (the decoder skipped that) so it is analyzed
+/// itself. `None` means the scan was cancelled.
+async fn settle_twin(
+    mut predecoded: PreDecoded,
+    twins: &Arc<TwinRegistry>,
+    coord: &ScanCoordinator,
+    budget: &Arc<PredecodeBudget>,
+    legacy: bool,
+    patience: Duration,
+) -> Option<PreDecoded> {
+    let mut reclaims = 0;
+    loop {
+        let TwinClaim::Pending(notify) = &predecoded.twin else {
+            return Some(predecoded);
+        };
+        let hash = predecoded.content_hash.expect("a pending twin claim carries a hash");
+        let outcome = tokio::select! {
+            ok = twins.wait(&hash, notify) => Some(ok),
+            _ = tokio::time::sleep(patience) => None,
+            _ = coord.wait_cancelled() => return None,
+        };
+        if outcome == Some(true) {
+            predecoded.twin = TwinClaim::Ready;
+            return Some(predecoded);
+        }
+        // The owner failed: claim again, so one of the remaining copies
+        // becomes the owner. The owner is only slow: analyze unshared.
+        reclaims += 1;
+        let share = (outcome.is_some() && reclaims <= TWIN_RECLAIM_LIMIT).then(|| twins.clone());
+        let file = predecoded.file;
+        let fallback = file.clone();
+        let (coord, budget) = (coord.clone(), budget.clone());
+        let decoded = tokio::task::spawn_blocking(move || {
+            let _thread_guard = DecoderThreadGuard::enter();
+            predecode_one(file, &coord, &budget, legacy, share.as_deref(), false)
+        })
+        .await;
+        predecoded = match decoded {
+            Ok(Some(item)) => item,
+            Ok(None) => return None,
+            Err(_) => PreDecoded::failed(fallback, "the file could not be read (decoder error)"),
+        };
     }
 }
 
@@ -1423,6 +1599,11 @@ type MacFrame = mac::Frame;
 enum MacFrame {}
 
 impl PreDecoded {
+    /// A file passed to the writer without being opened.
+    fn unread(file: DiscoveredFile) -> Self {
+        Self { decoded: None, ..Self::failed(file, "") }
+    }
+
     fn failed(file: DiscoveredFile, message: &str) -> Self {
         Self {
             file,
@@ -1536,10 +1717,35 @@ fn decode_reserved<T>(
     Some((decode(), guard))
 }
 
+/// Runs `future` on the calling thread, parked between wake-ups, until it
+/// finishes or the scan is cancelled (`None`). Needs no runtime: channels and
+/// the coordinator's notifier wake the thread directly.
+fn wait_unless_cancelled<T>(coord: &ScanCoordinator, future: impl std::future::Future<Output = T>) -> Option<T> {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    let mut cancelled = std::pin::pin!(coord.wait_cancelled());
+    loop {
+        if cancelled.as_mut().poll(&mut context).is_ready() {
+            return None;
+        }
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return Some(value);
+        }
+        std::thread::park();
+    }
+}
+
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
 /// blocking JPEG/PNG decode doesn't tie up tokio's runtime threads.
-/// Polls the raw discovery channel so cancellation wakes idle workers, then
-/// pushes into the pre-decoded channel via `send_blocking()`.
+/// Blocks on the raw discovery channel and on the pre-decoded channel; a
+/// cancel wakes it from either.
 fn run_decoder_thread(
     rx: async_channel::Receiver<DiscoveredFile>,
     tx: async_channel::Sender<PreDecoded>,
@@ -1553,17 +1759,8 @@ fn run_decoder_thread(
         if coord.is_cancelled() {
             return;
         }
-        let file = loop {
-            match rx.try_recv() {
-                Ok(file) => break file,
-                Err(async_channel::TryRecvError::Closed) => return,
-                Err(async_channel::TryRecvError::Empty) => {
-                    if coord.is_cancelled() {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
+        let Some(Ok(file)) = wait_unless_cancelled(&coord, rx.recv()) else {
+            return;
         };
         // Trace-gated forensics: a native crash never reaches the log as a
         // Rust panic, so the last "decode start" lines name the in-flight
@@ -1576,7 +1773,7 @@ fn run_decoder_thread(
         );
         let fallback = file.clone();
         let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            predecode_one(file, &coord, &budget, legacy, &twins)
+            predecode_one(file, &coord, &budget, legacy, Some(&twins), true)
         })) {
             Ok(Some(item)) => item,
             Ok(None) => return,
@@ -1588,21 +1785,48 @@ fn run_decoder_thread(
                 PreDecoded::failed(fallback, "the file could not be read (decoder error)")
             }
         };
-        let mut item = item;
-        loop {
-            if coord.is_cancelled() {
+        // A copy waits behind an owner that is still decoding on another
+        // thread; the owner brings its copies along once it is queued. An owner
+        // whose decode panicked (its item no longer says "owner") lets go, so
+        // its copies analyse themselves.
+        let owned = OWNED_TWIN.take();
+        if let Some(hash) = owned.filter(|_| !matches!(item.twin, TwinClaim::Owner)) {
+            twins.publish(hash, false);
+        }
+        let item = match (&item.twin, item.content_hash) {
+            (TwinClaim::Pending(_), Some(hash)) => twins.hold(&hash, item),
+            _ => Some(item),
+        };
+        if let Some(item) = item {
+            let Some(Ok(())) = wait_unless_cancelled(&coord, tx.send(item)) else {
                 return;
-            }
-            match tx.try_send(item) {
-                Ok(()) => break,
-                Err(async_channel::TrySendError::Closed(_)) => return,
-                Err(async_channel::TrySendError::Full(returned)) => {
-                    item = returned;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
+            };
+        }
+        // Only now, with the owner queued ahead of them.
+        for follower in owned.map(|hash| twins.owner_queued(&hash)).unwrap_or_default() {
+            let Some(Ok(())) = wait_unless_cancelled(&coord, tx.send(follower)) else {
+                return;
+            };
         }
     }
+}
+
+thread_local! {
+    /// The image this decoder thread claimed as owner for the file in hand.
+    static OWNED_TWIN: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
+}
+
+/// Claims `hash` for the file being read. A decoder's owner collects its
+/// copies until it is queued; a worker's owner is already running.
+fn claim_twin(twins: &TwinRegistry, hash: [u8; 32], from_decoder: bool) -> TwinClaim {
+    if !from_decoder {
+        return twins.claim(hash);
+    }
+    let claim = twins.claim_queued(hash);
+    if matches!(claim, TwinClaim::Owner) {
+        OWNED_TWIN.set(Some(hash));
+    }
+    claim
 }
 
 /// Reads, hashes and decodes one file for `run_decoder_thread`. `None` means
@@ -1612,17 +1836,21 @@ fn predecode_one(
     coord: &ScanCoordinator,
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
-    twins: &TwinRegistry,
+    twins: Option<&TwinRegistry>,
+    from_decoder: bool,
 ) -> Option<PreDecoded> {
     #[cfg(test)]
     assert!(
         file.path.file_name().is_none_or(|name| name != "fileid-test-decoder-panic"),
         "injected decoder panic"
     );
+    if file.moved_from_known_row {
+        return Some(PreDecoded::unread(file));
+    }
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if mac::enabled() {
         let _ = (coord, budget);
-        return Some(mac::predecode(file, legacy));
+        return Some(mac::predecode(file, legacy, twins, from_decoder));
     }
     {
         let decode_started = Instant::now();
@@ -1631,6 +1859,9 @@ fn predecode_one(
         let mut content_hash = None;
         let mut legacy_hashes = None;
         let mut exif_data = None;
+        // The file's EXIF block, read once here for the camera, place and date
+        // and handed to the decoder for the orientation and colour space.
+        let mut primary_exif = None;
 
         if !file.online_only {
             match file.kind {
@@ -1653,8 +1884,9 @@ fn predecode_one(
                             // so non-EXIF formats (PNG, GIF, screenshots) record
                             // an explicit no-EXIF result instead of looking
                             // unparsed downstream.
-                            exif_data =
-                                Some(parse_exif_fields(&bytes).unwrap_or((None, None, None, None)));
+                            let read = read_primary_exif(&bytes);
+                            exif_data = Some(read.fields.clone().unwrap_or((None, None, None, None)));
+                            primary_exif = Some(read);
                             // ≤16 MB → full SHA-256 (cross-platform with Swift).
                             content_hash = Some(sha256_bytes(&bytes));
                             legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
@@ -1715,22 +1947,25 @@ fn predecode_one(
 
         // Only a full SHA-256 of an image is an identity worth sharing; a
         // ready twin needs no frame at all.
-        let twin = match (content_hash, file.kind) {
-            (Some(hash), FileKind::Image)
+        let twin = match (content_hash, file.kind, twins) {
+            (Some(hash), FileKind::Image, Some(twins))
                 if twin_reuse_enabled()
                     && !file.online_only
                     && file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
             {
-                twins.claim(hash)
+                claim_twin(twins, hash, from_decoder)
             }
             _ => TwinClaim::None,
         };
+        // A copy of an image that is being analyzed right now is not decoded
+        // either: the worker waits for the owner and decodes only if it fails.
+        let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
 
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
         // hydrates the file picks up its content.
-        let mut decoded = if file.online_only || matches!(twin, TwinClaim::Ready) {
+        let mut decoded = if file.online_only || awaits_twin {
             None
         } else {
             match file.kind {
@@ -1742,7 +1977,7 @@ fn predecode_one(
                         budget,
                         reservation,
                         coord,
-                        || decode_image_sync(&file.path, file_bytes.as_deref()),
+                        || decode_image_sync_with(&file.path, file_bytes.as_deref(), primary_exif.as_ref()),
                     )?;
                     budget_guard = Some(guard);
                     Some(result)
@@ -1933,6 +2168,15 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
 /// Windows bitmap codecs. The fallback is still per-file and bounded, so a
 /// missing codec only marks that file as undecodable.
 pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    decode_image_sync_with(path, bytes, None)
+}
+
+/// [`decode_image_sync`] with the EXIF the caller already read from `bytes`.
+fn decode_image_sync_with(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    exif: Option<&PrimaryExif>,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let is_raw = path
         .extension()
         .and_then(|s| s.to_str())
@@ -1941,7 +2185,7 @@ pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) ->
         && let Some(out) = decode_raw_preview(path, bytes) {
             return Ok(out);
         }
-    let primary = decode_image_sync_imagecrate(path, bytes);
+    let primary = decode_image_sync_imagecrate(path, bytes, exif);
     if primary.is_ok() {
         return primary;
     }
@@ -2099,13 +2343,25 @@ fn jpeg_scaled_decode_enabled() -> bool {
 /// its long side; native size up to a third above `floor`, DCT-scaled above
 /// that. The caller applies the primary image's orientation. `None` keeps
 /// the existing decode paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
+#[cfg(test)]
 pub(crate) fn decode_mpf_preview(bytes: &[u8], primary_w: u32, primary_h: u32, floor: u32) -> Option<(Vec<u8>, u32, u32)> {
+    decode_mpf_preview_with(bytes, primary_w, primary_h, floor, None)
+}
+
+/// `srgb` is the file's colour-space tag when the caller already read it.
+fn decode_mpf_preview_with(
+    bytes: &[u8],
+    primary_w: u32,
+    primary_h: u32,
+    floor: u32,
+    srgb: Option<bool>,
+) -> Option<(Vec<u8>, u32, u32)> {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_MPF_PREVIEW").map_or(true, |v| v.trim() != "0")) {
         return None;
     }
     let cap = floor.saturating_mul(4) / 3;
-    if primary_w.max(primary_h) < cap || !exif_is_srgb(bytes) {
+    if primary_w.max(primary_h) < cap || !srgb.unwrap_or_else(|| exif_is_srgb(bytes)) {
         return None;
     }
     let preview = super::mpf_preview::largest_preview(bytes)?;
@@ -2211,7 +2467,11 @@ pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>
     Some((rgb, w, h))
 }
 
-fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_image_sync_imagecrate(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    exif: Option<&PrimaryExif>,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
         let mmap;
@@ -2251,9 +2511,10 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         // Any scaled-decode failure falls through to the full decoder.
         // Read the orientation once, from the same bytes both decode paths use.
         // Neither the image crate nor the DCT-scaled path applies it for us.
-        let orientation = exif_orientation(bytes);
+        let orientation = exif.map_or_else(|| exif_orientation(bytes), |exif| exif.orientation);
         if reader.format() == Some(image::ImageFormat::Jpeg) {
-            if let Some((buf, w, h)) = decode_mpf_preview(bytes, pw, ph, JPEG_SCALED_DECODE_FLOOR_EDGE) {
+            let srgb = exif.map(|exif| exif.srgb);
+            if let Some((buf, w, h)) = decode_mpf_preview_with(bytes, pw, ph, JPEG_SCALED_DECODE_FLOOR_EDGE, srgb) {
                 return apply_exif_orientation(buf, w, h, orientation);
             }
             if let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
@@ -2311,7 +2572,6 @@ async fn process_file_predecoded(
     clip_sem: &Arc<Semaphore>,
     worker_idx: usize,
     coord: &ScanCoordinator,
-    twins: &TwinRegistry,
 ) -> TaggedFile {
     // `_budget` keeps the byte-budget reservation alive while this worker
     // holds the frame; it releases when the function returns.
@@ -2324,51 +2584,7 @@ async fn process_file_predecoded(
         predecoded;
     let file = &file;
     let started = Instant::now();
-    let scanned_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
-    let mut tagged = TaggedFile {
-        path: file.path.clone(),
-        kind: file.kind,
-        size_bytes: file.size_bytes,
-        modified_unix: file.modified_unix,
-        created_unix: file.created_unix,
-        captured_from_exif: false,
-        scanned_unix,
-        has_faces: false,
-        faces: Vec::new(),
-        vision_faces: None,
-        has_text: false,
-        ocr_text: None,
-        ocr_handwritten: false,
-        phash: None,
-        aesthetic: None,
-        image_width: 0,
-        image_height: 0,
-        clip_embedding: None,
-        camera_model: None,
-        location_lat: None,
-        location_lon: None,
-        vision_ms: 0.0,
-        clip_ms: 0.0,
-        total_ms: 0.0,
-        failed: false,
-        error_message: None,
-        file_ref: file.file_ref,
-        content_hash: None,
-        legacy_hashes: None,
-        text_embedding: None,
-        doc_text: None,
-        tags: Vec::new(),
-        faces_evaluated: false,
-        ocr_stage_ran: false,
-        doc_stage_ran: false,
-        text_stage_done: false,
-        tags_evaluated: false,
-        reuse_twin: false,
-    };
+    let mut tagged = TaggedFile::bare(file);
 
     // Content identity for rename/move heal. The decoder thread already
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
@@ -2446,18 +2662,8 @@ async fn process_file_predecoded(
     // A byte-identical image already analyzed (earlier scan, or the copy
     // ahead of this one in the queue): keep the file's own EXIF, year and
     // camera chips, and let the writer copy the twin's rows.
-    let reuse = match &twin {
-        TwinClaim::Ready => true,
-        TwinClaim::Pending(notify) => {
-            let hash = content_hash.expect("a pending twin claim carries a hash");
-            tokio::select! {
-                ok = twins.wait(&hash, notify) => ok,
-                _ = tokio::time::sleep(TWIN_WAIT_PATIENCE) => false,
-                _ = coord.wait_cancelled() => false,
-            }
-        }
-        TwinClaim::Owner | TwinClaim::None => false,
-    };
+    // (A copy that was waiting on its owner has been settled by the worker.)
+    let reuse = matches!(twin, TwinClaim::Ready);
     if reuse && matches!(file.kind, FileKind::Image) {
         if let Some((cam, lat, lon, captured)) = exif {
             tagged.camera_model = cam;
@@ -2535,6 +2741,7 @@ async fn process_file_predecoded(
     perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
     let mut ram_plus_ran = false;
+    let mut defer_ram = false;
     if let Some((rgb, w, h)) = image_source {
         tagged.image_width = w;
         tagged.image_height = h;
@@ -2576,13 +2783,8 @@ async fn process_file_predecoded(
                     STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
                     let vision_started = Instant::now();
                     if permit.is_ok() && !coord.is_gpu_dead() {
-                        let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
-                        let arcface_mu = &arcface_pool[worker_idx % arcface_pool.len()];
                         let scrfd_started = Instant::now();
-                        let detections = {
-                            let mut s = scrfd_mu.lock();
-                            s.detect(&rgb, w, h)
-                        };
+                        let detections = YuNet::detect_shared(scrfd_pool, worker_idx, &rgb, w, h);
                         perf_trace("scrfd_done", &file.path, scrfd_started.elapsed().as_secs_f64() * 1000.0);
                         let arcface_started = Instant::now();
                         match detections {
@@ -2630,7 +2832,7 @@ async fn process_file_predecoded(
                                     .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
                                     if let Some(crop) = crop {
                                         let embed_result = {
-                                            let mut a = arcface_mu.lock();
+                                            let mut a = crate::models::checkout(arcface_pool, worker_idx);
                                             a.embed(&crop).map(|embedding| (embedding, a.model_version().to_owned()))
                                         };
                                         match embed_result {
@@ -2703,10 +2905,9 @@ async fn process_file_predecoded(
                     let permit = clip_sem.acquire().await;
                     let clip_started = Instant::now();
                     if permit.is_ok() && !coord.is_gpu_dead() {
-                        let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
                         let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
-                            let mut c = clip_mu.lock();
+                            let mut c = crate::models::checkout(clip_pool, worker_idx);
                             c.embed(&resized)
                         };
                         match embed_result {
@@ -2756,7 +2957,12 @@ async fn process_file_predecoded(
                 // computed regardless of which tagger is active. Shares the
                 // `vision_sem` GPU budget; device-removed → cancel the scan.
                 ram_plus_ran = false;
-                if !coord.is_gpu_dead() {
+                // Deferred mode leaves RAM++ (and the text read its tags decide)
+                // to the catch-up pass: the row gets the scene labels now.
+                defer_ram = matches!(file.kind, FileKind::Image)
+                    && crate::pipeline::catch_up::ram_plus_deferred(false)
+                    && (models.ram_plus.is_some() || models.ram_plus_batch.is_some());
+                if !coord.is_gpu_dead() && !defer_ram {
                     // Tags come from EITHER the batch coordinator (one batched
                     // Session — HW-4 throughput path; no vision_sem because the
                     // coordinator owns the Session and serializes batches itself,
@@ -2788,8 +2994,7 @@ async fn process_file_predecoded(
                                         Ordering::Relaxed,
                                     );
                                     if permit.is_ok() && !coord.is_gpu_dead() {
-                                        let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
-                                        let mut g = ram_mu.lock();
+                                        let mut g = crate::models::checkout(ram_pool, worker_idx);
                                         Some(g.tag_prepared(chw))
                                     } else {
                                         None
@@ -2808,15 +3013,7 @@ async fn process_file_predecoded(
                                 let redacted = crate::platform::redact_path_for_log(&file.path);
                                 // Faces ran and saw nobody: generic people words are
                                 // the detector's say, as on the Mac (TagAgreement).
-                                let tags: Vec<(String, f32)> = if tagged.faces_evaluated && tagged.faces.is_empty() {
-                                    tags.into_iter()
-                                        .filter(|(label, _)| {
-                                            !crate::models::ram_plus::PEOPLE_WORDS.contains(&label.to_ascii_lowercase().as_str())
-                                        })
-                                        .collect()
-                                } else {
-                                    tags
-                                };
+                                let tags = without_people_words(tags, tagged.faces_evaluated && tagged.faces.is_empty());
                                 let ram_emit_count = tags.len();
                                 let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
                                 for (label, score) in tags {
@@ -2926,7 +3123,7 @@ async fn process_file_predecoded(
                 // useful, so skip. Documents/screenshots still run OCR.
                 // Also short-circuit when the GPU is already known dead, to
                 // avoid any recursive device-init after a TDR.
-                if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
+                if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && !defer_ram && should_run_ocr(&file.path, &tagged, file.size_bytes) {
                     // The OCR stage ran this session regardless of whether text
                     // came back — lets the dbwriter clear stale ocr_text/ocr_fts
                     // on a re-process that now yields nothing (#11).
@@ -2951,17 +3148,22 @@ async fn process_file_predecoded(
     // scene tags didn't clear the threshold. (Aspect and the generic "Has
     // Faces/Text/Location" capability tags were removed — see
     // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
-    push_enriched_extras(&mut tagged);
+    let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
+    // What the scan stored in RAM++'s place, for the catch-up pass.
+    let stored_in_place: Vec<String> = tagged.tags.iter().map(|(tag, _)| tag.clone()).collect();
     // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
     // the classifier's confidence-ordered output; cap at 16 to avoid
     // exploding the tags table on noisy classifier outputs. Case-insensitive
     // matters because the classifier may emit "Dog" and a hypothetical
-    // synonym path may push "dog"; we want the first to win.
-    {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        tagged.tags.retain(|(t, _)| seen.insert(t.to_ascii_lowercase()));
-        tagged.tags.truncate(stored_tag_cap());
-    }
+    // synonym path may push "dog"; we want the first to win. The catch-up
+    // pass builds its list with the same function.
+    tagged.tags = crate::pipeline::catch_up::assemble_tags(
+        Vec::new(),
+        std::mem::take(&mut tagged.tags),
+        extras.clone(),
+        stored_tag_cap(),
+        crate::pipeline::catch_up::ascii_fold,
+    );
 
     tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     record_stage(&STATS_TOTAL_US, started);
@@ -3014,7 +3216,132 @@ async fn process_file_predecoded(
         && !tagged.failed
         && !file.online_only
         && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
+    if defer_ram && !tagged.failed && !coord.is_gpu_dead() {
+        // RAM++ will supply the tags, so the set stored now (scene labels, or
+        // only the Year and camera tags) stands in for it and is authoritative.
+        tagged.tags_evaluated = true;
+        tagged.catch_up = Some(crate::pipeline::catch_up::Marker {
+            stages: crate::pipeline::catch_up::TAGS_OWED,
+            vision: crate::pipeline::catch_up::Context {
+                k: stored_in_place,
+                f: Some(tagged.faces_evaluated),
+                m: Some(tagged.camera_model.is_some()),
+                x: Some(extras),
+                ..Default::default()
+            }
+            .encoded(),
+            face_count: tagged.faces.len() as i64,
+        });
+    }
     tagged
+}
+
+/// Faces ran and saw nobody: generic people words are the detector's say, as
+/// on the Mac (TagAgreement).
+fn without_people_words(tags: Vec<(String, f32)>, no_face_found: bool) -> Vec<(String, f32)> {
+    if !no_face_found {
+        return tags;
+    }
+    tags.into_iter()
+        .filter(|(label, _)| !crate::models::ram_plus::PEOPLE_WORDS.contains(&label.to_ascii_lowercase().as_str()))
+        .collect()
+}
+
+/// The scan's decoder and RAM++ behind the catch-up pass (portable pipeline).
+struct PortableCatchUp {
+    models: Arc<ModelStack>,
+    runtime: tokio::runtime::Handle,
+    coord: ScanCoordinator,
+}
+
+impl PortableCatchUp {
+    fn ram_plus(&self, rgb: &[u8], w: u32, h: u32, preferred: usize) -> Option<anyhow::Result<Vec<(String, f32)>>> {
+        use crate::models::ram_plus::RamPlusTagger;
+        if let Some(batch) = &self.models.ram_plus_batch {
+            let side = crate::models::ram_plus::INPUT_SIZE;
+            Some(RamPlusTagger::resize_to_input(rgb, w, h).and_then(|input| self.runtime.block_on(batch.tag(input, side, side))))
+        } else {
+            let pool = self.models.ram_plus.as_ref()?;
+            Some(RamPlusTagger::preprocess_tensor(rgb, w, h).and_then(|chw| crate::models::checkout(pool, preferred).tag_prepared(chw)))
+        }
+    }
+}
+
+impl crate::pipeline::catch_up::Analyzer for PortableCatchUp {
+    fn ready(&self, phase: crate::pipeline::catch_up::Phase) -> bool {
+        phase == crate::pipeline::catch_up::Phase::Tags
+            && (self.models.ram_plus.is_some() || self.models.ram_plus_batch.is_some())
+            && !self.coord.is_gpu_dead()
+    }
+
+    fn parallelism(&self) -> usize {
+        // One file per pooled session; a batched session wants several at once.
+        if self.models.ram_plus_batch.is_some() { 8 } else { self.models.pool_size.max(1) }
+    }
+
+    fn analyse(
+        &self,
+        file: &crate::pipeline::catch_up::Pending,
+        phase: crate::pipeline::catch_up::Phase,
+        context: Option<&crate::pipeline::catch_up::Context>,
+    ) -> crate::pipeline::catch_up::Outcome {
+        use crate::pipeline::catch_up::{Outcome, Phase};
+        let (Some(context), Phase::Tags) = (context, phase) else {
+            return Outcome::Stale;
+        };
+        if self.coord.is_gpu_dead() {
+            return Outcome::Leave;
+        }
+        let Ok((rgb, w, h)) = decode_image_sync(&file.path, None) else {
+            return Outcome::Failed;
+        };
+        let ram = match self.ram_plus(&rgb, w, h, file.file_id as usize) {
+            Some(Ok(tags)) => tags,
+            Some(Err(err)) if error_has_device_removed_marker(&err) => {
+                if self.coord.mark_gpu_dead() {
+                    tracing::error!(?err, "[GPU-TDR] RAM++ device-removed during catch-up");
+                }
+                return Outcome::Leave;
+            }
+            Some(Err(err)) => {
+                tracing::warn!(?err, "RAM++ tag failed during catch-up");
+                return Outcome::Failed;
+            }
+            None => return Outcome::Leave,
+        };
+        let ram = without_people_words(ram, context.f == Some(true) && file.face_count == 0);
+        let has_camera = context.m.unwrap_or(file.camera_model.is_some());
+        let extras = context.x.clone().unwrap_or_else(|| {
+            enriched_extras(file.created_at, file.modified_at.unwrap_or(0.0), file.camera_model.as_deref())
+        });
+        Outcome::Done(crate::pipeline::catch_up::portable_update(
+            file,
+            context,
+            ram,
+            extras,
+            stored_tag_cap(),
+            |names| ocr_gate(&file.path, names, w, h, has_camera),
+            || match shell::ocr::recognize(&rgb, w, h) {
+                Ok(text) => Some(text),
+                Err(err) => {
+                    tracing::warn!(?err, "OCR failed");
+                    None
+                }
+            },
+        ))
+    }
+}
+
+/// The analyzer the catch-up pass runs after a scan with these models.
+pub(crate) fn catch_up_analyzer(
+    models: Arc<ModelStack>,
+    coord: ScanCoordinator,
+) -> Box<dyn crate::pipeline::catch_up::Analyzer + Send> {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if models.apple_scan {
+        return Box::new(mac::CatchUp);
+    }
+    Box::new(PortableCatchUp { models, runtime: tokio::runtime::Handle::current(), coord })
 }
 
 /// Persisted tags per file (16 on both engines); `FILEID_TAG_CAP` widens it
@@ -3033,16 +3360,21 @@ fn stored_tag_cap() -> usize {
 /// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
 /// is wasted CPU; skip in that case but keep running for documents/screenshots.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
+    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
+    ocr_gate(path, &tag_names, tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+}
+
+/// [`should_run_ocr`] over the facts it reads, for the catch-up pass.
+fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32, has_camera: bool) -> bool {
     // Paper, whiteboard and handwriting tags read even on camera photos; the
     // OCR has no handwriting tier, so Deep Analyze's transcription picks up what
     // it mangles (text_reading::needs_transcription).
-    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
-    if super::text_reading::is_text_bearing(&tag_names)
-        || super::text_reading::is_document_shape(tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+    if super::text_reading::is_text_bearing(tag_names)
+        || super::text_reading::is_document_shape(width, height, has_camera)
     {
         return true;
     }
-    if tagged.camera_model.is_some() {
+    if has_camera {
         return false;
     }
     // Filenames that strongly suggest documents/screenshots.
@@ -3083,6 +3415,13 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
 ///   emitted — they read as noise; descriptive content comes from CLIP scene
 ///   tags (and, when installed, the optional Deep-Analyze VLM pass).
 fn push_enriched_extras(tagged: &mut TaggedFile) {
+    let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
+    tagged.tags.extend(extras.into_iter().map(|tag| (tag, None)));
+}
+
+/// The Year and camera-family tags for a file with these dates and camera.
+fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: Option<&str>) -> Vec<String> {
+    let mut extras = Vec::new();
     // Order matters: the Library card's `TopTwoTags` slice takes the first
     // two tags it sees. Classifier output (when installed) appears first
     // in the vec; enriched-extras fill the remainder. We deliberately
@@ -3113,16 +3452,13 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // local `gregorianCalendar`; Windows mirrors that here (creation-time
     // wins over modified-at — the latter only fills in when the platform
     // reported no birth time).
-    let year_source = tagged
-        .created_unix
-        .filter(|&c| c > 0.0)
-        .unwrap_or(tagged.modified_unix);
+    let year_source = created_unix.filter(|&c| c > 0.0).unwrap_or(modified_unix);
     if year_source > 0.0
         && let Some(year) = local_unix_seconds_to_year(year_source)
             && year > 1990 && year < 2100 {
-                tagged.tags.push((format!("Year_{year}"), None));
+                extras.push(format!("Year_{year}"));
             }
-    if let Some(cm) = tagged.camera_model.as_deref() {
+    if let Some(cm) = camera_model {
         let lower = cm.to_ascii_lowercase();
         let family = if lower.contains("iphone") { Some("iPhone") }
             else if lower.contains("ipad") { Some("iPad") }
@@ -3136,9 +3472,10 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
             else if lower.contains("pixel") { Some("Pixel") }
             else { None };
         if let Some(f) = family {
-            tagged.tags.push((f.to_string(), None));
+            extras.push(f.to_string());
         }
     }
+    extras
 }
 
 /// Unix-seconds → calendar year in the machine's **local** timezone. macOS
@@ -3239,9 +3576,28 @@ fn apply_exif_orientation(
 pub(crate) type ExifFields = (Option<String>, Option<f64>, Option<f64>, Option<f64>);
 
 pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
+    read_primary_exif(bytes).fields
+}
+
+/// Everything the scan takes from a file's EXIF block, from one parse:
+/// `parse_exif_fields`, `exif_orientation` and `exif_is_srgb` in one.
+struct PrimaryExif {
+    fields: Option<ExifFields>,
+    orientation: Option<image::metadata::Orientation>,
+    srgb: bool,
+}
+
+fn read_primary_exif(bytes: &[u8]) -> PrimaryExif {
     match exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) {
-        Ok(exif) => Some(exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
-        Err(_) => raw_exif_fields(bytes),
+        Ok(exif) => PrimaryExif {
+            fields: Some(exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
+            orientation: exif
+                .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|field| field.value.get_uint(0))
+                .and_then(|raw| image::metadata::Orientation::from_exif(u8::try_from(raw).ok()?)),
+            srgb: exif.get_field(exif::Tag::ColorSpace, exif::In::PRIMARY).and_then(|field| field.value.get_uint(0)) == Some(1),
+        },
+        Err(_) => PrimaryExif { fields: raw_exif_fields(bytes), orientation: None, srgb: false },
     }
 }
 
@@ -3662,6 +4018,7 @@ mod tests {
                 modified_unix: 1.0,
                 created_unix: None,
                 online_only: false,
+                moved_from_known_row: false,
                 file_ref: None,
             })
             .await
@@ -3686,6 +4043,310 @@ mod tests {
         assert!(failed.is_empty(), "files failed during a search: {failed:?}");
     }
 
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    fn twin_image(dir: &std::path::Path, name: &str, bytes: &[u8]) -> DiscoveredFile {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: bytes.len() as u64,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        }
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40]))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[test]
+    fn a_copy_of_an_image_in_flight_is_hashed_but_not_decoded() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-pending-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        assert!(matches!(owner.twin, TwinClaim::Owner));
+        assert!(matches!(owner.decoded, Some(Ok(_))));
+        let copy = predecode_one(twin_image(&dir, "b.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        assert!(matches!(copy.twin, TwinClaim::Pending(_)));
+        assert!(copy.decoded.is_none() && copy.budget.is_none(), "the waiting copy holds no frame");
+        assert_eq!(copy.content_hash, owner.content_hash);
+        let unshared = predecode_one(twin_image(&dir, "c.png", &png), &coord, &budget, false, None, false).unwrap();
+        assert!(matches!(unshared.twin, TwinClaim::None));
+        assert!(matches!(unshared.decoded, Some(Ok(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[tokio::test]
+    async fn a_waiting_copy_reuses_a_finished_owner_and_decodes_only_when_it_failed() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-settle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20));
+        let pending = |twins: &Arc<TwinRegistry>, name: &str| {
+            let item = predecode_one(twin_image(&dir, name, &png), &coord, &budget, false, Some(twins), false).unwrap();
+            assert!(matches!(item.twin, TwinClaim::Pending(_)));
+            item
+        };
+        let patience = Duration::from_secs(30);
+
+        // The owner finishes: the copy is ready and was never decoded.
+        let twins = TwinRegistry::new();
+        let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let hash = owner.content_hash.unwrap();
+        let copy = pending(&twins, "b.png");
+        let publisher = {
+            let twins = twins.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                twins.publish(hash, true);
+            })
+        };
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        publisher.await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::Ready));
+        assert!(settled.decoded.is_none());
+
+        // The owner fails: the copy claims the image, is decoded now, and the
+        // copies behind it wait on it instead of on the failed owner.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let copy = pending(&twins, "b.png");
+        twins.publish(hash, false);
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::Owner));
+        assert!(matches!(settled.decoded, Some(Ok(_))));
+        assert!(matches!(twins.claim(hash), TwinClaim::Pending(_)));
+
+        // The owner is only slow: the copy is analyzed on its own, unshared.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let copy = pending(&twins, "b.png");
+        let settled = settle_twin(copy, &twins, &coord, &budget, false, Duration::from_millis(20)).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::None));
+        assert!(matches!(settled.decoded, Some(Ok(_))));
+
+        // A cancelled scan stops waiting.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let copy = pending(&twins, "b.png");
+        coord.request_cancel();
+        assert!(settle_twin(copy, &twins, &coord, &budget, false, patience).await.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Copies only hash, so they are ready before the owner that is still
+    /// decoding. Queued ahead of it they would occupy every worker, each
+    /// waiting for an owner no worker is free to analyse.
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[test]
+    fn decoders_queue_an_owner_before_the_copies_that_wait_for_it() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
+        // The owner's decoder has claimed the image but not queued it yet.
+        let owner = predecode_one(twin_image(&dir, "owner.png", &png), &coord, &budget, false, Some(&twins), true).unwrap();
+        assert_eq!(OWNED_TWIN.take(), owner.content_hash);
+        let hash = owner.content_hash.unwrap();
+
+        // Another decoder thread finishes two copies meanwhile.
+        let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(4);
+        let (predecoded_tx, predecoded_rx) = async_channel::bounded::<PreDecoded>(8);
+        raw_tx.send_blocking(twin_image(&dir, "copy1.png", &png)).unwrap();
+        raw_tx.send_blocking(twin_image(&dir, "copy2.png", &png)).unwrap();
+        drop(raw_tx);
+        run_decoder_thread(raw_rx, predecoded_tx.clone(), coord.clone(), budget.clone(), false, twins.clone());
+        assert!(predecoded_rx.is_empty(), "the copies are held back");
+
+        // The owner is queued, then the copies it collected.
+        predecoded_tx.send_blocking(owner).unwrap();
+        for follower in twins.owner_queued(&hash) {
+            predecoded_tx.send_blocking(follower).unwrap();
+        }
+        drop(predecoded_tx);
+        let order: Vec<String> = std::iter::from_fn(|| predecoded_rx.recv_blocking().ok())
+            .map(|item| item.file.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(order, ["owner.png", "copy1.png", "copy2.png"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_waiting_copy_gives_up_before_the_per_file_timeout() {
+        assert!(TWIN_WAIT_PATIENCE < PER_FILE_TIMEOUT);
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[tokio::test]
+    async fn identical_images_all_complete_when_no_analysis_can_be_shared() {
+        let dir = std::env::temp_dir().join(format!("fileid-twin-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = tiny_png();
+        let (tx, rx) = mpsc::channel(16);
+        // No models: every analysis publishes "not reusable", so each copy in
+        // turn claims the image and analyzes itself.
+        let tagger = Tagger::new(ScanCoordinator::new(), 3, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        for i in 0..6 {
+            tx.send(twin_image(&dir, &format!("copy{i}.png"), &png)).await.unwrap();
+        }
+        drop(tx);
+        let mut rows = Vec::new();
+        while let Some(row) = tokio::time::timeout(Duration::from_secs(20), out.recv()).await.expect("no copy hangs") {
+            rows.push(row);
+        }
+        decoder_join.await.unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|row| !row.failed && !row.reuse_twin && row.phash.is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn counting_source(loads: Arc<AtomicUsize>, fail: bool) -> Arc<ModelSource> {
+        ModelSource::lazy(move || {
+            Box::pin(async move {
+                loads.fetch_add(1, Ordering::SeqCst);
+                if fail {
+                    Err(crate::pipeline::scan_models::ModelLoadFailure::new("model_load_failed", "broken weights"))
+                } else {
+                    Ok(Arc::new(ModelStack::empty()))
+                }
+            })
+        })
+    }
+
+    fn text_file(dir: &std::path::Path, name: &str) -> DiscoveredFile {
+        let path = dir.join(name);
+        std::fs::write(&path, "garden notes").unwrap();
+        DiscoveredFile {
+            path,
+            kind: FileKind::Doc,
+            size_bytes: 12,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn models_load_only_when_a_file_needs_analysing() {
+        let dir = std::env::temp_dir().join(format!("fileid-lazy-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Nothing to analyse (an unchanged library, or only moved files): no load.
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        let mut moved = text_file(&dir, "moved.txt");
+        moved.moved_from_known_row = true;
+        moved.file_ref = Some(3);
+        tx.send(moved).await.unwrap();
+        drop(tx);
+        let row = tokio::time::timeout(Duration::from_secs(5), out.recv()).await.unwrap().unwrap();
+        assert!(row.heal_only);
+        assert!(tokio::time::timeout(Duration::from_secs(5), out.recv()).await.unwrap().is_none());
+        decoder_join.await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        // Files to analyse: one load, shared by every worker.
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        for i in 0..5 {
+            tx.send(text_file(&dir, &format!("note{i}.txt"))).await.unwrap();
+        }
+        drop(tx);
+        let mut rows = 0;
+        while let Some(row) = tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap() {
+            assert!(!row.failed);
+            rows += 1;
+        }
+        decoder_join.await.unwrap();
+        assert_eq!((rows, loads.load(Ordering::SeqCst)), (5, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_model_load_stops_the_scan_without_writing_any_file() {
+        let dir = std::env::temp_dir().join(format!("fileid-lazy-models-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let source = counting_source(loads.clone(), true);
+        let coord = ScanCoordinator::new();
+        let (tx, rx) = mpsc::channel(8);
+        let (mut out, decoder_join) = Tagger::with_model_source(coord.clone(), 2, source.clone()).spawn(rx);
+        for i in 0..4 {
+            tx.send(text_file(&dir, &format!("note{i}.txt"))).await.unwrap();
+        }
+        assert!(tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap().is_none());
+        drop(tx);
+        decoder_join.await.unwrap();
+        assert!(coord.is_cancelled());
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(source.failure().map(|failure| failure.kind), Some("model_load_failed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The runtime here has one thread, and it is the test's: analysis that
+    /// ran on runtime threads would have to run on it.
+    #[tokio::test]
+    async fn files_are_analysed_on_dedicated_threads_not_on_the_runtime() {
+        let dir = std::env::temp_dir().join(format!("fileid-worker-thread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let (mut out, decoder_join) = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty())).spawn(rx);
+        tx.send(text_file(&dir, "fileid-test-worker-thread.txt")).await.unwrap();
+        drop(tx);
+        let row = tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap().unwrap();
+        let thread = row.camera_model.expect("the worker reports its thread");
+        assert!(thread.starts_with("fileid-tag-"), "analysed on {thread}");
+        assert_ne!(Some(thread.as_str()), std::thread::current().name());
+        drop(out);
+        decoder_join.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_moved_file_reaches_the_writer_unread() {
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        tx.send(DiscoveredFile {
+            path: PathBuf::from("/fileid-missing/moved.jpg"),
+            kind: FileKind::Image,
+            size_bytes: 1024,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            moved_from_known_row: true,
+            file_ref: Some(7),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let got = tokio::time::timeout(Duration::from_secs(2), out.recv()).await.unwrap().unwrap();
+        assert!(got.heal_only);
+        assert!(!got.failed, "the missing file was never opened");
+        assert_eq!(got.file_ref, Some(7));
+        assert!(got.content_hash.is_none() && !got.tags_evaluated && !got.faces_evaluated);
+        drop(out);
+        decoder_join.await.unwrap();
+    }
+
     #[tokio::test]
     async fn tagger_passes_discovered_through_to_tagged() {
         let coord = ScanCoordinator::new();
@@ -3701,6 +4362,7 @@ mod tests {
             modified_unix: 1.0,
             created_unix: None,
             online_only: false,
+            moved_from_known_row: false,
             file_ref: None,
         })
         .await
@@ -3875,6 +4537,7 @@ mod tests {
                     modified_unix: 0.0,
                     created_unix: None,
                     online_only: true,
+                    moved_from_known_row: false,
                     file_ref: None,
                 })
                 .unwrap();
@@ -3907,6 +4570,7 @@ mod tests {
                     modified_unix: 0.0,
                     created_unix: None,
                     online_only: false,
+                    moved_from_known_row: false,
                     file_ref: None,
                 })
                 .unwrap();
@@ -3939,12 +4603,14 @@ mod tests {
                 modified_unix: 0.0,
                 created_unix: None,
                 online_only: false,
+                moved_from_known_row: false,
                 file_ref: None,
             },
             &ScanCoordinator::new(),
             &PredecodeBudget::new(256 << 20),
             false,
-            &TwinRegistry::new(),
+            Some(&TwinRegistry::new()),
+            true,
         )
         .expect("not cancelled");
         assert!(item.decoded.is_none(), "a missing frame runtime must not mark the video failed");
@@ -3972,6 +4638,7 @@ mod tests {
                         modified_unix: 0.0,
                         created_unix: None,
                         online_only: false,
+                        moved_from_known_row: false,
                         file_ref: None,
                     })
                     .unwrap();
@@ -4038,7 +4705,7 @@ mod tests {
         let not_srgb = jpeg_with_mpf_preview(&primary, &preview, false);
         assert!(decode_mpf_preview(&not_srgb, 600, 400, 300).is_none());
         assert!(decode_mpf_preview(&primary, 600, 400, 300).is_none(), "no MPF index, no preview");
-        let (_, w, h) = decode_image_sync_imagecrate(std::path::Path::new("mpf-test.jpg"), Some(&file)).unwrap();
+        let (_, w, h) = decode_image_sync_imagecrate(std::path::Path::new("mpf-test.jpg"), Some(&file), None).unwrap();
         assert_eq!((w, h), (600, 400), "the scan floor is 2048, so this small file still decodes in full");
     }
 
@@ -4073,6 +4740,22 @@ mod tests {
         // A buffer that does not match the claimed dimensions must surface as an
         // error, never a panic in the scan pipeline.
         assert!(apply_exif_orientation(vec![1, 2, 3], 9, 9, Some(Orientation::Rotate90)).is_err());
+    }
+
+    #[test]
+    fn one_exif_read_agrees_with_the_separate_readers_and_decodes_the_same_frame() {
+        let path = std::path::Path::new("oriented.jpg");
+        for bytes in [jpeg_with_orientation(6, 4, Some(6)), jpeg_with_orientation(6, 4, None), tiny_png(), b"not an image".to_vec()] {
+            let read = read_primary_exif(&bytes);
+            assert_eq!(read.orientation, exif_orientation(&bytes));
+            assert_eq!(read.srgb, exif_is_srgb(&bytes));
+            assert_eq!(read.fields, parse_exif_fields(&bytes));
+            let hinted = decode_image_sync_with(path, Some(&bytes), Some(&read)).ok();
+            assert_eq!(hinted, decode_image_sync(path, Some(&bytes)).ok());
+        }
+        let turned = jpeg_with_orientation(6, 4, Some(6));
+        let (_, w, h) = decode_image_sync_with(path, Some(&turned), Some(&read_primary_exif(&turned))).unwrap();
+        assert_eq!((w, h), (4, 6), "the orientation handed down is applied");
     }
 
     fn jpeg_with_orientation(width: u32, height: u32, orientation: Option<u8>) -> Vec<u8> {
@@ -4387,6 +5070,9 @@ mod tests {
             text_stage_done: false,
             tags_evaluated: true,
             reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
         }
     }
 

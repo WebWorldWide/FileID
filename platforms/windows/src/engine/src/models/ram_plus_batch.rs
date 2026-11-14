@@ -125,11 +125,19 @@ impl RamPlusBatchCoordinator {
         }
         let (tx, rx) = oneshot::channel();
         let req = RamPlusRequest { rgb, width, height, response: tx };
-        let sender = self.sender.clone();
-        tokio::task::spawn_blocking(move || sender.send(req))
-            .await
-            .map_err(|e| anyhow!("ram++ coordinator join: {e}"))?
-            .map_err(|_| anyhow!("ram++ coordinator channel closed"))?;
+        // Submit in place while the queue has room; a full queue (backpressure)
+        // moves the blocking send to a blocking thread.
+        match self.sender.try_send(req) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => return Err(anyhow!("ram++ coordinator channel closed")),
+            Err(crossbeam_channel::TrySendError::Full(req)) => {
+                let sender = self.sender.clone();
+                tokio::task::spawn_blocking(move || sender.send(req))
+                    .await
+                    .map_err(|e| anyhow!("ram++ coordinator join: {e}"))?
+                    .map_err(|_| anyhow!("ram++ coordinator channel closed"))?;
+            }
+        }
         rx.await
             .map_err(|_| anyhow!("ram++ coordinator dropped response sender"))?
     }

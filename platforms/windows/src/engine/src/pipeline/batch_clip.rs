@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use tokio::sync::oneshot;
 
 use crate::models::mobileclip::MobileClipImage;
@@ -114,14 +114,20 @@ impl ClipBatchCoordinator {
         }
         let (tx, rx) = oneshot::channel();
         let req = ClipRequest { rgb, response: tx };
-        // Use blocking send via a tiny spawn_blocking — crossbeam's send is
-        // sync. The bounded channel can apply backpressure when CLIP is the
-        // pipeline bottleneck.
-        let sender = self.sender.clone();
-        tokio::task::spawn_blocking(move || sender.send(req))
-            .await
-            .map_err(|e| anyhow!("clip coordinator join: {e}"))?
-            .map_err(|_| anyhow!("clip coordinator channel closed"))?;
+        // The queue almost always has room, so submit in place. Only when it is
+        // full (CLIP is the bottleneck and applies backpressure) does the
+        // blocking send move to a blocking thread.
+        match self.sender.try_send(req) {
+            Ok(()) => {}
+            Err(TrySendError::Disconnected(_)) => return Err(anyhow!("clip coordinator channel closed")),
+            Err(TrySendError::Full(req)) => {
+                let sender = self.sender.clone();
+                tokio::task::spawn_blocking(move || sender.send(req))
+                    .await
+                    .map_err(|e| anyhow!("clip coordinator join: {e}"))?
+                    .map_err(|_| anyhow!("clip coordinator channel closed"))?;
+            }
+        }
         rx.await
             .map_err(|_| anyhow!("clip coordinator dropped response sender"))?
     }
