@@ -22,6 +22,9 @@ public sealed class TakeReviewPolicyTests
         Quality(3, 3, false, 3),
     };
 
+    private static readonly string[] ClosestToGoal = { "Closest to the goal" };
+    private static readonly string[] ShowsGoal = { "Shows the goal" };
+
     [Fact]
     public void GoalRankingMarksTheTriesAndMovesTheKeep()
     {
@@ -32,8 +35,8 @@ public sealed class TakeReviewPolicyTests
         Assert.False(TakeReviewPolicy.CanRank("hit", tries.Take(1).ToArray()));
         var answer = new CatalogTakeGoalRanking("hit", "ranked", new long[] { 1, 3, 2 }, new long[] { 3 }, "");
         var marked = TakeReviewPolicy.MarkGoal(tries, answer);
-        Assert.Equal(new[] { "Closest to the goal" }, marked[0].Reasons);
-        Assert.Equal(new[] { "Shows the goal" }, marked[2].Reasons);
+        Assert.Equal(ClosestToGoal, marked[0].Reasons);
+        Assert.Equal(ShowsGoal, marked[2].Reasons);
         var (keep, focus) = TakeReviewPolicy.AdoptGoal(marked, new HashSet<long> { 2 }, answer)!.Value;
         Assert.Equal(new HashSet<long> { 1 }, keep);
         Assert.Equal(0, focus);
