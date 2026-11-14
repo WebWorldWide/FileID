@@ -130,7 +130,8 @@ public sealed record BulkActionResult(
     string Action,
     uint Succeeded,
     uint Failed,
-    System.Collections.Generic.IReadOnlyList<BulkActionItem> Messages);
+    System.Collections.Generic.IReadOnlyList<BulkActionItem> Messages,
+    [property: JsonPropertyName("commandID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CommandId = null);
 
 public sealed record BulkActionItem(
     [property: JsonPropertyName("fileID")] long? FileId,
