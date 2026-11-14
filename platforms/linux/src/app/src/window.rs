@@ -368,7 +368,11 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
             }
         }
         let window = window.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(delay + 2200), move || {
+        let settle = std::env::var("FILEID_SELF_SHOT_SETTLE_MS")
+            .ok()
+            .and_then(|ms| ms.trim().parse::<u64>().ok())
+            .unwrap_or(2200);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay + settle), move || {
             self_capture(&window, &path, 6);
         });
     }
