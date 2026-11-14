@@ -4935,3 +4935,12 @@ The engine side of `rankTakesWithGoal` was finished on 2026-11-05 (see NEXT); on
 - **One PR.** `agent/main-ci-fix` (#335) and `agent/winui-audit` (#332) are merged into the integration branch (#331) instead of landing separately. All three conflicted with main, a conflicting PR runs no CI, and each would have had to be re-merged after the others landed. The cost is a larger PR; the WinUI part is still compiled only by CI, as before.
 - **Verify the merged tree before pushing.** The merge of main compiled cleanly as text but broke the GTK app (two pages used an API this branch replaced). The local run of CI's builds, tests and three conformance suites is the gate for integration merges, not the absence of textual conflicts.
 - **Chat merges ask first.** The Chat action card already names the people and has its own Merge button, but People asks before every merge on all three apps since the 2026-11-12 audit and the Mac's Chat does too, so GTK and WinUI Chat now show the same confirmation. Undo is offered only when every merge in the action succeeded and the engine returned an operation id for each, so "Undo merge" never leaves a half-undone set behind silently: a failed step reports that it could not put them back.
+
+## 2026-11-14 — Duplicate photos: at most `workers - 1` workers wait on a twin
+
+A copy of an image normally reaches a worker after the copy that owns the analysis, because the decoders hold copies back until their owner is queued. That order breaks after an owner fails or cannot share (no models): the copies already released claim the image again from a worker, and the new owner may be one a decoder is still reading. With every worker waiting on it, nothing analyzed it until `TWIN_WAIT_PATIENCE` (45 s) ran out.
+
+- **Chosen:** cap the workers that may wait at `workers - 1`. The worker that would be the last one waiting analyzes its copy unshared instead, so one worker is always free for the owner. A finished owner is read without taking a waiting place, so a single-worker pool still reuses analyses.
+- **Not chosen:** handing the copy back to the decoder that holds the new owner (keeps every reuse, but adds a second hand-over path between the two pools), or shortening the patience (still a stall, only shorter).
+- **Cost:** in that narrow case one copy per stuck round is analyzed twice. Sharing in the normal case is unchanged.
+- **Evidence:** the pipeline test that failed 1 in 25 runs under 60 busy processes (each failure a full 20 s) passes 500 of 500 with the slowest run at 0.66 s.
