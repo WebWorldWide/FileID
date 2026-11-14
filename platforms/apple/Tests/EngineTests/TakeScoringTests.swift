@@ -41,6 +41,14 @@ struct TakeScoringTests {
         #expect(scored[0].reasons.contains("Out of focus"))
     }
 
+    @Test func identicalTriesGetNoChip() {
+        let one = TakeScoring.signals(pattern(96, 64), faces: [])
+        let scored = TakeScoring.score([shot(1, one), shot(2, one)])
+        #expect(scored[0].score == scored[1].score)
+        #expect(scored.allSatisfy { $0.reasons.isEmpty })
+        #expect(scored[0].recommended)
+    }
+
     @Test func sharedProblemsAreNotReasonsAndClosedEyesLose() {
         var open = TakeScoring.signals(pattern(400, 300), faces: [])
         open.faces = [TakeScoring.Face(x: 0.3, y: 0.2, width: 0.2, height: 0.25, quality: 0.6, eyesOpen: 0.9)]
@@ -86,13 +94,65 @@ struct TakeScoringTests {
         #expect(VisionTakeFaceAnalyzer.closedRatio < VisionTakeFaceAnalyzer.openRatio)
     }
 
-    private func insert(_ db: GRDB.Database, _ id: Int64, _ path: String, _ time: Double, _ angle: Float) throws {
-        try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension) VALUES(?,?,?,100,?,?,0,'image','jpg')",
-                       arguments: [id, path, id, time, time])
+    private func insert(_ db: GRDB.Database, _ id: Int64, _ path: String, _ time: Double, _ angle: Float, hash: UInt8? = nil, size: Int64 = 100) throws {
+        try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension,content_hash) VALUES(?,?,?,?,?,?,0,'image','jpg',?)",
+                       arguments: [id, path, id, size, time, time, hash.map { Data(repeating: $0, count: 32) }])
         var vector = [Float](repeating: 0, count: 512)
         vector[0] = cos(angle); vector[1] = sin(angle)
         let blob = vector.withUnsafeBufferPointer { Data(buffer: $0) }
         try db.execute(sql: "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)", arguments: [id, blob, CLIPEmbeddingSpace.modelID])
+    }
+
+    private func insertContent(_ db: GRDB.Database, _ id: Int64, _ path: String, _ time: Double, _ angle: Float, hash: UInt8, size: Int64) throws {
+        try insert(db, id, path, time, angle, hash: hash, size: size)
+    }
+
+    private func autoGroups(_ database: FileIDEngine.Database) async throws -> [CatalogTakeAutoGroup] {
+        let response = await CatalogStore.handle(CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups"), database: database)
+        return try #require(response.takeGroups)
+    }
+
+    @Test func byteIdenticalCopiesAreNotTakes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try insertContent(db, 1, "/c/dup b.jpg", 100, 0, hash: 7, size: 5000)
+            try insertContent(db, 2, "/c/dup b again.jpg", 101, 0, hash: 7, size: 5000)
+        }
+        #expect(try await database.pool.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings") } == 2)
+        #expect(try await autoGroups(database).isEmpty)
+    }
+
+    @Test func aGroupOfThreeWithTwoCopiesShowsTwoTriesAndKeepsTheLowestID() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try insertContent(db, 5, "/c/one.jpg", 100, 0, hash: 7, size: 5000)
+            try insertContent(db, 2, "/c/one copy.jpg", 99, 0, hash: 7, size: 5000)
+            try insertContent(db, 3, "/c/other.jpg", 101, 0.05, hash: 8, size: 5000)
+        }
+        let groups = try await autoGroups(database)
+        #expect(groups.count == 1)
+        #expect(groups[0].fileIDs == [2, 3])
+        #expect(groups[0].shots.count == 2)
+    }
+
+    @Test func filesTooLargeForAFullHashAndFilesWithoutAHashAreNeverCollapsed() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try insertContent(db, 1, "/c/a.jpg", 100, 0, hash: 7, size: 17 * 1024 * 1024)
+            try insertContent(db, 2, "/c/b.jpg", 101, 0, hash: 7, size: 17 * 1024 * 1024)
+        }
+        #expect(try await autoGroups(database).count == 1)
+        try await database.pool.write { db in
+            try insert(db, 3, "/c/c.jpg", 5000, 0)
+            try insert(db, 4, "/c/d.jpg", 5001, 0)
+        }
+        #expect(try await autoGroups(database).count == 2)
     }
 
     @Test func derivedFilesAndEventMembersAreLeftOutOfSuggestions() async throws {
