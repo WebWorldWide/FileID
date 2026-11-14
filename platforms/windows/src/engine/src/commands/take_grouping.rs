@@ -340,18 +340,18 @@ fn eligible(conn: &Connection) -> Result<Vec<(&'static str, File)>> {
          ORDER BY f.id",
     )?;
     let mut rows = statement.query(params![model(), (DIMENSION * 4) as i64])?;
-    let mut hashes: HashSet<Vec<u8>> = HashSet::new();
+    let mut hashes: HashSet<(Vec<u8>, i64)> = HashSet::new();
     let mut files = Vec::new();
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let time: f64 = row.get(2)?;
-        let hash: Option<Vec<u8>> = row.get(7)?;
-        if !time.is_finite() || hash.is_some_and(|hash| !hashes.insert(hash)) {
+        let size: i64 = row.get(4)?;
+        let content = super::catalog_take_auto::content_identity(row.get(7)?, Some(size));
+        if !time.is_finite() || content.is_some_and(|content| !hashes.insert(content)) {
             continue;
         }
         let path: String = row.get(1)?;
         let kind: String = row.get(3)?;
-        let size: i64 = row.get(4)?;
         let modified: Option<f64> = row.get(5)?;
         let camera = row.get::<_, Option<String>>(6)?.map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
         let revision = revision(size, modified);

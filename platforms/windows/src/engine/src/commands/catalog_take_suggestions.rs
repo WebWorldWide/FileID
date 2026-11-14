@@ -28,7 +28,7 @@ pub(super) fn discover(
     );
     let scope = serde_json::to_string(&ids)?;
     let mut statement = conn.prepare(
-        "SELECT f.id, f.path_text, f.created_at, f.content_hash, e.embedding
+        "SELECT f.id, f.path_text, f.created_at, f.content_hash, f.size_bytes, e.embedding
          FROM files f
          JOIN clip_embeddings e ON e.file_id=f.id AND e.model=?1
          WHERE f.id IN (SELECT value FROM json_each(?2))
@@ -40,16 +40,16 @@ pub(super) fn discover(
     let mut rows = statement.query(params!["mobileclip_s2", scope])?;
     let mut active: Vec<Group> = Vec::new();
     let mut finished: Vec<Group> = Vec::new();
-    let mut seen_hashes: HashSet<Vec<u8>> = HashSet::new();
+    let mut seen_hashes: HashSet<(Vec<u8>, i64)> = HashSet::new();
 
     while let Some(row) = rows.next()? {
         let time: f64 = row.get(2)?;
-        let blob: Vec<u8> = row.get(4)?;
+        let blob: Vec<u8> = row.get(5)?;
         let Some(vector) = decode(&blob) else { continue };
         if !time.is_finite() { continue; }
         let member = CatalogTakeGroupMember { file_id: row.get(0)?, path: row.get(1)? };
-        let hash: Option<Vec<u8>> = row.get(3)?;
-        if hash.is_some_and(|value| !seen_hashes.insert(value)) { continue; }
+        let content = super::catalog_take_auto::content_identity(row.get(3)?, row.get(4)?);
+        if content.is_some_and(|value| !seen_hashes.insert(value)) { continue; }
 
         while active.first().is_some_and(|group| time - group.anchor_time > MAXIMUM_GAP) {
             finished.push(active.remove(0));
@@ -152,5 +152,24 @@ mod tests {
         let response = crate::commands::catalog::execute(&mut conn, &request).unwrap();
         let wire = serde_json::to_value(response).unwrap();
         assert_eq!(wire["suggestedTakeGroups"][0]["members"][1]["fileID"], 2);
+    }
+
+    #[test]
+    fn large_files_with_one_sampled_hash_are_different_tries_small_copies_are_one() {
+        let conn = crate::db::test_support::memory_db();
+        let big = (crate::util::content_hash::FULL_HASH_MAX_BYTES + 1) as i64;
+        for (id, time, size) in [(1, 1000.0, big), (2, 1010.0, big), (3, 1020.0, 100), (4, 1030.0, 100)] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension,content_hash) VALUES(?1,?2,?1,?3,?4,?4,0,'video','mov',?5)",
+                params![id, format!("/internal/{id}.mov"), size, time, vec![if id < 3 { 1_u8 } else { 3 }]],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,'mobileclip_s2')",
+                params![id, blob(1.0, 0.0)],
+            ).unwrap();
+        }
+        let groups = discover(&conn, &[1, 2, 3, 4], 20).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].members.iter().map(|member| member.file_id).collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 }

@@ -171,3 +171,25 @@ fn interrupted_jobs_pause_and_resume_without_redoing_sessions() {
     assert_eq!(stored(&conn).len(), 3);
     assert!(super::plan(&conn).unwrap().dirty.is_empty());
 }
+
+#[test]
+fn large_files_with_one_sampled_hash_stay_two_tries_while_small_copies_collapse() {
+    let mut conn = crate::db::test_support::memory_db();
+    let big = (crate::util::content_hash::FULL_HASH_MAX_BYTES + 1) as i64;
+    file(&conn, 1, "/shoot/a1.jpg", 1000.0, Some("Phone A"), (1.0, 0.0));
+    file(&conn, 2, "/shoot/a2.jpg", 1030.0, Some("Phone A"), (0.96, 0.28));
+    file(&conn, 3, "/shoot/a3.jpg", 1060.0, Some("Phone A"), (0.96, 0.28));
+    file(&conn, 4, "/shoot/a4.jpg", 1090.0, Some("Phone A"), (0.96, 0.28));
+    conn.execute("UPDATE files SET size_bytes=?1, content_hash=x'aa' WHERE id IN (1,2)", [big]).unwrap();
+    conn.execute("UPDATE files SET content_hash=x'bb' WHERE id IN (3,4)", []).unwrap();
+    for (id, vector) in [(1, (1.0, 0.0)), (2, (0.96, 0.28)), (3, (0.96, 0.28)), (4, (0.96, 0.28))] {
+        conn.execute(
+            "INSERT OR REPLACE INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
+            params![id, blob(vector.0, vector.1), model()],
+        )
+        .unwrap();
+    }
+    rerun(&mut conn);
+    let ids: Vec<String> = stored(&conn).into_iter().map(|row| row.1).collect();
+    assert_eq!(ids, vec!["[1,2,3]".to_string()]);
+}
