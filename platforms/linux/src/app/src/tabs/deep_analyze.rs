@@ -413,11 +413,11 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     sync_run_state(&ui);
 
     // ── Live engine events → cards ───────────────────────────────────────────
+    let rx = ui.engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
         ui,
         async move {
-            let rx = ui.engine.borrow_mut().subscribe();
             while let Ok(ev) = rx.recv().await {
                 apply_event(&ui, &ev);
             }

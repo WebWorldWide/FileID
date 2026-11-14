@@ -68,8 +68,10 @@ struct Shell {
     split: adw::OverlaySplitView,
     title_bar: Rc<TitleBar>,
     sidebar: Rc<Sidebar>,
-    headers: Vec<(&'static str, PageHeader)>,
-    contents: Vec<(&'static str, gtk::Widget)>,
+    /// Pages are built the first time they are shown.
+    pages: RefCell<BuiltPages<Built>>,
+    act: Rc<dyn Fn(Action)>,
+    inspector_built: Cell<bool>,
     status: RefCell<Status>,
     folder_path: RefCell<Option<PathBuf>>,
     note: RefCell<Option<String>>,
@@ -81,6 +83,73 @@ struct Shell {
     last_refresh: Cell<Option<std::time::Instant>>,
     refresh_pending: Cell<bool>,
     inspector: crate::motion::SpringRevealer,
+}
+
+#[derive(Clone)]
+struct Built {
+    content: gtk::Widget,
+    header: PageHeader,
+}
+
+/// The pages built so far, in the order they were first shown.
+struct BuiltPages<T> {
+    items: Vec<(&'static str, T)>,
+}
+
+impl<T> Default for BuiltPages<T> {
+    fn default() -> Self {
+        Self { items: Vec::new() }
+    }
+}
+
+impl<T> BuiltPages<T> {
+    fn get(&self, id: &str) -> Option<&T> {
+        self.items.iter().find(|(built, _)| *built == id).map(|(_, item)| item)
+    }
+
+    fn insert(&mut self, id: &'static str, item: T) {
+        if self.get(id).is_none() {
+            self.items.push((id, item));
+        }
+    }
+
+}
+
+/// The page, built first when it is not there yet. `build` runs with nothing
+/// borrowed: a page being built may call back into the window.
+fn ensure_built<T: Clone>(
+    pages: &RefCell<BuiltPages<T>>,
+    id: &'static str,
+    build: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if let Some(built) = pages.borrow().get(id) {
+        return Some(built.clone());
+    }
+    let item = build()?;
+    pages.borrow_mut().insert(id, item.clone());
+    Some(item)
+}
+
+/// The page the window opens on: the remembered one, else Library.
+fn launch_page(remembered: Option<&str>) -> &'static str {
+    remembered.and_then(shell::page).map_or("library", |page| page.id)
+}
+
+fn build_page(id: &str, engine: &Rc<RefCell<EngineClient>>) -> Option<gtk::Widget> {
+    let engine = engine.clone();
+    Some(match id {
+        "library" => crate::tabs::library::build(engine),
+        "people" => crate::tabs::people::build(engine),
+        "moments" => crate::tabs::moments::catalog(engine),
+        "deep-analyze" => crate::tabs::deep_analyze::build_deep_analyze_tab(engine),
+        "chat" => crate::tabs::chat::chat(engine),
+        "takes" => crate::tabs::takes::takes(engine),
+        "cleanup" => crate::tabs::cleanup::build_cleanup_tab(engine),
+        "restructure" => crate::tabs::restructure::build_restructure_tab(engine),
+        "tools" => crate::tabs::file_tools::tools(engine),
+        "settings" => crate::tabs::settings::build(engine),
+        _ => return None,
+    })
 }
 
 /// Progress events repaint the title bar and sidebar at most this often.
@@ -129,35 +198,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     let stack = adw::ViewStack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
-    let contents: Vec<(&'static str, gtk::Widget)> = vec![
-        ("library", crate::tabs::library::build(engine.clone())),
-        ("people", crate::tabs::people::build(engine.clone())),
-        ("moments", crate::tabs::moments::catalog(engine.clone())),
-        (
-            "deep-analyze",
-            crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone()),
-        ),
-        ("chat", crate::tabs::chat::chat(engine.clone())),
-        ("takes", crate::tabs::takes::takes(engine.clone())),
-        (
-            "cleanup",
-            crate::tabs::cleanup::build_cleanup_tab(engine.clone()),
-        ),
-        (
-            "restructure",
-            crate::tabs::restructure::build_restructure_tab(engine.clone()),
-        ),
-        ("tools", crate::tabs::file_tools::tools(engine.clone())),
-        ("settings", crate::tabs::settings::build(engine.clone())),
-    ];
-    let mut headers = Vec::new();
-    for (id, content) in &contents {
-        let page = shell::page(id).expect("every built page is registered");
-        let (column, header) = page_header::wrap(page, content);
-        stack.add_titled_with_icon(&column, Some(id), page.title, page.icon);
-        headers.push((*id, header));
-    }
-
     let title_bar = TitleBar::new(act.clone());
     let sidebar = Sidebar::new(act.clone());
 
@@ -169,15 +209,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .build();
     split.set_sidebar(Some(&sidebar.root));
     let inspector = crate::motion::SpringRevealer::new(crate::motion::Slide::Left);
-    let close_slot = slot.clone();
-    inspector.set_child(Some(&crate::tabs::chat::inspector(
-        engine.clone(),
-        Rc::new(move || {
-            if let Some(shell) = close_slot.get().and_then(Weak::upgrade) {
-                shell.handle(Action::ToggleChat);
-            }
-        }),
-    )));
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     content.add_css_class("fileid-pages");
     content.append(&stack);
@@ -225,8 +256,9 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         split,
         title_bar,
         sidebar,
-        headers,
-        contents,
+        pages: RefCell::default(),
+        act: act.clone(),
+        inspector_built: Cell::new(false),
         status: RefCell::new(Status::default()),
         folder_path: RefCell::new(None),
         note: RefCell::new(None),
@@ -246,9 +278,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     if let Some(path) = initial_folder.or_else(crate::app_settings::last_folder) {
         shell.set_folder(&path);
     }
-    let initial = crate::app_settings::active_tab()
-        .and_then(|id| shell::page(&id))
-        .map_or("library", |page| page.id);
+    let initial = launch_page(crate::app_settings::active_tab().as_deref());
     shell.navigate(initial);
     shell.settings_requested.set(false);
     shell.refresh();
@@ -346,7 +376,7 @@ impl Shell {
             Action::WipeAndRescan => self.confirm_wipe(),
             Action::AskChat(text) => {
                 self.navigate("chat");
-                if let Some((_, page)) = self.contents.iter().find(|(id, _)| *id == "chat") {
+                if let Some(page) = self.page_content("chat") {
                     let _ = page.activate_action("chat.ask", Some(&text.to_variant()));
                 }
             }
@@ -369,7 +399,7 @@ impl Shell {
                 self.navigate("library");
                 if let Some(editable) = self
                     .page_content("library")
-                    .and_then(|root| find_editable(root, LIBRARY_SEARCH_HINT))
+                    .and_then(|root| find_editable(&root, LIBRARY_SEARCH_HINT))
                 {
                     editable.grab_focus();
                     editable.select_region(0, -1);
@@ -380,7 +410,7 @@ impl Shell {
                 "library" => {
                     if let Some(button) = self
                         .page_content("library")
-                        .and_then(|root| find_button(root, "Select all"))
+                        .and_then(|root| find_button(&root, "Select all"))
                     {
                         button.emit_clicked();
                     }
@@ -397,6 +427,9 @@ impl Shell {
             }
             Action::ToggleChat => {
                 let open = !self.inspector.reveals_child() && self.current.get() != "chat";
+                if open {
+                    self.build_inspector();
+                }
                 self.inspector.set_reveal_child(open);
                 self.title_bar.set_chat_state(open, self.current.get() == "chat");
             }
@@ -408,6 +441,7 @@ impl Shell {
 
     fn navigate(&self, id: &'static str) {
         let Some(page) = shell::page(id) else { return };
+        self.page_content(page.id);
         let changed = self.current.replace(page.id) != page.id;
         self.settings_requested.set(page.id == "settings");
         self.stack.set_visible_child_name(page.id);
@@ -433,17 +467,39 @@ impl Shell {
             }
     }
 
-    fn page_content(&self, page: &str) -> Option<&gtk::Widget> {
-        self.contents
-            .iter()
-            .find(|(id, _)| *id == page)
-            .map(|(_, root)| root)
+    /// The page's content, built first if this is the first time it is needed.
+    fn page_content(&self, page: &str) -> Option<gtk::Widget> {
+        let page = shell::page(page)?;
+        ensure_built(&self.pages, page.id, || {
+            self.engine.borrow_mut().replay_to_new_subscribers(true);
+            let content = build_page(page.id, &self.engine);
+            self.engine.borrow_mut().replay_to_new_subscribers(false);
+            let content = content?;
+            let (column, header) = page_header::wrap(page, &content);
+            self.stack
+                .add_titled_with_icon(&column, Some(page.id), page.title, page.icon);
+            header.set_meta(&self.status.borrow().page_meta(page.id));
+            Some(Built { content, header })
+        })
+        .map(|built| built.content)
     }
 
     fn page_action(&self, page: &str, action: &str) {
         if let Some(root) = self.page_content(page) {
             let _ = root.activate_action(action, None);
         }
+    }
+
+    /// The Chat inspector is built the first time it is opened.
+    fn build_inspector(&self) {
+        if self.inspector_built.replace(true) {
+            return;
+        }
+        let act = self.act.clone();
+        self.engine.borrow_mut().replay_to_new_subscribers(true);
+        let chat = crate::tabs::chat::inspector(self.engine.clone(), Rc::new(move || act(Action::ToggleChat)));
+        self.engine.borrow_mut().replay_to_new_subscribers(false);
+        self.inspector.set_child(Some(&chat));
     }
 
     /// A local desktop notification (GNOME/KDE notification daemon over
@@ -457,8 +513,8 @@ impl Shell {
     }
 
     fn hand_off(&self, page: &str, placeholder: &str, text: &str) -> Option<gtk::Editable> {
-        let (_, root) = self.contents.iter().find(|(id, _)| *id == page)?;
-        let editable = find_editable(root, placeholder)?;
+        let root = self.page_content(page)?;
+        let editable = find_editable(&root, placeholder)?;
         editable.set_text(text);
         editable.grab_focus();
         editable.set_position(-1);
@@ -657,8 +713,8 @@ impl Shell {
         self.sidebar.update(&status);
         let page = detail_page(status.folder.is_some(), status.total_files, self.settings_requested.get());
         crate::motion::show_child(&self.detail, page);
-        for (id, header) in &self.headers {
-            header.set_meta(&status.page_meta(id));
+        for (id, built) in &self.pages.borrow().items {
+            built.header.set_meta(&status.page_meta(id));
         }
     }
 
@@ -1178,6 +1234,40 @@ mod shortcut_tests {
         for action in [Action::FocusSearch, Action::FocusLibrarySearch, Action::ToggleSidebar, Action::Navigate("library")] {
             assert!(!needs_text_guard(&action));
         }
+    }
+
+    #[test]
+    fn the_window_opens_on_the_remembered_page_or_library() {
+        assert_eq!(launch_page(None), "library");
+        assert_eq!(launch_page(Some("no-such-page")), "library");
+        for page in shell::PAGES.iter() {
+            assert_eq!(launch_page(Some(page.id)), page.id);
+        }
+    }
+
+    #[test]
+    fn a_page_is_built_once_and_only_when_first_asked_for() {
+        let pages: RefCell<BuiltPages<u32>> = RefCell::default();
+        let builds = Cell::new(0);
+        assert!(pages.borrow().get("chat").is_none());
+        let first = ensure_built(&pages, "chat", || {
+            builds.set(builds.get() + 1);
+            Some(7)
+        });
+        let again = ensure_built(&pages, "chat", || {
+            builds.set(builds.get() + 1);
+            Some(8)
+        });
+        assert_eq!((first, again, builds.get()), (Some(7), Some(7), 1));
+        assert!(pages.borrow().get("library").is_none());
+    }
+
+    #[test]
+    fn a_page_that_cannot_be_built_is_not_recorded_and_can_be_tried_again() {
+        let pages: RefCell<BuiltPages<u32>> = RefCell::default();
+        assert_eq!(ensure_built(&pages, "tools", || None), None);
+        assert!(pages.borrow().get("tools").is_none());
+        assert_eq!(ensure_built(&pages, "tools", || Some(3)), Some(3));
     }
 
     #[test]

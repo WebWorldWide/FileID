@@ -15,6 +15,7 @@ mod engine_client;
 mod engine_errors;
 mod event_queue;
 mod fonts;
+mod job_replay;
 mod lavalamp;
 mod model_license;
 mod motion;

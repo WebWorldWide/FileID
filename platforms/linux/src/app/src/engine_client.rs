@@ -336,6 +336,9 @@ pub struct EngineClient {
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
     subscribers: Vec<EventSender>,
+    /// The newest event of each job still running, for pages built late.
+    replay: crate::job_replay::JobReplay,
+    replaying: bool,
     thumbs: Arc<ThumbQueue>,
     preview: Arc<PreviewSlot>,
     query_worker: Arc<QueryWorkerState>,
@@ -363,6 +366,8 @@ impl EngineClient {
             raw_tx,
             raw_rx: Some(raw_rx),
             subscribers: Vec::new(),
+            replay: crate::job_replay::JobReplay::default(),
+            replaying: false,
             thumbs: Arc::new(ThumbQueue::new()),
             preview: Arc::new(PreviewSlot::new()),
             query_worker: spawn_query_worker(),
@@ -379,11 +384,24 @@ impl EngineClient {
     /// from now on, and the newest of each kind of progress event.
     pub fn subscribe(&mut self) -> EventReceiver {
         let (tx, rx) = crate::event_queue::channel();
+        if self.replaying {
+            for event in self.replay.snapshot(self.ready) {
+                tx.push(&event);
+            }
+        }
         self.subscribers.push(tx);
         rx
     }
 
+    /// While on, a new subscriber first receives `Ready` (when the engine is
+    /// up) and the newest event of every running job, as if it had been
+    /// listening since launch. Switched on only around a page's `build`.
+    pub fn replay_to_new_subscribers(&mut self, on: bool) {
+        self.replaying = on;
+    }
+
     fn publish(&mut self, event: &Rc<EngineState>) {
+        self.replay.observe(event);
         prune_closed_subscribers(&mut self.subscribers);
         for subscriber in &self.subscribers {
             subscriber.push(event);
