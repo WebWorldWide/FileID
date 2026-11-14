@@ -187,6 +187,11 @@ struct MainWindow: View {
                 handoff.libraryRoot = pickedURL
                 handoff.navigate = { activeTabBinding.wrappedValue = $0 }
                 handoff.chooseFolder = { chooseProposed($0) }
+                #if DEBUG
+                SelfShot.run(engine: engine, store: store,
+                             navigate: { raw in if let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab } },
+                             openFolder: { url, scan in if scan { choose(url) } else { pickedURL = url } })
+                #endif
             }
             .onChange(of: pickedURL) { _, newValue in
                 persistPickedFolder(newValue)
