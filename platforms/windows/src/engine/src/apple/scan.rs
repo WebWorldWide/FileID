@@ -237,6 +237,13 @@ pub fn load_ram_plus(directory: &Path) -> bool {
     unsafe { ffi::fileid_apple_ramplus_load(path.as_ptr()) }
 }
 
+/// Free the MLX CLIP and RAM++ models and return MLX's cached buffers. Callers
+/// go through `scan_models::ADAPTER_MODELS`, which only unloads at zero holders.
+pub fn unload_models() {
+    // SAFETY: no arguments; the adapter drops its model references under its own locks.
+    unsafe { ffi::fileid_apple_scan_models_unload() };
+}
+
 /// Whether the accurate text tier has been compiled.
 pub fn ocr_ready() -> bool {
     // SAFETY: no arguments.

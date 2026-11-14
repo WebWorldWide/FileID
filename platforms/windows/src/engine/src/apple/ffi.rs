@@ -184,6 +184,9 @@ unsafe extern "C" {
     pub fn fileid_apple_ramplus_load(directory: *const c_char) -> bool;
     /// RAM++ tags agreed with the primary pass. JSON `[[tag, score], ...]`.
     pub fn fileid_apple_ramplus_tag(image: u64, vision_confidences: *const c_char, face_count: usize) -> *mut c_char;
+    /// Free the MLX CLIP and RAM++ models and MLX's cached buffers; a no-op when
+    /// nothing is loaded. Calls already running finish on the old models.
+    pub fn fileid_apple_scan_models_unload();
     // --- end Stage 5 ---
 
     // --- Stage 7: MLX vision-language models ---

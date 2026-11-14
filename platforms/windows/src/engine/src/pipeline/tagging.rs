@@ -513,6 +513,9 @@ pub struct ModelStack {
     pub apple_scan: bool,
     /// CLIP image embeddings come from the MLX adapter.
     pub apple_clip: bool,
+    /// The Mac adapter's CLIP and RAM++ stay loaded while any stack holds this;
+    /// the last drop frees them.
+    pub adapter_hold: Option<crate::pipeline::scan_models::AdapterHold>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -882,6 +885,7 @@ impl ModelStack {
             pool_size,
             apple_scan: false,
             apple_clip: false,
+            adapter_hold: None,
         }
     }
 
@@ -908,6 +912,7 @@ impl ModelStack {
             pool_size: 1,
             apple_scan: false,
             apple_clip: false,
+            adapter_hold: None,
         }
     }
 }
@@ -3375,6 +3380,11 @@ impl crate::pipeline::catch_up::Analyzer for PortableCatchUp {
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+pub(crate) fn mac_unload_adapters() {
+    mac::unload_adapters();
+}
+
 /// The analyzer the catch-up pass runs after a scan with these models.
 pub(crate) fn catch_up_analyzer(
     models: Arc<ModelStack>,
@@ -3382,7 +3392,7 @@ pub(crate) fn catch_up_analyzer(
 ) -> Box<dyn crate::pipeline::catch_up::Analyzer + Send> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if models.apple_scan {
-        return Box::new(mac::CatchUp);
+        return Box::new(mac::CatchUp { _models: models });
     }
     Box::new(PortableCatchUp { models, runtime: tokio::runtime::Handle::current(), coord })
 }

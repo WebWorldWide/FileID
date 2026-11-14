@@ -268,6 +268,10 @@ package final class GPURequestBatcher: @unchecked Sendable {
         if Memory.cacheLimit > mb * 1_048_576 { Memory.cacheLimit = mb * 1_048_576 }
     }
 
+    /// Hand MLX's cached, unused buffers back to the system after a model is
+    /// dropped. Live arrays (a resident description model) are untouched.
+    package static func releaseCache() { GPU.clearCache() }
+
     package func submit(_ tensor: [Float]) -> [Float]? {
         let slot = Slot()
         lock.lock()

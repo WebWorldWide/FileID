@@ -5,7 +5,7 @@
 import FileIDAppleVLM
 import Foundation
 
-public let fileIDAppleABIVersion: UInt32 = 1
+public let fileIDAppleABIVersion: UInt32 = 2
 
 @_cdecl("fileid_apple_abi_version")
 public func fileid_apple_abi_version() -> UInt32 {

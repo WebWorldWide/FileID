@@ -141,6 +141,18 @@ struct ScanAdapterTests {
         #expect(image == 0)
     }
 
+    @Test func unloadWithNothingLoadedIsANoOpAndLoadsStillFailAfterIt() throws {
+        let dir = try folder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        fileid_apple_scan_models_unload()
+        fileid_apple_scan_models_unload()
+        #expect(!dir.appendingPathComponent("clip.onnx").path.withCString { fileid_apple_clip_load($0) })
+        #expect(!dir.path.withCString { fileid_apple_ramplus_load($0) })
+        fileid_apple_scan_models_unload()
+        #expect(!ScanCLIP.shared.unload())
+        #expect(!ScanRamPlus.shared.unload())
+    }
+
     @Test func modelsRefuseMissingWeightsAndUnloadedCalls() throws {
         let dir = try folder()
         defer { try? FileManager.default.removeItem(at: dir) }

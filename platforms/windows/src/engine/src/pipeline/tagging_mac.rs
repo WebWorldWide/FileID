@@ -46,27 +46,43 @@ pub(crate) struct Frame {
 static CLIP_READY: AtomicBool = AtomicBool::new(false);
 static RAM_PLUS_READY: AtomicBool = AtomicBool::new(false);
 
+/// Runs under `ADAPTER_MODELS`' lock once no stack, catch-up pass or timeline
+/// encoder holds the adapter models.
+pub(crate) fn unload_adapters() {
+    CLIP_READY.store(false, Ordering::Release);
+    RAM_PLUS_READY.store(false, Ordering::Release);
+    scan::unload_models();
+}
+
 /// The models this path runs: CLIP and RAM++ on MLX through the adapter (CLIP
 /// falls back to ONNX Runtime when MLX cannot load), BGE through ONNX Runtime.
 /// Face models stay unloaded: faces come from Vision.
 pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> ModelStack {
     let pool_size = if runtime_available { resolve_pool_size(worker_count) } else { 1 };
-    let clip = crate::models::mobileclip::default_weights_path()
-        .ok()
-        .filter(|path| path.is_file())
-        .is_some_and(|path| {
-            crate::models::clip_space::load_verified(&[(&path, "mobileclip_s2", 0)], || {
-                if scan::load_clip(&path) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
-            })
-            .map_err(|error| tracing::warn!(model = "CLIP", %error, "MLX image tower not loaded"))
-            .is_ok()
-        });
+    let (adapters, adapter_hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
+        || {
+            let clip = crate::models::mobileclip::default_weights_path()
+                .ok()
+                .filter(|path| path.is_file())
+                .is_some_and(|path| {
+                    crate::models::clip_space::load_verified(&[(&path, "mobileclip_s2", 0)], || {
+                        if scan::load_clip(&path) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
+                    })
+                    .map_err(|error| tracing::warn!(model = "CLIP", %error, "MLX image tower not loaded"))
+                    .is_ok()
+                });
+            let ram_plus = crate::models::ram_plus::default_tags_path()
+                .ok()
+                .and_then(|tags| tags.parent().map(Path::to_path_buf))
+                .filter(|dir| dir.join("ram_plus.onnx").is_file() && dir.join("ram_plus_tags.txt").is_file())
+                .is_some_and(|dir| scan::load_ram_plus(&dir));
+            (clip, ram_plus)
+        },
+        |(clip, ram_plus)| *clip || *ram_plus,
+        unload_adapters,
+    );
+    let (clip, ram_plus) = adapters;
     CLIP_READY.store(clip, Ordering::Release);
-    let ram_plus = crate::models::ram_plus::default_tags_path()
-        .ok()
-        .and_then(|tags| tags.parent().map(Path::to_path_buf))
-        .filter(|dir| dir.join("ram_plus.onnx").is_file() && dir.join("ram_plus_tags.txt").is_file())
-        .is_some_and(|dir| scan::load_ram_plus(&dir));
     RAM_PLUS_READY.store(ram_plus, Ordering::Release);
     tracing::info!(clip, ram_plus, "[TAGGING] Mac scan adapters (MLX)");
     let mobileclip_pool = (!clip && runtime_available)
@@ -78,6 +94,7 @@ pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> Model
         pool_size,
         apple_scan: true,
         apple_clip: clip,
+        adapter_hold,
         ..ModelStack::empty()
     }
 }
@@ -456,7 +473,10 @@ async fn image_row(
 }
 
 /// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
-pub(super) struct CatchUp;
+/// Holds the stack so the adapter's RAM++ stays loaded until the catch-up ends.
+pub(super) struct CatchUp {
+    pub(super) _models: Arc<ModelStack>,
+}
 
 impl CatchUp {
     fn read(image: &scan::Image, classify: &[String], text_tags: &[String], has_camera: bool) -> catch_up::TextRead {

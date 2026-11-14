@@ -103,7 +103,9 @@ pub(crate) const POOL_MAX_SIDE: u32 = 448;
 /// elsewhere. `None` when neither can load; callers fall back to luma.
 enum ClipEncoder {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    Mlx,
+    Mlx {
+        _hold: crate::pipeline::scan_models::AdapterHold,
+    },
     #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
     Ort(Box<crate::models::mobileclip::MobileClipImage>),
 }
@@ -113,17 +115,20 @@ impl ClipEncoder {
         let weights = crate::models::mobileclip::default_weights_path().ok().filter(|path| path.is_file())?;
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {
-            // Loaded once per process, after the manifest check the scan uses.
-            static MLX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let ready = *MLX.get_or_init(|| {
-                crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
-                    if crate::apple::scan::load_clip(&weights) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
-                })
-                .map_err(|error| tracing::warn!(%error, "timeline: MLX CLIP image tower not loaded"))
-                .is_ok()
-            });
-            if ready {
-                return Some(Self::Mlx);
+            // The adapter keeps CLIP while this encoder or a scan holds it.
+            let (_, hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
+                || {
+                    crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
+                        if crate::apple::scan::load_clip(&weights) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
+                    })
+                    .map_err(|error| tracing::warn!(%error, "timeline: MLX CLIP image tower not loaded"))
+                    .is_ok()
+                },
+                |ready| *ready,
+                crate::pipeline::tagging::mac_unload_adapters,
+            );
+            if let Some(hold) = hold {
+                return Some(Self::Mlx { _hold: hold });
             }
         }
         crate::models::mobileclip::MobileClipImage::load(weights).ok().map(|clip| Self::Ort(Box::new(clip)))
@@ -132,7 +137,7 @@ impl ClipEncoder {
     fn embed(&mut self, path: &Path) -> Option<Vec<f32>> {
         match self {
             #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-            Self::Mlx => {
+            Self::Mlx { .. } => {
                 let size = std::fs::metadata(path).ok()?.len();
                 crate::apple::scan::decode_image(path, size)?.clip_embedding()
             }

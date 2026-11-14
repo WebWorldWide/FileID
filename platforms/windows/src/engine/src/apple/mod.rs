@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 /// Interface version this engine was built against.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Exit status when the bundled FileIDAppleKit implements another interface.
 const EXIT_ABI_MISMATCH: i32 = 78;
