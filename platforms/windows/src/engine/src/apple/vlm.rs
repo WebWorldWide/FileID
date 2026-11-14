@@ -375,6 +375,7 @@ impl Resident {
         if state.kind.as_deref() != Some(kind) || !current.resident() || current.loaded.as_deref() != Some(kind) {
             state.memory = None;
             state.kind = None;
+            crate::pipeline::scan_models::release_for_other_models();
             let memory_mb = budget_mb(kind).unwrap_or(4096);
             let scheduler = self.scheduler.clone();
             let flag = cancel.clone();
@@ -442,6 +443,7 @@ impl MlxLease {
         if self.state.memory.is_some() && status().await?.resident() {
             return Ok(());
         }
+        crate::pipeline::scan_models::release_for_other_models();
         let memory_mb = budget_mb(&self.kind).unwrap_or(4096);
         let scheduler = self.scheduler.clone();
         let flag = cancel.clone();

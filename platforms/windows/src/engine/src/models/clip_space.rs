@@ -34,7 +34,34 @@ fn artifacts(kind: &str) -> Vec<super::registry::FileEntry> {
     }
 }
 
+type VerifiedKey = (std::path::PathBuf, String, usize);
+
+/// Files that passed the checksum, with the size and modification time they
+/// had then; a file with the same pair is not hashed again.
+static VERIFIED: parking_lot::Mutex<Vec<(VerifiedKey, u64, std::time::SystemTime)>> = parking_lot::Mutex::new(Vec::new());
+
 pub fn verify(path: &Path, kind: &str, index: usize) -> Result<()> {
+    verify_with(path, kind, index, hash_matches)
+}
+
+fn verify_with(path: &Path, kind: &str, index: usize, check: impl FnOnce(&Path, &str, usize) -> Result<()>) -> Result<()> {
+    let meta = std::fs::metadata(path).ok().and_then(|meta| meta.modified().ok().map(|modified| (meta.len(), modified)));
+    let key = (path.to_path_buf(), kind.to_owned(), index);
+    if let Some((len, modified)) = meta
+        && VERIFIED.lock().iter().any(|(held, l, m)| *held == key && *l == len && *m == modified)
+    {
+        return Ok(());
+    }
+    check(path, kind, index)?;
+    if let Some((len, modified)) = meta {
+        let mut verified = VERIFIED.lock();
+        verified.retain(|(held, ..)| *held != key);
+        verified.push((key, len, modified));
+    }
+    Ok(())
+}
+
+fn hash_matches(path: &Path, kind: &str, index: usize) -> Result<()> {
     let entries = artifacts(kind);
     let expected = entries
         .get(index)
@@ -116,6 +143,28 @@ mod tests {
         assert!(verify(&path, "mobileclip_s2", 0).is_err());
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn an_unchanged_verified_file_is_not_hashed_again_but_a_changed_one_is() {
+        let path = std::env::temp_dir().join(format!("fileid-clip-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"first").unwrap();
+        let hashes = std::sync::atomic::AtomicUsize::new(0);
+        let ok = |_: &Path, _: &str, _: usize| {
+            hashes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        verify_with(&path, "mobileclip_s2", 0, ok).unwrap();
+        verify_with(&path, "mobileclip_s2", 0, ok).unwrap();
+        assert_eq!(hashes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::write(&path, b"second, longer").unwrap();
+        verify_with(&path, "mobileclip_s2", 0, ok).unwrap();
+        assert_eq!(hashes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let refused = |_: &Path, _: &str, _: usize| -> Result<()> { bail!("mismatch") };
+        std::fs::write(&path, b"third, longest of all").unwrap();
+        assert!(verify_with(&path, "mobileclip_s2", 0, refused).is_err());
+        assert!(verify_with(&path, "mobileclip_s2", 0, refused).is_err(), "a refusal is never remembered");
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn verified_load_keeps_the_model_only_when_the_weights_check_out() {
         let path = std::env::temp_dir().join(format!("fileid-clip-load-{}", uuid::Uuid::new_v4()));

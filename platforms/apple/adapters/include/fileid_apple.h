@@ -19,7 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FILEID_APPLE_ABI_VERSION 1
+#define FILEID_APPLE_ABI_VERSION 2
 
 #ifdef __cplusplus
 extern "C" {
@@ -250,6 +250,10 @@ bool fileid_apple_clip_load(const char *onnx_path);
 
 /* L2-normalized 512-d embedding into out (capacity floats). */
 bool fileid_apple_clip_embed(uint64_t image, float *out, size_t capacity);
+
+/* Free the MLX CLIP and RAM++ models and MLX's cached buffers. A no-op when
+ * nothing is loaded; calls already running finish on the old models. */
+void fileid_apple_scan_models_unload(void);
 
 /* MLX RAM++ from a folder holding ram_plus.onnx and its tag sidecars. */
 bool fileid_apple_ramplus_load(const char *directory);
