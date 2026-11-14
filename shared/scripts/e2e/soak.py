@@ -161,15 +161,20 @@ class Engine:
         raise TimeoutError(f"{self.label}: no matching event in {timeout}s")
 
     def drain(self):
+        """Discard queued events; returns the scan-terminal event among them (scanComplete or a cancelled/failed phase)
+        so a caller that is waiting for one does not lose it."""
+        terminal = None
         while True:
             try:
                 ev = self.q.get_nowait()
             except queue.Empty:
-                return
+                return terminal
             if kind(ev) == "error":
                 k = inner(ev).get("kind")
                 ERROR_KINDS[k] = ERROR_KINDS.get(k, 0) + 1
                 note_sample(k, inner(ev))
+            elif kind(ev) == "scanComplete" or (kind(ev) == "phaseChanged" and inner(ev) in ("cancelled", "failed")):
+                terminal = ev
 
     def request(self, command, action_key, body, timeout=300):
         rid = str(uuid.uuid4())
@@ -671,9 +676,12 @@ class Soak:
         eng.wait(lambda e: kind(e) == "progress", 120)
         eng.send("pauseScan")
         time.sleep(1.5)
-        eng.drain()
+        done = eng.drain()
         eng.send("resumeScan")
-        k, v = eng.wait_scan_end(600)
+        if done is not None:
+            k, v = ("scanComplete", inner(done)) if kind(done) == "scanComplete" else (inner(done), {})
+        else:
+            k, v = eng.wait_scan_end(600)
         if k != "scanComplete":
             fail(rnd, "paused then resumed scan completes", (k, v))
         # cancel then a normal scan completes with the same catalog
