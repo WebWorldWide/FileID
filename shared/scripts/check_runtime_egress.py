@@ -162,7 +162,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/restructure.rs": "c763c8ddb72c68f30fe0b54707844d5fd65945907b21f50f6c85e85ba87daee8",
   "platforms/windows/src/engine/src/commands/trash.rs": "dafb97ceaf12988b1319887388a2f28bdd81abfcb32cd3c81a1e5bc5a2619ff9",
   "platforms/windows/src/engine/src/downloader.rs": "9d8dbe7ec8abacc2679afcb5c255cfc2fdf65411827699d8681ffd05cf11da84",
-  "platforms/windows/src/engine/src/server.rs": "e7612ea7b52654ee063f414b56d8d2a9c197c030dd720ad3d30408e4c7f38c71",
+  "platforms/windows/src/engine/src/server.rs": "b6d5c952bb3d10cf8ed88afd6dea7f7210031d050dd308fb6f45e0677ef9d66d",
   "platforms/windows/src/engine/src/models/runtime.rs": "43727589ba0752588d3532adf357f64c5814597ee2f3bfb754a03f3fa3ab5306",
   "platforms/windows/src/engine/src/models/vlm.rs": "da06866186668cb34ef298152cf4d4d2bad7fd0ede656313c43fa59d5967444f",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "93ef5e06c33f8f97b44116785053ca2460028ae91bc199f6bea0eb1fad3cbf6d",
@@ -176,7 +176,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/tags.rs": "5ab33e5ca6ed86bf8a7c719568443c502347ff093cb1e7d3374b7719a778fe39",
   "platforms/windows/src/engine/src/shell/trash.rs": "959c0063983706ee8503970196a2748648b3ce8176887c6aa0fe73302d797caa",
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "dd1893ffa5e67243b1584f5d43879348ce46558b6d06ac846769a58ad0efe302",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "bf6e988aab84643529fe0d0bf5f0b2e3a014a4b6635ef3e37f33ff26a22ccaad",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
   "platforms/windows/src/engine/src/apple/ffi.rs": "4f8b92425df1f76d41fb29224b7cb3b962f878e72dc77d15a7364504b903fe35",
 }
