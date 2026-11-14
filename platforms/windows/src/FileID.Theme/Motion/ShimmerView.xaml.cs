@@ -1,6 +1,7 @@
-﻿// ShimmerView code-behind. Drives the storyboard on/off based on
-// IsActive + ReducedMotion. When reduced-motion is on, the highlight
-// stays hidden (BaseLayer alone reads as "loading state at rest").
+﻿// ShimmerView code-behind. Shows or hides the fixed highlight band from
+// IsActive + ReducedMotion. The band does not animate (see ShimmerView.xaml).
+// When reduced-motion is on, the highlight stays hidden (BaseLayer alone
+// reads as "loading state at rest").
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -29,13 +30,12 @@ public sealed partial class ShimmerView : UserControl
         };
         Unloaded += (_, _) =>
         {
-            ShimmerStoryboard.Stop();
             ReducedMotion.Instance.PropertyChanged -= OnReducedMotionChanged;
         };
     }
 
     /// <summary>
-    /// Tile is currently loading → shimmer animates. False → static placeholder.
+    /// Tile is currently loading → the highlight band shows. False → plain placeholder.
     /// </summary>
     public bool IsActive
     {
@@ -52,16 +52,7 @@ public sealed partial class ShimmerView : UserControl
 
     private void Sync()
     {
-        bool shouldRun = IsActive && !ReducedMotion.Instance.IsReduced;
-        if (shouldRun)
-        {
-            ShimmerStoryboard.Begin();
-            Highlight.Opacity = 0.6;
-        }
-        else
-        {
-            ShimmerStoryboard.Stop();
-            Highlight.Opacity = 0;
-        }
+        bool showBand = IsActive && !ReducedMotion.Instance.IsReduced;
+        Highlight.Opacity = showBand ? 0.6 : 0;
     }
 }
