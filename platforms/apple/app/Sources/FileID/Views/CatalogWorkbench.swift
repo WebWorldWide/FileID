@@ -141,11 +141,15 @@ struct CatalogWorkbench: View {
                         MetaText(resultsMeta, size: 12)
                     }
                     Spacer(minLength: 4)
+                }
+                HStack(spacing: 8) {
                     askButton
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        .fixedSize()
                         .disabled(hitFileCount < 2)
                         .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
+                    Spacer(minLength: 0)
                 }
             }
             .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 14)
@@ -189,6 +193,7 @@ struct CatalogWorkbench: View {
             ChatHandoff.shared.askAbout(targets.map(\.fileID), kinds: targets.map { ChatScope.kind($0.path) })
         }
         .buttonStyle(.dsGhost)
+        .fixedSize()
         .disabled(targets.isEmpty)
         .help(checkedRows.isEmpty ? "Open Chat with every result attached (⌘-click results to pick some)" : "Open Chat with the selected results attached")
         .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(targets.count) results" : "Ask Chat about the \(targets.count) selected results")

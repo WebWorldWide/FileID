@@ -640,8 +640,8 @@ struct LibraryView: View {
 
                 ViewThatFits(in: .horizontal) {
                     if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
-                    MetaText("\(rows.count.formatted()) of \(shownTotal.formatted()) shown", size: 11).fixedSize()
-                    MetaText("\(rows.count.formatted())/\(shownTotal.formatted())", size: 11).fixedSize()
+                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
+                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
                     Color.clear.frame(width: 0, height: 0)
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -780,6 +780,13 @@ struct LibraryView: View {
                 reload()
             }
         }
+    }
+
+    /// The listing can load a moment before the store's file count catches up after a scan;
+    /// the total never reads lower than the rows already drawn.
+    static func shownSummary(rows: Int, total: Int, short: Bool = false) -> String {
+        let total = max(total, rows)
+        return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
     }
 
     /// Files the current listing draws from: unreadable files appear only under their own filter.
