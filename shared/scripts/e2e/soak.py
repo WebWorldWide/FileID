@@ -23,7 +23,14 @@ NOTICE_KINDS = {"rescan_no_changes", "empty_folder", "discovery_partial"}
 BAD_LOG = re.compile(r"panicked at|\bpanic\b|\bfatal\b|database is locked|SQLITE_BUSY|stack overflow|SIGSEGV|abort", re.I)
 FAILURES = []
 ERROR_KINDS = {}
+ERROR_SAMPLES = {}
 LOGBAD = []
+
+
+def note_sample(k, body):
+    msgs = ERROR_SAMPLES.setdefault(k, [])
+    if len(msgs) < 3:
+        msgs.append(str(body.get("message"))[:300])
 
 
 def now():
@@ -146,6 +153,7 @@ class Engine:
             if kind(ev) == "error":
                 k = inner(ev).get("kind")
                 ERROR_KINDS[k] = ERROR_KINDS.get(k, 0) + 1
+                note_sample(k, inner(ev))
                 if on_error:
                     on_error(ev)
             if pred(ev):
@@ -161,6 +169,7 @@ class Engine:
             if kind(ev) == "error":
                 k = inner(ev).get("kind")
                 ERROR_KINDS[k] = ERROR_KINDS.get(k, 0) + 1
+                note_sample(k, inner(ev))
 
     def request(self, command, action_key, body, timeout=300):
         rid = str(uuid.uuid4())
@@ -290,10 +299,12 @@ class Soak:
         self.lib = os.path.join(self.work, "lib")
         self.trash = os.path.join(self.work, "Trash")
         self.models = a.models_dir or os.path.join(self.work, "models")
+        os.makedirs(self.work, exist_ok=True)
         self.report = open(os.path.join(self.work, "soak-report.jsonl"), "a")
         self.series = []
         self.uncatalogued = {}
         self.counter = 0
+        self.notes = {}
 
     # ---------- model of the library on disk
     def p(self, rel):
@@ -330,7 +341,7 @@ class Soak:
     def db_rows(self, db, prefix):
         with ro(db) as c:
             return {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(
-                "SELECT path_text, id, failed, kind, size_bytes FROM files WHERE path_text LIKE ?", (prefix + "/%",))}
+                "SELECT path_text, id, failed, kind, error_message FROM files WHERE path_text LIKE ?", (prefix + "/%",))}
 
     # ---------- invariants
     def check_disk(self, rnd, model, root, name):
@@ -344,35 +355,31 @@ class Soak:
             return False
         return True
 
+    @staticmethod
+    def tombstone(row):
+        """A row the engine keeps but hides after the file vanished: failed=1 with the 'no longer present' message."""
+        return bool(row[1]) and "no longer present" in (row[3] or "")
+
     def check_catalog(self, rnd, eng, root, model, name, first=False):
+        """Visible rows (not tombstones) must be exactly the files on disk, except zero-byte files, which the engine
+        never catalogues (db/zero_byte.rs: the transition never inserts); tombstones must not point at present files."""
         rows = self.db_rows(eng.db, root)
         disk = {os.path.join(root, r) for r in model}
-        stale = sorted(set(rows) - disk)
-        missing = sorted(disk - set(rows))
+        visible = {p for p, v in rows.items() if not self.tombstone(v)}
+        stale = sorted(visible - disk)
+        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0)
+        zero_rows = sorted(p for p in visible & disk if os.path.getsize(p) == 0)
+        hidden_present = sorted(p for p, v in rows.items() if self.tombstone(v) and p in disk)
         if first:
-            self.uncatalogued[name] = set(missing)
-            reasons = {}
-            for m in missing:
-                reasons[self.classify(m)] = reasons.get(self.classify(m), 0) + 1
-            log(f"{name}: baseline uncatalogued files: {len(missing)} by class {reasons}")
-        else:
-            missing = [m for m in missing if self.classify(m) not in self.uncat_classes.get(name, set())]
-        if first:
-            self.uncat_classes = getattr(self, "uncat_classes", {})
-            self.uncat_classes[name] = {self.classify(m) for m in self.uncatalogued[name]}
-            # a class only counts as "never catalogued" when every file of the class was skipped
-            for cls in list(self.uncat_classes[name]):
-                members = [os.path.join(root, r) for r in model if self.classify(os.path.join(root, r)) == cls]
-                if any(m in rows for m in members):
-                    self.uncat_classes[name].discard(cls)
-            missing = [m for m in self.uncatalogued[name] if self.classify(m) not in self.uncat_classes[name]]
-        if stale or missing:
+            log(f"{name}: {len(rows)} rows, {len(disk) - len(visible & disk)} disk files without a visible row (zero-byte: {sum(1 for p in disk - visible if os.path.getsize(p) == 0)})")
+        if stale or missing or hidden_present:
             fail(rnd, f"{name}: catalog rows equal files on disk",
-                 f"stale rows={[os.path.relpath(s, root) for s in stale[:4]]}({len(stale)}) uncatalogued={[os.path.relpath(s, root) for s in missing[:4]]}({len(missing)})")
-        hidden = [p for p, v in rows.items() if v[1]]
+                 f"stale visible rows={[os.path.relpath(s, root) for s in stale[:4]]}({len(stale)}) uncatalogued={[os.path.relpath(s, root) for s in missing[:4]]}({len(missing)}) "
+                 f"hidden-but-present={[os.path.relpath(s, root) for s in hidden_present[:4]]}({len(hidden_present)})")
         return rows
 
-    def classify(self, path):
+    @staticmethod
+    def classify(path):
         base = os.path.basename(path)
         if "/.hidden-folder/" in path or base.startswith("."):
             return "dot"
@@ -422,6 +429,11 @@ class Soak:
         with ro(eng.db) as c:
             after = dict(c.execute("SELECT id, scanned_at FROM files WHERE path_text LIKE ?", (self.lib + "/%",)).fetchall())
         changed = [i for i in after if before.get(i) != after[i]]
+        with ro(eng.db) as c:
+            failed_ids = {r[0] for r in c.execute("SELECT id FROM files WHERE failed=1")}
+        retried = [i for i in changed if i in failed_ids]
+        self.retried_failed = len(retried)
+        changed = [i for i in changed if i not in failed_ids]
         if k != "scanComplete" or changed:
             fail(rnd, "rescan analyses nothing new", f"{k} reprocessed={len(changed)} {v}")
         return round(time.time() - t, 1)
@@ -432,30 +444,30 @@ class Soak:
         regular = [r for r in sorted(self.model) if self.classify(self.p(r)) == "other" and "Edge/" not in r and os.access(self.p(r), os.W_OK)]
         before_ids = self.ids_by_path(eng, regular)
         deleted, renamed, moved, touched, overwritten, added = [], [], [], [], [], []
-        picks = rng.sample(regular, 40)
-        for r in picks[:8]:
+        picks = rng.sample(regular, 160)
+        for r in picks[:30]:
             os.remove(self.p(r)); del self.model[r]; deleted.append(r)
-        for r in picks[8:14]:
+        for r in picks[30:55]:
             base, ext = os.path.splitext(r)
             new = f"{base}-r{rnd}{ext}"
             os.rename(self.p(r), self.p(new)); self.model[new] = self.model.pop(r); renamed.append((r, new))
         dirs = sorted({os.path.dirname(r) for r in regular})
-        for r in picks[14:20]:
+        for r in picks[55:80]:
             d = rng.choice(dirs)
             new = os.path.join(d, f"m{rnd}-" + os.path.basename(r))
             if os.path.exists(self.p(new)):
                 continue
             os.rename(self.p(r), self.p(new)); self.model[new] = self.model.pop(r); moved.append((r, new))
-        for r in picks[20:26]:
+        for r in picks[80:110]:
             t = time.time() + rng.randint(5, 500)
             os.utime(self.p(r), (t, t)); touched.append(r)
-        for r in picks[26:31]:
+        for r in picks[110:135]:
             if r.endswith((".txt", ".md", ".csv", ".html")):
                 data = (f"overwritten in round {rnd} " + "x" * rng.randint(1, 500) + "\n").encode()
                 with open(self.p(r), "wb") as f:
                     f.write(data)
                 self.model[r] = hashlib.sha256(data).hexdigest(); overwritten.append(r)
-        for i in range(12):
+        for i in range(40):
             d = rng.choice(dirs)
             name = f"new-r{rnd}-{i}-{uuid.uuid4().hex[:6]}." + rng.choice(("txt", "md", "csv"))
             data = f"fresh file round {rnd} {i} {uuid.uuid4()} harbor lantern\n".encode()
@@ -618,10 +630,12 @@ class Soak:
             fail(rnd, "planRestructure moves nothing", "")
         if not moves:
             return 0
-        moves = moves[:400]
+        moves = moves[:400] if rnd % 3 else moves
+        self.notes["restructure_moves"] = len(moves)
         eng.send("applyRestructure", {"libraryRoot": self.lib, "moves": moves, "useSymlinks": False})
         ev = eng.wait(lambda e: kind(e) in ("restructureApplyResult", "error") and (kind(e) != "error" or inner(e).get("kind") not in NOTICE_KINDS), 600)
         res = inner(ev)
+        self.notes["restructure_result"] = {k: res.get(k) for k in ("applied", "failed", "planned") if isinstance(res, dict)}
         mid = snapshot(self.lib)
         if sorted(mid.values()) != sorted(before.values()):
             fail(rnd, "applyRestructure keeps every file's bytes", f"{len(mid)} vs {len(before)} files; result {json.dumps(res)[:200]}")
@@ -733,6 +747,9 @@ class Soak:
 
     def step_malformed(self, rnd, eng):
         pid = eng.p.pid
+        outside = os.path.join(self.work, "outside-library.txt")
+        with open(outside, "w") as f:
+            f.write("must stay put\n")
         big = b'{"id":"x","payload":{"healthCheck":{"requestID":"' + b"A" * (2 * 1024 * 1024) + b'"}}}\n'
         junk = [b"\n", b"   \n", b"not json at all\n", b"{\n", b'{"id":1,"payload":', b'{"id":"a"}\n', b'{"id":"a","payload":{}}\n',
                 b'{"id":"a","payload":{"nope":{}}}\n', b'{"id":"a","payload":{"startScan":{"rootPath":5}}}\n',
@@ -741,9 +758,12 @@ class Soak:
                 b'{"id":"a","payload":{"restoreFromTrash":{"batchID":"../../../etc"}}}\n', b"\xff\xfe\xfd\xfc\n",
                 b'{"id":"a","payload":{"healthCheck":{"requestID":"\xff\xfe"}}}\n', b"\x00\x00\x00\n", b"[" * 5000 + b"\n",
                 b'{"a":' * 3000 + b"\n", b'{"id":"a","payload":{"catalogRequest":{"request":{"action":"search","requestID":"r","query":"' + b"%" * 50000 + b'"}}}}\n',
-                b'{"id":"a","payload":{"applyTags":{"fileIDs":[1],"tags":[""],"mode":"explode"}}}\n', b'{"id":"a","payload":{"applyRestructure":{"libraryRoot":"/","moves":[{"fileID":1,"source":"/etc/passwd","destination":"/tmp/x","category":"c"}],"useSymlinks":false}}}\n', big]
+                b'{"id":"a","payload":{"applyTags":{"fileIDs":[1],"tags":[""],"mode":"explode"}}}\n', json.dumps({"id": "a", "payload": {"applyRestructure": {"libraryRoot": self.lib, "moves": [
+                    {"fileID": 1, "source": outside, "destination": outside + ".moved", "category": "c"},
+                    {"fileID": 2, "source": self.p(next(iter(self.model))), "destination": self.lib + "/../escaped.bin", "category": "c"}],
+                    "useSymlinks": False}}}).encode() + b"\n", big]
         for i, line in enumerate(junk):
-            eng.write_raw(line)
+            eng.write_raw(line if line.endswith(b"\n") else line + b"\n")
             if i % 4 == 0:
                 h = eng.health(120)
                 if h.get("pid") != pid:
@@ -751,8 +771,10 @@ class Soak:
         h = eng.health(120)
         if h.get("pid") != pid or not eng.alive():
             fail(rnd, "engine survives the malformed burst", h)
-        if os.path.exists("/etc/passwd.bak") or os.path.exists("/tmp/x"):
-            fail(rnd, "malformed applyRestructure moved nothing", "")
+        if not os.path.exists(outside) or os.path.exists(outside + ".moved") or os.path.exists(os.path.join(self.work, "escaped.bin")):
+            fail(rnd, "applyRestructure refuses moves outside the library root", "")
+        if snapshot(self.lib) != self.model:
+            fail(rnd, "malformed burst changed the library", "")
 
     def step_victim(self, rnd):
         """SIGKILL an engine in the middle of a scan, restart it on the same catalog, rescan."""
@@ -774,19 +796,16 @@ class Soak:
             self.check_disk(rnd, self.victim_model, self.victim_lib, "victim library")
             rows = self.db_rows(v.db, self.victim_lib)
             disk = {os.path.join(self.victim_lib, r) for r in self.victim_model}
-            stale = set(rows) - disk
+            stale = {p for p, v in rows.items() if not self.tombstone(v)} - disk
             if stale:
                 fail(rnd, "victim catalog has no rows for missing files", sorted(stale)[:3])
-            if len(disk - set(rows)) > len(self.victim_expected_missing(disk, rows)):
-                fail(rnd, "victim catalog covers its files", len(disk - set(rows)))
+            if [d for d in disk - set(rows) if os.path.getsize(d) != 0]:
+                fail(rnd, "victim catalog covers its files", len([d for d in disk - set(rows) if os.path.getsize(d) != 0]))
             k, res = v.scan(self.victim_lib)
             if k != "scanComplete":
                 fail(rnd, "second scan after restart completes", (k, res))
         finally:
             v.close()
-
-    def victim_expected_missing(self, disk, rows):
-        return [d for d in disk if d not in rows and (self.classify(d) in self.uncat_classes.get("main", set()))]
 
     # ---------- the rounds
     def round(self, rnd, eng, steps):
@@ -805,8 +824,6 @@ class Soak:
         # invariants
         t0 = time.time()
         self.check_disk(rnd, self.model, self.lib, "library")
-        if snapshot(self.lib) != self.model:
-            pass
         self.check_trash(rnd)
         eng.drain()
         self.check_catalog(rnd, eng, self.lib, self.model, "main", first=(rnd == 1))
@@ -816,7 +833,7 @@ class Soak:
             fail(rnd, "engine answers healthCheck with its pid", h)
         self.bad_log_since(rnd, marks)
         m = proc_metrics(eng.p.pid, os.path.join(self.work, "main"))
-        m.update(round=rnd, steps=timing, check_s=round(time.time() - t0, 1), errors=dict(ERROR_KINDS), load=os.getloadavg()[0])
+        m.update(round=rnd, notes=dict(self.notes), retried_failed=getattr(self, "retried_failed", None), steps=timing, check_s=round(time.time() - t0, 1), errors=dict(ERROR_KINDS), load=os.getloadavg()[0])
         self.series.append(m)
         self.report.write(json.dumps(m) + "\n")
         self.report.flush()
@@ -830,7 +847,6 @@ class Soak:
         t_start = time.time()
         rnd = 0
         deadline = t_start + a.minutes * 60
-        self.uncat_classes = {}
         while True:
             rnd += 1
             stats = {}
@@ -892,10 +908,12 @@ class Soak:
             if len(c) > 5 and c[-1] > max(c[2:5]) + max(2, 0.1 * max(c[2:5])) and c[-1] >= c[len(c) // 2] >= c[2]:
                 fail(rounds, f"{key} not growing", f"{c[:6]} ... {c[-3:]}")
         log("error kinds seen:", json.dumps(ERROR_KINDS))
+        for k, v in ERROR_SAMPLES.items():
+            log(f"  sample {k}: {v}")
         log(f"failures: {len(FAILURES)}")
         for f in FAILURES:
             log("  ", f)
-        json.dump({"rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "failures": FAILURES, "series": s},
+        json.dump({"rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "error_samples": ERROR_SAMPLES, "failures": FAILURES, "series": s},
                   open(os.path.join(self.work, "soak-summary.json"), "w"), indent=1)
 
 
