@@ -2654,17 +2654,20 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
             operation: None,
         };
-        if !send_cmd(
-            ui,
-            CommandPayload::MergeClusters(MergeClustersPayload {
-                source_person_id: source,
-                destination_person_id: destination,
-            }),
-        ) {
-            break;
-        }
+        let command = CommandPayload::MergeClusters(MergeClustersPayload {
+            source_person_id: source,
+            destination_person_id: destination,
+        });
+        let sent_id = ui.engine.borrow_mut().send_with_id(command);
+        let command_id = match sent_id {
+            Ok(id) => id,
+            Err(error) => {
+                set_status(ui, format!("Command could not be sent: {error}"));
+                break;
+            }
+        };
         ui.merge_journal.borrow_mut().push_back(record);
-        super::merge_ledger::sent(super::merge_ledger::Owner::People, source, destination);
+        super::merge_ledger::sent(super::merge_ledger::Owner::People, command_id, source, destination);
         sent += 1;
     }
     sent

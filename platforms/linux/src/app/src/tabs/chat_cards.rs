@@ -496,11 +496,12 @@ impl Runner {
         }
         let mut outstanding = 0;
         for source in sources {
-            if self.send(CommandPayload::MergeClusters(MergeClustersPayload {
+            let command = CommandPayload::MergeClusters(MergeClustersPayload {
                 source_person_id: source,
                 destination_person_id: target,
-            })) {
-                super::merge_ledger::sent(super::merge_ledger::Owner::Chat, source, target);
+            });
+            if let Ok(command_id) = self.engine.borrow_mut().send_with_id(command) {
+                super::merge_ledger::sent(super::merge_ledger::Owner::Chat, command_id, source, target);
                 outstanding += 1;
             }
         }

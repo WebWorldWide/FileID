@@ -132,12 +132,20 @@ mod tests {
         Entry { owner, source, destination }
     }
 
+    fn waiting(command_id: &str, owner: Owner, source: i64, destination: i64) -> Waiting {
+        Waiting { command_id: command_id.to_owned(), entry: entry(owner, source, destination) }
+    }
+
+    fn echoed(command_id: &str, ok: bool, message: &str) -> BulkActionResult {
+        BulkActionResult { command_id: Some(command_id.to_owned()), ..result(ok, message) }
+    }
+
     #[test]
     fn a_chat_merge_is_never_filed_against_a_people_record() {
-        let mut pending = VecDeque::from([entry(Owner::People, 4, 9), entry(Owner::Chat, 7, 2)]);
+        let mut pending = VecDeque::from([waiting("a", Owner::People, 4, 9), waiting("b", Owner::Chat, 7, 2)]);
         let chat = resolve(&mut pending, &result(true, "moved 12 face prints from #7 into #2"));
         assert_eq!(chat, Some(entry(Owner::Chat, 7, 2)));
-        assert_eq!(pending, [entry(Owner::People, 4, 9)]);
+        assert_eq!(pending, [waiting("a", Owner::People, 4, 9)]);
         let people = resolve(&mut pending, &result(true, "moved 3 face prints from #4 into #9"));
         assert_eq!(people, Some(entry(Owner::People, 4, 9)));
         assert!(pending.is_empty());
@@ -145,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_merge_nobody_here_sent_belongs_to_no_one() {
-        let mut pending = VecDeque::from([entry(Owner::People, 4, 9)]);
+        let mut pending = VecDeque::from([waiting("a", Owner::People, 4, 9)]);
         assert_eq!(resolve(&mut pending, &result(true, "moved 1 face prints from #30 into #31")), None);
         assert_eq!(pending.len(), 1);
         assert_eq!(resolve(&mut VecDeque::new(), &result(false, "busy")), None);
@@ -153,10 +161,45 @@ mod tests {
 
     #[test]
     fn a_failure_without_ids_answers_the_oldest_waiting_merge() {
-        let mut pending = VecDeque::from([entry(Owner::Chat, 1, 2), entry(Owner::People, 3, 4)]);
+        let mut pending = VecDeque::from([waiting("a", Owner::Chat, 1, 2), waiting("b", Owner::People, 3, 4)]);
         let failed = result(false, "One or both people no longer exist; refresh People and try again.");
         assert_eq!(resolve(&mut pending, &failed), Some(entry(Owner::Chat, 1, 2)));
-        assert_eq!(pending, [entry(Owner::People, 3, 4)]);
+        assert_eq!(pending, [waiting("b", Owner::People, 3, 4)]);
+    }
+
+    #[test]
+    fn a_result_is_matched_by_its_command_id_whatever_its_sentence_says() {
+        let mut pending = VecDeque::from([waiting("a", Owner::People, 4, 9), waiting("b", Owner::Chat, 7, 2)]);
+        let reworded = echoed("b", true, "Merged the two people.");
+        assert_eq!(resolve(&mut pending, &reworded), Some(entry(Owner::Chat, 7, 2)));
+        assert_eq!(pending, [waiting("a", Owner::People, 4, 9)]);
+        let failed = echoed("a", false, "busy");
+        assert_eq!(resolve(&mut pending, &failed), Some(entry(Owner::People, 4, 9)));
+    }
+
+    #[test]
+    fn the_command_id_wins_over_a_sentence_naming_other_people() {
+        let mut pending = VecDeque::from([waiting("a", Owner::People, 4, 9), waiting("b", Owner::Chat, 4, 9)]);
+        let second = echoed("b", true, "moved 3 face prints from #4 into #9");
+        assert_eq!(resolve(&mut pending, &second), Some(entry(Owner::Chat, 4, 9)));
+        assert_eq!(pending, [waiting("a", Owner::People, 4, 9)]);
+    }
+
+    #[test]
+    fn a_result_with_an_id_we_never_sent_belongs_to_no_one() {
+        let mut pending = VecDeque::from([waiting("a", Owner::People, 4, 9)]);
+        assert_eq!(resolve(&mut pending, &echoed("other", true, "moved 3 face prints from #4 into #9")), None);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn two_pages_merging_the_same_pair_each_get_their_own_result() {
+        let mut pending = VecDeque::from([waiting("people", Owner::People, 4, 9), waiting("chat", Owner::Chat, 4, 9)]);
+        let chat = echoed("chat", true, "moved 3 face prints from #4 into #9");
+        assert_eq!(resolve(&mut pending, &chat), Some(entry(Owner::Chat, 4, 9)));
+        let people = echoed("people", false, "#4 is already one cluster; nothing to merge");
+        assert_eq!(resolve(&mut pending, &people), Some(entry(Owner::People, 4, 9)));
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -170,8 +213,8 @@ mod tests {
     #[test]
     fn every_listener_of_one_event_gets_the_same_answer() {
         clear();
-        sent(Owner::People, 4, 9);
-        sent(Owner::People, 5, 9);
+        sent(Owner::People, "a".into(), 4, 9);
+        sent(Owner::People, "b".into(), 5, 9);
         let event = Rc::new(EngineEvent::BulkActionResult(result(true, "moved 3 face prints from #4 into #9")));
         assert_eq!(entry_for(&event), Some(entry(Owner::People, 4, 9)));
         assert_eq!(entry_for(&event), Some(entry(Owner::People, 4, 9)));
