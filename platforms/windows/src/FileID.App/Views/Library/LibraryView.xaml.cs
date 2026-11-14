@@ -380,7 +380,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
         }
-        if (e.PropertyName is nameof(LibraryViewModel.TotalCount))
+        if (e.PropertyName is nameof(LibraryViewModel.TotalCount) or nameof(LibraryViewModel.SearchSummary))
         {
             DispatcherQueue.TryEnqueue(SyncShownCount);
         }
@@ -416,7 +416,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     {
         if (_unloaded) return;
         int shown = ViewModel.Items.Count;
-        ShownCountText.Text = shown == 0 && ViewModel.TotalCount is null or 0 ? string.Empty : ShownCount(shown, ViewModel.TotalCount);
+        var plain = shown == 0 && ViewModel.TotalCount is null or 0 ? string.Empty : ShownCount(shown, ViewModel.TotalCount);
+        var summary = shown == 0 ? null : ViewModel.SearchSummary;
+        var text = SearchStrengthPolicy.CountText(plain, summary);
+        ShownCountText.Text = text;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ShownCountText, SearchStrengthPolicy.AccessibleName(text, summary));
     }
 
     public string StatusText
