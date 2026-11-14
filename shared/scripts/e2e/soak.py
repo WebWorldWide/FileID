@@ -901,7 +901,14 @@ class Soak:
             if c:
                 log(f"{key}: first={c[0]} median={statistics.median(c)} last={c[-1]} (round 3={c[2] if len(c) > 2 else '-'})")
         mem = col("footprint_mb")
-        if len(mem) > 3 and mem[2] and mem[-1] > mem[2] * 1.10:
+        if len(mem) >= 12:
+            # one footprint sample swings with the Mac's memory compression and load; compare quartile medians
+            q = max(3, len(mem) // 4)
+            early, late = statistics.median(mem[2:2 + q]), statistics.median(mem[-q:])
+            log(f"footprint median of rounds 3..{2 + q}: {early} MB, of the last {q} rounds: {late} MB")
+            if late > early * 1.10:
+                fail(rounds, "memory growth from the early to the late rounds under 10% (median of a quarter each)", f"{early} -> {late} MB")
+        elif len(mem) > 3 and mem[2] and mem[-1] > mem[2] * 1.10:
             fail(rounds, "memory growth from round 3 to the last round under 10%", f"{mem[2]} -> {mem[-1]} MB")
         for key in ("fds", "threads"):
             c = col(key)
