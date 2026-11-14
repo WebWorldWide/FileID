@@ -399,6 +399,8 @@ struct PendingRename {
     undoing: bool,
     rows: Vec<Row>,
     learned: Vec<CatalogNameEdit>,
+    /// The Recent changes line this undo settles.
+    entry: Option<u64>,
 }
 
 struct NamingUi {
@@ -720,7 +722,7 @@ fn apply(ui: &Rc<NamingUi>) {
     }
     let old = rows.iter().map(|row| (row.file_id, row.current_name().to_owned())).collect();
     let ids = entries.iter().map(|entry| entry.file_id).collect();
-    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows, learned: Vec::new() });
+    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows, learned: Vec::new(), entry: None });
 }
 
 fn send_renames(ui: &Rc<NamingUi>, renames: Vec<RenameEntry>, pending: PendingRename) {
@@ -756,6 +758,9 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
         .filter(|id| pending.ids.contains(id))
         .collect();
     let failed = pending.ids.len() - done.len();
+    if pending.undoing {
+        crate::changes::settle(pending.entry, failed as u64, "name");
+    }
     let first_error = result.messages.iter().find(|item| !item.ok).and_then(|item| item.message.clone());
     let landed: HashSet<i64> = done.iter().copied().collect();
     let samples = if pending.undoing || !ui.learn.is_active() { Vec::new() } else { edits(&pending.rows, &landed) };
@@ -783,16 +788,46 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
         let toast = adw::Toast::builder().title(title).use_markup(false).timeout(10).build();
         if !back.is_empty() {
             toast.set_button_label(Some("Undo"));
-            let weak = Rc::downgrade(ui);
             let learned = samples.clone();
-            toast.connect_button_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
+            let put_back = {
+                let back = back.clone();
+                let learned = learned.clone();
+                move |ui: &Rc<NamingUi>, entry: Option<u64>| {
+                    if ui.pending.borrow().is_some() {
+                        return false;
+                    }
                     let ids = back.iter().map(|entry| entry.file_id).collect();
                     send_renames(
-                        &ui,
+                        ui,
                         back.clone(),
-                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new(), learned: learned.clone() },
+                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new(), learned: learned.clone(), entry },
                     );
+                    ui.pending.borrow().is_some()
+                }
+            };
+            let slot = Rc::new(Cell::new(None::<u64>));
+            let reverse: crate::changes::Reverse = {
+                let weak = Rc::downgrade(ui);
+                let put_back = put_back.clone();
+                let slot = slot.clone();
+                Rc::new(move || weak.upgrade().is_some_and(|ui| put_back(&ui, slot.get())))
+            };
+            let entry = crate::changes::record(
+                back.len() as u64,
+                || crate::changes::count_label("Renamed", back.len() as u64, "file"),
+                Some(reverse),
+            );
+            slot.set(entry);
+            let weak = Rc::downgrade(ui);
+            toast.connect_button_clicked(move |_| {
+                let Some(ui) = weak.upgrade() else { return };
+                match entry {
+                    Some(id) => {
+                        crate::changes::undo(id);
+                    }
+                    None => {
+                        put_back(&ui, None);
+                    }
                 }
             });
         }
@@ -844,7 +879,8 @@ fn subscribe(ui: &Rc<NamingUi>) {
                 EngineState::Ready => request_learned(&ui, false),
                 EngineState::Failed(_) | EngineState::Exited => {
                     ui.requests.borrow_mut().clear();
-                    if ui.pending.take().is_some() {
+                    if let Some(pending) = ui.pending.take() {
+                        crate::changes::settle_failed(pending.entry, "FileID restarted. Check the files, then try again.");
                         set_status(&ui, "FileID stopped before the renames were confirmed. Check the files before trying again.");
                     }
                     sync_apply(&ui);
