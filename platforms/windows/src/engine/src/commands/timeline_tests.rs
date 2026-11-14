@@ -58,7 +58,7 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
         request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"dense"}));
     assert!(enqueue(&mut conn, &mode, Some("qwen3_vl_4b"), true).is_err());
     let no_model = enqueue(&mut conn, &ok, None, true).unwrap_err().to_string();
-    assert!(no_model.contains("No model will be downloaded"));
+    assert!(no_model.contains("FileID won't download one by itself"));
     let no_ffmpeg = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), false)
         .unwrap_err()
         .to_string();
