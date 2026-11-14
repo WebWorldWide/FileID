@@ -174,6 +174,8 @@ struct MergeRecord {
     faces: Vec<i64>,
     /// The engine's undo record for this merge; older engines return none.
     operation: Option<String>,
+    /// Its line in Recent changes, so either undo path settles the same entry.
+    entry: Option<u64>,
 }
 
 #[derive(Default)]
@@ -732,7 +734,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                             && result.succeeded > 0
                             && (operation.is_some() || !record.faces.is_empty())
                         {
-                            ui.merge_undo.borrow_mut().push(MergeRecord { operation, ..record });
+                            let mut record = MergeRecord { operation, ..record };
+                            record.entry = record_merge_change(&ui, &record);
+                            ui.merge_undo.borrow_mut().push(record);
                             refresh_undo_merge(&ui);
                         }
                         let outstanding = ui.merge_results_pending.get();
@@ -2653,6 +2657,7 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             destination_name: name(destination),
             faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
             operation: None,
+            entry: None,
         };
         let command = CommandPayload::MergeClusters(MergeClustersPayload {
             source_person_id: source,
@@ -2714,8 +2719,35 @@ fn undo_last_merge(ui: &Rc<Ui>) {
     let Some(record) = ui.merge_undo.borrow().last().cloned() else {
         return;
     };
+    let entry = record.entry;
+    undo_merge_record(ui, record, entry);
+}
+
+/// Lists a confirmed merge in Recent changes, so Ctrl+Z splits it back out.
+fn record_merge_change(ui: &Rc<Ui>, record: &MergeRecord) -> Option<u64> {
+    let slot = Rc::new(Cell::new(None::<u64>));
+    let reverse: crate::changes::Reverse = {
+        let weak = Rc::downgrade(ui);
+        let record = record.clone();
+        let slot = slot.clone();
+        Rc::new(move || {
+            weak.upgrade()
+                .is_some_and(|ui| undo_merge_record(&ui, record.clone(), slot.get()))
+        })
+    };
+    let entry = crate::changes::record(
+        1,
+        || format!("Merged {} into {}", record.source_name, record.destination_name),
+        Some(reverse),
+    );
+    slot.set(entry);
+    entry
+}
+
+/// Starts splitting one recorded merge back out; false when it could not start.
+fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bool {
     if !begin_person_action(ui, "revertMerge") {
-        return;
+        return false;
     }
     ui.undo_merge_button.set_sensitive(false);
     set_status(ui, "Undoing the merge…".to_string());
@@ -2739,17 +2771,26 @@ fn undo_last_merge(ui: &Rc<Ui>) {
             match page {
                 Some(page) if page.status == "ok" => {
                     forget(&ui);
+                    crate::changes::settle(entry, 0, "face");
                     set_status(&ui, actions::UNDO_MERGE_OK.to_string());
                     schedule_reload_burst(&ui);
                 }
                 Some(page) => {
+                    let detail = page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
                     if page.status == "refused" {
                         forget(&ui);
+                        if let Some(id) = entry {
+                            crate::changes::set_status(id, crate::changes::Status::NotUndoable(detail.clone()));
+                        }
+                    } else {
+                        crate::changes::settle_failed(entry, &detail);
                     }
-                    let detail = page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
                     set_status(&ui, actions::undo_merge_failed(&detail));
                 }
-                None => set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again.")),
+                None => {
+                    crate::changes::settle_failed(entry, "FileID restarted. Try again.");
+                    set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again."));
+                }
             }
             return;
         }
@@ -2759,17 +2800,23 @@ fn undo_last_merge(ui: &Rc<Ui>) {
         match results.as_deref().and_then(<[_]>::first) {
             Some(result) if result.failed == 0 && result.succeeded > 0 => {
                 forget(&ui);
+                crate::changes::settle(entry, 0, "face");
                 set_status(&ui, actions::UNDO_MERGE_OK.to_string());
                 schedule_reload_burst(&ui);
             }
             Some(result) => {
                 let detail = actions::first_failure(std::slice::from_ref(result))
                     .unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                crate::changes::settle_failed(entry, &detail);
                 set_status(&ui, actions::undo_merge_failed(&detail));
             }
-            None => set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again.")),
+            None => {
+                crate::changes::settle_failed(entry, "FileID restarted. Try again.");
+                set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again."));
+            }
         }
     });
+    true
 }
 
 // ── Suggested merges ──────────────────────────────────────────────────────────
