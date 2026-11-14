@@ -80,4 +80,65 @@ public class UndoStackTests
         }
         Assert.Equal(20, count);
     }
+
+    private static readonly string[] LibraryOnly = { "library" };
+    private static readonly string[] LibraryThenCleanup = { "library", "cleanup" };
+
+    [Fact]
+    public async Task EachPageUndoesItsOwnNewestChange()
+    {
+        await DrainAsync();
+        var undone = new System.Collections.Generic.List<string>();
+        UndoStack.Instance.Push("library trash", ChangePage.Library, () => { undone.Add("library"); return Task.FromResult(true); });
+        UndoStack.Instance.Push("cleanup trash", ChangePage.Cleanup, () => { undone.Add("cleanup"); return Task.FromResult(true); });
+        UndoStack.Instance.Push("people merge", ChangePage.People, () => { undone.Add("people"); return Task.FromResult(true); });
+
+        Assert.Equal("library trash", UndoStack.Instance.TopLabelOn(ChangePage.Library));
+        Assert.Equal("people merge", UndoStack.Instance.TopLabel);
+
+        Assert.Equal("library trash", await UndoStack.Instance.UndoAsync(ChangePage.Library));
+        Assert.Equal(LibraryOnly, undone);
+        Assert.False(UndoStack.Instance.CanUndoOn(ChangePage.Library));
+        Assert.True(UndoStack.Instance.CanUndoOn(ChangePage.Cleanup));
+        Assert.True(UndoStack.Instance.CanUndoOn(ChangePage.People));
+        Assert.Null(await UndoStack.Instance.UndoAsync(ChangePage.Library));
+
+        Assert.Equal("cleanup trash", await UndoStack.Instance.UndoAsync(ChangePage.Cleanup));
+        Assert.Equal(LibraryThenCleanup, undone);
+        Assert.Equal("people merge", UndoStack.Instance.TopLabel);
+        await DrainAsync();
+    }
+
+    [Fact]
+    public async Task AChangeWithNoPageIsLeftToTheRecentChangesList()
+    {
+        await DrainAsync();
+        UndoStack.Instance.Push("folder move", () => Task.FromResult(true));
+
+        Assert.True(UndoStack.Instance.CanUndo);
+        Assert.False(UndoStack.Instance.CanUndoOn(ChangePage.Library));
+        Assert.False(UndoStack.Instance.CanUndoOn(ChangePage.Cleanup));
+        Assert.Equal(string.Empty, UndoStack.Instance.TopLabelOn(ChangePage.Cleanup));
+        await DrainAsync();
+    }
+
+    [Theory]
+    [InlineData("library", nameof(ChangePage.Library))]
+    [InlineData("cleanup", nameof(ChangePage.Cleanup))]
+    [InlineData("people", nameof(ChangePage.People))]
+    [InlineData("deepanalyze", nameof(ChangePage.DeepAnalyze))]
+    public void CtrlZActsOnTheShowingPage(string tab, string page)
+    {
+        Assert.Equal(page, UndoStack.PageForTab(tab)?.ToString());
+    }
+
+    [Theory]
+    [InlineData("settings")]
+    [InlineData("restructure")]
+    [InlineData("chat")]
+    [InlineData(null)]
+    public void CtrlZDoesNothingOnPagesWithNoChangesOfTheirOwn(string? tab)
+    {
+        Assert.Null(UndoStack.PageForTab(tab));
+    }
 }

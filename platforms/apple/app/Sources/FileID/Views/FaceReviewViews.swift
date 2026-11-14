@@ -102,6 +102,7 @@ private struct FaceReviewRow: View {
                 .font(Theme.Font.body(12.5))
                 .foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
+                .help(FaceReviewText.scoreHelp(item.score))
             MetaText(item.lowQuality == true ? "\(FaceReviewText.fileName(item)) · \(FaceReviewText.lowQuality)" : FaceReviewText.fileName(item), size: 11)
         }
     }
@@ -109,8 +110,11 @@ private struct FaceReviewRow: View {
     private var actions: some View {
         HStack(spacing: 8) {
             button("Ignore", .ignore, style: .ghost, label: FaceReviewText.ignoreLabel)
+                .help(FaceReviewText.ignoreHelp)
             button("Not this person", .reject, style: .secondary, label: FaceReviewText.rejectLabel(item))
+                .help(FaceReviewText.rejectHelp(item))
             button("Accept", .accept, style: .primary, label: FaceReviewText.acceptLabel(item))
+                .help(FaceReviewText.acceptHelp)
         }
         .disabled(model.busy)
     }

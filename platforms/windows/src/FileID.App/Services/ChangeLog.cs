@@ -39,6 +39,17 @@ internal enum ChangeKind
     Other,
 }
 
+/// <summary>The page a change was made on. Each page's own Undo acts only
+/// on its newest change; the Recent changes list still shows them all.</summary>
+internal enum ChangePage
+{
+    Unspecified,
+    Library,
+    Cleanup,
+    People,
+    DeepAnalyze,
+}
+
 internal enum ChangeStatus
 {
     Undoable,
@@ -55,8 +66,10 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
         ChangeKind kind,
         Func<Task<bool>>? reverse,
         ChangeStatus status = ChangeStatus.Undoable,
-        string? statusDetail = null)
+        string? statusDetail = null,
+        ChangePage page = ChangePage.Unspecified)
     {
+        Page = page;
         Id = Guid.NewGuid().ToString("N");
         Timestamp = DateTimeOffset.Now;
         Label = label;
@@ -70,6 +83,7 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
     public DateTimeOffset Timestamp { get; }
     public string Label { get; }
     public ChangeKind Kind { get; }
+    public ChangePage Page { get; }
 
     private ChangeStatus _status;
     public ChangeStatus Status
@@ -205,6 +219,21 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
+    /// <summary>The newest undoable change made on <paramref name="page"/>,
+    /// skipping newer changes made on other pages.</summary>
+    public ChangeLogEntry? MostRecentUndoableOn(ChangePage page)
+    {
+        lock (_gate)
+        {
+            if (_undoInFlight) return null;
+            foreach (var e in _entries)
+            {
+                if (e.Status == ChangeStatus.Undoable && e.Page == page) return e;
+            }
+            return null;
+        }
+    }
+
     /// <summary>Stable copy for rendering, newest first. Entry Status may
     /// still change after the snapshot (entries notify their own
     /// PropertyChanged).</summary>
@@ -218,9 +247,12 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    public ChangeLogEntry Push(string label, ChangeKind kind, Func<Task<bool>> reverse)
+    public ChangeLogEntry Push(string label, ChangeKind kind, Func<Task<bool>> reverse) =>
+        Push(label, kind, reverse, ChangePage.Unspecified);
+
+    public ChangeLogEntry Push(string label, ChangeKind kind, Func<Task<bool>> reverse, ChangePage page)
     {
-        var entry = new ChangeLogEntry(label, kind, reverse);
+        var entry = new ChangeLogEntry(label, kind, reverse, page: page);
         lock (_gate)
         {
             if (kind == ChangeKind.Restructure)

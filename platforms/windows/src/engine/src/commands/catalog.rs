@@ -40,13 +40,13 @@ pub async fn handle(
     let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         if request.action == "scoreTakes" {
             let Some(database) = database else {
-                bail!("The catalog database is unavailable")
+                bail!("FileID couldn't open its library. Quit and reopen FileID.")
             };
             return score_takes(&database, &request).map(|response| (response, None));
         }
         if request.action == "enqueueTimeline" {
             let Some(database) = database else {
-                bail!("The catalog database is unavailable")
+                bail!("FileID couldn't open its library. Quit and reopen FileID.")
             };
             let (model, ffmpeg) = (super::timeline::installed_model(), super::timeline_media::available());
             let (id, response) = super::timeline::enqueue(&mut database.lock(), &request, model, ffmpeg)?;
@@ -100,7 +100,7 @@ fn execute_with_index(
     request: CatalogRequest,
 ) -> Result<CatalogResponse> {
     let Some(database) = database else {
-        bail!("The catalog database is unavailable")
+        bail!("FileID couldn't open its library. Quit and reopen FileID.")
     };
     if let Some(index) = index {
         if request.action == "search" {
@@ -117,6 +117,12 @@ fn execute_with_index(
             result.jobs = jobs(&database.lock())?;
             return Ok(result);
         }
+    }
+    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
+    if ["search", "detail", "jobs"].contains(&request.action.as_str())
+        && let Some(mut reader) = crate::db::reader_for(&database)?
+    {
+        return execute(&mut reader, &request);
     }
     let mut conn = database.lock();
     execute(&mut conn, &request)
@@ -137,11 +143,10 @@ fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result
         super::catalog_take_auto::compute_with(job, &mut workers)
     };
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
-    let scored = {
-        let mut faces = super::catalog_take_auto::YuNetFaces::load();
+    let scored = super::catalog_take_auto::YuNetFaces::with_loaded(|faces| -> Result<_> {
         let job = prepare(&database.lock(), ids, faces.id())?;
-        super::catalog_take_auto::compute(job, &mut faces)
-    };
+        Ok(super::catalog_take_auto::compute(job, faces))
+    })?;
     if let Err(error) = store(&database.lock(), &scored) {
         tracing::warn!(%error, "take scores were not cached");
     }
@@ -184,7 +189,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "search" => {
             let (mode, query, limit, files_only) = super::catalog_search::validate(request)?;
             if mode != "keyword" {
-                bail!("Visual search requires the engine catalog runtime")
+                bail!("Picture search isn't available right now. Search by keyword instead.")
             }
             let root = super::roots::RootScope::load(conn, request.root_id)?;
             result.hits = super::catalog_search::select(search(conn, query, &[], root.as_ref())?, limit, files_only);

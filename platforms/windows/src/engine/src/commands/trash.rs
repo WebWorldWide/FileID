@@ -626,6 +626,8 @@ pub(crate) async fn handle_restore_from_trash(
                                 file_id: Some(item.file_id),
                                 ok: true,
                                 message: Some(item.original_path.clone()),
+                                reason: None,
+                                operation_id: None,
                             });
                         }
                         Err(error) => {
@@ -637,6 +639,8 @@ pub(crate) async fn handle_restore_from_trash(
                                     "restored {}, but catalog reconciliation failed: {error}",
                                     item.original_path
                                 )),
+                                reason: None,
+                                operation_id: None,
                             });
                         }
                     }
@@ -650,6 +654,8 @@ pub(crate) async fn handle_restore_from_trash(
                             "the restored object is no longer present at {}",
                             item.original_path
                         )),
+                        reason: None,
+                        operation_id: None,
                     });
                 }
                 RestoreOutcome::Conflict => {
@@ -661,6 +667,8 @@ pub(crate) async fn handle_restore_from_trash(
                             "Cannot restore: {} is already occupied by another file.",
                             item.original_path
                         )),
+                        reason: None,
+                        operation_id: None,
                     });
                 }
                 RestoreOutcome::Refused(reason) | RestoreOutcome::Failed(reason) => {
@@ -669,6 +677,8 @@ pub(crate) async fn handle_restore_from_trash(
                         file_id: Some(item.file_id),
                         ok: false,
                         message: Some(format!("Could not restore {}: {reason}", item.original_path)),
+                        reason: None,
+                        operation_id: None,
                     });
                 }
             }
@@ -1218,6 +1228,8 @@ pub(crate) async fn handle_revert_merge(
                 file_id: None,
                 ok: complete,
                 message: Some(message),
+                reason: None,
+                operation_id: None,
             }],
         })
     })

@@ -84,19 +84,28 @@ package enum JPEGPreview {
         return data
     }
 
+    package static let headBytes = 64 << 10
+
     /// Walks the marker segments before the first scan, finds the MPF APP2
-    /// segment and returns its largest large-thumbnail entry.
+    /// segment and returns its largest large-thumbnail entry. The walk runs
+    /// over one read of the file's head; segments past it are read on demand.
     package static func largestThumbnail(descriptor: Int32, fileSize: Int) -> Entry? {
-        guard let soi = readExactly(descriptor, offset: 0, count: 2), soi[0] == 0xFF, soi[1] == 0xD8 else { return nil }
+        let head = readPrefix(descriptor, count: headBytes)
+        func bytes(_ offset: Int, _ count: Int) -> Data? {
+            guard offset >= 0, count > 0 else { return nil }
+            if offset + count <= head.count { return head.subdata(in: offset..<offset + count) }
+            return readExactly(descriptor, offset: offset, count: count)
+        }
+        guard let soi = bytes(0, 2), soi[0] == 0xFF, soi[1] == 0xD8 else { return nil }
         var position = 2
         for _ in 0..<64 {
-            guard let header = readExactly(descriptor, offset: position, count: 4), header[0] == 0xFF else { return nil }
+            guard let header = bytes(position, 4), header[0] == 0xFF else { return nil }
             let marker = header[1]
             if marker == 0xDA || marker == 0xD9 { return nil }
             let length = Int(header[2]) << 8 | Int(header[3])
             guard length >= 2 else { return nil }
             if marker == 0xE2, length >= 16,
-               let segment = readExactly(descriptor, offset: position + 4, count: length - 2),
+               let segment = bytes(position + 4, length - 2),
                let entries = mpfEntries(segment, segmentOffset: position + 4) {
                 let fits = entries.filter { $0.offset > 0 && $0.size > 0 && $0.size <= maxPreviewBytes && $0.offset + $0.size <= fileSize }
                 return fits.max { $0.size < $1.size }
@@ -156,6 +165,22 @@ package enum JPEGPreview {
             guard let a = u16(offset, little), let b = u16(offset + 2, little) else { return nil }
             return little ? UInt32(a) | UInt32(b) << 16 : UInt32(a) << 16 | UInt32(b)
         }
+    }
+
+    private static func readPrefix(_ descriptor: Int32, count: Int) -> Data {
+        var data = Data(count: count)
+        let done = data.withUnsafeMutableBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return 0 }
+            var total = 0
+            while total < count {
+                let got = pread(descriptor, base + total, count - total, off_t(total))
+                if got < 0 && errno == EINTR { continue }
+                if got <= 0 { break }
+                total += got
+            }
+            return total
+        }
+        return data.prefix(done)
     }
 
     private static func readExactly(_ descriptor: Int32, offset: Int, count: Int) -> Data? {

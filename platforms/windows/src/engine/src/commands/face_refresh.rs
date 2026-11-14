@@ -28,7 +28,7 @@ pub const MAC_PROCESSING: &str = "macos-landmark-overlap-v3-orientation";
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub const MAC_BBOX_PROCESSING: &str = "macos-bbox-crop-v3-orientation";
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
-const REPORT_ONLY: &str = "Updating faces needs the Mac face pipeline, which this engine doesn't run yet. People and names don't change.";
+const REPORT_ONLY: &str = "Updating faces isn't available on this computer yet. Your People and names are unchanged.";
 const BATCH: usize = 64;
 const NO_MODEL: &str = "Install the face recognition model in Settings, then update faces again.";
 const MODEL_CHANGED: &str = "The face model changed. Start the face update again.";

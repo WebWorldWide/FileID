@@ -1,6 +1,6 @@
-// Bulk rename sheet — applies VLM-suggested filenames to many files at
-// once with a preview-and-confirm step. Saves the batch to UserDefaults
-// so the user can undo if they don't like the result.
+// Suggested-names sheet: every file that has a suggested name, with a
+// thumbnail, named in the saved Name style exactly as "Preview names" does.
+// Also owns the rename journal behind "Undo last rename".
 import SwiftUI
 import FileIDShared
 
@@ -14,21 +14,25 @@ struct BulkRenameSheet: View {
     let store: ReadStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var files: [FileRow] = []
-    @State private var selectedIDs: Set<Int64> = []
-    @State private var inFlight: Bool = false
+    @State private var rows: [NameStyle.Row] = []
+    @State private var kinds: [Int64: String] = [:]
+    @State private var loading = true
+    @State private var loadError: String?
+    @State private var inFlight = false
     @State private var status: String?
-    @State private var confirmLargeBatch: Bool = false
+    @State private var confirmRename = false
+    @State private var lastBatch: [ReadStore.RenameOutcome] = []
 
-    /// Above this many selected files, present a confirmation dialog
-    /// before applying. Below, just go.
-    private static let largeBatchThreshold = 50
+    private var ready: [CatalogWrites.NamedRename] { NameStyle.renames(rows) }
+    private var nameable: [NameStyle.Row] { rows.filter(\.canCheck) }
+
+    static let confirmMessage = "Only the names change; the files stay in their folders. To put the old names back, press Undo here or Undo last rename at the top of Library."
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            if files.isEmpty {
+            if nameable.isEmpty {
                 emptyState
             } else {
                 actionsBar
@@ -37,10 +41,7 @@ struct BulkRenameSheet: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
-        .onAppear {
-            files = store.filesWithProposedNames()
-            selectedIDs = Set(files.map(\.id))   // default: select all
-        }
+        .task { await load() }
     }
 
     // MARK: - Sections
@@ -50,27 +51,47 @@ struct BulkRenameSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Suggested names")
                     .font(Theme.Font.body(20, .semibold))
-                Text("FileID suggested a clearer name for each file based on what it shows. Tick the ones you want, then press Rename.")
+                Text("FileID suggested a clearer name for each file, in your Name style. Edit any name, tick the ones you want, then press Rename.")
                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
             }
             Spacer()
             Button("Done") { dismiss() }
-                .buttonStyle(.dsPrimary)
-                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.dsSecondary)
+                .keyboardShortcut(.cancelAction)
         }
         .padding(16)
     }
 
+    @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "wand.and.rays")
-                .font(.system(size: 48, weight: .light))
-                .foregroundStyle(Theme.text3)
-            Text("No suggested names yet").font(Theme.Font.body(16, .semibold))
-            Text("Describe your files first (Describe Files page). Suggested names appear here.")
-                .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+            if loading {
+                ProgressView().controlSize(.small)
+                Text("Working out names…").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
+            } else if let loadError {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(Theme.warning)
+                Text(loadError).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                    .multilineTextAlignment(.center).frame(maxWidth: 420)
+                Button("Try again") { Task { await load() } }.buttonStyle(.dsSecondary)
+            } else {
+                Image(systemName: "wand.and.rays")
+                    .font(.system(size: 48, weight: .light))
+                    .foregroundStyle(Theme.text3)
+                Text(rows.isEmpty ? "No suggested names yet" : "Every file already has a good name")
+                    .font(Theme.Font.body(16, .semibold))
+                Text(rows.isEmpty
+                     ? "Describe your files first (Describe Files page). Suggested names appear here."
+                     : "Nothing needs renaming in your Name style.")
+                    .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                if let status { MetaText(status, size: 12) }
+                if !lastBatch.isEmpty {
+                    Button("Undo") { undo() }.buttonStyle(.dsSecondary).disabled(inFlight)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
@@ -78,40 +99,42 @@ struct BulkRenameSheet: View {
 
     private var actionsBar: some View {
         HStack(spacing: 8) {
-            Text("\(selectedIDs.count) of \(files.count) selected")
+            Text("\(ready.count.formatted()) of \(nameable.count.formatted()) ticked")
                 .font(Theme.Font.mono(11))
+            if loading { IndeterminateBar().frame(width: 60) }
+            if let status {
+                Text(status).font(Theme.Font.body(11)).foregroundStyle(Theme.text3).lineLimit(2)
+            }
             Spacer()
-            Button("Select all") { selectedIDs = Set(files.map(\.id)) }
+            Button("Select all") { setAll(true) }
                 .buttonStyle(.dsSecondary)
-            Button("Clear") { selectedIDs.removeAll() }
+            Button("Clear") { setAll(false) }
                 .buttonStyle(.dsSecondary)
+            if !lastBatch.isEmpty {
+                Button("Undo") { undo() }
+                    .buttonStyle(.dsSecondary)
+                    .disabled(inFlight)
+                    .help("Put back the names from the rename you just made")
+            }
             Button {
-                attemptApply()
+                confirmRename = true
             } label: {
                 Label(inFlight
                       ? "Renaming…"
-                      : "Rename \(selectedIDs.count) file\(selectedIDs.count == 1 ? "" : "s")",
+                      : "Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")…",
                       systemImage: "wand.and.rays")
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                    .foregroundStyle(.black)
-                    .font(Theme.Font.body(13.5, .semibold))
             }
-            .buttonStyle(.plain)
-            .disabled(selectedIDs.isEmpty || inFlight)
+            .buttonStyle(DSPrimaryButtonStyle(height: 30))
+            .disabled(ready.isEmpty || inFlight || loading)
             .confirmationDialog(
-                "Rename \(selectedIDs.count) files?",
-                isPresented: $confirmLargeBatch
+                "Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")?",
+                isPresented: $confirmRename,
+                titleVisibility: .visible
             ) {
-                Button("Rename \(selectedIDs.count) files", role: .destructive) {
-                    applySelected()
-                }
+                Button("Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")") { apply() }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("This will rename \(selectedIDs.count) files on disk. The Library 'Undo last rename' button can revert it, but it won't restore filenames you've moved or renamed again afterwards.")
-            }
-            if let s = status {
-                Text(s).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(Self.confirmMessage)
             }
         }
         .padding(12)
@@ -120,98 +143,133 @@ struct BulkRenameSheet: View {
     private var renameList: some View {
         ScrollView {
             LazyVStack(spacing: 4) {
-                ForEach(files) { f in
-                    renameRow(f)
+                ForEach(nameable) { row in
+                    BulkRenameRow(
+                        row: row,
+                        kind: kinds[row.fileID],
+                        checked: Binding(get: { row.checked }, set: { NameStyle.setChecked(&rows, fileID: row.fileID, $0) }),
+                        edited: Binding(get: { row.edited }, set: { NameStyle.edit(&rows, fileID: row.fileID, $0) }))
                 }
             }
             .padding(12)
         }
     }
 
-    @ViewBuilder
-    private func renameRow(_ f: FileRow) -> some View {
-        BulkRenameRow(
-            file: f,
-            isSelected: selectedIDs.contains(f.id),
-            onToggle: { id in
-                if selectedIDs.contains(id) {
-                    selectedIDs.remove(id)
-                } else {
-                    selectedIDs.insert(id)
-                }
-            }
-        )
-    }
-
     // MARK: - Actions
 
-    private func attemptApply() {
-        if selectedIDs.count >= Self.largeBatchThreshold {
-            confirmLargeBatch = true
-        } else {
-            applySelected()
-        }
+    private func setAll(_ checked: Bool) {
+        for index in rows.indices where rows[index].canCheck { rows[index].checked = checked }
     }
 
-    private func applySelected() {
-        let toRename = files.filter { selectedIDs.contains($0.id) }
-        guard !toRename.isEmpty else { return }
+    private func load() async {
+        loading = true
+        loadError = nil
+        let files = await Task.detached(priority: .userInitiated) { [store] in store.filesWithProposedNames() }.value
+        kinds = Dictionary(files.map { ($0.id, $0.kind) }, uniquingKeysWith: { first, _ in first })
+        switch await StyledNames.rows(engine: engine, fileIDs: files.map(\.id), naming: StyledNames.savedNaming(), previous: rows) {
+        case .rows(let next): rows = next
+        case .failed(let why): rows = []; loadError = why
+        }
+        loading = false
+    }
+
+    private func apply() {
+        let renames = ready
+        guard !renames.isEmpty, !inFlight else { return }
         inFlight = true
-        status = nil
-        Task {
-            let result = await CatalogWrites.applyProposedNames(toRename, engine: engine, store: store)
-            // Persist the batch to UserDefaults so the user can undo.
-            BulkRenameSheet.saveLastBatch(result.renamed)
-            let refreshed = await Task.detached(priority: .userInitiated) { [store] in store.filesWithProposedNames() }.value
-            inFlight = false
-            files = refreshed
-            selectedIDs = Set(refreshed.map(\.id))
-            if result.failed == 0 {
-                status = "Renamed \(result.renamed.count) file\(result.renamed.count == 1 ? "" : "s")"
-            } else {
-                status = "Renamed \(result.renamed.count) · \(result.failed) couldn't be renamed"
-                    + (result.firstError.map { " — \($0)" } ?? "")
+        status = "Renaming…"
+        let shown = rows, naming = StyledNames.savedNaming()
+        Task { @MainActor in
+            let result = await CatalogWrites.applyNames(renames, engine: engine, store: store)
+            if !result.renamed.isEmpty {
+                BulkRenameSheet.saveLastBatch(result.renamed)
+                lastBatch = result.renamed
             }
+            await StyledNames.learn(engine: engine, shown: shown, renamed: result.renamed, naming: naming)
+            status = StyledNames.renamedSummary(result)
+            inFlight = false
+            await load()
         }
     }
 
+    private func undo() {
+        let batch = lastBatch
+        guard !batch.isEmpty, !inFlight else { return }
+        inFlight = true
+        Task { @MainActor in
+            let result = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
+            if result.failed == 0 && result.skipped == 0 { BulkRenameSheet.removeBatch(batch) }
+            lastBatch = []
+            status = StyledNames.undoneSummary(result)
+            inFlight = false
+            await load()
+        }
+    }
+
+    // MARK: - Rename journal
+    //
+    // A short stack, newest last, so one single-file rename can't bury the
+    // bulk rename before it. "Undo last rename" takes the newest batch.
+
+    nonisolated static let batchesKey = "bulkRename.batches.v3"
     nonisolated static let lastBatchKey = "bulkRename.lastBatch.v2"
-    /// Pre-expiry format (bare [RenameOutcome], no timestamp or file
-    /// identity) — never read anymore, only cleaned up.
     nonisolated private static let legacyBatchKey = "bulkRename.lastBatch.v1"
+    nonisolated static let maxBatches = 10
     /// Journals older than this stop surfacing "Undo last rename" — a
     /// weeks-old batch is far more likely to hit a same-named
     /// replacement file than to be an intentional undo.
     nonisolated static let lastBatchMaxAge: TimeInterval = 7 * 24 * 60 * 60
 
+    nonisolated private static func loadBatches() -> [PersistedRenameBatch] {
+        let defaults = UserDefaults.standard
+        var batches: [PersistedRenameBatch] = []
+        if let data = defaults.data(forKey: batchesKey),
+           let stored = try? JSONDecoder().decode([PersistedRenameBatch].self, from: data) {
+            batches = stored
+        } else if let data = defaults.data(forKey: lastBatchKey),
+                  let single = try? JSONDecoder().decode(PersistedRenameBatch.self, from: data) {
+            batches = [single]
+        }
+        let now = Date()
+        return batches.filter { !$0.entries.isEmpty && now.timeIntervalSince($0.savedAt) < lastBatchMaxAge }
+    }
+
+    nonisolated private static func storeBatches(_ batches: [PersistedRenameBatch]) {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: lastBatchKey)
+        defaults.removeObject(forKey: legacyBatchKey)
+        if batches.isEmpty {
+            defaults.removeObject(forKey: batchesKey)
+        } else if let data = try? JSONEncoder().encode(Array(batches.suffix(maxBatches))) {
+            defaults.set(data, forKey: batchesKey)
+        }
+    }
+
+    /// Adds a batch on top of the journal. A zero-success batch is ignored so
+    /// it can't cover an earlier batch the user can still undo.
     nonisolated static func saveLastBatch(_ entries: [ReadStore.RenameOutcome]) {
-        // A zero-success batch (e.g. a bulk rename where every file failed)
-        // must NOT overwrite a still-valid prior journal — that would silently
-        // destroy "Undo last rename" for the earlier batch the user can still
-        // legitimately revert.
         guard !entries.isEmpty else { return }
-        let batch = PersistedRenameBatch(savedAt: Date(), entries: entries)
-        guard let data = try? JSONEncoder().encode(batch) else { return }
-        UserDefaults.standard.set(data, forKey: lastBatchKey)
-        UserDefaults.standard.removeObject(forKey: legacyBatchKey)
+        storeBatches(loadBatches() + [PersistedRenameBatch(savedAt: Date(), entries: entries)])
     }
 
-    /// Decode the most recent rename batch from UserDefaults. Returns
-    /// nil if no batch has been recorded yet or the recorded batch is
-    /// older than `lastBatchMaxAge`. Nonisolated so background tasks
-    /// can persist the batch right after applying it.
+    /// The newest rename batch that is still recent enough to undo.
     nonisolated static func loadLastBatch() -> [ReadStore.RenameOutcome]? {
-        guard let data = UserDefaults.standard.data(forKey: lastBatchKey),
-              let batch = try? JSONDecoder().decode(PersistedRenameBatch.self, from: data),
-              Date().timeIntervalSince(batch.savedAt) < lastBatchMaxAge
-        else { return nil }
-        return batch.entries
+        loadBatches().last?.entries
     }
 
-    /// Clear the persisted batch (after successful undo).
+    /// Drops the newest batch (after it was undone); the one before it becomes
+    /// the next "Undo last rename".
     nonisolated static func clearLastBatch() {
-        UserDefaults.standard.removeObject(forKey: lastBatchKey)
-        UserDefaults.standard.removeObject(forKey: legacyBatchKey)
+        storeBatches(Array(loadBatches().dropLast()))
+    }
+
+    /// Drops the batch holding exactly these renames, wherever it sits.
+    nonisolated static func removeBatch(_ entries: [ReadStore.RenameOutcome]) {
+        let key = entries.map { "\($0.fileID)\t\($0.newPath)" }
+        var batches = loadBatches()
+        guard let at = batches.lastIndex(where: { $0.entries.map { "\($0.fileID)\t\($0.newPath)" } == key }) else { return }
+        batches.remove(at: at)
+        storeBatches(batches)
     }
 
     // MARK: - Person tag history
@@ -220,7 +278,7 @@ struct BulkRenameSheet: View {
     // the user renames a cluster ("Alex" → "Alex Doe") we can offer
     // to retag previously-tagged photos. Stored as a tiny JSON dict in
     // UserDefaults — `[Int64-as-string : last-tag]`. Engineering-wise
-    // this lives next to lastBatchKey because both are "remembering
+    // this lives next to the rename journal because both are "remembering
     // something about an irreversible mutation we just made."
 
     nonisolated static let personTagHistoryKey = "personTagHistory.v1"
@@ -245,35 +303,27 @@ struct BulkRenameSheet: View {
     }
 }
 
-/// Single rename row with a Quick Look thumbnail on the left so the
-/// user can see the photo / video / PDF they're renaming. Without
-/// this, "IMG_4823.heic → Mia at the piano" is meaningless — the
-/// user has no idea which photo IMG_4823 actually is.
+/// One rename row with a thumbnail, so the user can see which photo, video or
+/// PDF "IMG_4823.heic" is before giving it a new name.
 private struct BulkRenameRow: View {
-    let file: FileRow
-    let isSelected: Bool
-    let onToggle: (Int64) -> Void
-
+    let row: NameStyle.Row
+    let kind: String?
+    @Binding var checked: Bool
+    @Binding var edited: String
 
     var body: some View {
-        let oldName = file.url.lastPathComponent
-        let proposed = file.vlmProposedName ?? ""
-        let newName: String = {
-            let ext = file.url.pathExtension
-            if proposed.isEmpty { return oldName }
-            return ext.isEmpty ? proposed : "\(proposed).\(ext)"
-        }()
+        let url = URL(fileURLWithPath: row.path)
         HStack(spacing: 10) {
-            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                .foregroundStyle(isSelected ? Theme.gold : .secondary)
-                .onTapGesture { onToggle(file.id) }
+            Toggle(isOn: $checked) { EmptyView() }
+                .toggleStyle(DSCheckboxToggleStyle())
+                .accessibilityLabel("Rename \(row.currentName)")
 
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
-                AsyncThumbnail(url: file.url, size: 96) {
-                    Image(systemName: FileKind.symbolName(forKind: file.kind))
+                AsyncThumbnail(url: url, size: 96) {
+                    Image(systemName: kind.map(FileKind.symbolName(forKind:)) ?? FileTypes.symbolName(forExtension: url.pathExtension))
                         .font(Theme.Font.body(16, .semibold))
                         .foregroundStyle(Theme.text3)
                 }
@@ -285,31 +335,43 @@ private struct BulkRenameRow: View {
                     .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
             )
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(oldName)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.currentName)
                     .font(Theme.Font.mono(11))
                     .foregroundStyle(Theme.text3)
-                    .strikethrough(isSelected, color: .secondary.opacity(0.5))
+                    .strikethrough(checked, color: .secondary.opacity(0.5))
                     .lineLimit(1).truncationMode(.middle)
-                HStack(spacing: 4) {
+                    .help(row.path)
+                HStack(spacing: 6) {
                     Image(systemName: "arrow.right")
                         .font(Theme.Font.body(11))
                         .foregroundStyle(Theme.text3)
-                    Text(newName)
-                        .font(Theme.Font.mono(11, .semibold))
-                        .foregroundStyle(Theme.gold)
-                        .lineLimit(1).truncationMode(.middle)
+                        .accessibilityHidden(true)
+                    if row.isFollower {
+                        Text(edited)
+                            .font(Theme.Font.mono(11, .semibold))
+                            .foregroundStyle(Theme.gold.opacity(checked ? 0.8 : 0.4))
+                            .lineLimit(1).truncationMode(.middle)
+                            .help("Follows the name of the file it belongs with")
+                    } else {
+                        TextField("New name", text: $edited)
+                            .textFieldStyle(.plain)
+                            .font(Theme.Font.mono(11, .semibold))
+                            .foregroundStyle(Theme.gold)
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
+                            .disabled(!checked)
+                            .accessibilityLabel("New name for \(row.currentName)")
+                    }
                 }
             }
             Spacer(minLength: 0)
         }
-        .contentShape(Rectangle())
-        .onTapGesture { onToggle(file.id) }
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
+                .fill(checked ? Theme.gold.opacity(0.05) : Color.clear)
         )
     }
 }

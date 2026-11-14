@@ -61,6 +61,28 @@ public sealed class ThumbnailResourceBoundsTests
     {
         Assert.Equal(expected, ThumbnailService.VideoPixelSize(scale));
     }
+
+    [Theory]
+    [InlineData(1.0, 256)]
+    [InlineData(1.25, 384)]
+    [InlineData(1.5, 384)]
+    [InlineData(1.75, 512)]
+    [InlineData(2.0, 512)]
+    [InlineData(3.0, 768)]
+    [InlineData(20.0, 768)]
+    [InlineData(0.0, 256)]
+    [InlineData(double.NaN, 256)]
+    public void ImageThumbnailsAreAskedAtTheTileSizeTimesTheDisplayScaleInBuckets(double scale, int expected)
+    {
+        Assert.Equal(expected, ThumbnailService.ImagePixelSize(scale));
+    }
+
+    [Fact]
+    public void SeveralDrainsShareTheRequestQueue()
+    {
+        Assert.InRange(ThumbnailService.WorkerCount, 2, 4);
+    }
+
     /// A burst larger than the queue capacity must complete EVERY request:
     /// the newest requests stay queued for real work and the evicted oldest
     /// are placeholder-completed by the drop callback — none may hang in the

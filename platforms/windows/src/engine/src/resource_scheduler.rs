@@ -63,6 +63,8 @@ pub struct ResourceScheduler {
     io: usize,
     accelerator_capacity: AcceleratorCapacity,
 }
+const AVAILABLE_MEMORY_TTL: Duration = Duration::from_millis(100);
+
 pub struct Lease {
     scheduler: Arc<ResourceScheduler>,
     id: u64,
@@ -89,12 +91,24 @@ impl ResourceScheduler {
         static SHARED: OnceLock<Arc<ResourceScheduler>> = OnceLock::new();
         SHARED
             .get_or_init(|| {
+                // Installed memory never changes and free memory is probed at most
+                // every 100 ms: a scan asks twice per file, and each probe is a
+                // system call (or two) that used to run for every one.
+                static TOTAL_MB: OnceLock<u64> = OnceLock::new();
+                static AVAILABLE_MB: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
                 Self::new(
                     || {
-                        (
-                            (crate::platform::physical_memory_gb() * 1024.0) as u64,
-                            crate::platform::available_memory_mb(),
-                        )
+                        let total = *TOTAL_MB.get_or_init(|| (crate::platform::physical_memory_gb() * 1024.0) as u64);
+                        let mut cached = AVAILABLE_MB.lock();
+                        let available = match *cached {
+                            Some((read, value)) if read.elapsed() < AVAILABLE_MEMORY_TTL => value,
+                            _ => {
+                                let value = crate::platform::available_memory_mb();
+                                *cached = Some((Instant::now(), value));
+                                value
+                            }
+                        };
+                        (total, available)
                     },
                     num_cpus::get().saturating_sub(2).max(1),
                     2,

@@ -22,9 +22,9 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     assert_eq!(response.status, "ok");
     // The Mac app's engine uses Apple Speech, which needs no model install.
     let speech_note = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        "on-device speech"
+        "any speech"
     } else {
-        "Install a speech model from the model catalog"
+        "install a speech model"
     };
     assert!(response.message.unwrap().contains(speech_note));
     assert_eq!(response.jobs.len(), 1);
@@ -58,7 +58,7 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
         request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"dense"}));
     assert!(enqueue(&mut conn, &mode, Some("qwen3_vl_4b"), true).is_err());
     let no_model = enqueue(&mut conn, &ok, None, true).unwrap_err().to_string();
-    assert!(no_model.contains("No model will be downloaded"));
+    assert!(no_model.contains("FileID won't download one by itself"));
     let no_ffmpeg = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), false)
         .unwrap_err()
         .to_string();

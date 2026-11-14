@@ -89,6 +89,12 @@ public actor ScanCoordinator {
     // cancelling a running scan poisoned a separately-queued later scan.
     private var runningEpoch = -1
 
+    /// Catch-up work after the main pass (ScanCatchUp). While set, progress
+    /// reports `total` above `discovered` by the catch-up's size and `processed`
+    /// advanced by what it has done, so counters only ever grow; the terminal
+    /// snapshot reports the scan's own counts again.
+    private var catchUp: (total: Int, done: Int)?
+
     private var lastProcessedSnapshot: Int = 0
     private var lastSnapshotAt: Date = .distantPast
     private var rollingFilesPerSecond: Double = 0
@@ -107,6 +113,7 @@ public actor ScanCoordinator {
             failed: 0
         )
         current = s
+        catchUp = nil
         // Honor a cancel that landed in the start window — clear cancel
         // state only when no cancelScan has arrived for this epoch (or later). The
         // old unconditional reset dropped a back-to-back Start→Cancel.
@@ -186,6 +193,31 @@ public actor ScanCoordinator {
         guard var s = current else { return }
         s.phase = phase
         current = s
+    }
+
+    func setCatchUp(total: Int) {
+        let done = catchUp?.done ?? 0
+        if catchUp == nil {
+            lastSnapshotAt = Date()
+            lastProcessedSnapshot = reportedProcessed(done: 0)
+            rollingFilesPerSecond = 0
+        }
+        catchUp = (max(total, done), done)
+    }
+
+    func bumpCatchUp(by count: Int) {
+        guard var work = catchUp else { return }
+        work.done = min(work.total, work.done + count)
+        catchUp = work
+    }
+
+    func endCatchUp() {
+        catchUp = nil
+    }
+
+    private func reportedProcessed(done: Int) -> Int {
+        guard let s = current else { return 0 }
+        return max(s.processed, s.discovered - s.failed) + done
     }
 
     public func requestPause()  {
@@ -299,7 +331,12 @@ public actor ScanCoordinator {
     public var isPaused: Bool    { paused }
 
     public func snapshot() -> ScanProgress? {
-        guard let s = current else { return nil }
+        guard var s = current else { return nil }
+        let owed = s.phase == .postScan ? catchUp : nil
+        if let owed {
+            s.processed = reportedProcessed(done: owed.done)
+            s.totalFiles = s.discovered + owed.total
+        }
         let now = Date()
         let dt = now.timeIntervalSince(lastSnapshotAt)
         if dt >= 1.0 {
@@ -314,7 +351,7 @@ public actor ScanCoordinator {
         }
         let eta: Double? = {
             guard s.totalFiles > 0, rollingFilesPerSecond > 0.01 else { return nil }
-            let remaining = max(0, s.totalFiles - s.processed)
+            let remaining = owed.map { $0.total - $0.done } ?? max(0, s.totalFiles - s.processed)
             return Double(remaining) / rollingFilesPerSecond
         }()
         return ScanProgress(

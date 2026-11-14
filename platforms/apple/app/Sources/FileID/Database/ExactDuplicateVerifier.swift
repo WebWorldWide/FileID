@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import FileIDShared
 
@@ -6,6 +7,8 @@ struct ExactDuplicateSnapshot: Sendable {
     let partial: Bool
     let candidateCount: Int
     let skipped: Int
+    var capped = false
+    var cancelled = false
 }
 
 enum ExactDuplicateVerifier {
@@ -20,17 +23,32 @@ enum ExactDuplicateVerifier {
     }
 
     private struct CachedDigest {
-        let digest: Data
-        let verifiedAt: TimeInterval
+        var prefilter: Data
+        var digest: Data?
         var age: UInt64
     }
 
+    // Only touched on `queue`.
     private final class CacheState: @unchecked Sendable {
         var values: [ExactFileDigest.CacheKey: CachedDigest] = [:]
         var age: UInt64 = 0
     }
 
-    private static let cacheCapacity = 10_000
+    private final class CancelFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
+    }
+
+    private struct Prefiltered {
+        let file: FileRow
+        let key: ExactFileDigest.CacheKey
+        let prefilter: Data
+    }
+
+    private static let cacheCapacity = 20_000
+    private static let prefilterSpan = 64 * 1024
     private static let cacheState = CacheState()
     private static let queue = DispatchQueue(
         label: "com.fileid.exact-duplicate-verifier", qos: .userInitiated)
@@ -41,18 +59,37 @@ enum ExactDuplicateVerifier {
     static func verify(
         candidates: [FileRow], candidateCount: Int, inputPartial: Bool
     ) async -> ExactDuplicateSnapshot {
-        await withCheckedContinuation { continuation in
+        let cancel = CancelFlag()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
             queue.async {
-                var grouped: [Key: [FileRow]] = [:]
+                let stopped = ExactDuplicateSnapshot(
+                    groups: [], partial: true, candidateCount: candidateCount,
+                    skipped: 0, cancelled: true)
                 var skipped = 0
+                var bySample: [Key: [Prefiltered]] = [:]
                 for file in candidates {
-                    guard let digest = digest(for: file) else {
+                    if cancel.isSet { return continuation.resume(returning: stopped) }
+                    guard let sampled = prefilter(for: file) else {
                         skipped += 1
                         continue
                     }
-                    grouped[Key(digest: digest, size: file.sizeBytes), default: []]
-                        .append(file)
+                    bySample[Key(digest: sampled.prefilter, size: file.sizeBytes), default: []]
+                        .append(sampled)
                 }
+                var grouped: [Key: [FileRow]] = [:]
+                for members in bySample.values where members.count > 1 {
+                    for member in members {
+                        if cancel.isSet { return continuation.resume(returning: stopped) }
+                        guard let digest = fullDigest(for: member) else {
+                            skipped += 1
+                            continue
+                        }
+                        grouped[Key(digest: digest, size: member.file.sizeBytes), default: []]
+                            .append(member.file)
+                    }
+                }
+                trimCache()
                 var groups = grouped.compactMap { key, files -> DuplicateGroup? in
                     guard files.count > 1 else { return nil }
                     let sorted = files.sorted(by: keeperComesFirst)
@@ -75,34 +112,78 @@ enum ExactDuplicateVerifier {
                     groups: groups,
                     partial: inputPartial || skipped > 0 || groupTruncated || memberTruncated,
                     candidateCount: candidateCount,
-                    skipped: skipped))
+                    skipped: skipped,
+                    capped: inputPartial || groupTruncated || memberTruncated))
             }
+            }
+        } onCancel: {
+            cancel.set()
         }
     }
 
-    private static func digest(for file: FileRow) -> Data? {
+    // The cache key is (path, size, modified time, device, inode), so an entry is
+    // valid for as long as the file is untouched: no expiry, only a size bound.
+    private static func prefilter(for file: FileRow) -> Prefiltered? {
         guard let key = ExactFileDigest.cacheKey(
             url: file.url, expectedSize: file.sizeBytes) else { return nil }
         cacheState.age &+= 1
-        let now = Date().timeIntervalSinceReferenceDate
-        if var cached = cacheState.values[key], now - cached.verifiedAt < 30 {
+        if var cached = cacheState.values[key] {
             cached.age = cacheState.age
             cacheState.values[key] = cached
-            return cached.digest
+            return Prefiltered(file: file, key: key, prefilter: cached.prefilter)
         }
-        guard let digest = ExactFileDigest.compute(
-            url: file.url, expectedSize: file.sizeBytes),
+        let small = file.sizeBytes <= Int64(prefilterSpan * 2)
+        let sample = small
+            ? ExactFileDigest.compute(url: file.url, expectedSize: file.sizeBytes)
+            : edgeSample(url: file.url, size: file.sizeBytes)
+        guard let sample,
               ExactFileDigest.cacheKey(
                 url: file.url, expectedSize: file.sizeBytes) == key else { return nil }
         cacheState.values[key] = CachedDigest(
-            digest: digest, verifiedAt: now, age: cacheState.age)
-        if cacheState.values.count > cacheCapacity {
-            let oldest = cacheState.values.sorted { $0.value.age < $1.value.age }
-                .prefix(cacheCapacity / 10)
-                .map(\.key)
-            for key in oldest { cacheState.values.removeValue(forKey: key) }
-        }
+            prefilter: sample, digest: small ? sample : nil, age: cacheState.age)
+        return Prefiltered(file: file, key: key, prefilter: sample)
+    }
+
+    private static func fullDigest(for member: Prefiltered) -> Data? {
+        if let digest = cacheState.values[member.key]?.digest { return digest }
+        let file = member.file
+        guard let digest = ExactFileDigest.compute(
+            url: file.url, expectedSize: file.sizeBytes),
+              ExactFileDigest.cacheKey(
+                url: file.url, expectedSize: file.sizeBytes) == member.key else { return nil }
+        cacheState.age &+= 1
+        cacheState.values[member.key] = CachedDigest(
+            prefilter: member.prefilter, digest: digest, age: cacheState.age)
         return digest
+    }
+
+    /// SHA-256 of the first and last 64 KiB. Only rules files out: copies are still
+    /// decided by the full-file digest.
+    private static func edgeSample(url: URL, size: Int64) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            guard let head = try handle.read(upToCount: prefilterSpan),
+                  head.count == prefilterSpan else { return nil }
+            try handle.seek(toOffset: UInt64(size) - UInt64(prefilterSpan))
+            guard let tail = try handle.read(upToCount: prefilterSpan),
+                  tail.count == prefilterSpan else { return nil }
+            var hasher = SHA256()
+            hasher.update(data: head)
+            hasher.update(data: tail)
+            return Data(hasher.finalize())
+        } catch {
+            return nil
+        }
+    }
+
+    private static func trimCache() {
+        guard cacheState.values.count > cacheCapacity else { return }
+        let excess = cacheState.values.count - cacheCapacity + cacheCapacity / 10
+        let oldest = cacheState.values.sorted { $0.value.age < $1.value.age }
+            .prefix(excess)
+            .map(\.key)
+        for key in oldest { cacheState.values.removeValue(forKey: key) }
     }
 
     static func matchesImmediately(
@@ -154,6 +235,7 @@ struct DuplicateTrashItem: Sendable {
 struct DuplicateTrashOutcome: Sendable {
     var trashed: [(id: Int64, size: Int64)] = []
     var verificationFailed = 0
+    var protectedLocation = 0
     var failed = 0
     var batchID: String?
     var engineUnavailable = false
@@ -215,11 +297,27 @@ extension ExactDuplicateVerifier {
         }
         outcome.trashed = result.messages.filter(\.ok).compactMap(\.fileID).map { ($0, sizes[$0] ?? 0) }
         SpotlightIndexer.deindex(ids: outcome.trashed.map(\.id))
-        let refused = result.messages.filter { !$0.ok }
-        outcome.verificationFailed += refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
-        outcome.failed = refused.count - refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
+        for refusal in result.messages where !refusal.ok {
+            switch trashRefusal(refusal) {
+            case "protected": outcome.protectedLocation += 1
+            case "changed": outcome.verificationFailed += 1
+            default: outcome.failed += 1
+            }
+        }
         outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         return outcome
+    }
+
+    /// The helper's reason code; a helper that sends none is read from its fixed
+    /// wording (ReadOnlyLocations and the trash checks).
+    nonisolated static func trashRefusal(_ item: BulkActionItem) -> String {
+        if let reason = item.reason { return reason }
+        let text = item.message ?? ""
+        if text.hasPrefix("This file belongs to a managed media library") || text.hasPrefix("This location is read-only") {
+            return "protected"
+        }
+        if text.hasPrefix("File changed since") || text.hasSuffix("Nothing was moved.") { return "changed" }
+        return "failed"
     }
 
     /// Puts a Cleanup batch back: files return to where they were and their catalog

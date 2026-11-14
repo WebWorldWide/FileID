@@ -110,7 +110,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     // embeddings are L2-normalized, so squared-L2 distance is monotonic in
     // `(1 − cosine)` (the index gives the same neighbor ranking as cosine).
     const HNSW_MIN: usize = 5_000;
-    let embeddings: Vec<Vec<f32>> = faces.iter().map(|f| f.embedding.clone()).collect();
+    let embeddings: Vec<&[f32]> = faces.iter().map(|f| f.embedding.as_slice()).collect();
     // Each file contributes one decoded still or one video keyframe, so two
     // detections in one physical file are negative identity evidence. Key by
     // file_id rather than content hash so corresponding faces in copied files
@@ -135,7 +135,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         let points: Vec<(Vec<f32>, usize)> = embeddings
             .iter()
             .enumerate()
-            .map(|(i, e)| (e.clone(), i))
+            .map(|(i, e)| (e.to_vec(), i))
             .collect();
         crate::util::hnsw_index::build(points)
     });
@@ -2261,11 +2261,7 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let mut acc = 0.0f32;
-    for i in 0..a.len() {
-        acc += a[i] * b[i];
-    }
-    acc
+    crate::util::vector_math::dot(a, b)
 }
 
 #[cfg(test)]

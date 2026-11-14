@@ -33,6 +33,8 @@ struct LavaLampBackground: View {
         Blob(x: 0.84, size: 440, rise: 56, sway: 16, delay: -27, color: Color(red: 1, green: 186/255, blue: 52/255), opacity: 0.7)
     ]
 
+    private static let waxDownscale: CGFloat = 3
+
     var body: some View {
         if reduceTransparency {
             Theme.bg1
@@ -75,7 +77,12 @@ struct LavaLampBackground: View {
 
                     if mode != .off {
                         AtmosphereTimeline(paused: paused || reduceMotion) { time in
-                            Canvas { ctx, size in
+                            // The wax is all soft gradients, so it is drawn at a third of the
+                            // window's size and stretched back: the same picture for a ninth
+                            // of the float pixels composited every frame.
+                            Canvas { ctx, canvasSize in
+                                let size = CGSize(width: canvasSize.width * Self.waxDownscale, height: canvasSize.height * Self.waxDownscale)
+                                ctx.scaleBy(x: 1 / Self.waxDownscale, y: 1 / Self.waxDownscale)
                                 let slow = mode == .calm ? 1.7 : 1.0
                                 ctx.blendMode = .screen
                                 for blob in Self.blobs {
@@ -96,7 +103,10 @@ struct LavaLampBackground: View {
                                         ]), center: CGPoint(x: cx, y: cy), startRadius: 0, endRadius: r * 1.1))
                                 }
                             }
+                            .frame(width: w / Self.waxDownscale, height: h / Self.waxDownscale)
                             .drawingGroup(opaque: false, colorMode: .extendedLinear)
+                            .scaleEffect(Self.waxDownscale, anchor: .topLeading)
+                            .frame(width: w, height: h, alignment: .topLeading)
                         }
                         .opacity(mode == .calm ? 0.55 : 1)
                     }

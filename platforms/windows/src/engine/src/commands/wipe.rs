@@ -37,14 +37,15 @@ pub(crate) async fn handle_wipe_library(
     {
         Ok(permit) => permit,
         Err(_) => {
-            let message = format!(
+            let detail = format!(
                 "Timed out waiting for library operations to stop (scan={}, faces={}, deepAnalyze={}, restructure={}). Nothing was wiped.",
                 scan_state.lock().is_some(),
                 face_cluster_active.load(std::sync::atomic::Ordering::Acquire),
                 deep_analyze_active.load(std::sync::atomic::Ordering::Acquire),
                 restructure_active.load(std::sync::atomic::Ordering::Acquire),
             );
-            tracing::warn!("{message}");
+            tracing::warn!("{detail}");
+            let message = "FileID is still busy with other work, so nothing was erased. Stop the scan or other jobs, then try again.".to_string();
             sink.send(IpcEvent::now(EventPayload::LibraryWiped(Wrap::new(
                 LibraryWiped { ok: false, message: Some(message) },
             ))))

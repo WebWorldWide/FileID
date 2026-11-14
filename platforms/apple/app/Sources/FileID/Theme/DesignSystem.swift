@@ -766,7 +766,15 @@ struct DSProgressViewStyle: ProgressViewStyle {
 
 struct IndeterminateBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.atmospherePaused) private var userPaused
+    @Environment(\.pageActive) private var pageActive
     @State private var phase: CGFloat = -0.35
+    @State private var windowVisible = true
+
+    /// A repeatForever animation keeps the compositor awake, so it only runs
+    /// while its window is on screen.
+    private var animating: Bool { !reduceMotion && !userPaused && windowVisible && pageActive }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
@@ -774,18 +782,72 @@ struct IndeterminateBar: View {
                 Capsule()
                     .fill(LinearGradient(colors: [Theme.gold.opacity(0), Theme.gold, Theme.gold.opacity(0)], startPoint: .leading, endPoint: .trailing))
                     .frame(width: geo.size.width * 0.35)
-                    .offset(x: geo.size.width * (reduceMotion ? 0.32 : phase))
+                    .offset(x: geo.size.width * (animating ? phase : 0.32))
             }
             .clipShape(Capsule())
         }
         .frame(height: 4)
         .frame(minWidth: 40)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: false)) { phase = 1.0 }
-        }
+        .background { WindowVisibilityProbe(visible: $windowVisible).allowsHitTesting(false).accessibilityHidden(true) }
+        .onAppear { sweep(animating) }
+        .onChange(of: animating) { _, on in sweep(on) }
         .accessibilityLabel("In progress")
     }
+}
+
+extension IndeterminateBar {
+    private func sweep(_ on: Bool) {
+        if on {
+            phase = -0.35
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: false)) { phase = 1.0 }
+        } else {
+            var stop = Transaction()
+            stop.disablesAnimations = true
+            withTransaction(stop) { phase = -0.35 }
+        }
+    }
+}
+
+/// Reports whether the hosting window is on screen (not minimised, hidden or
+/// fully covered).
+private struct WindowVisibilityProbe: NSViewRepresentable {
+    @Binding var visible: Bool
+
+    final class Probe: NSView {
+        var onChange: (Bool) -> Void = { _ in }
+        private var observer: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            guard let window else { return }
+            observer = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.report() }
+            }
+            report()
+        }
+
+        func report() {
+            guard let window else { return }
+            let visible = window.occlusionState.contains(.visible)
+            DispatchQueue.main.async { [onChange] in onChange(visible) }
+        }
+
+        override func removeFromSuperview() {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            super.removeFromSuperview()
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.onChange = { [binding = $visible] value in if binding.wrappedValue != value { binding.wrappedValue = value } }
+        return probe
+    }
+
+    func updateNSView(_ view: Probe, context: Context) {}
 }
 
 /// Label beside a control, the prototype's "Resolution [720p|1080p]" row.

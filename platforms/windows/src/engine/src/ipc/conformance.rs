@@ -678,6 +678,8 @@ fn event_exemplars() -> Vec<EventPayload> {
                 file_id: Some(1),
                 ok: false,
                 message: Some("file locked".into()),
+                reason: None,
+                operation_id: None,
             }],
         })),
         EventPayload::ClipTextEmbedding(Wrap::new(ClipTextEmbedding {
@@ -785,6 +787,8 @@ fn mark_persons_different_bulk_result_matches_schema() {
                 file_id: None,
                 ok: true,
                 message: None,
+                reason: None,
+                operation_id: None,
             }],
         },
     )));

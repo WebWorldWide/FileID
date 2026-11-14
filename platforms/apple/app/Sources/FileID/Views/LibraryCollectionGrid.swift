@@ -11,6 +11,9 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     let checkedIDs: Set<Int64>
     let selectedID: Int64?
     let refreshToken: String
+    /// Changes whenever `rows` or `tagsByFile` is replaced.
+    var contentVersion: Int = 0
+    var scrollToTopToken: Int = 0
     var textSize: TextSize = .standard
     var offline: OfflineRoots = .none
     var onSelect: (FileRow) -> Void
@@ -21,6 +24,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var onClearSelection: () -> Void = {}
     var onRangeCheck: (FileRow) -> Void = { _ in }
     var onCommandCheck: (FileRow) -> Void = { _ in }
+    var onAtTopChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -42,6 +46,9 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentView.drawsBackground = false
         context.coordinator.collection = collection
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.scrolled(_:)),
+                                               name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         collection.onKey = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
         context.coordinator.apply(self, force: true)
         return scroll
@@ -63,15 +70,26 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastTextSize: TextSize = .standard
         private var lastOffline: OfflineRoots = .none
         private var lastRows: [FileRow] = []
-        private var lastTags: [Int64: [String]] = [:]
+        private var lastContentVersion = Int.min
+        private var lastScrollToTopToken = 0
+        private var atTop = true
         private var lastClickRowID: Int64?
+
+        @objc func scrolled(_ note: Notification) {
+            guard let clip = note.object as? NSClipView else { return }
+            let nowAtTop = clip.bounds.minY <= 80
+            guard nowAtTop != atTop else { return }
+            atTop = nowAtTop
+            model?.onAtTopChange(nowAtTop)
+        }
         /// Keyboard cursor in select mode, where the pane selection is hidden.
         private var cursorID: Int64?
 
         func apply(_ grid: LibraryCollectionGrid, force: Bool) {
             model = grid
             guard let collection else { return }
-            let newIDs = grid.rows.map(\.id)
+            let contentChanged = force || grid.contentVersion != lastContentVersion
+            let newIDs = contentChanged ? grid.rows.map(\.id) : ids
             let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
                 || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize || grid.offline != lastOffline
             if !grid.selectMode { cursorID = nil }
@@ -85,13 +103,13 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 if appended {
                     let paths = Set((old..<newIDs.count).map { IndexPath(item: $0, section: 0) })
                     NSAnimationContext.runAnimationGroup { $0.duration = 0; collection.insertItems(at: paths) }
-                    if stateChanged || grid.tagsByFile != lastTags {
+                    if stateChanged || contentChanged {
                         reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
                     }
                 } else {
                     collection.reloadData()
                 }
-            } else if stateChanged || grid.rows != lastRows || grid.tagsByFile != lastTags {
+            } else if stateChanged || contentChanged {
                 reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
             }
             if let selected = grid.selectedID, selected != lastSelected, let index = newIDs.firstIndex(of: selected) {
@@ -104,7 +122,14 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastTextSize = grid.textSize
             lastOffline = grid.offline
             lastRows = grid.rows
-            lastTags = grid.tagsByFile
+            lastContentVersion = grid.contentVersion
+            if grid.scrollToTopToken != lastScrollToTopToken {
+                lastScrollToTopToken = grid.scrollToTopToken
+                if let scroll = collection.enclosingScrollView {
+                    scroll.contentView.scroll(to: .zero)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+            }
         }
 
         private func reconfigureVisible(_ grid: LibraryCollectionGrid, reloadImages: Bool) {
@@ -382,7 +407,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let check = NSImageView()
     private let textGlyph = NSImageView()
     private let unreadableGlyph = NSImageView()
-    private var hasSmartName = false
+    private var findsSimilar = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
     private var hovering = false { didSet { updateRing() } }
@@ -479,8 +504,8 @@ final class LibraryTileItem: NSCollectionViewItem {
         self.checked = checked
         badge.text = row.failed ? "Unreadable" : FileKindLabel.title(row.kind)
         let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        hasSmartName = !proposed.isEmpty
-        name.text = hasSmartName ? (row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)") : row.url.lastPathComponent
+        name.text = row.url.lastPathComponent
+        findsSimilar = !row.failed && (row.kind == "image" || row.kind == "video")
         textGlyph.isHidden = !row.hasText
         unreadableGlyph.isHidden = !row.failed
         offlineBadge.isHidden = !offline
@@ -497,7 +522,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.needsLayout = true
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
-        view.setAccessibilityLabel([row.url.lastPathComponent, hasSmartName ? "smart name \(name.text)" : nil, row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
+        view.setAccessibilityLabel([row.url.lastPathComponent, proposed.isEmpty ? nil : "suggested name \(proposed)", row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
                                     offline ? "offline" : nil,
                                     row.displayDate?.formatted(date: .abbreviated, time: .omitted),
                                     row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
@@ -556,7 +581,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
             for layer in [badge, offlineBadge, size, date] + chips { layer.foregroundColor = layer.color.cgColor }
-            name.foregroundColor = (hasSmartName ? NSColor(hex: 0xFFCC00) : name.color).cgColor
+            name.foregroundColor = name.color.cgColor
         }
         CATransaction.commit()
         updateRing()
@@ -574,7 +599,9 @@ final class LibraryTileItem: NSCollectionViewItem {
     fileprivate func contextMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(ClosureMenuItem(title: "Open Preview") { [weak self] in self?.onOpenPreview?() })
-        menu.addItem(ClosureMenuItem(title: "Find Similar Photos") { [weak self] in self?.onFindSimilar?() })
+        if findsSimilar {
+            menu.addItem(ClosureMenuItem(title: "Find Similar Photos and Videos") { [weak self] in self?.onFindSimilar?() })
+        }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Show in Finder") { [weak self] in self?.onRevealInFinder?() })
         return menu

@@ -819,7 +819,7 @@ fn subscribe(ui: &Rc<NamingUi>) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
             let Some(ui) = weak.upgrade() else { break };
-            match event {
+            match &*event {
                 EngineState::CatalogResponse(response) => {
                     let slot = ui.requests.borrow_mut().accept(&response.request_id, true);
                     if slot.as_deref() == Some(LEARNED_SLOT) {
@@ -840,7 +840,7 @@ fn subscribe(ui: &Rc<NamingUi>) {
                         set_status(&ui, response.message.as_deref().unwrap_or("FileID couldn't suggest names right now."));
                     }
                 }
-                EngineState::BulkActionResult(result) if result.action == "renameFiles" => renamed(&ui, &result),
+                EngineState::BulkActionResult(result) if result.action == "renameFiles" => renamed(&ui, result),
                 EngineState::Ready => request_learned(&ui, false),
                 EngineState::Failed(_) | EngineState::Exited => {
                     ui.requests.borrow_mut().clear();

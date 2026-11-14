@@ -110,3 +110,21 @@ and also semantic-only, and scores the files the reply calls good matches: macro
 recall over present queries, the share of present queries with a good match, and absent queries
 answered with none. Pass the Swift engine as `--vector-engine` to compare engines with identical
 client vectors; each engine still embeds its own prompt when CLIP text is installed in the home.
+
+## Tags (`tag_eval.py`)
+
+Scores the scan's stored tags against the 72 labelled subjects of the search set
+(`search/labels.json`, the same 499 photos as People). A photo counts as tagged with a
+subject when one of its tags is in the subject's accepted-word list inside the script, so
+recall is a lower bound and precision an upper bound; ambiguous photos are left out.
+
+```
+tag_eval.py --engine <fileid-engine> --home <eval home> --name baseline          # scan + score
+tag_eval.py --engine <fileid-engine> --home <eval home> --name wide --wide       # keep every RAM++ candidate >= 0.3
+tag_eval.py --db <wide catalog> --home <eval home> --simulate --rules '{"refine": true, "max_tags": 10}'
+```
+
+The Rust engine on the Mac needs `--env ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib`
+and an eval home whose `models/` holds the Rust layout (`ram_plus/`, `mobileclip/`, `clip_text/`,
+`sface/`, `yunet/`). `--simulate` re-selects tags from a wide catalog the way the engine does,
+so a rule can be tried in seconds; verify the engine afterwards with a default-mode scan.

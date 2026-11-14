@@ -209,9 +209,10 @@ public enum DeepAnalyzeRunner {
             targets = try await resolveTargets(database: database,
                                                 scope: scope, modelKey: modelKey)
         } catch {
+            JSONLog.shared.warn(ev: "deep_targets_failed", error: "\(error)")
             await sink.emit(.error(EngineError(
                 kind: "deep_targets_failed",
-                message: "Could not resolve targets: \(error.localizedDescription)"
+                message: "FileID couldn't work out which files to describe. Try again."
             )))
             await finish(processed: 0, failed: 0, cancelled: false)
             return
@@ -229,7 +230,7 @@ public enum DeepAnalyzeRunner {
         // for the in-flight job. Reject up front instead.
         let ramGB = Hardware.physicalMemoryGB
         guard modelKind.fits(ramGB: ramGB) else {
-            let msg = "\(modelKind.displayName) needs ~\(String(format: "%.1f", modelKind.ramBudgetGB)) GB resident RAM. This Mac has \(Int(ramGB)) GB total — loading would OOM-kill the engine. Pick a smaller model in Settings → AI Models."
+            let msg = "This model needs more memory than this Mac has. Pick a smaller model in Settings."
             JSONLog.shared.info(ev: "deep_model_too_big",
                                  extra: ["model": AnyCodable(modelKey),
                                          "needGB": AnyCodable(modelKind.ramBudgetGB),
@@ -273,13 +274,14 @@ public enum DeepAnalyzeRunner {
             if case StreamingDownloadError.checksumMismatch = error {
                 await sink.emit(.error(EngineError(
                     kind: "model_integrity_failed",
-                    message: "Could not load \(modelKind.displayName): \(error.localizedDescription)",
+                    message: "The download for \(modelKind.displayName) arrived damaged, so FileID threw it away. Download it again in Settings.",
                     modelKind: modelKey
                 )))
             } else {
+                JSONLog.shared.warn(ev: "deep_load_failed", error: "\(modelKey): \(PlainError.logText(error))")
                 await sink.emit(.error(EngineError(
                     kind: "deep_load_failed",
-                    message: "Could not load \(modelKind.displayName): \(error.localizedDescription)"
+                    message: "FileID couldn't load \(modelKind.displayName). \(PlainError.reason(error))"
                 )))
             }
             await finish(processed: 0, failed: 0, cancelled: false)
@@ -353,7 +355,7 @@ public enum DeepAnalyzeRunner {
             if namingContext == nil {
                 failed += 1
                 await sink.emit(.error(EngineError(kind: "deep_source_changed",
-                    message: "A source file changed or is unavailable. Refresh the library before analyzing it.")))
+                    message: "A file changed or can't be reached. Scan the folder again, then describe it.")))
                 continue
             }
             let contextNameAvailable = namingContext?.label != nil

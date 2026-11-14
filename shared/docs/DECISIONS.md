@@ -4826,7 +4826,67 @@ Decided under the owner's delegation. `Microsoft.AI.DirectML` 1.15.4 registers `
 ## 2026-11-12 — GTK Library Find Similar uses catalog search on the seed file (agent `parity-gtk-lib-people`)
 
 The Mac's Find Similar sends a catalog `search` with `searchMode semantic` and the seed `fileID` (limit 60, location `rootID`, `resultScope files`), not `embedImageQuery`. GTK does the same so both rank with the engine's visual index; `embedImageQuery` is only the Windows path (it returns the seed vector and the app ranks it). While the index is still building the Rust engine answers status `error` with "Preparing the local visual search index…", so GTK retries once a second like the Mac's `indexing` loop. Bulk-tag undo records, per file, only the tags the file lacked before (read from `tags` with source `user`, the rows `applyTags` writes), so undo removes exactly what the batch added. Journals are JSON in the state folder because GTK has no UserDefaults.
+
+## 2026-11-12 — Byte-identical images share one analysis (shared engine)
+
+Decided under the owner's delegation. Model work is the scan's cost; libraries full of backup copies paid it per file. The decoder thread already computes the full SHA-256 before decoding, so a session registry (`pipeline/twin_reuse.rs`, seeded from rows that finished an earlier scan) decides per image: first copy analyzes and publishes; a copy of a finished twin skips decode and inference; a copy of an in-flight twin decodes, then waits (the twin is ahead of it in the writer's FIFO, so its rows commit first). The writer copies tags (except `Year_`), the CLIP row, OCR text and face rows from the twin in the same transaction and copies the crop files after commit. Only images with a full hash take part: video and over-cap files hash by sampled composite. The copy keeps stage flags false so a touched file keeps its own rows; with no twin row and no rows of its own it is marked failed for retry. A copy's faces get no `person_id`; the post-scan clustering assigns them. Measured: 120 files (40 unique) 380 s → 104 s on the Mac CPU path with identical rows per copy. Not done: the Mac engine (NEXT), Deep Analyze descriptions (opt-in pass, could copy the same way).
+
+## 2026-11-12 — Camera JPEGs decode from their MPF preview in the shared engine
+
+The Mac measured a 2.8x scan speed-up from decoding the CIPA DC-007 large thumbnail instead of the 33 MP frame (2026-11-10) with outputs that match full decodes. The Rust engine now applies the same rules ahead of its DCT-scaled decode, against its 2048 px floor (so a preview must have at least 1365 px on the long side; Sony's 1616 x 1080 qualifies) and apply the primary image's EXIF orientation. A kill switch (`FILEID_JPEG_MPF_PREVIEW=0`) is the A/B control. Face crops come from a smaller frame on these files; the Mac's face numbers held at a 1536 px target, and a Rust People check is listed in NEXT.
+
+## 2026-11-12 — Tag selection: Mac rules ported; CLIP agreement and a threshold cap measured and not adopted
+
+Measured on the private 499-photo set against 72 labelled search subjects (`tag_eval.py`; a photo counts as tagged with a subject when a stored tag is in the subject's accepted-word list, so recall is a lower bound and precision an upper bound; tune / held-out split by event). Rust engine, RAM++ with its per-class thresholds, floor 0.62, top 8.
+
+- **Ported (adopted):** the Mac's wider suppress list and `refine` collapse, plus no people words without a detected face. Held-out P 0.826 → 0.789, R 0.397 → 0.420, F1 0.537 → 0.548, tags per photo 7.6 → 6.9. The precision change is the freed slots admitting more labelled tags; the dropped words (person, hand, white, …) are unlabelled either way.
+- **CLIP agreement (not adopted):** a prompt-ensembled CLIP ViT-B/32 text embedding per RAM++ tag (`examples/dump_label_embeddings.rs`; 4,585 labels x 5 prompts took 19 minutes on the Mac CPU) scored against the file's image embedding. Over 3,485 labelled (photo, tag) pairs the RAM++ probability ranks right from wrong at AUC 0.791, the CLIP cosine at 0.719, and a logit blend centred on the image's median cosine at 0.809. In the pipeline that is held-out F1 0.537 → 0.541 for a 0.04 precision loss, within noise. Not shipped: the gain does not pay for a ten-minute first-launch job on CPU hosts. The Mac keeps its measured Vision veto.
+- **Per-class threshold cap (not adopted, owner's call):** RAM++'s thresholds average 0.69 and reach 0.9 on common classes, which is where recall goes (725 of 1,485 labelled positives sit below their class cut). Capping them at 0.75 with the ported rules: held-out P 0.757 / R 0.442 / F1 0.558; at 0.7: 0.761 / 0.444 / 0.561; a plain 0.1 shift overfits tune. A cap alone without the ported rules makes held-out worse (F1 0.525). Left for the owner because every precision point was asked for.
+- **Top-8 stays.** Ten tags adds recall 0.42 → 0.43 for precision 0.79 → 0.78; "loose" was the complaint at twelve.
+
+## 2026-11-12 — Mac audit fixes: decisions taken under delegation
+
+- **Description models leave Documents for new installs only.** `ModelCachePaths` now defaults to Application Support (as the App Store flavour does); a non-empty `~/Documents/huggingface/models` keeps being used. No migration: moving tens of gigabytes behind the owner's back was the larger risk, and iCloud upload only threatens installs that have not downloaded yet.
+- **Cloud-only files are left out of a scan and counted in the notice**, not written as metadata-only rows: such a row would enter the skip set with unchanged size and date and never be analysed after download.
+- **Every group in Duplicates keeps one file, and all merges confirm** instead of gaining Undo, because the engine has no journal for `mergeClusters`.
+- **Speech permission stays with the helper.** Moving the prompt to the app needs a check that the app's grant covers the helper process; until then prompting mid-scan beats speech being off.
+- **Rename paths converge on `applyNames`:** a taken name fails for that file instead of getting a `_2` suffix, matching Preview names.
+- **Egress digests** for six Mac files were refreshed after a diff audit (no host, session or process added); the owner's instruction to fix all open problems is the approval.
+
+## 2026-11-12 — People merge undo reuses the catalog operation journal; IPC 1.27.0
+
+Under the owner's delegation. A merge's undo record is a `person_merge` operation in the existing `catalog_operations` / `catalog_corrections` tables, written in the merge's own transaction, so no migration was needed and the catalog stays byte-identical across engines. Undo is refused when the merged-in person's id exists again or none of its faces can return; faces deleted or moved since are skipped. The header button and `"lastPersonMerge"` only reach merges from the last 24 hours so an old merge is never one click from reversal; undo by explicit id has no age limit. IPC additions are optional fields and new string values on existing shapes, so older apps keep working. (2026-11-13: the Rust engine now writes the same journal; cross-engine undo passes conformance both ways.)
+
+## 2026-11-12 — Mac identical-photo reuse keeps results in memory, in-scan only
+
+Unlike the Rust engine (the writer copies the twin's rows), the Swift engine holds the first copy's finished result in a per-scan registry (128 MB cap, oldest dropped) and builds each copy's row from it, so DBWriter is unchanged. Identical bytes carry identical EXIF, so camera, GPS and capture time come from the twin; the Year tag is recomputed from the copy's own creation date when there is no EXIF time. A result is shared only while the same models are loaded. Seeding from earlier scans is left for a Storage read helper.
+
+## 2026-11-12 — Lava lamp drawn at a third of the size, 20 fps
+
+The wax is six soft radial gradients, so drawing the float16 layer at one third of the window's size and stretching it back gives the same picture for a ninth of the pixels; its fastest motion is about a point per frame, so 20 fps replaces 30. The colour mode and blend are unchanged to keep the look. The Detail pane's material under its 80 % fill was removed (it re-blurred the lava every frame while mostly hidden). All three need the owner's eyes; revert `waxDownscale` to 1 or the interval to 1/30 if the wax looks soft or steppy.
+
+## 2026-11-12 — Vision classifier stays on the Neural Engine
+
+The scan review suggested moving `VNClassifyImageRequest` to the GPU to relieve the Neural Engine. Measured on the M1 Pro with the release Swift engine over 499 photos, alternating runs: Neural Engine 17.8 / 16.0 s, GPU 19.5 / 16.7 s, CPU 28.1 s, tags 0.991 Jaccard. No gain, so nothing changes; `FILEID_VISION_CLASSIFY_DEVICE=gpu|cpu` stays as a measurement switch. The machine was heavily loaded during the run, so a quiet rerun could differ by a few percent, not by the 20–35 % the idea needed.
+
+## 2026-11-13 — RAM++ tagging moves to a catch-up pass after the Mac scan (catalog v34)
+
+Decided under the owner's delegation, after two "fix everything" instructions covering it. Inline RAM++ held a Mac scan near the tagger's speed; files now appear at scan speed with classifier tags and a "Tagging photos" pass replaces them. The marker is a table (`scan_catchup`, v34) rather than a column so settled files cost nothing and the table is the resume cursor; it stores the classifier output the tag rules read (labels ≥ 0.30 with confidences, the three vetoable labels, face count), so the catch-up reproduces the inline result without re-running Vision — measured identical on 61 photos including scores and text. The pass runs inside the scan's finishing phase so pause, Stop, shutdown and the sleep guard need no new app code; the cost is that `scanComplete` waits for it. Careful text reads use the same marker. `FILEID_RAMPLUS_INLINE=1` is the control. The Rust engine carries the migration only, so catalogs stay in lockstep; Windows and Linux keep inline tagging until the pass is ported.
+
+## 2026-11-13 — Decode-ahead stays off; identical photos are reused across scans
+
+A decode-ahead stage (`ScanDecodeAhead`) keeps decoded frames ready for the inference workers. On 400 HEICs it scanned in 12.6 s against 12.7–12.8 s with identical rows: the Neural Engine, not decode, bounds the scan, as the 2026-11-10 entry found. It stays in the tree behind `FILEID_DECODE_AHEAD` with the default off. Cross-scan reuse seeds the twin registry from finished rows and requires matching CLIP model id, face processing version and embedding model, and a scored tag when RAM++ is loaded; a forced rescan does not seed. Measured: 150 new copies plus 20 touched files rescanned in 1.5 s with identical analysis.
 - **build.py patched in the build.** With `--use_binskim_compliant_compile_flags`, build.py gives nvcc its `/DNDEBUG`-style defines verbatim and the device-link step reads them as files (`Don't know what to do with 'D:/DNDEBUG'`, first full CI build, after about 50 minutes of compiling). The script rewrites the one line to pass `-D...` and refuses to run if that line is not there exactly once. The binskim flags (CFG, Spectre) stay on.
+
+## 2026-11-13 — One integration branch; shared-engine choices made under delegation
+
+- **Integration order.** #327 (convergence) landed on main while the audit PR was in CI, so the audit branch was merged with it in a worktree (14 conflicts, both sides kept) and the shared-engine, GTK and scan branches were stacked on that result rather than opened as separate PRs: they touch the files the merge resolved.
+- **After-scan tagging is on for the Mac-hosted Rust engine and off on Windows and Linux.** On the Mac the tagger shares the machine with the scan and deferral was measured to help (Swift engine, 2026-11-13). On DirectML/CUDA RAM++ is GPU-bound, deferral only changes when tags appear, and no gain has been measured; `FILEID_RAMPLUS_DEFERRED=1` opts in.
+- **Stable person ids on the portable clustering path.** "Write only changed faces" is impossible when every pass mints new ids, so a cluster keeps its named identity's id or its majority owner's. Apps must not assume ids change per pass.
+- **Search index updates use a delta, not insertion.** `instant-distance` cannot insert, so changed points sit beside the graph and are searched by brute force until they exceed max(256, 10 %), then the graph is rebuilt on all cores. The build memory reservation dropped from 32 KB to 8 KB per point so an 8 GB machine can index 200k photos.
+- **Failure memory lives in `scan_catchup` with `stages = 4`** (owes nothing) to avoid a second migration in the same day; a dedicated column is the cleaner follow-up.
+- **WinUI logging stays synchronous** (one persistent handle, Debug gated) because a queued writer loses the forensic tail on a native fast-fail.
+- **Egress digests** were refreshed after diff audits at each merge step; no host, session or process launch was added anywhere.
 ## 2026-11-12 — Swift reconcile reads the Rust Trash log without rewriting it
 
 After a rollback the Swift engine only drops catalog rows for Rust-batch files provably in the Trash; it neither completes the Rust entries nor touches the log (Rust owns it and imports Swift's journal itself). Restore of such a batch already works through `RustTrashLog.find`.
@@ -4869,3 +4929,18 @@ The Mac setting (`FILEID_CAREFUL_READ=latin`) skips Vision's automatic language 
 ## 2026-11-12 — Best Takes goal panel on Windows and Linux
 
 The engine side of `rankTakesWithGoal` was finished on 2026-11-05 (see NEXT); only the pages were missing. Both pages mirror the Mac panel and wording. After a `ranked` answer the top try replaces the kept pick only when the quality pick was the sole mark, so a hand-made choice is never overridden (Mac rule). Answers with status `unclear` or `unavailable` show their summary and leave the order alone.
+
+## 2026-11-14 — One PR for the open branches; Chat merges ask first on every app
+
+- **One PR.** `agent/main-ci-fix` (#335) and `agent/winui-audit` (#332) are merged into the integration branch (#331) instead of landing separately. All three conflicted with main, a conflicting PR runs no CI, and each would have had to be re-merged after the others landed. The cost is a larger PR; the WinUI part is still compiled only by CI, as before.
+- **Verify the merged tree before pushing.** The merge of main compiled cleanly as text but broke the GTK app (two pages used an API this branch replaced). The local run of CI's builds, tests and three conformance suites is the gate for integration merges, not the absence of textual conflicts.
+- **Chat merges ask first.** The Chat action card already names the people and has its own Merge button, but People asks before every merge on all three apps since the 2026-11-12 audit and the Mac's Chat does too, so GTK and WinUI Chat now show the same confirmation. Undo is offered only when every merge in the action succeeded and the engine returned an operation id for each, so "Undo merge" never leaves a half-undone set behind silently: a failed step reports that it could not put them back.
+
+## 2026-11-14 — Duplicate photos: at most `workers - 1` workers wait on a twin
+
+A copy of an image normally reaches a worker after the copy that owns the analysis, because the decoders hold copies back until their owner is queued. That order breaks after an owner fails or cannot share (no models): the copies already released claim the image again from a worker, and the new owner may be one a decoder is still reading. With every worker waiting on it, nothing analyzed it until `TWIN_WAIT_PATIENCE` (45 s) ran out.
+
+- **Chosen:** cap the workers that may wait at `workers - 1`. The worker that would be the last one waiting analyzes its copy unshared instead, so one worker is always free for the owner. A finished owner is read without taking a waiting place, so a single-worker pool still reuses analyses.
+- **Not chosen:** handing the copy back to the decoder that holds the new owner (keeps every reuse, but adds a second hand-over path between the two pools), or shortening the patience (still a stall, only shorter).
+- **Cost:** in that narrow case one copy per stuck round is analyzed twice. Sharing in the normal case is unchanged.
+- **Evidence:** the pipeline test that failed 1 in 25 runs under 60 busy processes (each failure a full 20 s) passes 500 of 500 with the slowest run at 0.66 s.

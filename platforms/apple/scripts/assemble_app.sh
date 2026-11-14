@@ -192,9 +192,11 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSDesktopFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDocumentsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDownloadsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSDesktopFolderUsageDescription</key><string>FileID reads this folder to tag and find your files, and moves or renames files only when you ask.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>FileID reads this folder to tag and find your files, and moves or renames files only when you ask.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>FileID reads this folder to tag and find your files, and moves or renames files only when you ask.</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>FileID reads this drive to tag and find your files, and moves or renames files only when you ask.</string>
+    <key>NSNetworkVolumesUsageDescription</key><string>FileID reads this drive to tag and find your files, and moves or renames files only when you ask.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>FileID transcribes audio and video on-device to make recordings searchable. Nothing leaves your Mac.</string>
 </dict>
 </plist>

@@ -60,16 +60,16 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var subtitle: String {
         switch self {
-        case .qwen2VL7B:     return "Proven Apache-2.0 model with strong OCR + scene understanding."
-        case .qwen3VL2B:     return "Fast. About twice the speed of 4B with close description quality."
-        case .qwen3VL4B:     return "Recommended for 8 GB Macs. Strong grounding with a light memory footprint."
-        case .qwen3VL8B:     return "Best quality for 16 GB Macs. Stronger detail, OCR, and grounded naming."
-        case .qwen35_2B:     return "Compact vision model for memory-constrained Macs. Experimental until evaluated."
-        case .gemma3_4B:     return "Google's open model. Strong on grounded VQA. Lightest pick."
-        case .gemma3_12B:    return "High quality. Heavy: ~9 GB resident, ~3× slower."
-        case .mistralSmall32: return "Max quality. Apache-2.0; ~14 GB, slowest. 32 GB Macs."
-        case .paligemma3B:   return "Strong on grounding, OCR, and visual question answering."
-        default: return MLXModelCatalog.entry(forID: rawValue)?.summary ?? "Registered model"
+        case .qwen2VL7B:     return "Good at reading text in pictures and describing scenes. Medium speed. Needs a Mac with 16 GB of memory."
+        case .qwen3VL2B:     return "The fastest choice. Descriptions are a little less detailed. Works on Macs with 8 GB of memory."
+        case .qwen3VL4B:     return "Best choice for Macs with 8 GB of memory. Accurate descriptions without using much memory."
+        case .qwen3VL8B:     return "Best choice for Macs with 16 GB of memory. More detail, and better at reading text in pictures. Slower."
+        case .qwen35_2B:     return "Small and light, for Macs with little memory. New, so results may vary."
+        case .gemma3_4B:     return "Made by Google. Good at answering questions about a picture. Fast, and works on Macs with 8 GB of memory."
+        case .gemma3_12B:    return "Very detailed descriptions. About three times slower, and needs a Mac with 16 GB of memory or more."
+        case .mistralSmall32: return "The most detailed descriptions. The slowest choice. Works best on a Mac with 32 GB of memory."
+        case .paligemma3B:   return "Good at finding things in a picture and reading text. Fast, and works on Macs with 8 GB of memory."
+        default: return MLXModelCatalog.entry(forID: rawValue)?.summary ?? "Extra model"
         }
     }
 
@@ -77,7 +77,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var sourceRepo: String { manifestPin?.repo ?? MLXModelCatalog.entry(forID: rawValue)!.repo }
 
-    public var approxBytes: Int64 { manifestPin?.approxBytes ?? MLXModelCatalog.entry(forID: rawValue)!.weightBytes }
+    public var approxBytes: Int64 { manifestPin?.approxBytes ?? MLXModelCatalog.entry(forID: rawValue)?.weightBytes ?? 0 }
 
     public var ramBudgetGB: Double {
         switch self {
@@ -111,7 +111,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var licensePolicyKey: String {
         if let manifestPin { return manifestPin.license }
-        return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
+        return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)?.license ?? ""] ?? "Unknown"
     }
 
     public var licenseName: String {
@@ -150,8 +150,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return freeDiskBytes >= requiredFreeBytes
     }
 
-    /// First recommendation that fits, falling back to the lightest
-    /// commercial-clean pick (Gemma 3 4B).
+    /// First recommendation that fits, falling back to Gemma 3 4B.
     public static func safeDefaultFor(ramGB: Double,
                                       freeDiskBytes: Int64? = nil) -> AIModelKind {
         let ranked = recommendedFor(ramGB: ramGB)
@@ -187,9 +186,15 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case "gemma3_4b":                    return .gemma3_4B
         case "gemma3_12b":                   return .gemma3_12B
         // Dropped non-commercial Qwen2.5-VL-3B (Qwen Research License).
-        case "qwen2_vl_3b", "qwen2_5_vl_3b": return .qwen2VL7B
-        default:                              return .qwen2VL7B
+        case "qwen2_vl_3b", "qwen2_5_vl_3b": return fallbackForThisMac
+        default:                              return fallbackForThisMac
         }
+    }
+
+    /// An unknown or dropped saved choice becomes the pick that fits this Mac,
+    /// never a model that needs more memory than it has.
+    private static var fallbackForThisMac: AIModelKind {
+        safeDefaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
     }
 }
 
@@ -208,7 +213,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
     public var displayName: String { "SFace (OpenCV Zoo)" }
 
     public var subtitle: String {
-        "Commercial-clean (Apache-2.0) face recognition — 128-d embeddings. Replaces the non-commercial InsightFace ArcFace."
+        "Tells which faces belong to the same person. Small and fast."
     }
 
     /// ONNX model filename on disk. Pulled from OpenCV Zoo's HF mirror at
@@ -236,9 +241,8 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
     /// Installation directory shared between engine + app. Both check
     /// here when deciding whether the upgrade banner should show.
     public static var modelsDirectory: URL {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? UserHome.url.appendingPathComponent("Library/Application Support", isDirectory: true))
             .appendingPathComponent("FileID/Models", isDirectory: true)
     }
 

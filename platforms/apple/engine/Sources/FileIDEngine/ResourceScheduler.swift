@@ -54,15 +54,15 @@ actor ResourceScheduler {
         var errorDescription: String? {
             switch self {
             case .invalidMemoryEstimate:
-                "Memory availability or the requested allocation could not be established."
+                "FileID couldn't tell how much memory is free. Try again in a moment."
             case .exceedsSystemBudget:
-                "This operation exceeds the memory budget reserved for the system and app. Choose a smaller model or library."
+                "This needs more memory than this Mac has. Pick a smaller model in Settings."
             case .exceedsResourceCapacity:
-                "This operation exceeds the available local processing or storage capacity."
+                "This is more than this Mac can handle at once. Try a smaller selection."
             case .insufficientAvailableMemory:
-                "Available memory is too low to run this operation safely. Finish other work or try again later."
+                "There isn't enough free memory right now. Close other apps or try again later."
             case .insufficientResources:
-                "The local processing capacity is busy. Try again after current work finishes."
+                "FileID is busy with other work. Try again when it finishes."
             }
         }
     }
@@ -185,6 +185,13 @@ actor ResourceScheduler {
     func release(_ lease: MemoryLease) {
         guard reservations.removeValue(forKey: lease) != nil else { return }
         drainWaiters()
+    }
+
+    /// Whether background work may hold `memoryMB` more right now. Nothing is
+    /// reserved: the scan's decode-ahead asks before each frame and decodes
+    /// in its worker instead when the answer is no.
+    func backgroundHeadroom(memoryMB: UInt64) -> Bool {
+        !hasInteractiveReservation && canGrant(Demand(memoryMB: max(1, memoryMB)))
     }
 
     func snapshot() -> Snapshot {

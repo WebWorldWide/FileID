@@ -1027,22 +1027,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// Dot product over eight independent lanes so the compiler vectorizes it (a
-/// single running sum cannot be reordered). Used for kNN scans only.
-fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len().min(b.len());
-    let (a, b) = (&a[..len], &b[..len]);
-    let mut lanes = [0.0f32; 8];
-    let (a_chunks, a_tail) = a.as_chunks::<8>();
-    let (b_chunks, b_tail) = b.as_chunks::<8>();
-    for (x, y) in a_chunks.iter().zip(b_chunks) {
-        for lane in 0..8 {
-            lanes[lane] += x[lane] * y[lane];
-        }
-    }
-    let tail: f32 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
-    lanes.iter().sum::<f32>() + tail
-}
+use crate::util::vector_math::dot as dot_lanes;
 
 fn l2_normalized(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -91,7 +91,7 @@ struct ListCostTests {
         #expect(rows.map(\.id) == [0, 1])
         #expect(rows[0].name == "beach.mov")
         #expect(rows[0].sampled)
-        #expect(rows[0].meta.hasSuffix("Video frame, not checked"))
+        #expect(rows[0].meta.hasSuffix("From a video frame (not reviewed)"))
         #expect(rows[0].meta.contains(" · "))
         #expect(rows[0].text == "waves")
         #expect(rows[1].name == "report.pdf")

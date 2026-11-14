@@ -260,7 +260,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (e.PropertyName is nameof(EngineClient.Info)
                 or nameof(EngineClient.State))
             {
-                Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
+                Services.DebugLog.Info($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
                 OnPropertyChanged(nameof(EngineVersionText));
                 OnPropertyChanged(nameof(WorkerCapText));
                 OnPropertyChanged(nameof(GpuSummaryText));
@@ -279,7 +279,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
             {
-                Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
+                Services.DebugLog.Info($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncReprobeUi(); });
             }
         });

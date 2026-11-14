@@ -466,46 +466,65 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             }
 
             // 4. Fetch file rows for those IDs in the ranked order
-            var rows = new List<FileRow>(topIDs.Count);
-            var idPlaceholders = new List<string>();
-            using (var cmd = _connection.CreateCommand())
-            {
-                for (int j = 0; j < topIDs.Count; j++)
-                {
-                    var paramName = $"$id{j}";
-                    idPlaceholders.Add(paramName);
-                    cmd.Parameters.AddWithValue(paramName, topIDs[j]);
-                }
-                cmd.CommandText = $"""
-                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                       (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
-                       vlm_proposed_name
-                FROM files
-                WHERE id IN ({string.Join(",", idPlaceholders)}) AND failed = 0
-                """;
-
-                var byId = new Dictionary<long, FileRow>();
-                using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
-                {
-                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    {
-                        var row = ReadRow(reader);
-                        byId[row.Id] = row;
-                    }
-                }
-
-                foreach (var id in topIDs)
-                {
-                    if (byId.TryGetValue(id, out var row))
-                    {
-                        rows.Add(row);
-                    }
-                }
-            }
-
-            return rows;
+            return await RowsInOrderLockedAsync(_connection, topIDs, ct).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>Library rows for <paramref name="ids"/>, in that order. Ids
+    /// that are gone, failed, or outside the current location are left out.</summary>
+    public async Task<IReadOnlyList<FileRow>> RowsByIdsAsync(IReadOnlyList<long> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return Array.Empty<FileRow>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return Array.Empty<FileRow>();
+            return await RowsInOrderLockedAsync(_connection, ids, ct).ConfigureAwait(false);
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task<IReadOnlyList<FileRow>> RowsInOrderLockedAsync(
+        SqliteConnection connection, IReadOnlyList<long> ids, CancellationToken ct)
+    {
+        var rows = new List<FileRow>(ids.Count);
+        var idPlaceholders = new List<string>(ids.Count);
+        using var cmd = connection.CreateCommand();
+        for (int j = 0; j < ids.Count; j++)
+        {
+            var paramName = $"$id{j}";
+            idPlaceholders.Add(paramName);
+            cmd.Parameters.AddWithValue(paramName, ids[j]);
+        }
+        var scope = _scope;
+        cmd.CommandText = $"""
+            SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
+                   vlm_proposed_name
+            FROM files
+            WHERE id IN ({string.Join(",", idPlaceholders)}) AND failed = 0{ScopeClause("path_text", scope)}
+            """;
+        BindScope(cmd, scope);
+
+        var byId = new Dictionary<long, FileRow>(ids.Count);
+        using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                var row = ReadRow(reader);
+                byId[row.Id] = row;
+            }
+        }
+
+        foreach (var id in ids)
+        {
+            if (byId.Remove(id, out var row))
+            {
+                rows.Add(row);
+            }
+        }
+        return rows;
     }
 
     /// <summary>enumerate files that have a VLM-proposed name

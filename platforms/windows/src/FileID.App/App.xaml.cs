@@ -132,7 +132,7 @@ public partial class App : Application
             // session can be correlated to a specific build + engine binary.
             var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
             var enginePath = AppPaths.EngineExePath;
-            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={AppPaths.Root}, engine={enginePath}");
+            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={PathRedactor.Redact(AppPaths.Root)}, engine={PathRedactor.Redact(enginePath)}");
 
             Trace("EngineClient.StartAsync");
             // Captured on EngineStartedTask so the install flow can poll
@@ -299,7 +299,7 @@ public partial class App : Application
             }
 
             AppViewModel.Instance.FolderPath = folderPath;
-            DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
+            DebugLog.Info($"[AUTO-SCAN] starting scan; display={PathRedactor.Redact(AppViewModel.Instance.FolderDisplay)}");
             if (!exitAfterScan)
             {
                 await engine.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);

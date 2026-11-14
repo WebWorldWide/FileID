@@ -12,6 +12,8 @@
 mod app_settings;
 mod changes;
 mod engine_client;
+mod engine_errors;
+mod event_queue;
 mod fonts;
 mod lavalamp;
 mod model_license;
@@ -21,6 +23,7 @@ mod spring;
 mod v3;
 mod tabs;
 mod theme;
+mod thumb_cache;
 mod welcome;
 mod window;
 

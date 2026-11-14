@@ -99,8 +99,11 @@ impl Sink {
                 drain_to(&mut handle, &mut rx);
             }
             None => {
+                // Stdout is line-buffered: unwrapped, every frame is its own
+                // write call. The buffer is flushed whenever the queue runs
+                // empty (see `drain_to`), so no event waits behind it.
                 let stdout = std::io::stdout();
-                let mut handle = stdout.lock();
+                let mut handle = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
                 drain_to(&mut handle, &mut rx);
             }
         });
@@ -341,6 +344,52 @@ mod tests {
     /// is the per-event primitive; flushing is the writer loop's job, coalesced
     /// once per drained burst. Proven here by asserting write_line performs zero
     /// flushes across many events (the old `write_frame` flushed every call).
+    /// What the stdout branch does: a 64 KiB buffer in front of the stream.
+    #[test]
+    fn a_buffered_burst_reaches_the_stream_in_one_write_and_a_lone_event_is_not_held_back() {
+        #[derive(Clone, Default)]
+        struct Shared(std::sync::Arc<std::sync::Mutex<CountingWriter>>);
+        impl Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
+        }
+        let stream = Shared::default();
+        let (tx, mut rx) = mpsc::channel::<IpcEvent>(256);
+        for i in 0..100 {
+            tx.try_send(log_event(format!("event-{i}"))).unwrap();
+        }
+        let writer = {
+            let stream = stream.clone();
+            std::thread::spawn(move || {
+                let mut handle = std::io::BufWriter::with_capacity(64 * 1024, stream);
+                drain_to(&mut handle, &mut rx);
+            })
+        };
+        let wait_for = |lines: usize| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let state = stream.0.lock().unwrap();
+                if state.bytes.split(|b| *b == b'\n').count() > lines && state.flushes > 0 {
+                    return (state.writes, state.flushes);
+                }
+                drop(state);
+                assert!(std::time::Instant::now() < deadline, "events were held in the buffer");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let (writes, _) = wait_for(100);
+        assert!(writes < 100, "a burst is not one write per frame (got {writes})");
+        // The sender stays open: a terminal event must still be on the stream at once.
+        tx.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Cancelled)))).unwrap();
+        wait_for(101);
+        drop(tx);
+        writer.join().unwrap();
+    }
+
     #[test]
     fn burst_writes_do_not_flush_per_frame() {
         let mut out = CountingWriter::default();

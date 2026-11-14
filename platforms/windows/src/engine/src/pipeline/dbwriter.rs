@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
@@ -287,6 +287,9 @@ impl DbWriter {
         // Face/crop positions to extract by move only after commit. The JPEG
         // encode + fs::write stays outside the transaction and writer lock.
         let mut deferred_crops: Vec<DeferredFaceCrop> = Vec::new();
+        // (twin face id, new face id) crop files to copy after commit.
+        let mut crop_copies: Vec<(i64, i64)> = Vec::new();
+        let mut reused_twins = 0u32;
 
         // Rename/move heal candidates are resolved BEFORE the writer lock:
         // `heal_candidate_moved()` does a blocking `symlink_metadata()` stat (is
@@ -321,6 +324,12 @@ impl DbWriter {
             let mut heal_recheck_stmt = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)")
                 .context("preparing rename-heal recheck")?;
+            let mut heal_only_check_stmt = tx
+                .prepare_cached(HEAL_ONLY_CHECK_SQL)
+                .context("preparing heal-only check")?;
+            let mut heal_only_touch_stmt = tx
+                .prepare_cached("UPDATE files SET scanned_at = ?2 WHERE id = ?1")
+                .context("preparing heal-only touch")?;
             let mut heal_update_stmt = tx
                 .prepare_cached(HEAL_UPDATE_SQL)
                 .context("preparing rename-heal update")?;
@@ -373,6 +382,38 @@ impl DbWriter {
             let mut doc_text_delete = tx
                 .prepare_cached("DELETE FROM doc_text WHERE file_id = ?1")
                 .context("preparing doc_text delete")?;
+            let mut twin_lookup = tx
+                .prepare_cached(TWIN_LOOKUP_SQL)
+                .context("preparing twin lookup")?;
+            let mut twin_children = tx
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM tags WHERE file_id = ?1 AND source = 'auto')                      OR EXISTS (SELECT 1 FROM clip_embeddings WHERE file_id = ?1)",
+                )
+                .context("preparing twin children check")?;
+            let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
+            let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
+            let mut twin_clip = tx.prepare_cached(TWIN_CLIP_SQL).context("preparing twin clip copy")?;
+            let mut twin_ocr = tx.prepare_cached(TWIN_OCR_SQL).context("preparing twin ocr copy")?;
+            let mut twin_faces = tx.prepare_cached(TWIN_FACES_SQL).context("preparing twin faces read")?;
+            let mut twin_face_insert =
+                tx.prepare_cached(TWIN_FACE_INSERT_SQL).context("preparing twin face copy")?;
+            let mut twin_unavailable = tx
+                .prepare_cached("UPDATE files SET failed = 1, error_message = ?2 WHERE id = ?1")
+                .context("preparing twin unavailable update")?;
+            let mut catalog_revision = tx
+                .prepare_cached(CATALOG_REVISION_SQL)
+                .context("preparing catalog revision")?;
+            let mut failure_record = tx
+                .prepare_cached(crate::pipeline::catch_up::RECORD_FAILURE_SQL)
+                .context("preparing failure memory")?;
+            let mut failure_clear = tx
+                .prepare_cached(crate::pipeline::catch_up::CLEAR_FAILURE_SQL)
+                .context("preparing failure memory clear")?;
+            let mut owed_write = tx.prepare_cached(OWED_WRITE_SQL).context("preparing catch-up marker")?;
+            let mut owed_clear = tx
+                .prepare_cached("DELETE FROM scan_catchup WHERE file_id = ?1")
+                .context("preparing catch-up marker clear")?;
+            let mut owed_copy = tx.prepare_cached(OWED_COPY_SQL).context("preparing catch-up marker copy")?;
             for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -410,18 +451,28 @@ impl DbWriter {
                     let still_there: bool = heal_recheck_stmt
                         .query_row(params![id, old], |r| r.get(0))
                         .context("rename-heal recheck")?;
-                    if still_there {
+                    // A file nobody analysed may only take over a row that
+                    // still describes it: scanned cleanly, same size and date.
+                    let trusted = !f.heal_only
+                        || heal_only_check_stmt
+                            .query_row(params![id, f.size_bytes as i64, f.modified_unix], |r| r.get(0))
+                            .context("heal-only check")?;
+                    if still_there && trusted {
                         healable = Some(*id);
                         break;
                     }
                 }
+                let mut healed = None;
                 if let Some(id) = healable {
                     match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
-                        Ok(_) => tracing::info!(
-                            id,
-                            new_path = %crate::platform::redact_path_for_log(&f.path),
-                            "[RENAME-HEAL] re-bound existing row to new path"
-                        ),
+                        Ok(_) => {
+                            healed = Some(id);
+                            tracing::info!(
+                                id,
+                                new_path = %crate::platform::redact_path_for_log(&f.path),
+                                "[RENAME-HEAL] re-bound existing row to new path"
+                            );
+                        }
                         // A content-identical COPY already occupies the new path
                         // (scanned there independently). Skip the heal rather than
                         // OR REPLACE-deleting that row — which silently orphaned its
@@ -447,6 +498,33 @@ impl DbWriter {
                             })?;
                         }
                     }
+                }
+
+                if f.heal_only {
+                    match healed {
+                        Some(id) => {
+                            heal_only_touch_stmt
+                                .execute(params![id, f.scanned_unix])
+                                .context("heal-only touch")?;
+                        }
+                        // The old path came back or the new one was taken
+                        // between the walk and this write. No row is made
+                        // from an unanalysed file; the next scan sees it as new.
+                        None => tracing::info!(
+                            path = %crate::platform::redact_path_for_log(&f.path),
+                            "[RENAME-HEAL] move could not be re-bound; the next scan analyses the file"
+                        ),
+                    }
+                    *total += 1;
+                    if matches!(
+                        f.kind,
+                        crate::pipeline::discovery::FileKind::Image
+                            | crate::pipeline::discovery::FileKind::Video
+                            | crate::pipeline::discovery::FileKind::Model
+                    ) {
+                        *heavy += 1;
+                    }
+                    continue;
                 }
 
                 let file_id: i64 = file_stmt
@@ -532,7 +610,7 @@ impl DbWriter {
                     // The Mac face pipeline records its own file revision when it
                     // extracts Vision faces; a portable one here would mark them stale.
                     if f.vision_faces.is_none() {
-                    tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
+                        catalog_revision.execute(params![file_id, source_revision, f.scanned_unix])?;
                     }
                     for (face_index, face) in f.faces.iter().enumerate() {
                         let mut bbox = serde_json::json!({
@@ -648,6 +726,148 @@ impl DbWriter {
                     }
                 }
 
+                // A byte-identical image analyzed before: copy the twin row's
+                // tags, embedding, text and faces, keeping this file's own
+                // year and camera chips. With no twin row (the file was only
+                // touched, or the twin vanished) a row that already has its own
+                // results keeps them; a bare one is retried next scan.
+                if f.reuse_twin {
+                    let twin: Option<i64> = match f.content_hash.as_ref() {
+                        Some(hash) => twin_lookup
+                            .query_row(params![hash.as_slice(), file_id], |r| r.get(0))
+                            .optional()
+                            .with_context(|| format!("twin lookup for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                        None => None,
+                    };
+                    let redacted = || crate::platform::redact_path_for_log(&f.path);
+                    if let Some(twin_id) = twin {
+                        let stale_face_ids: Vec<i64> = face_delete
+                            .query_map(params![file_id], |r| r.get::<_, i64>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .with_context(|| format!("twin face delete for {}", redacted()))?;
+                        crop_ids_to_prune.extend(stale_face_ids);
+                        tag_delete.execute(params![file_id]).with_context(|| format!("twin tag delete for {}", redacted()))?;
+                        ocr_text_delete.execute(params![file_id]).with_context(|| format!("twin ocr delete for {}", redacted()))?;
+                        twin_files.execute(params![file_id, twin_id]).with_context(|| format!("twin files copy for {}", redacted()))?;
+                        twin_tags.execute(params![file_id, twin_id]).with_context(|| format!("twin tags copy for {}", redacted()))?;
+                        for (tag, score) in &f.tags {
+                            let trimmed = tag.trim();
+                            if trimmed.is_empty() { continue; }
+                            tag_insert
+                                .execute(params![file_id, trimmed, score.map(|s| s as f64)])
+                                .with_context(|| format!("twin extra tag for {}", redacted()))?;
+                        }
+                        twin_clip.execute(params![file_id, twin_id]).with_context(|| format!("twin clip copy for {}", redacted()))?;
+                        twin_ocr.execute(params![file_id, twin_id]).with_context(|| format!("twin ocr copy for {}", redacted()))?;
+                        let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                        // The Mac scan (`vision_faces`) stores faces without vectors
+                        // and leaves the file revision to the Mac face pipeline; its
+                        // copies are stored the same way.
+                        let mac_scan = f.vision_faces.is_some();
+                        if !mac_scan {
+                            catalog_revision.execute(params![file_id, source_revision, f.scanned_unix])?;
+                        }
+                        let faces: Vec<TwinFace> = twin_faces
+                            .query_map(params![twin_id], |r| {
+                                Ok(TwinFace {
+                                    id: r.get(0)?,
+                                    print_data: r.get(1)?,
+                                    bbox: r.get(2)?,
+                                    embedding: r.get(3)?,
+                                    quality: r.get(4)?,
+                                    excluded: r.get(5)?,
+                                    model: r.get(6)?,
+                                    processing: r.get(7)?,
+                                })
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .with_context(|| format!("twin faces read for {}", redacted()))?;
+                        for face in faces {
+                            let face = if mac_scan { face.without_vector() } else { face };
+                            let new_id: i64 = twin_face_insert
+                                .query_row(
+                                    params![
+                                        file_id,
+                                        face.print_data,
+                                        face.bbox,
+                                        face.embedding,
+                                        face.quality,
+                                        face.excluded,
+                                        face.model,
+                                        face.processing,
+                                        face.model.as_ref().map(|_| source_revision.as_str()),
+                                    ],
+                                    |r| r.get(0),
+                                )
+                                .with_context(|| format!("twin face copy for {}", redacted()))?;
+                            crop_copies.push((face.id, new_id));
+                        }
+                        // The copy owes what its twin owes (`Tagging.twinCopy`): the
+                        // catch-up pass then tags both. The twin's Year and camera
+                        // tags are its own, so the copy's are worked out again.
+                        let owes = owed_copy
+                            .execute(params![file_id, twin_id, f.size_bytes as i64, f.modified_unix, f.scanned_unix])
+                            .with_context(|| format!("twin catch-up marker for {}", redacted()))?;
+                        if owes == 0 {
+                            owed_clear.execute(params![file_id]).with_context(|| format!("twin catch-up clear for {}", redacted()))?;
+                        }
+                        reused_twins += 1;
+                    } else {
+                        let has_results: bool = twin_children
+                            .query_row(params![file_id], |r| r.get(0))
+                            .with_context(|| format!("twin children check for {}", redacted()))?;
+                        if !has_results {
+                            twin_unavailable
+                                .execute(params![file_id, "the identical file's analysis was not available; it will be analyzed on the next scan"])
+                                .with_context(|| format!("twin unavailable for {}", redacted()))?;
+                            *failed += 1;
+                        }
+                    }
+                }
+
+                // Remember a failure that is about the file, so a file that
+                // can never be read stops costing a full attempt on every scan.
+                if f.failed {
+                    if !f.failure_is_transient {
+                        failure_record
+                            .execute(params![
+                                file_id,
+                                f.size_bytes as i64,
+                                f.modified_unix,
+                                crate::pipeline::catch_up::failure_context(),
+                                f.scanned_unix,
+                            ])
+                            .with_context(|| format!("failure memory for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                    }
+                } else if let Some(owed) = f
+                    .catch_up
+                    .as_ref()
+                    .filter(|owed| owed.stages & crate::pipeline::catch_up::OWED_MASK != 0 && (f.tags_evaluated || f.ocr_stage_ran))
+                {
+                    // What the scan still owes this file (the Swift writer's step
+                    // 2b), in the same transaction as the tags it describes.
+                    owed_write
+                        .execute(params![
+                            file_id,
+                            owed.stages,
+                            f.size_bytes as i64,
+                            f.modified_unix,
+                            owed.vision,
+                            owed.face_count,
+                            f.scanned_unix,
+                        ])
+                        .with_context(|| format!("catch-up marker for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                } else if f.tags_evaluated || f.ocr_stage_ran {
+                    // A full analysis replaces any earlier marker.
+                    owed_clear
+                        .execute(params![file_id])
+                        .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                } else {
+                    failure_clear
+                        .execute(params![file_id])
+                        .with_context(|| format!("failure memory clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                }
+
                 if f.failed {
                     *failed += 1;
                 }
@@ -664,7 +884,7 @@ impl DbWriter {
                 clip.push(f.clip_ms);
                 let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
                 store.push(insert_ms);
-                if std::env::var("FILEID_PERF_TRACE").is_ok_and(|v| !v.is_empty() && v != "0") {
+                if crate::pipeline::tagging::perf_trace_enabled() {
                     tracing::debug!(
                         target: "FileIDEngine::perf",
                         stage = "db_write_done",
@@ -724,6 +944,13 @@ impl DbWriter {
             if let Err(err) = save_face_crop(face_id, crop) {
                 tracing::warn!(?err, face_id, "face crop write failed");
             }
+        }
+        // After the twins' own crops exist: a copy's twin may sit in this batch.
+        for (twin_face_id, face_id) in crop_copies {
+            copy_face_crop(twin_face_id, face_id);
+        }
+        if reused_twins > 0 {
+            tracing::info!(reused_twins, files_in_batch, "[TWIN] copied analysis from byte-identical images");
         }
 
         let wall = started.elapsed().as_secs_f64();
@@ -849,6 +1076,9 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
 // query, mirroring the INSERT path.
+const HEAL_ONLY_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND failed = 0 \
+     AND size_bytes = ?2 AND modified_at IS NOT NULL AND abs(modified_at - ?3) < 0.000001)";
+
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE OR ABORT files
        SET path_text = ?1, path_hash = ?2, path_search = ?4
@@ -891,6 +1121,90 @@ const INSERT_FACE_SQL: &str = r#"
     INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version, source_revision)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#;
+
+// Twin reuse (see pipeline/twin_reuse.rs): ?1 is the new row, ?2 the twin.
+const TWIN_LOOKUP_SQL: &str = const_format_twin_lookup();
+
+const fn const_format_twin_lookup() -> &'static str {
+    concat!(
+        "SELECT id FROM files WHERE content_hash = ?1 AND id != ?2 AND ",
+        "kind = 'image' AND failed = 0 AND content_hash IS NOT NULL AND length(content_hash) = 32 ",
+        "AND (EXISTS (SELECT 1 FROM tags t WHERE t.file_id = files.id AND t.source = 'auto') ",
+        "OR EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id)) ",
+        "ORDER BY id LIMIT 1"
+    )
+}
+
+const TWIN_FILES_SQL: &str = r#"
+    UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text,
+        camera_model = COALESCE(t.camera_model, files.camera_model),
+        location_lat = COALESCE(t.location_lat, files.location_lat),
+        location_lon = COALESCE(t.location_lon, files.location_lon)
+    FROM (SELECT phash, aesthetic, has_faces, has_text, camera_model, location_lat, location_lon
+          FROM files WHERE id = ?2) AS t
+    WHERE files.id = ?1
+"#;
+
+const TWIN_TAGS_SQL: &str = r#"
+    INSERT OR REPLACE INTO tags (file_id, tag, source, score)
+    SELECT ?1, tag, 'auto', score FROM tags
+    WHERE file_id = ?2 AND source = 'auto' AND tag NOT LIKE 'Year\_%' ESCAPE '\'
+"#;
+
+const TWIN_CLIP_SQL: &str = r#"
+    INSERT INTO clip_embeddings (file_id, embedding, model)
+    SELECT ?1, embedding, model FROM clip_embeddings WHERE file_id = ?2
+    ON CONFLICT(file_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model
+"#;
+
+const TWIN_OCR_SQL: &str = r#"
+    INSERT INTO ocr_text (file_id, text, source, handwritten)
+    SELECT ?1, text, source, handwritten FROM ocr_text WHERE file_id = ?2 AND source = 'ocr'
+"#;
+
+const TWIN_FACES_SQL: &str = r#"
+    SELECT id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version
+    FROM face_prints WHERE file_id = ?1 ORDER BY id
+"#;
+
+const TWIN_FACE_INSERT_SQL: &str = r#"
+    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version, source_revision)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    RETURNING id
+"#;
+
+struct TwinFace {
+    id: i64,
+    print_data: Vec<u8>,
+    bbox: String,
+    embedding: Option<Vec<u8>>,
+    quality: Option<f64>,
+    excluded: Option<i64>,
+    model: Option<String>,
+    processing: Option<String>,
+}
+
+impl TwinFace {
+    /// The face as a scan stores it before any vector is extracted.
+    fn without_vector(self) -> Self {
+        Self { print_data: Vec::new(), embedding: None, model: None, processing: None, ..self }
+    }
+}
+
+const OWED_WRITE_SQL: &str = "INSERT OR REPLACE INTO scan_catchup \
+     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)";
+
+// ?1 the copy, ?2 its twin, ?3/?4 the copy's size and date, ?5 now.
+const OWED_COPY_SQL: &str = "INSERT OR REPLACE INTO scan_catchup \
+     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+     SELECT ?1, stages, ?3, ?4, CASE WHEN json_valid(vision) THEN json_remove(vision, '$.x') ELSE vision END, \
+            face_count, 0, ?5 \
+     FROM scan_catchup WHERE file_id = ?2 AND (stages & 3) != 0";
+
+const CATALOG_REVISION_SQL: &str = "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) \
+     VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at \
+     WHERE catalog_revisions.revision!=excluded.revision";
 
 /// Convert a slice of f32 to little-endian bytes for BLOB storage.
 /// Matches the macOS GRDB layout exactly (CoreML / ORT both produce
@@ -1034,6 +1348,13 @@ fn save_face_crop(face_id: i64, crop_rgb_112: Vec<u8>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Best-effort copy of a twin's crop JPEG for a face row copied from it.
+fn copy_face_crop(twin_face_id: i64, face_id: i64) {
+    if let Ok(dir) = crate::paths::faces_dir() {
+        let _ = std::fs::copy(dir.join(format!("{twin_face_id}.jpg")), dir.join(format!("{face_id}.jpg")));
+    }
+}
+
 /// Best-effort removal of a face crop JPEG (face_crops/<face_id>.jpg) orphaned
 /// by a faces_evaluated re-process. Silent on any error — a leftover crop is
 /// cosmetic disk use, never a correctness issue.
@@ -1146,6 +1467,10 @@ mod tests {
             doc_stage_ran: false,
             text_stage_done: false,
             tags_evaluated: true,
+            reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
         }
     }
 
@@ -2393,3 +2718,498 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod twin_reuse_tests {
+    use super::*;
+    use crate::pipeline::discovery::FileKind;
+    use crate::pipeline::tagging::DetectedFace;
+    use std::path::PathBuf;
+
+    fn image(path: &str, hash: [u8; 32]) -> TaggedFile {
+        TaggedFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: Some(1_600_000_000.0),
+            captured_from_exif: false,
+            scanned_unix: 1_700_000_100.0,
+            has_faces: false,
+            faces: vec![],
+            vision_faces: None,
+            has_text: false,
+            ocr_text: None,
+            ocr_handwritten: false,
+            phash: None,
+            aesthetic: None,
+            image_width: 0,
+            image_height: 0,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+            file_ref: None,
+            content_hash: Some(hash),
+            legacy_hashes: None,
+            text_embedding: None,
+            doc_text: None,
+            tags: vec![],
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
+            text_stage_done: false,
+            tags_evaluated: false,
+            reuse_twin: false,
+            heal_only: false,
+            failure_is_transient: false,
+            catch_up: None,
+        }
+    }
+
+    fn analyzed(path: &str, hash: [u8; 32]) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.phash = Some(42);
+        file.aesthetic = Some(0.5);
+        file.has_faces = true;
+        file.has_text = true;
+        file.ocr_text = Some("FileID OCR 12345".to_owned());
+        file.image_width = 640;
+        file.image_height = 480;
+        let mut clip = vec![0.0f32; 512];
+        clip[0] = 1.0;
+        file.clip_embedding = Some(clip);
+        let mut embedding = vec![0.0f32; 128];
+        embedding[3] = 1.0;
+        file.faces.push(DetectedFace {
+            bbox: [10.0, 20.0, 30.0, 40.0],
+            embedding,
+            embedding_model: Some("fixture-weight-hash".to_owned()),
+            roll: 0.0,
+            yaw: 0.1,
+            pitch: 0.2,
+            quality: 0.9,
+            excluded: false,
+            crop_rgb_112: None,
+        });
+        file.tags = vec![("dog".to_owned(), Some(0.9)), ("park".to_owned(), Some(0.7)), ("Year_2020".to_owned(), None)];
+        file.faces_evaluated = true;
+        file.ocr_stage_ran = true;
+        file.tags_evaluated = true;
+        file
+    }
+
+    fn reused(path: &str, hash: [u8; 32], year: &str) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.reuse_twin = true;
+        file.tags = vec![(year.to_owned(), None)];
+        file
+    }
+
+    #[test]
+    fn a_copy_takes_over_its_twins_rows_and_keeps_its_own_year() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [9u8; 32];
+        let mut buffer = vec![analyzed("/lib/a.jpg", hash), reused("/lib/backup/a.jpg", hash, "Year_2021")];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+
+        let db = conn.lock();
+        let copy_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = '/lib/backup/a.jpg'", [], |r| r.get(0)).unwrap();
+        let (phash, has_faces, has_text, failed): (i64, i64, i64, i64) = db
+            .query_row("SELECT phash, has_faces, has_text, failed FROM files WHERE id = ?1", params![copy_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        assert_eq!((phash, has_faces, has_text, failed), (42, 1, 1, 0));
+        let mut tags: Vec<String> = db
+            .prepare("SELECT tag FROM tags WHERE file_id = ?1 ORDER BY tag").unwrap()
+            .query_map(params![copy_id], |r| r.get(0)).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        tags.sort();
+        assert_eq!(tags, vec!["Year_2021", "dog", "park"]);
+        let clip: Vec<u8> = db.query_row("SELECT embedding FROM clip_embeddings WHERE file_id = ?1", params![copy_id], |r| r.get(0)).unwrap();
+        assert_eq!(clip.len(), 512 * 4);
+        let text: String = db.query_row("SELECT text FROM ocr_text WHERE file_id = ?1", params![copy_id], |r| r.get(0)).unwrap();
+        assert_eq!(text, "FileID OCR 12345");
+        let (faces, model): (i64, String) = db
+            .query_row("SELECT count(*), max(embedding_model) FROM face_prints WHERE file_id = ?1", params![copy_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((faces, model.as_str()), (1, "fixture-weight-hash"));
+        let total_faces: i64 = db.query_row("SELECT count(*) FROM face_prints", [], |r| r.get(0)).unwrap();
+        assert_eq!(total_faces, 2, "the twin keeps its own face row");
+    }
+
+    #[test]
+    fn a_copy_takes_the_camera_and_location_its_bytes_share_with_the_twin() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        let mut twin = analyzed("/lib/a.jpg", hash);
+        twin.camera_model = Some("iPhone 15 Pro".to_owned());
+        twin.location_lat = Some(48.2);
+        twin.location_lon = Some(16.4);
+        writer.flush(&mut vec![twin, reused("/lib/b.jpg", hash, "Year_2021")], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let copy: (String, f64, f64) = db
+            .query_row("SELECT camera_model, location_lat, location_lon FROM files WHERE path_text = '/lib/b.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(copy, ("iPhone 15 Pro".to_owned(), 48.2, 16.4));
+        let revisions: i64 = db.query_row("SELECT count(*) FROM catalog_revisions r JOIN files f ON f.id = r.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revisions, 1);
+    }
+
+    #[test]
+    fn a_mac_scan_copy_stores_its_faces_without_vectors_or_a_file_revision() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [12u8; 32];
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.vision_faces = Some(Vec::new());
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash), copy], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let face: (Vec<u8>, Option<Vec<u8>>, Option<String>, Option<String>, Option<String>, String) = db
+            .query_row(
+                "SELECT fp.print_data, fp.arcface_embedding, fp.embedding_model, fp.processing_version, fp.source_revision, fp.bbox \
+                 FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.path_text = '/lib/b.jpg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert!(face.0.is_empty() && face.1.is_none() && face.2.is_none() && face.3.is_none() && face.4.is_none());
+        assert!(!face.5.is_empty(), "the face box is copied");
+        let revisions: i64 = db.query_row("SELECT count(*) FROM catalog_revisions r JOIN files f ON f.id = r.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revisions, 0, "the Mac face pipeline records the file revision itself");
+        let tags: i64 = db.query_row("SELECT count(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 3);
+    }
+
+    fn owed(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, f64, Option<String>, i64)> {
+        conn.lock()
+            .query_row(
+                "SELECT c.stages, c.size_bytes, c.modified_at, c.vision, c.face_count FROM scan_catchup c \
+                 JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn work_owed_is_stored_with_the_row_and_replaced_by_a_full_analysis() {
+        use crate::pipeline::catch_up::{Marker, CAREFUL_TEXT_OWED, TAGS_OWED, TEXT_READ_AT_SCAN};
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut deferred = analyzed("/lib/a.jpg", [21u8; 32]);
+        deferred.catch_up = Some(Marker { stages: TAGS_OWED | TEXT_READ_AT_SCAN, vision: Some("{\"k\":[],\"c\":[],\"u\":false}".into()), face_count: 2 });
+        writer.flush(&mut vec![deferred.clone()], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert_eq!(
+            owed(&conn, "/lib/a.jpg"),
+            Some((TAGS_OWED | TEXT_READ_AT_SCAN, 1234, 1_700_000_000.0, Some("{\"k\":[],\"c\":[],\"u\":false}".to_string()), 2))
+        );
+
+        // A marker that owes nothing is not stored, and clears an earlier one.
+        let mut settled = deferred.clone();
+        settled.catch_up = Some(Marker { stages: TEXT_READ_AT_SCAN, vision: None, face_count: 0 });
+        writer.flush(&mut vec![settled], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg"), None);
+
+        // A row whose stages did not run (a timeout) leaves an earlier marker alone.
+        writer.flush(&mut vec![deferred], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let mut timed_out = image("/lib/a.jpg", [21u8; 32]);
+        timed_out.catch_up = Some(Marker { stages: CAREFUL_TEXT_OWED, vision: None, face_count: 0 });
+        writer.flush(&mut vec![timed_out], &mut 0, &mut 0, &mut 0, 3).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg").map(|m| m.0), Some(TAGS_OWED | TEXT_READ_AT_SCAN));
+
+        // An inline analysis (no marker) replaces it.
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", [21u8; 32])], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(owed(&conn, "/lib/a.jpg"), None);
+    }
+
+    #[test]
+    fn a_copy_owes_what_its_twin_owes_without_the_twins_own_year_and_camera_tags() {
+        use crate::pipeline::catch_up::{Context, Marker, TAGS_OWED};
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [22u8; 32];
+        let mut twin = analyzed("/lib/a.jpg", hash);
+        let context = Context { k: vec!["park".into()], f: Some(true), x: Some(vec!["Year_2020".into()]), ..Context::default() };
+        twin.catch_up = Some(Marker { stages: TAGS_OWED, vision: context.encoded(), face_count: 1 });
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.size_bytes = 1234;
+        copy.modified_unix = 1_711_111_111.0;
+        writer.flush(&mut vec![twin, copy], &mut 0, &mut 0, &mut 0, 0).unwrap();
+
+        let (stages, size, modified, vision, faces) = owed(&conn, "/lib/b.jpg").expect("the copy owes the tags too");
+        assert_eq!((stages, size, modified, faces), (TAGS_OWED, 1234, 1_711_111_111.0, 1));
+        let copied = Context::decode(vision.as_deref()).unwrap();
+        assert_eq!(copied, Context { x: None, ..context });
+
+        // Once the twin is settled, a later copy takes its final tags and owes nothing.
+        conn.lock().execute("DELETE FROM scan_catchup WHERE file_id = (SELECT id FROM files WHERE path_text = '/lib/a.jpg')", []).unwrap();
+        let mut again = reused("/lib/b.jpg", hash, "Year_2021");
+        again.modified_unix = 1_711_111_111.0;
+        writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(owed(&conn, "/lib/b.jpg"), None);
+    }
+
+    #[test]
+    fn a_copy_of_an_earlier_scan_is_served_from_the_catalog() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [5u8; 32];
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock()).unwrap();
+        assert_eq!(known, vec![hash]);
+
+        writer.flush(&mut vec![reused("/lib/b.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let db = conn.lock();
+        let tags: i64 = db.query_row("SELECT count(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.path_text = '/lib/b.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 3);
+    }
+
+    #[test]
+    fn a_copy_without_a_twin_row_is_retried_next_scan_unless_it_has_results() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [7u8; 32];
+        writer.flush(&mut vec![reused("/lib/lonely.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let failed: i64 = conn.lock().query_row("SELECT failed FROM files WHERE path_text = '/lib/lonely.jpg'", [], |r| r.get(0)).unwrap();
+        assert_eq!(failed, 1);
+
+        // The same path touched (new mtime, same bytes) keeps the results it already has.
+        writer.flush(&mut vec![analyzed("/lib/own.jpg", hash)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let mut touched = reused("/lib/own.jpg", hash, "Year_2020");
+        touched.modified_unix += 10.0;
+        writer.flush(&mut vec![touched], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let db = conn.lock();
+        let (failed, tags): (i64, i64) = db
+            .query_row("SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((failed, tags), (0, 3));
+    }
+}
+
+#[cfg(test)]
+mod heal_only_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn discovered(path: &str, file_ref: u64) -> DiscoveredFile {
+        DiscoveredFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: Some(file_ref),
+            moved_from_known_row: false,
+        }
+    }
+
+    fn analyzed(path: &str, file_ref: u64) -> TaggedFile {
+        let mut file = TaggedFile::bare(&discovered(path, file_ref));
+        file.scanned_unix = 1_700_000_100.0;
+        file.content_hash = Some([3u8; 32]);
+        file.tags = vec![("dog".to_owned(), Some(0.9))];
+        file.tags_evaluated = true;
+        file
+    }
+
+    fn moved(path: &str, file_ref: u64) -> TaggedFile {
+        let mut file = TaggedFile::bare(&discovered(path, file_ref));
+        file.scanned_unix = 1_700_009_000.0;
+        file.heal_only = true;
+        file
+    }
+
+    fn seeded() -> (Arc<Mutex<Connection>>, DbWriter) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        conn.lock().execute("INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES ('/seed', 0, 1, 0, 'other', '')", []).unwrap();
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        assert!(writer.rename_heal_enabled());
+        (conn, writer)
+    }
+
+    fn rows(conn: &Arc<Mutex<Connection>>) -> Vec<(i64, String, f64, i64)> {
+        let db = conn.lock();
+        let mut stmt = db
+            .prepare("SELECT f.id, f.path_text, f.scanned_at, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE f.path_text != '/seed' ORDER BY f.id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn a_moved_file_rebinds_its_row_without_any_analysis() {
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        let (mut total, mut heavy, mut failed) = (0, 0, 0);
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut total, &mut heavy, &mut failed, 1).unwrap();
+        let after = rows(&conn);
+        assert_eq!(after, vec![(before[0].0, "/fileid-missing/new.jpg".to_string(), 1_700_009_000.0, 1)]);
+        assert_eq!((total, heavy, failed), (1, 1, 0));
+        let hash: Vec<u8> = conn.lock().query_row("SELECT content_hash FROM files WHERE id = ?1", [before[0].0], |r| r.get(0)).unwrap();
+        assert_eq!(hash, vec![3u8; 32], "the stored analysis is untouched");
+    }
+
+    #[test]
+    fn a_move_that_can_no_longer_be_rebound_writes_nothing() {
+        // The row changed since the walk: it no longer describes this file.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock().execute("UPDATE files SET modified_at = modified_at + 5 WHERE file_ref = 42", []).unwrap();
+        let before = rows(&conn);
+        let mut total = 0;
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut total, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+        assert_eq!(total, 1, "the file still counts toward the scan's progress");
+
+        // The new path was taken by another row in the meantime.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed("/fileid-missing/old.jpg", 42), analyzed("/fileid-missing/new.jpg", 43)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 42)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+
+        // The old path is back on disk (a hard link or a copy with the same id).
+        let dir = std::env::temp_dir().join(format!("fileid-heal-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.jpg");
+        std::fs::write(&old, b"x").unwrap();
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![analyzed(&old.to_string_lossy(), 42)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let before = rows(&conn);
+        writer.flush(&mut vec![moved(&dir.join("new.jpg").to_string_lossy(), 42)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(rows(&conn), before);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No candidate at all.
+        let (conn, writer) = seeded();
+        writer.flush(&mut vec![moved("/fileid-missing/new.jpg", 99)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert!(rows(&conn).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod failure_memory_tests {
+    use super::*;
+    use crate::pipeline::catch_up;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn file(path: &str, failed: bool) -> TaggedFile {
+        let mut file = TaggedFile::bare(&DiscoveredFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        });
+        file.failed = failed;
+        file.error_message = failed.then(|| "image decode: broken".to_string());
+        file.tags_evaluated = !failed;
+        file
+    }
+
+    fn memory(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, String)> {
+        conn.lock()
+            .query_row(
+                "SELECT c.stages, c.attempts, c.vision FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn given_up(conn: &Arc<Mutex<Connection>>) -> Vec<String> {
+        let db = conn.lock();
+        let mut stmt = db.prepare(catch_up::GIVEN_UP_SQL).unwrap();
+        stmt.query_map([catch_up::failure_context()], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn three_failures_of_the_same_file_are_remembered_and_a_success_forgets_them() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        for attempt in 1..=3 {
+            writer.flush(&mut vec![file("/lib/broken.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            assert_eq!(memory(&conn, "/lib/broken.jpg"), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
+            assert_eq!(given_up(&conn).len(), usize::from(attempt == 3));
+        }
+        let (failed, message): (i64, String) = conn
+            .lock()
+            .query_row("SELECT failed, error_message FROM files WHERE path_text = '/lib/broken.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((failed, message.as_str()), (1, "image decode: broken"), "the row the Library lists as unreadable is kept");
+
+        writer.flush(&mut vec![file("/lib/broken.jpg", false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, "/lib/broken.jpg"), None);
+        assert!(given_up(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_changed_file_or_engine_starts_counting_again_and_transient_failures_never_count() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        for attempt in 0..3 {
+            writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+        }
+        assert_eq!(given_up(&conn), vec!["/lib/a.jpg".to_string()]);
+
+        // Edited on disk: the next failure is the first for the new content.
+        let mut edited = file("/lib/a.jpg", true);
+        edited.modified_unix += 60.0;
+        writer.flush(&mut vec![edited], &mut 0, &mut 0, &mut 0, 3).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert!(given_up(&conn).is_empty());
+
+        // Failures recorded by another engine build do not count for this one.
+        conn.lock().execute("UPDATE scan_catchup SET attempts = 3, vision = '{\"failedBy\":\"fileid-engine 0.0.1 portable\"}'", []).unwrap();
+        assert!(given_up(&conn).is_empty());
+        let mut again = file("/lib/a.jpg", true);
+        again.modified_unix += 60.0;
+        writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+
+        // The stored row changed without a scan (size differs): not given up.
+        conn.lock().execute("UPDATE scan_catchup SET attempts = 3", []).unwrap();
+        assert_eq!(given_up(&conn).len(), 1);
+        conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
+        assert!(given_up(&conn).is_empty());
+
+        let mut transient = file("/lib/offline.jpg", true);
+        transient.failure_is_transient = true;
+        for attempt in 5..9 {
+            writer.flush(&mut vec![transient.clone()], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+        }
+        assert_eq!(memory(&conn, "/lib/offline.jpg"), None);
+    }
+
+    #[test]
+    fn a_failure_replaces_work_owed_from_an_earlier_scan() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer.flush(&mut vec![file("/lib/a.jpg", false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock()
+            .execute(
+                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
+                 SELECT id, 1, size_bytes, modified_at, '{}', 2, 2, 0 FROM files",
+                [],
+            )
+            .unwrap();
+        writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| (m.0, m.1)), Some((4, 1)));
+    }
+}
+

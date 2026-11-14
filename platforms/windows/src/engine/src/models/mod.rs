@@ -59,4 +59,45 @@ pub(crate) mod resident_service;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;
+
+/// Check a session out of a pool: the first one nobody is using, starting at
+/// `preferred`; only when every session is busy does the caller wait, on its
+/// preferred one. Indexing by worker number alone let two workers queue on
+/// one session while another sat idle.
+pub fn checkout<T>(pool: &[parking_lot::Mutex<T>], preferred: usize) -> parking_lot::MutexGuard<'_, T> {
+    let start = preferred % pool.len();
+    (0..pool.len())
+        .find_map(|offset| pool[(start + offset) % pool.len()].try_lock())
+        .unwrap_or_else(|| pool[start].lock())
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::checkout;
+    use parking_lot::Mutex;
+
+    #[test]
+    fn checkout_takes_an_idle_session_before_waiting_on_a_busy_one() {
+        let pool: Vec<Mutex<usize>> = (0..3).map(Mutex::new).collect();
+        assert_eq!(*checkout(&pool, 1), 1, "the preferred session when it is free");
+        assert_eq!(*checkout(&pool, 7), 1, "the preference wraps around the pool");
+        let busy = pool[1].lock();
+        assert_eq!(*checkout(&pool, 1), 2, "the next idle session instead of queueing");
+        let also_busy = pool[2].lock();
+        assert_eq!(*checkout(&pool, 1), 0);
+        let first = checkout(&pool, 1);
+        assert!(pool.iter().all(|session| session.try_lock().is_none()), "three holders, three sessions");
+        drop((busy, also_busy, first));
+
+        // Every session busy: the caller waits for its preferred one.
+        let held: Vec<_> = pool.iter().map(Mutex::lock).collect();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| *checkout(&pool, 2));
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert!(!waiter.is_finished());
+            drop(held);
+            assert_eq!(waiter.join().unwrap(), 2);
+        });
+    }
+}
 pub use native_runtime::llama_server_available;

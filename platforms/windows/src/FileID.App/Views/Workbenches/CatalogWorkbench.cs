@@ -277,7 +277,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         => DebugLog.SafeRun("CatalogWorkbench.OnAppScopeChanged", () =>
         {
             if (e.PropertyName != nameof(AppViewModel.Scope)) return;
-            DebugLog.Debug($"[ENGINE-SUB:CatalogWorkbench] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:CatalogWorkbench] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(SearchInChosenLocation);
         });
 
@@ -300,7 +300,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
         AppViewModel.Instance.PropertyChanged += OnAppScopeChanged;
         UseMomentsQuery();
-        _thumbs ??= new ThumbnailService();
+        _thumbs = ThumbnailService.Shared;
         _poll.Start();
         _ = PollAsync();
         if (_evidence.Player is not null) _playhead.Start();
@@ -312,7 +312,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
         _poll.Stop();
         _playhead.Stop();
-        _thumbs?.Dispose();
         _thumbs = null;
     }
 
@@ -660,7 +659,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         var result = await Engine.CatalogAsync(request, ct);
         await UI(() =>
         {
-            Status.Text = result.Message ?? $"Job action: {result.Status}";
+            Status.Text = result.Message ?? (result.Status == "ok" ? "Done." : "That didn't work. Try again in a moment.");
             if (result.Status == "ok" && revision == Interlocked.Read(ref _jobsRevision)) ApplyJobs(result.Jobs);
         }, ct);
     }
@@ -680,14 +679,14 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             }
             else
             {
-                Status.Text = result.Message ?? "Job refresh failed.";
+                Status.Text = result.Message ?? "Couldn't check progress just now.";
             }
         }, ct);
         if (refreshDetail && _fileID is not null) await RefreshDetailAsync(ct);
     }
     private async Task PollAsync()
     {
-        if (_polling || Busy || Lifetime.IsCancellationRequested) return;
+        if (_polling || Busy || Lifetime.IsCancellationRequested || !WindowShowing()) return;
         _polling = true;
         var ct = Lifetime;
         try { await RefreshJobsAsync(ct); }
@@ -695,8 +694,30 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         catch (Exception ex) { await UI(() => Status.Text = ex.Message, ct); }
         finally { _polling = false; }
     }
+    private static bool WindowShowing()
+    {
+        try
+        {
+            var window = FileID.App.HostWindow;
+            if (window is null) return true;
+            if (!window.Visible) return false;
+            return window.AppWindow?.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter
+            {
+                State: Microsoft.UI.Windowing.OverlappedPresenterState.Minimized
+            };
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or ObjectDisposedException or InvalidOperationException)
+        {
+            return true;
+        }
+    }
+
+    private IReadOnlyList<CatalogJob> _shownJobs = Array.Empty<CatalogJob>();
+
     private void ApplyJobs(IReadOnlyList<CatalogJob> jobs)
     {
+        if (_jobs.ItemsSource is not null && CatalogJobActions.SameJobs(_shownJobs, jobs)) return;
+        _shownJobs = jobs;
         var selected = (_jobs.SelectedItem as JobItem)?.Job.Id;
         var items = jobs.Select(job => new JobItem(job)).ToArray();
         _jobs.ItemsSource = items;
@@ -712,6 +733,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     }
     private sealed record JobItem(CatalogJob Job)
     {
-        public override string ToString() => $"{(Job.Kind == "catalogIndex" ? "Search index" : Job.Kind == "takeGrouping" ? "Related tries" : "Video analysis")} · {Job.State} · {Job.Progress:P0} · {Job.FileIDs.Count} file(s)\nJob {Job.Id} · Files: {string.Join(", ", Job.FileIDs)}\n{Job.Error}";
+        public override string ToString() => CatalogJobActions.RowText(Job);
     }
 }

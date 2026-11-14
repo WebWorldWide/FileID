@@ -121,7 +121,7 @@ final class ChatActionRunner {
 
     func stop(_ action: ChatAction, engine: EngineClient) {
         switch action.kind {
-        case "scanFolder", "rescan": engine.cancelAutoPilot(); engine.cancel()
+        case "scanFolder", "rescan": engine.cancelScan()
         case "describeFiles": engine.deepAnalyzeCancel()
         default: engine.cancelRestructure()
         }
@@ -186,7 +186,12 @@ final class ChatActionRunner {
                 return "Scan finished · \(progress.processed.formatted()) files\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn't be read" : "")."
             }
         case "describeFiles":
-            let model = DeepAnalyzeSettings.shared.activeKind.rawValue
+            let kind = DeepAnalyzeSettings.shared.activeKind
+            guard ModelLicenseGate.ensureAccepted(for: kind) else {
+                phases[action.id] = .failed("Describing didn't start because the AI model's terms weren't accepted.")
+                return
+            }
+            let model = kind.rawValue
             let sent = action.fileIDs.map { engine.deepAnalyzeSelection(fileIDs: Array($0.prefix(100)), modelKind: model) } ?? {
                 engine.deepAnalyzeAll(modelKind: model, skipExisting: true)
                 return engine.deepAnalyzeInFlight
@@ -200,7 +205,7 @@ final class ChatActionRunner {
             }
         case "stopJob":
             let job = action.job ?? "all"
-            if job == "scan" || job == "all" { engine.cancelAutoPilot(); engine.cancel() }
+            if job == "scan" || job == "all" { engine.cancelScan() }
             if job == "describe" || job == "all" { engine.deepAnalyzeCancel() }
             if job == "organize" || job == "all" { engine.cancelRestructure() }
             if job == "moments" || job == "all" {
@@ -232,7 +237,7 @@ final class ChatActionRunner {
             guard let setting = action.setting, let value = action.value else { return }
             let previous = Self.setting(setting)
             Self.setSetting(setting, value)
-            phases[action.id] = .done("Turned \(value ? "on" : "off").")
+            phases[action.id] = .done("\(Self.settingTitle(setting)) is now \(value ? "on" : "off").")
             offerUndo(action, label: "Undo") { Self.setSetting(setting, previous); return "Changed back." }
         case "suggestFolderLayout":
             guard let path = action.path else { return }
@@ -290,32 +295,51 @@ final class ChatActionRunner {
             guard let store = handoff.store, let renames = action.renames else { return }
             phases[action.id] = .running("Renaming \(renames.count.formatted()) files")
             let wanted = Dictionary(renames.map { ($0.fileID, $0.newName) }, uniquingKeysWith: { first, _ in first })
-            let rows = await Task.detached(priority: .userInitiated) { () -> [FileRow] in
+            let current = await Task.detached(priority: .userInitiated) { () -> [Int64] in
                 // Only files whose suggestion is still the one the card showed.
                 store.files(forFileIDs: Array(wanted.keys)).filter { row in
                     guard let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines), let name = wanted[row.id] else { return false }
                     let ext = row.url.pathExtension
                     return (ext.isEmpty ? proposed : "\(proposed).\(ext)") == name
-                }
+                }.map(\.id).sorted()
             }.value
-            let result = await CatalogWrites.applyProposedNames(rows, engine: engine, store: store)
+            // Same path as the rename sheets: names in the saved Name style.
+            let naming = StyledNames.savedNaming()
+            var styled: [CatalogWrites.NamedRename] = []
+            for start in stride(from: 0, to: current.count, by: NameStyle.maxFiles) {
+                let ids = Array(current[start..<min(start + NameStyle.maxFiles, current.count)])
+                switch await StyledNames.rows(engine: engine, fileIDs: ids, naming: naming) {
+                case .failed(let why):
+                    phases[action.id] = .failed(why)
+                    return
+                case .rows(let rows):
+                    styled += NameStyle.renames(rows)
+                }
+            }
+            let result = await CatalogWrites.applyNames(styled, engine: engine, store: store)
             BulkRenameSheet.saveLastBatch(result.renamed)
-            let skipped = renames.count - result.renamed.count - result.failed
-            phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (result.failed > 0 ? " · \(result.failed.formatted()) failed" : "") + (skipped > 0 ? " · \(skipped.formatted()) skipped because their suggestion changed" : "") + ".")
+            let changed = renames.count - current.count
+            phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (StyledNames.suggestionLabel() == "Suggested name" ? "" : " in your name style") + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" : "") + (changed > 0 ? " · \(changed.formatted()) skipped because their suggestion changed" : "") + ".")
             if !result.renamed.isEmpty {
                 let batch = result.renamed
                 offerUndo(action, label: "Undo renames") {
                     let undone = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
-                    if undone.failed == 0 && undone.skipped == 0 { BulkRenameSheet.clearLastBatch() }
+                    if undone.failed == 0 && undone.skipped == 0 { BulkRenameSheet.removeBatch(batch) }
                     return "Put back \(undone.undone.formatted()) names."
                 }
             }
         case "namePerson":
             guard let store = handoff.store, let id = action.personID, let name = action.name else { return }
-            guard let before = store.persons(includeUnknown: true).first(where: { $0.id == id }) else { phases[action.id] = .failed("That person is no longer in People."); return }
-            let parts = name.split(separator: " ").map(String.init)
-            guard await CatalogWrites.renamePerson(engine, store: store, id: id, title: nil, firstName: parts.first, middleName: nil,
-                                                   lastName: parts.count > 1 ? parts.dropFirst().joined(separator: " ") : nil, suffix: nil) else {
+            let found = await Task.detached(priority: .userInitiated) {
+                store.persons(includeUnknown: true).first(where: { $0.id == id })
+            }.value
+            guard let before = found else { phases[action.id] = .failed("That person is no longer in People."); return }
+            // Only a plain "First Last" is split; anything else ("Uncle Bob Jr", "Grandma") stays whole.
+            let whole = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = whole.split(separator: " ").map(String.init)
+            let split = parts.count == 2
+            guard await CatalogWrites.renamePerson(engine, store: store, id: id, title: nil, firstName: split ? parts[0] : whole, middleName: nil,
+                                                   lastName: split ? parts[1] : nil, suffix: nil) else {
                 phases[action.id] = .failed("The name wasn't saved. Try again in People.")
                 return
             }
@@ -334,8 +358,16 @@ final class ChatActionRunner {
         case "mergePeople":
             guard let store = handoff.store, let target = action.personID, let sources = action.personIDs else { return }
             phases[action.id] = .running("Merging")
-            let moved = await CatalogWrites.merge(engine, store: store, target: target, sources: sources)
-            phases[action.id] = moved == nil ? .failed("The merge didn't go through. Nothing changed.") : .done("Merged · \((moved ?? 0).formatted()) faces moved.")
+            var seen = Set<Int64>()
+            let others = sources.filter { $0 != target && seen.insert($0).inserted }
+            let merged = await CatalogWrites.mergeBatch(engine, store: store, plan: [(target: target, sources: others)])
+            if merged == 0 {
+                phases[action.id] = .failed("The merge didn't go through. Nothing changed.")
+            } else if merged < others.count {
+                phases[action.id] = .done("Merged \(merged.formatted()) of \(others.count.formatted()) people into this person. The rest didn't merge; try again in People.")
+            } else {
+                phases[action.id] = .done(merged == 1 ? "Merged the two into one person." : "Merged \(merged.formatted()) people into this person.")
+            }
         default:
             phases[action.id] = .failed("This action isn't available.")
         }
@@ -362,13 +394,17 @@ final class ChatActionRunner {
         let changed = outcome.verificationFailed + missing
         var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
+        if outcome.protectedLocation > 0 { summary += " · \(outcome.protectedLocation.formatted()) left alone in a protected location, such as a Photos library" }
         if outcome.failed > 0 { summary += " · \(outcome.failed.formatted()) couldn't be moved" }
         store.notifyChanged()
         phases[action.id] = .done(summary + ".")
         if let batch = outcome.batchID, !outcome.trashed.isEmpty {
-            UserDefaults.standard.set(batch, forKey: "cleanup.lastTrashBatch")
+            UserDefaults.standard.set(batch, forKey: Self.lastTrashBatchKey)
             offerUndo(action, label: "Put them back") {
                 let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+                if undone.restored > 0, UserDefaults.standard.string(forKey: Self.lastTrashBatchKey) == batch {
+                    UserDefaults.standard.set("", forKey: Self.lastTrashBatchKey)
+                }
                 store.notifyChanged()
                 return undone.restored > 0 ? "Put back \(undone.restored.formatted()) \(undone.restored == 1 ? "copy" : "copies")." : (undone.message ?? "Nothing was put back. Check the Trash.")
             }
@@ -408,7 +444,7 @@ final class ChatActionRunner {
 
     /// Why a folder job a card is waiting on will never send its reply.
     nonisolated static func folderJobInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {
-        if engineRestarted { return "FileID's engine restarted before this finished. Check Organize Folders, then try again." }
+        if engineRestarted { return "FileID's helper restarted before this finished. Check Organize Folders, then try again." }
         guard let newError, folderJobFailureKinds.contains(newError.kind) else { return nil }
         return ["restructure_busy", "restructure_already_running"].contains(newError.kind)
             ? "Another folder job is already running. Wait for it to finish, then try again."
@@ -423,7 +459,17 @@ final class ChatActionRunner {
         }
     }
 
+    nonisolated static let lastTrashBatchKey = "chat.lastTrashBatch"
+
     // MARK: - Settings Chat may change
+
+    static func settingTitle(_ key: String) -> String {
+        switch key {
+        case "cleanupAutoTag": "Tagging the copies you keep in Duplicates"
+        case "backgroundMotion": "Background motion"
+        default: "Written answers in Chat"
+        }
+    }
 
     static func setting(_ key: String) -> Bool {
         let defaults = UserDefaults.standard
@@ -527,7 +573,7 @@ struct ChatActionCard: View {
     private var cardDetail: String {
         if action.kind == "applyFolderLayout" {
             guard let plan else { return "There's no suggested layout for this folder yet. Ask Chat to organize it first; nothing moves until you apply it." }
-            return "Moves \(plan.count.formatted()) files in \(URL(fileURLWithPath: plan.root).lastPathComponent) into the suggested folders. Files the plan marked for review stay where they are."
+            return "Moves the \(plan.count.formatted()) files FileID is sure about in \(URL(fileURLWithPath: plan.root).lastPathComponent) into the suggested folders. Review the rest in Organize Folders."
         }
         if action.kind == "undoLastMove", !engine.canUndoRestructure { return "There's no applied layout to undo." }
         return action.detail
@@ -535,6 +581,7 @@ struct ChatActionCard: View {
 
     private var primaryTitle: String {
         if action.kind == "applyFolderLayout", let plan { return "Move \(plan.count.formatted()) files" }
+        if action.kind == "mergePeople" { return "Merge" }
         return action.title
     }
 
@@ -557,7 +604,12 @@ struct ChatActionCard: View {
                     }
                 }
             }
-            if let undo = action.undo { MetaText("Undo: \(undo)", color: Theme.text2, size: 12) }
+            if action.kind == "mergePeople" {
+                MetaText("You can undo a merge right after, here or with Undo last merge in People.", color: Theme.warning, size: 12)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let undo = action.undo {
+                MetaText("Undo: \(undo)", color: Theme.text2, size: 12)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -62,6 +62,8 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v31_take_proposals", include_str!("../../../../../../shared/catalog/v31.sql")),
         ("v32_face_review", include_str!("../../../../../../shared/catalog/v32.sql")),
         ("v33_face_queues", include_str!("../../../../../../shared/catalog/v33.sql")),
+        ("v34_scan_catchup", include_str!("../../../../../../shared/catalog/v34.sql")),
+        ("v35_foreign_key_indexes", include_str!("../../../../../../shared/catalog/v35.sql")),
     ]
 }
 
@@ -520,7 +522,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 33, "expected 33 applied migrations");
+        assert_eq!(n, 35, "expected 35 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -599,7 +601,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 33);
+        assert_eq!(n, 35);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -693,7 +695,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 33] = [
+        const CANONICAL: [&str; 35] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -727,6 +729,8 @@ mod tests {
             "v31_take_proposals",
             "v32_face_review",
             "v33_face_queues",
+            "v34_scan_catchup",
+            "v35_foreign_key_indexes",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
@@ -911,5 +915,155 @@ mod tests {
             !joined.to_ascii_uppercase().contains("TEMP B-TREE"),
             "grid query must not materialise a TEMP B-TREE sort, got: {joined}"
         );
+    }
+
+    fn uncovered_foreign_keys(conn: &Connection) -> Vec<String> {
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        let mut missing = Vec::new();
+        for table in tables {
+            let keys: Vec<String> = conn
+                .prepare("SELECT \"from\" FROM pragma_foreign_key_list(?1) WHERE seq=0")
+                .unwrap()
+                .query_map([&table], |r| r.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            let mut leading: Vec<String> = conn
+                .prepare(
+                    "SELECT i.name FROM pragma_index_list(?1) l, pragma_index_info(l.name) i WHERE i.seqno=0",
+                )
+                .unwrap()
+                .query_map([&table], |r| r.get::<_, Option<String>>(0))
+                .unwrap()
+                .flatten()
+                .flatten()
+                .collect();
+            let rowid: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_table_info(?1) WHERE pk=1 AND type='INTEGER' AND (SELECT COUNT(*) FROM pragma_table_info(?1) WHERE pk>0)=1")
+                .unwrap()
+                .query_map([&table], |r| r.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            leading.extend(rowid);
+            for key in keys {
+                if !leading.contains(&key) {
+                    missing.push(format!("{table}.{key}"));
+                }
+            }
+        }
+        missing
+    }
+
+    #[test]
+    fn v35_indexes_every_foreign_key_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        assert_eq!(uncovered_foreign_keys(&conn), Vec::<String>::new());
+    }
+
+    fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+        conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn v35_invalidation_and_file_deletes_search_instead_of_scanning() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        let trigger: String = conn
+            .query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='catalog_invalidate'", [], |r| r.get(0))
+            .unwrap();
+        let body = trigger.split_once("BEGIN").unwrap().1.rsplit_once("END").unwrap().0;
+        let statements: Vec<String> = body
+            .split(';')
+            .map(|s| s.trim().replace("new.id", "7"))
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(statements.len(), 8, "catalog_invalidate changed; re-check its indexes");
+        for statement in &statements {
+            let steps = plan(&conn, statement);
+            assert!(!steps.is_empty(), "{statement}");
+            for step in steps {
+                assert!(step.starts_with("SEARCH"), "{statement} => {step}");
+            }
+        }
+
+        let children: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT m.name, f.\"from\" FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+                 WHERE m.type='table' AND f.\"table\" IN ('files','persons','face_prints') ORDER BY 1,2",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(children.len() > 30, "{children:?}");
+        for (table, column) in children {
+            for step in plan(&conn, &format!("SELECT 1 FROM {table} WHERE {column}=7")) {
+                assert!(step.starts_with("SEARCH"), "{table}.{column} => {step}");
+            }
+        }
+
+        for (name, table) in [
+            ("catalog_observations_file", "catalog_observations"),
+            ("catalog_embeddings_file", "catalog_embeddings"),
+            ("catalog_coverage_file", "catalog_coverage"),
+            ("catalog_take_scores_file", "catalog_take_scores"),
+            ("catalog_event_files_file", "catalog_event_files"),
+            ("catalog_assets_derived", "catalog_assets"),
+            ("catalog_corrections_file", "catalog_corrections"),
+            ("face_identity_constraints_anchor", "face_identity_constraints"),
+            ("face_queue_dismissals_file", "face_queue_dismissals"),
+            ("face_queue_dismissals_other", "face_queue_dismissals"),
+            ("face_review_candidates_runner_up", "face_review_candidates"),
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1 AND tbl_name=?2",
+                    [name, table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn v35_deleting_a_file_still_cascades() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO files (id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES
+              (1,'/a.jpg',1,100,0,'image','jpg'),(2,'/b.jpg',2,100,0,'image','jpg');
+             INSERT INTO catalog_events(id,title) VALUES('e','t');
+             INSERT INTO catalog_event_files VALUES('e',1),('e',2);
+             INSERT INTO catalog_assets VALUES(2,1,'proxy','{}');
+             INSERT INTO catalog_corrections VALUES('c',1,'k','{}','{}',0);
+             INSERT INTO catalog_embeddings VALUES('1','file',1,'m',1,x'00000000','r');
+             INSERT INTO face_identity_constraints(file_id,bbox,anchor_file_id,anchor_bbox,source,created_at) VALUES(2,'b',1,'a','review',0);
+             INSERT INTO face_queue_dismissals(kind,file_id,bbox,other_file_id,other_bbox,created_at) VALUES('merge',2,'b',1,'a',0);
+             DELETE FROM files WHERE id=1;",
+        )
+        .unwrap();
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT COUNT(*) FROM catalog_event_files"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM catalog_assets"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM catalog_corrections WHERE file_id IS NULL"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM catalog_embeddings"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM face_identity_constraints"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM face_queue_dismissals"), 0);
     }
 }

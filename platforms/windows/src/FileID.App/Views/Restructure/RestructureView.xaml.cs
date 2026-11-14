@@ -174,19 +174,19 @@ public sealed partial class RestructureView : UserControl
             switch (e.PropertyName)
             {
                 case nameof(EngineClient.LastRestructurePlan):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
                     break;
                 case nameof(EngineClient.LastRestructureApplyResult):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
                     break;
                 case nameof(EngineClient.CanUndoRestructure):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncUndoAffordance(); });
                     break;
                 case nameof(EngineClient.LastError):
-                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DebugLog.Info($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineError(); });
                     break;
                 case nameof(EngineClient.SpawnGeneration):
@@ -1323,9 +1323,7 @@ public sealed partial class RestructureView : UserControl
         {
             PlanStatusText.Text = "FileID couldn't work out a plan. Try again.";
             _ = ShowAlertAsync("Couldn't suggest a layout",
-                string.IsNullOrWhiteSpace(err.Message)
-                    ? "FileID couldn't work out a plan. Try again, or rescan the folder first."
-                    : err.Message);
+                EngineErrorText.Plain(err.Message, "FileID couldn't work out a plan. Try again, or rescan the folder first."));
         }
         else if (err.Kind == "undo_restructure")
         {
@@ -1333,18 +1331,14 @@ public sealed partial class RestructureView : UserControl
             SyncUndoAffordance();
             ApplyStatusText.Text = "Undo didn't complete. Review your files before trying again.";
             _ = ShowAlertAsync("Couldn't undo",
-                (string.IsNullOrWhiteSpace(err.Message)
-                    ? "FileID couldn't finish undoing your reorganization."
-                    : err.Message) +
+                EngineErrorText.Plain(err.Message, "FileID couldn't finish putting your folders back.") +
                 "\n\nCompleted moves may already have been restored. Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl if this keeps happening.");
         }
         else
         {
             ApplyStatusText.Text = "Apply was not confirmed. Review your files before trying again.";
             _ = ShowAlertAsync("Couldn't apply changes",
-                (string.IsNullOrWhiteSpace(err.Message)
-                    ? "FileID couldn't finish applying your reorganization."
-                    : err.Message) +
+                EngineErrorText.Plain(err.Message, "FileID couldn't finish moving your files.") +
                 "\n\nSome files may already have moved. Review your files and check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl before retrying.");
         }
     }

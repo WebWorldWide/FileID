@@ -162,7 +162,13 @@ pub enum CommandPayload {
     /// action undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any
     /// of them moved since), merge (the merged person comes back under its id with its name and
     /// faces), notSamePerson, dismiss and split (the faces return and the new person is removed);
-    /// the suggestion is pending again.
+    /// the suggestion is pending again. Schema 1.27.0: also undoes a mergeClusters merge by the
+    /// operationID in its bulkActionResult item: the merged person comes back under its id with its
+    /// name, title, unknown flag and representative face, the faces that still exist and still
+    /// belong to the kept person move back, a name the kept person took from it is cleared, and
+    /// verdicts the merge replaced return; refused when none of its faces can move back.
+    /// operationID lastPersonMerge names the newest such merge from the last 24 hours that is not
+    /// undone.
     #[serde(rename = "undoFaceReview")]
     UndoFaceReview(UndoFaceReviewPayload),
 }
@@ -1018,7 +1024,10 @@ pub struct ListFaceReviewPayload {
     /// existing people, in merges, best score first; splits: people whose faces form two
     /// well-separated groups, in splits, most separated first; refresh: the face refresh backlog
     /// for the engine's current face model and processing, in refresh (items, merges and splits
-    /// empty). Every queue is read-only and stored by runFaceClustering.
+    /// empty). Every queue is read-only and stored by runFaceClustering. Schema 1.27.0: mergeUndo
+    /// reports the newest mergeClusters merge from the last 24 hours that undoFaceReview can still
+    /// undo: total is 1 with operationID, personID (the person kept) and otherPersonID (the person
+    /// merged in), or 0 when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1069,7 +1078,12 @@ pub struct ResolveFaceReviewPayload {
 /// undo. Schema 1.25.0: also undoes acceptAll (every accepted face, or nothing when any of them
 /// moved since), merge (the merged person comes back under its id with its name and faces),
 /// notSamePerson, dismiss and split (the faces return and the new person is removed); the
-/// suggestion is pending again.
+/// suggestion is pending again. Schema 1.27.0: also undoes a mergeClusters merge by the operationID
+/// in its bulkActionResult item: the merged person comes back under its id with its name, title,
+/// unknown flag and representative face, the faces that still exist and still belong to the kept
+/// person move back, a name the kept person took from it is cleared, and verdicts the merge
+/// replaced return; refused when none of its faces can move back. operationID lastPersonMerge names
+/// the newest such merge from the last 24 hours that is not undone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoFaceReviewPayload {
@@ -1563,6 +1577,18 @@ pub struct BulkActionItem {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Schema 1.27.0. trashFiles, on a file that was not moved: why, so the app can group refusals
+    /// without reading message. changed: the file, or the copy being kept, is no longer what was
+    /// indexed or verified; protected: it is in a read-only or managed-library location; missing:
+    /// the catalog has no such file; failed: anything else. Omitted on success, by other actions
+    /// and by engines that do not classify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Schema 1.27.0. mergeClusters, on a merge that changed something: the catalog operation
+    /// (catalog_corrections kind person_merge) to pass to undoFaceReview. Omitted by engines that
+    /// keep no merge journal.
+    #[serde(rename = "operationID", default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1957,7 +1983,8 @@ pub struct FaceReviewPage {
     /// Plain-language reason when status is not ok.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// resolve: the operation to pass to undoFaceReview. undo: the operation undone.
+    /// resolve: the operation to pass to undoFaceReview. undo: the operation undone. list of
+    /// mergeUndo (schema 1.27.0): the merge that can be undone.
     #[serde(rename = "operationID", default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     /// resolve and undo: the face changed.

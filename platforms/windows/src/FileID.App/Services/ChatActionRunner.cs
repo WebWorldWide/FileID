@@ -408,13 +408,31 @@ internal sealed class ChatActionRunner
         var target = action.PersonID!.Value;
         Set(action.Id, ChatActionPhase.Running("Merging"));
         var merged = 0;
+        var operations = new List<string>();
         foreach (var source in action.PersonIDs!.Distinct())
         {
             var result = await Engine.WaitForBulkActionResultAsync("mergeClusters", () => Engine.MergeClustersAsync(source, target), TimeSpan.FromSeconds(30));
-            if (result.Failed == 0 && result.Succeeded > 0) merged++;
+            if (!PersonMergePolicy.Succeeded(result)) continue;
+            merged++;
+            if (PersonMergePolicy.OperationId(result) is { } operation) operations.Add(operation);
         }
-        if (merged == 0) Fail(action.Id, "The merge didn't go through. Nothing changed.");
-        else Set(action.Id, ChatActionPhase.Done(merged == 1 ? "Merged 1 person into this one." : $"Merged {merged:N0} people into this one."));
+        if (merged == 0)
+        {
+            Fail(action.Id, "The merge didn't go through. Nothing changed.");
+            return;
+        }
+        Set(action.Id, ChatActionPhase.Done(merged == 1 ? "Merged 1 person into this one." : $"Merged {merged:N0} people into this one."));
+        if (operations.Count != merged) return;
+        // Each merge is undone from the helper's own record, newest first.
+        OfferUndo(action.Id, "Undo merge", async () =>
+        {
+            for (var index = operations.Count - 1; index >= 0; index--)
+            {
+                var page = await Engine.UndoFaceReviewAsync(operations[index]);
+                if (!FaceReviewPolicy.IsOk(page)) return "FileID couldn't put them back. Try again in People.";
+            }
+            return "Put back as separate people.";
+        });
     }
 
     private static async Task<IReadOnlyDictionary<long, ChatFileRow>> ReadFilesAsync(IReadOnlyCollection<long> ids)

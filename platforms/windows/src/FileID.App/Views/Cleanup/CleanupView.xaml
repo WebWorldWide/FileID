@@ -44,7 +44,7 @@
                            TextWrapping="Wrap"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           ToolTipService.ToolTip="To undo, open the Recycle Bin, right-click a file and choose Restore." />
+                           ToolTipService.ToolTip="Press Put back last move to undo. You can also restore files from the Recycle Bin." />
             </StackPanel>
             <ScrollViewer Grid.Column="1"
                           HorizontalScrollMode="Auto"
@@ -69,6 +69,17 @@
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE74D;" />
                             <TextBlock Text="{x:Bind DeleteButtonText, Mode=OneWay}" TextWrapping="NoWrap" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="PutBackButton"
+                            Click="OnPutBackLastMoveClicked"
+                            Visibility="Collapsed"
+                            AutomationProperties.Name="Put back last move"
+                            AutomationProperties.HelpText="Puts the files from your last move to the Recycle Bin back where they were"
+                            ToolTipService.ToolTip="Puts the files from your last move to the Recycle Bin back where they were">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <FontIcon FontSize="13" Glyph="&#xE7A7;" />
+                            <TextBlock Text="Put back last move" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnRefreshClicked"

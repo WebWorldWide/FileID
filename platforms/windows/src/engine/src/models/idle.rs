@@ -46,6 +46,27 @@ impl<T: Send> IdleSlot<T> {
         Ok(result)
     }
 
+    /// Runs `work` on the held value without loading it; `None` when parked.
+    pub fn peek<R>(&self, work: impl FnOnce(&T) -> R) -> Option<R> {
+        let mut state = self.state.lock();
+        let (value, used) = state.as_mut()?;
+        *used = Instant::now();
+        Some(work(value))
+    }
+
+    /// Holds `value` in place of whatever was held and restarts the idle period.
+    pub fn put(&'static self, value: T) {
+        self.register();
+        let replaced = self.state.lock().replace((value, Instant::now()));
+        drop(replaced);
+    }
+
+    /// Frees the held value now; true when there was one.
+    pub fn clear(&self) -> bool {
+        let parked = self.state.lock().take();
+        parked.is_some()
+    }
+
     pub fn is_loaded(&self) -> bool {
         self.state.lock().is_some()
     }
@@ -125,6 +146,19 @@ mod tests {
         assert_eq!(LOADS.load(Ordering::SeqCst), 2, "next use reloads");
         assert!(sweep(Instant::now() + Duration::from_secs(61)) >= 1);
         assert!(!SLOT.is_loaded());
+    }
+
+    #[test]
+    fn a_value_can_be_put_peeked_and_cleared_without_a_loader() {
+        static SLOT: IdleSlot<u32> = IdleSlot::new("test-put", Duration::from_secs(60));
+        assert_eq!(SLOT.peek(|v| *v), None);
+        SLOT.put(5);
+        SLOT.put(6);
+        assert_eq!(SLOT.peek(|v| *v), Some(6));
+        assert!(SLOT.park_idle(Instant::now() + Duration::from_secs(61)), "a put value parks like a loaded one");
+        SLOT.put(7);
+        assert!(SLOT.clear());
+        assert!(!SLOT.clear() && !SLOT.is_loaded());
     }
 
     #[test]

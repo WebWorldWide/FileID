@@ -11,7 +11,11 @@ enum FaceQueueText {
     }
     static func faces(_ count: Int) -> String { "\(count) face\(count == 1 ? "" : "s")" }
     static func mergeReason(_ item: FaceMergeSuggestion) -> String {
-        "These two look like the same person (\(FaceReviewText.percent(item.score))% alike) and are never in the same photo."
+        switch FaceReviewText.likelihood(item.score) {
+        case "very likely": return "These two are very likely the same person and are never in the same photo."
+        case "probably": return "These two are probably the same person and are never in the same photo."
+        default: return "These two might be the same person and are never in the same photo."
+        }
     }
     static func mergeLabel(_ item: FaceMergeSuggestion) -> String { "Merge \(name(item.otherName)) into \(name(item.personName))" }
     static func notSameLabel(_ item: FaceMergeSuggestion) -> String {
@@ -33,6 +37,11 @@ enum FaceQueueText {
     static func splitRow(_ item: FaceSplitSuggestion) -> String {
         "\(name(item.personName)): \(item.keepCount) faces stay, \(item.splitCount) would move to a new person."
     }
+    static let skip = "Skip"
+    static let skipHelp = "Hide this suggestion without deciding. Nothing is changed."
+    static let notSameHelp = "These are two different people. FileID won't suggest merging them again."
+    static let mergeHelp = "Combine both into one person. You can undo this right after."
+    static let splitHelp = "Move the second group of faces to a new person. You can undo this right after."
     static func done(_ resolution: String) -> String {
         switch resolution {
         case "merge": return "Merged."
@@ -138,6 +147,14 @@ enum FaceRefreshText {
     static let update = "Update faces"
     static let updateLabel = "Update faces for the current face model"
     static func needs(_ count: Int) -> String { "Faces need updating (\(count))" }
+    static let why = "These faces were saved by an earlier version of face matching. Updating them keeps people grouped correctly. It runs in the background."
+    static let extrasHelp = "Missing: the photo was moved or deleted. Offline: the photo is on a drive that isn't connected. Failed: the photo changed or its face couldn't be read."
+    static func explanation(_ status: FaceRefreshStatus) -> String? {
+        var parts: [String] = []
+        if status.outdated > 0 { parts.append(why) }
+        if status.missing + status.offline + status.failed > 0 { parts.append(extrasHelp) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
     static func extras(_ status: FaceRefreshStatus) -> String {
         [(status.missing, "missing"), (status.offline, "offline"), (status.failed, "failed")]
             .filter { $0.0 > 0 }.map { " · \($0.0) \($0.1)" }.joined()
@@ -179,6 +196,7 @@ final class FaceRefreshModel {
     }
 
     var line: String? { message ?? status.flatMap(FaceRefreshText.line) }
+    var explanation: String? { message == nil ? status.flatMap(FaceRefreshText.explanation) : nil }
     var isRunning: Bool { status?.state == "running" || status?.state == "queued" }
     var isPaused: Bool { status?.state == "paused" }
     var canStart: Bool { !isRunning && !isPaused && line != nil && !(status?.model.isEmpty ?? true) }

@@ -24,6 +24,27 @@ package enum HEIFDecoder {
         } ?? nil
     }
 
+    /// Decodes a file the caller already read (the scan hashes the bytes first).
+    package static func decode(file: FileBytes, maxPixelSize: Int) -> CGImage? {
+        guard maxPixelSize > 0 else { return nil }
+        return withExtendedLifetime(file) {
+            try? decode(bytes: UnsafeBufferPointer(start: file.buffer.bytes, count: file.count), maxPixelSize: maxPixelSize)
+        } ?? nil
+    }
+
+    /// A whole file in memory; `count` is the file's size (the buffer may be larger).
+    package struct FileBytes: Sendable {
+        package let buffer: PageBuffer
+        package let count: Int
+
+        package var raw: UnsafeRawBufferPointer { UnsafeRawBufferPointer(start: buffer.base, count: count) }
+    }
+
+    package static func load(path: String) -> FileBytes? {
+        guard let buffer = try? read(path) else { return nil }
+        return FileBytes(buffer: buffer, count: buffer.count)
+    }
+
     /// Anonymous memory straight from the kernel, unmapped when released. Large malloc
     /// blocks freed after each photo stayed resident in the allocator's cache (+420 MB of
     /// footprint during a 1,500-photo HEIC scan).

@@ -2,10 +2,8 @@ import FileIDVLMCore
 // Tagging stage — Stage B of the pipeline.
 //
 // Per-file work: load CGImage, run Vision primary pass, optionally OCR,
-// compute dHash, read EXIF, build a TaggedFile struct. Bounded ANE access
-// via a semaphore — the v1 lesson was that flooding ANE with 14 simultaneous
-// requests causes thrashing and a throughput collapse. 3-4 in-flight is
-// enough to keep ANE saturated.
+// compute dHash, read EXIF, build a TaggedFile struct. Each model service
+// bounds its own concurrency; the worker pool bounds the Vision passes.
 //
 // All work happens on a concurrent GCD queue so a slow file (corrupt JPEG,
 // network volume hiccup) doesn't park a Swift cooperative thread.
@@ -28,9 +26,11 @@ public enum Tagging {
         attributes: .concurrent
     )
 
+    static let hashTimeoutSeconds: TimeInterval = 30
+
     // Hot-loop constants — allocated once, not per file.
     private static let gregorianCalendar = Calendar(identifier: .gregorian)
-    private static let docHints: Set<String> = [
+    static let docHints: Set<String> = [
         "document", "text", "screenshot", "receipt",
         "presentation", "menu", "sign"
     ]
@@ -45,19 +45,42 @@ public enum Tagging {
         discovered: DiscoveredFile,
         worker: VisionWorker
     ) async -> TaggedFile {
+        await processFile(discovered: discovered, worker: worker, twins: TwinReuse.enabled ? TwinReuse.shared : nil,
+                          catalog: TwinReuse.catalog)
+    }
+
+    /// `twins` nil analyzes every image itself; tests pass their own registry
+    /// and their own `options` (tagger, RAM++ mode, careful reader).
+    static func processFile(
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins? = nil,
+        options: ScanCatchUp.ScanOptions = .live
+    ) async -> TaggedFile {
         let url = discovered.url
         let kind = discovered.kind.rawValue
         let ext = url.pathExtension.lowercased()
         let started = CFAbsoluteTimeGetCurrent()
 
+        if discovered.movedFromKnownRow {
+            var moved = TaggedFile(
+                url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
+                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                fileRef: discovered.fileRef)
+            moved.healOnly = true
+            return moved
+        }
+
         var tagged: TaggedFile
         switch discovered.kind {
         case .image:
-            tagged = await processImage(discovered: discovered, worker: worker, started: started)
+            tagged = await processImage(
+                discovered: discovered, worker: worker, started: started, twins: twins, catalog: catalog, options: options)
         case .video:
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
-            tagged = await processPDF(discovered: discovered, worker: worker, started: started)
+            tagged = await processPDF(discovered: discovered, worker: worker, started: started, options: options)
         case .doc:
             tagged = await processDoc(discovered: discovered, worker: worker, started: started)
         case .audio:
@@ -80,25 +103,30 @@ public enum Tagging {
                 tagged.textStageDone = true
             }
         }
+        await finalize(&tagged, discovered: discovered)
+        return tagged
+    }
+
+    private static func finalize(_ tagged: inout TaggedFile, discovered: DiscoveredFile) async {
+        let url = discovered.url
         if tagged.contentHash == nil && !Task.isCancelled {
             let contentSize = UInt64(max(0, discovered.sizeBytes))
-            let state = ContentHashContinuation()
+            let state = OnceContinuation<Data?>()
+            let giveUp = DispatchWorkItem { state.finish(nil) }
             tagged.contentHash = await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    state.install(continuation)
+                    state.install(continuation, ifFinished: nil)
                     visionQueue.async {
                         state.finish(ContentHash.compute(url: url, size: contentSize))
                     }
-                    visionQueue.asyncAfter(deadline: .now() + 30) {
-                        state.finish(nil)
-                    }
+                    visionQueue.asyncAfter(deadline: .now() + hashTimeoutSeconds, execute: giveUp)
                 }
             } onCancel: {
                 state.finish(nil)
             }
+            giveUp.cancel()
         }
         tagged.fileRef = discovered.fileRef
-        return tagged
     }
 
     // MARK: - Audio pipeline
@@ -188,37 +216,290 @@ public enum Tagging {
 
     // MARK: - Image pipeline
 
+    /// Hashes an image before it is decoded, so a byte-identical copy of one
+    /// already analyzed (or being analyzed) in this scan, or analyzed by an
+    /// earlier scan, takes that result.
     private static func processImage(
         discovered: DiscoveredFile,
         worker: VisionWorker,
-        started: CFAbsoluteTime
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins?,
+        options: ScanCatchUp.ScanOptions
     ) async -> TaggedFile {
-        await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
+        let plan = await planImage(discovered: discovered, started: started, twins: twins, catalog: catalog)
+        return await finishImage(plan, discovered: discovered, worker: worker, started: started, twins: twins, options: options)
+    }
+
+    struct TwinOwnership: Sendable {
+        let key: TwinKey
+        let models: String
+    }
+
+    /// What is left to do for an image once its hash and twin claim are known.
+    enum ImagePlan: Sendable {
+        case done(TaggedFile)
+        case analyze(hash: ImageHash, heif: HEIFDecoder.FileBytes?, owner: TwinOwnership?)
+    }
+
+    static func planImage(
+        discovered: DiscoveredFile,
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins?
+    ) async -> ImagePlan {
+        guard let twins, TwinReuse.eligible(sizeBytes: discovered.sizeBytes), !Task.isCancelled else {
+            return .analyze(hash: .alongside, heif: nil, owner: nil)
+        }
+        let early = await hashBeforeDecode(discovered)
+        guard let hash = early.hash else {
+            return .analyze(hash: .known(nil), heif: nil, owner: nil)
+        }
+        let key = TwinKey(hash: hash, size: discovered.sizeBytes)
+        let models = TwinReuse.modelFingerprint()
+        let hashMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        switch twins.claim(key, models: models) {
+        case .ready(let twin):
+            twins.noteReuse()
+            return .done(twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs))
+        case .pending:
+            if let twin = await twins.wait(key, timeout: TwinReuse.waitSeconds), twin.models == models {
+                twins.noteReuse()
+                return .done(twinCopy(of: twin, for: discovered, contentHash: hash, elapsedMs: hashMs))
+            }
+            return .analyze(hash: .known(hash), heif: nil, owner: nil)
+        case .owner:
+            if let catalog, catalog.contains(key),
+               let found = await catalog.analysis(for: key, discovered: discovered, models: models) {
+                twins.publish(key, found.twin, analyzedHere: false)
+                twins.noteCatalogReuse()
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+                return .done(found.ownRow
+                    ? unchangedContent(of: found.twin, for: discovered, contentHash: hash, elapsedMs: elapsedMs)
+                    : twinCopy(of: found.twin, for: discovered, contentHash: hash, elapsedMs: elapsedMs))
+            }
+            return .analyze(hash: .known(hash), heif: early.heif, owner: TwinOwnership(key: key, models: models))
+        }
+    }
+
+    static func finishImage(
+        _ plan: ImagePlan,
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        started: CFAbsoluteTime,
+        twins: TwinRegistry?,
+        options: ScanCatchUp.ScanOptions,
+        predecoded: PredecodedImage? = nil
+    ) async -> TaggedFile {
+        switch plan {
+        case .done(let tagged):
+            return tagged
+        case .analyze(let hash, let heif, let owner):
+            let analysis = await analyzeImage(
+                discovered: discovered, worker: worker, started: started, hash: hash, heif: heif,
+                predecoded: predecoded, options: options)
+            if let owner, let twins {
+                // A model that loaded while this file was analyzed may have missed it.
+                let reusable = !analysis.tagged.failed && analysis.tagged.tagsEvaluated
+                    && TwinReuse.modelFingerprint() == owner.models
+                twins.publish(owner.key, reusable
+                    ? TwinAnalysis(tagged: analysis.tagged, modelTags: analysis.modelTags, models: owner.models) : nil)
+            }
+            return analysis.tagged
+        }
+    }
+
+    // MARK: - Decode-ahead
+
+    /// A scan image decoded before an inference worker was free for it.
+    struct PredecodedImage: @unchecked Sendable {
+        let image: CGImage?
+        let exif: (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?)
+        let loadMs: Double
+
+        var bytes: Int { image.map { $0.bytesPerRow * $0.height } ?? 0 }
+    }
+
+    /// A file after the decode-ahead stage: hashed, its twin claim settled and,
+    /// when it needs analysis, decoded.
+    struct PreparedFile: Sendable {
+        enum Stage: Sendable {
+            /// Not an image: the worker runs the whole file as it always has.
+            case whole
+            case image(ImagePlan, PredecodedImage?)
+        }
+        let discovered: DiscoveredFile
+        let stage: Stage
+        /// Time spent hashing and decoding; waiting in the queue is not counted.
+        let prepSeconds: Double
+
+        var decodedBytes: Int {
+            if case .image(_, let decoded?) = stage { return decoded.bytes }
+            return 0
+        }
+
+        /// A copy that reused a twin: nothing is left for a worker to do.
+        var finishedCopy: TaggedFile? {
+            guard case .image(.done(var tagged), _) = stage else { return nil }
+            tagged.fileRef = discovered.fileRef
+            return tagged
+        }
+    }
+
+    static var scanMaxPixels: Int {
+        ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
+            .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
+    }
+
+    /// Hash, twin claim and (when `decode`) the bounded decode, with the same
+    /// calls a worker makes, so a prepared file finishes with the same result.
+    static func prepare(
+        discovered: DiscoveredFile, twins: TwinRegistry?, catalog: CatalogTwins?, decode: Bool
+    ) async -> PreparedFile {
+        guard discovered.kind == .image, !discovered.movedFromKnownRow else {
+            return PreparedFile(discovered: discovered, stage: .whole, prepSeconds: 0)
+        }
+        let started = CFAbsoluteTimeGetCurrent()
+        let plan = await planImage(discovered: discovered, started: started, twins: twins, catalog: catalog)
+        guard case .analyze(let hash, let heif, let owner) = plan else {
+            return PreparedFile(discovered: discovered, stage: .image(plan, nil),
+                                prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+        }
+        guard decode, !Task.isCancelled else {
+            return PreparedFile(discovered: discovered, stage: .image(.analyze(hash: hash, heif: nil, owner: owner), nil),
+                                prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+        }
+        let heifBox = ScanSideResult<HEIFDecoder.FileBytes>()
+        if let heif { heifBox.set(heif) }
+        let decoded: PredecodedImage = await withCheckedContinuation { continuation in
             visionQueue.async {
-                let result = autoreleasepool { () -> TaggedFile in
+                continuation.resume(returning: autoreleasepool {
+                    let loadStart = CFAbsoluteTimeGetCurrent()
+                    let loaded = loadImageAndEXIF(
+                        url: discovered.url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take())
+                    return PredecodedImage(
+                        image: loaded?.0, exif: loaded?.1 ?? (nil, nil, nil, nil),
+                        loadMs: (CFAbsoluteTimeGetCurrent() - loadStart) * 1000)
+                })
+            }
+        }
+        return PreparedFile(discovered: discovered, stage: .image(.analyze(hash: hash, heif: nil, owner: owner), decoded),
+                            prepSeconds: CFAbsoluteTimeGetCurrent() - started)
+    }
+
+    static func processFile(
+        prepared: PreparedFile,
+        worker: VisionWorker,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins? = nil,
+        options: ScanCatchUp.ScanOptions = .live
+    ) async -> TaggedFile {
+        let discovered = prepared.discovered
+        guard case .image(let plan, let predecoded) = prepared.stage else {
+            return await processFile(discovered: discovered, worker: worker, twins: twins, catalog: catalog, options: options)
+        }
+        var tagged = await finishImage(
+            plan, discovered: discovered, worker: worker,
+            started: CFAbsoluteTimeGetCurrent() - prepared.prepSeconds,
+            twins: twins, options: options, predecoded: predecoded)
+        await finalize(&tagged, discovered: discovered)
+        return tagged
+    }
+
+    /// Releases the twin claim of a prepared file that will not be analyzed
+    /// (cancelled scan), so copies waiting on it stop waiting.
+    static func discard(_ prepared: PreparedFile, twins: TwinRegistry?) {
+        if case .image(.analyze(_, _, let owner?), _) = prepared.stage {
+            twins?.publish(owner.key, nil)
+        }
+    }
+
+    private struct EarlyHash: Sendable {
+        var hash: Data?
+        var heif: HEIFDecoder.FileBytes?
+    }
+
+    /// The full-file hash, bounded like the later one. A HEIC is read once
+    /// here and the same bytes go to the decoder.
+    private static func hashBeforeDecode(_ discovered: DiscoveredFile) async -> EarlyHash {
+        let url = discovered.url
+        let size = UInt64(max(0, discovered.sizeBytes))
+        let isHEIC = ["heic", "heif"].contains(url.pathExtension.lowercased())
+        let state = OnceContinuation<EarlyHash>()
+        let giveUp = DispatchWorkItem { state.finish(EarlyHash()) }
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                state.install(continuation, ifFinished: EarlyHash())
+                visionQueue.async {
+                    if isHEIC, let file = HEIFDecoder.load(path: url.path) {
+                        state.finish(EarlyHash(hash: ContentHash.compute(bytes: file.raw), heif: file))
+                    } else {
+                        state.finish(EarlyHash(hash: ContentHash.compute(url: url, size: size)))
+                    }
+                }
+                visionQueue.asyncAfter(deadline: .now() + hashTimeoutSeconds, execute: giveUp)
+            }
+        } onCancel: {
+            state.finish(EarlyHash())
+        }
+        giveUp.cancel()
+        return result
+    }
+
+    enum ImageHash: Sendable {
+        /// Read the file for its hash while the models run.
+        case alongside
+        /// Already attempted before decode; nil when that read failed.
+        case known(Data?)
+    }
+
+    private static func analyzeImage(
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        started: CFAbsoluteTime,
+        hash: ImageHash,
+        heif: HEIFDecoder.FileBytes? = nil,
+        predecoded: PredecodedImage? = nil,
+        options: ScanCatchUp.ScanOptions
+    ) async -> (tagged: TaggedFile, modelTags: [String]) {
+        let heifBox = ScanSideResult<HEIFDecoder.FileBytes>()
+        if let heif { heifBox.set(heif) }
+        return await withCheckedContinuation { (cont: CheckedContinuation<(tagged: TaggedFile, modelTags: [String]), Never>) in
+            visionQueue.async {
+                let result = autoreleasepool { () -> (tagged: TaggedFile, modelTags: [String]) in
                     let url = discovered.url
                     let ext = url.pathExtension.lowercased()
                     let sizeMB = Double(discovered.sizeBytes) / 1_048_576
+                    var knownHash: Data? = nil
+                    if case .known(let value) = hash { knownHash = value }
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let (cgImage, exif) = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes) else {
+                    let loaded: (CGImage, (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?))?
+                    if let predecoded {
+                        loaded = predecoded.image.map { ($0, predecoded.exif) }
+                    } else {
+                        loaded = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes, heifFile: heifBox.take())
+                    }
+                    guard let (cgImage, exif) = loaded else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
-                        return TaggedFile(
+                        return (TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
+                            contentHash: knownHash,
                             failed: true,
                             errorMessage: "Could not decode image",
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
-                        )
+                        ), [])
                     }
-                    let loadMs = (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
+                    let loadMs = predecoded?.loadMs ?? (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
 
                     // CLIP runs on the GPU and the file hash on the disk while
                     // Vision uses the Neural Engine below; join before building
                     // the result. All three only read `cgImage`.
                     let sideWork = DispatchGroup()
+                    let hashWork = DispatchGroup()
                     let clipBox = ScanSideResult<(blob: Data?, ms: Double)>()
                     let hashBox = ScanSideResult<Data?>()
                     DispatchQueue.global(qos: .userInitiated).async(group: sideWork) {
@@ -226,8 +507,13 @@ public enum Tagging {
                         let blob = MobileCLIPService.shared.embedImage(cgImage).map { FloatBlob.encode($0) }
                         clipBox.set((blob, (CFAbsoluteTimeGetCurrent() - clipStart) * 1000))
                     }
-                    DispatchQueue.global(qos: .utility).async(group: sideWork) {
-                        hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
+                    // The worker blocks on this join, so the read must not run below its priority.
+                    if case .alongside = hash {
+                        DispatchQueue.global(qos: .userInitiated).async(group: hashWork) {
+                            hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
+                        }
+                    } else {
+                        hashBox.set(knownHash)
                     }
 
                     // Vision primary pass — bundled classify + faces + saliency.
@@ -244,23 +530,20 @@ public enum Tagging {
                     // mirroring the Windows per-file-timeout row.
                     if !pass.didComplete {
                         sideWork.wait()
+                        _ = hashWork.wait(timeout: .now() + hashTimeoutSeconds)
                         JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
-                        return TaggedFile(
+                        return (TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
+                            contentHash: hashBox.get() ?? nil,
                             failed: true,
                             errorMessage: FileIDEngineMain.visionTimeoutMessage,
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
-                        )
+                        ), [])
                     }
 
-                    // OCR — only if classify suggests there's text to read. The
-                    // OCR stage "ran" iff we entered this branch; the DBWriter
-                    // gates its ocr_text delete/reinsert on ocrStageRan so a photo
-                    // we never OCR'd (or a primary-pass timeout) can't wipe valid
-                    // prior OCR text. Mirrors the Windows `ocr_stage_ran` gate.
                     // RAM++ primary tagger (4585-class, Apache-2.0) — the macOS
                     // lockstep mirror of the Windows stack. Falls back to the
                     // Vision classifier's narrow scene vocabulary when the RAM++
@@ -268,12 +551,17 @@ public enum Tagging {
                     // so tagging always works. RAM++ carries per-tag confidences →
                     // tags.score; the Vision fallback has none. Runs before OCR so
                     // its paper/handwriting tags can gate the text read.
+                    // Deferred mode skips it here: the row gets the classifier's
+                    // tags now and ScanCatchUp adds the RAM++ ones after the main
+                    // pass, through the same `imageTags`/`readText` rules.
+                    let deferred = options.mode == .deferred
                     let ramStart = CFAbsoluteTimeGetCurrent()
-                    let ramTags = TagAgreement.combine(ram: RamPlusService.shared.tag(cgImage),
-                                                       vision: pass.classifyConfidences,
-                                                       faceCount: pass.faceCount,
-                                                       peopleWords: RamPlusService.peopleWords)
-                    let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
+                    let imageTags = ScanCatchUp.imageTags(
+                        ram: deferred ? [] : options.tag(cgImage),
+                        classifyTags: pass.classifyTags, vision: pass.classifyConfidences,
+                        faceCount: pass.faceCount, cameraModel: exif.cameraModel,
+                        creationDate: exif.capturedAt ?? discovered.creationDate)
+                    let ramMs = deferred ? 0 : (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
 
                     // OCR — fast read when the classifiers or the page shape suggest
                     // text, then Vision's accurate tier only when TextReading says the
@@ -282,34 +570,26 @@ public enum Tagging {
                     // delete/reinsert on ocrStageRan so a photo we never OCR'd (or a
                     // primary-pass timeout) can't wipe valid prior OCR text. Mirrors
                     // the Windows `ocr_stage_ran` gate.
-                    let textTags = pass.classifyTags + ramTags.map(\.tag)
-                    var ocr: String? = nil
-                    var ocrMs: Double = 0
-                    var ocrCarefulMs: Double = 0
-                    var ocrHandwritten = false
+                    let textTags = imageTags.textTags
+                    var read = ScanCatchUp.TextOutcome()
                     var ocrStageRan = false
                     let documentShape = TextReading.isDocumentShape(
                         width: cgImage.width, height: cgImage.height, hasCamera: exif.cameraModel != nil
                     )
-                    if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) })
-                        || TextReading.isTextBearing(textTags) || documentShape {
+                    if ScanCatchUp.textGate(classifyTags: pass.classifyTags, textTags: textTags, documentShape: documentShape) {
                         ocrStageRan = true
-                        let ocrStart = CFAbsoluteTimeGetCurrent()
-                        let fast = worker.ocrFast(cgImage)
-                        ocrMs = (CFAbsoluteTimeGetCurrent() - ocrStart) * 1000
-                        var text = fast
-                        if TextReading.needsCarefulRead(fastText: fast, tags: textTags, textBearing: documentShape) {
-                            let carefulStart = CFAbsoluteTimeGetCurrent()
-                            let careful = worker.ocrAccurate(cgImage)
-                            ocrCarefulMs = (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
-                            ocrHandwritten = TextReading.isHandwritten(
-                                fastText: fast, carefulText: careful, tags: textTags,
-                                paperLike: TextReading.isPaperLike(tags: textTags, hasCamera: exif.cameraModel != nil))
-                            text = TextReading.preferred(fast: fast, careful: careful)
-                        }
-                        ocr = text.isEmpty ? nil : text
-                        if ocr == nil { ocrHandwritten = false }
+                        read = ScanCatchUp.readText(
+                            cgImage, textTags: textTags, documentShape: documentShape,
+                            hasCamera: exif.cameraModel != nil,
+                            fast: { worker.ocrFast($0) },
+                            careful: options.carefulRead ?? { worker.ocrAccurateIfAvailable($0) })
                     }
+                    let ocr = read.text
+                    let ocrMs = read.fastMs
+                    let ocrCarefulMs = read.carefulMs
+                    let ocrHandwritten = read.handwritten
+                    var owed = (deferred ? ScanCatchUp.tagsOwed : 0) | (read.carefulOwed ? ScanCatchUp.carefulTextOwed : 0)
+                    if owed != 0, ocrStageRan { owed |= ScanCatchUp.textReadAtScan }
 
                     let phash = computeDHash(cgImage)
                     // Byte-exact identity for Cleanup's literal-duplicate detection
@@ -317,40 +597,15 @@ public enum Tagging {
                     // with the Windows engine's content_hash. nil on read error, in
                     // which case the file simply won't participate in dedup.
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
-                    var tagScores: [String: Double]? = nil
-                    var primaryTags: [String]
-                    if !ramTags.isEmpty {
-                        primaryTags = ramTags.map { $0.tag }
-                        tagScores = Dictionary(ramTags.map { ($0.tag, Double($0.score)) },
-                                               uniquingKeysWith: { first, _ in first })
-                    } else {
-                        primaryTags = pass.classifyTags
-                    }
-
-                    // Enrich the primary tags with EXIF + dimension signals we
-                    // already have for free. Cheap, sync, gives the Library tile
-                    // chips real value. EXIF/derived tags carry no score.
-                    var enrichedTags = primaryTags
-                    enrichedTags.append(contentsOf: extraTags(
-                        cgImage: cgImage,
-                        cameraModel: exif.cameraModel,
-                        creationDate: exif.capturedAt ?? discovered.creationDate,
-                        hasFaces: pass.faceCount > 0,
-                        hasOCR: ocr?.isEmpty == false,
-                        hasLocation: exif.lat != nil && exif.lon != nil
-                    ))
-                    // Case-insensitive dedup (keep first-seen casing) then cap to 16 —
-                    // mirrors the Windows engine's pre-DB-write retain(seen)+truncate(16)
-                    // (tagging.rs) so a library's stored tag set is identical cross-platform.
-                    var seenTagKeys = Set<String>()
-                    var dedupedTags: [String] = []
-                    for tag in enrichedTags {
-                        guard seenTagKeys.insert(tag.lowercased()).inserted else { continue }
-                        dedupedTags.append(tag)
-                        if dedupedTags.count >= 16 { break }
-                    }
+                    let tagScores = imageTags.scores
+                    let primaryTags = imageTags.primary
+                    // Primary tags plus the free EXIF-derived ones (Year, camera
+                    // family), deduplicated and capped; those carry no score.
+                    let dedupedTags = imageTags.stored
 
                     sideWork.wait()
+                    // A stalled network volume must not park this worker for good.
+                    _ = hashWork.wait(timeout: .now() + hashTimeoutSeconds)
                     let contentHash = hashBox.get() ?? nil
                     let clipBlob = clipBox.get()?.blob ?? nil
                     let clipMs = clipBox.get()?.ms ?? 0
@@ -390,7 +645,15 @@ public enum Tagging {
                     tagged.ocrCarefulMs = ocrCarefulMs
                     tagged.ocrHandwritten = ocrHandwritten
                     tagged.capturedFromEXIF = exif.capturedAt != nil
-                    return tagged
+                    if owed != 0 {
+                        tagged.catchUp = ScanCatchUp.Marker(
+                            stages: owed,
+                            vision: ScanCatchUp.VisionContext(
+                                classifyTags: pass.classifyTags, confidences: pass.classifyConfidences,
+                                textTags: deferred ? nil : textTags).encoded,
+                            faceCount: pass.faceCount)
+                    }
+                    return (tagged, primaryTags)
                 }
                 cont.resume(returning: result)
             }
@@ -431,10 +694,17 @@ public enum Tagging {
                 // runs off-thread with a hard timeout, since AVFoundation duration/decode can
                 // hang on a NAS file; on timeout the video clusters by filename, as before.
                 // Mirrors the Windows engine, which CLIP-embeds the video keyframe at scan.
-                if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
+                let keyframe = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6)
+                if let cg = keyframe.image,
                    let blob = MobileCLIPService.shared.embedImage(cg)
                         .map({ FloatBlob.encode($0) }) {
                     tagged.clipEmbeddingBlob = blob
+                }
+                // A video with no usable keyframe can never get its embedding; record the
+                // attempt so the CLIP carve-out stops sending it through every scan. Not
+                // on a timeout (the volume may be slow today) or before CLIP can run.
+                if tagged.clipEmbeddingBlob == nil, !keyframe.timedOut, MobileCLIPService.shared.canEmbed {
+                    tagged.textStageDone = true
                 }
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
@@ -445,7 +715,7 @@ public enum Tagging {
     /// Extract a video keyframe with a hard wall-clock bound. AVFoundation duration/decode
     /// can hang on an unresponsive NAS file, so it runs in a detached task and is cancelled
     /// when the caller's timeout expires.
-    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> CGImage? {
+    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> (image: CGImage?, timedOut: Bool) {
         let box = KeyframeBox()
         let sema = DispatchSemaphore(value: 0)
         let task = Task.detached(priority: .utility) {
@@ -454,9 +724,9 @@ public enum Tagging {
         }
         if sema.wait(timeout: .now() + timeout) == .timedOut {
             task.cancel()
-            return nil
+            return (nil, true)
         }
-        return box.get()
+        return (box.get(), false)
     }
 
     private final class KeyframeBox: @unchecked Sendable {
@@ -535,7 +805,8 @@ public enum Tagging {
     private static func processPDF(
         discovered: DiscoveredFile,
         worker: VisionWorker,
-        started: CFAbsoluteTime
+        started: CFAbsoluteTime,
+        options: ScanCatchUp.ScanOptions
     ) async -> TaggedFile {
         let url = discovered.url
         let sizeMB = Double(discovered.sizeBytes) / 1_048_576
@@ -598,70 +869,26 @@ public enum Tagging {
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
                         )
                     }
-                    let pageCount = min(pdf.numberOfPages, 3)
-                    var fullText: [String] = []
-                    var carefulMs: Double = 0
-                    var handwritten = false
-                    for pageNum in 1..<(pageCount + 1) {
-                        guard let page = pdf.page(at: pageNum) else { continue }
-                        let bounds = page.getBoxRect(.mediaBox)
-                        guard bounds.width > 0, bounds.height > 0 else { continue }
-                        // The 20 MB gate above is byte-size only — a tiny
-                        // vector PDF with a plotter/poster-size mediaBox
-                        // (CAD, GIS) would render a multi-GB bitmap at a
-                        // fixed 2x (data:nil commits w*h*4 bytes), times up
-                        // to workerCap concurrent files. Clamp the scale so
-                        // each page stays under the same 50 MP ceiling the
-                        // Windows engine enforces (MAX_DECODED_PIXELS,
-                        // tagging.rs).
-                        var scale: CGFloat = 2.0
-                        let scaledPixels = bounds.width * bounds.height * scale * scale
-                        if scaledPixels > maxPDFRenderPixels {
-                            scale *= sqrt(maxPDFRenderPixels / scaledPixels)
-                        }
-                        let w = Int(bounds.width  * scale)
-                        let h = Int(bounds.height * scale)
-                        guard w > 0, h > 0 else { continue }
-                        let cs = CGColorSpaceCreateDeviceRGB()
-                        guard let ctx = CGContext(
-                            data: nil, width: w, height: h, bitsPerComponent: 8,
-                            bytesPerRow: 0, space: cs,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-                        ) else { continue }
-                        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
-                        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-                        ctx.scaleBy(x: scale, y: scale)
-                        ctx.drawPDFPage(page)
-                        if let cg = ctx.makeImage() {
-                            // An image-only page is a scan, and at most three are read:
-                            // always take the accurate read too. Handwriting a fast read
-                            // only half-mangles ("Meeting noteg") would slip the
-                            // garbled-word gate.
-                            let fast = worker.ocrFast(cg)
-                            let carefulStart = CFAbsoluteTimeGetCurrent()
-                            let careful = worker.ocrAccurate(cg)
-                            carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
-                            if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: [], paperLike: true) {
-                                handwritten = true
-                            }
-                            let text = TextReading.preferred(fast: fast, careful: careful)
-                            if !text.isEmpty { fullText.append(text) }
-                        }
-                    }
-                    let ocr = fullText.joined(separator: "\n\n")
+                    let read = readScannedPDF(
+                        pdf, fast: { worker.ocrFast($0) },
+                        careful: options.carefulRead ?? { worker.ocrAccurateIfAvailable($0) })
                     var scanned = TaggedFile(
                         url: url, kind: "pdf", extension: "pdf",
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
                         visionTags: ["PDF"],
-                        ocrText: ocr.isEmpty ? nil : ocr,
+                        ocrText: read.text,
                         perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
                         tagsEvaluated: true,
                         ocrStageRan: true
                     )
-                    scanned.ocrCarefulMs = carefulMs
-                    scanned.ocrHandwritten = handwritten && !ocr.isEmpty
+                    scanned.ocrCarefulMs = read.carefulMs
+                    scanned.ocrHandwritten = read.handwritten
+                    if read.carefulOwed {
+                        scanned.catchUp = ScanCatchUp.Marker(
+                            stages: ScanCatchUp.carefulTextOwed | ScanCatchUp.textReadAtScan, vision: nil, faceCount: 0)
+                    }
                     return scanned
                 }
                 // Cache the BGE content embedding for restructure (PDFKit text, not the
@@ -678,6 +905,69 @@ public enum Tagging {
         }
     }
 
+    /// Text of an image-only PDF: up to three pages rendered and read. `careful`
+    /// returns nil when the accurate tier is not available; the fast read then
+    /// stands and the careful one is owed.
+    static func readScannedPDF(_ pdf: CGPDFDocument, fast: (CGImage) -> String,
+                               careful: (CGImage) -> String?) -> ScanCatchUp.TextOutcome {
+        var outcome = ScanCatchUp.TextOutcome()
+        let pageCount = min(pdf.numberOfPages, 3)
+        var fullText: [String] = []
+        var handwritten = false
+        for pageNum in 1..<(pageCount + 1) {
+            guard let page = pdf.page(at: pageNum) else { continue }
+            let bounds = page.getBoxRect(.mediaBox)
+            guard bounds.width > 0, bounds.height > 0 else { continue }
+            // The 20 MB gate is byte-size only — a tiny vector PDF with a
+            // plotter/poster-size mediaBox (CAD, GIS) would render a multi-GB
+            // bitmap at a fixed 2x (data:nil commits w*h*4 bytes), times up to
+            // workerCap concurrent files. Clamp the scale so each page stays
+            // under the same 50 MP ceiling the Windows engine enforces
+            // (MAX_DECODED_PIXELS, tagging.rs).
+            var scale: CGFloat = 2.0
+            let scaledPixels = bounds.width * bounds.height * scale * scale
+            if scaledPixels > maxPDFRenderPixels {
+                scale *= sqrt(maxPDFRenderPixels / scaledPixels)
+            }
+            let w = Int(bounds.width  * scale)
+            let h = Int(bounds.height * scale)
+            guard w > 0, h > 0 else { continue }
+            let cs = CGColorSpaceCreateDeviceRGB()
+            guard let ctx = CGContext(
+                data: nil, width: w, height: h, bitsPerComponent: 8,
+                bytesPerRow: 0, space: cs,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { continue }
+            ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.scaleBy(x: scale, y: scale)
+            ctx.drawPDFPage(page)
+            if let cg = ctx.makeImage() {
+                // An image-only page is a scan, and at most three are read:
+                // always take the accurate read too. Handwriting a fast read
+                // only half-mangles ("Meeting noteg") would slip the
+                // garbled-word gate.
+                let fastStart = CFAbsoluteTimeGetCurrent()
+                let fastText = fast(cg)
+                outcome.fastMs += (CFAbsoluteTimeGetCurrent() - fastStart) * 1000
+                let carefulStart = CFAbsoluteTimeGetCurrent()
+                let read = careful(cg)
+                outcome.carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+                if read == nil { outcome.carefulOwed = true }
+                let carefulText = read ?? ""
+                if TextReading.isHandwritten(fastText: fastText, carefulText: carefulText, tags: [], paperLike: true) {
+                    handwritten = true
+                }
+                let text = TextReading.preferred(fast: fastText, careful: carefulText)
+                if !text.isEmpty { fullText.append(text) }
+            }
+        }
+        let joined = fullText.joined(separator: "\n\n")
+        outcome.text = joined.isEmpty ? nil : joined
+        outcome.handwritten = handwritten && !joined.isEmpty
+        return outcome
+    }
+
     // MARK: - Helpers
 
     typealias ScanSideResult = FileIDImaging.ScanSideResult
@@ -689,7 +979,8 @@ public enum Tagging {
     // assertable via @testable — see TaggingLoadSizeTests.
     static func loadImageAndEXIF(
         url: URL,
-        sizeBytes: Int64
+        sizeBytes: Int64,
+        heifFile: HEIFDecoder.FileBytes? = nil
     ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
         // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
@@ -718,9 +1009,17 @@ public enum Tagging {
         //     lower = faster scan + fewer faces, higher = slower + more faces.
         // Always generate the bounded decode from the source: embedded JPEG
         // previews are commonly only 160×120 and are too small for face gating.
-        let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
-            .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
-        guard let img = decodeScanImage(src, path: url.path, maxPixelSize: maxPixels) else { return nil }
+        let maxPixels = scanMaxPixels
+        // With the file already in memory, the same order as decodeScanImage for a
+        // HEIC (hardware decoder, then ImageIO) without reading it a second time.
+        let decoded: CGImage?
+        if let heifFile, isHEIF(src) {
+            decoded = HEIFDecoder.decode(file: heifFile, maxPixelSize: maxPixels)
+                ?? decodeBoundedImage(src, maxPixelSize: maxPixels)
+        } else {
+            decoded = decodeScanImage(src, path: url.path, maxPixelSize: maxPixels)
+        }
+        guard let img = decoded else { return nil }
         return (img, readEXIF(from: src))
     }
 
@@ -764,14 +1063,7 @@ public enum Tagging {
     /// but they dominated `TopTwoTags` on EXIF-less files and read as UI
     /// concerns rather than content; the signals still live in their own
     /// DB columns/facets. Mirrors Windows `push_enriched_extras`.
-    private static func extraTags(
-        cgImage: CGImage,
-        cameraModel: String?,
-        creationDate: Date?,
-        hasFaces: Bool,
-        hasOCR: Bool,
-        hasLocation: Bool = false
-    ) -> [String] {
+    static func extraTags(cameraModel: String?, creationDate: Date?) -> [String] {
         var out: [String] = []
         // Year tag from creation date.
         if let d = creationDate {
@@ -795,6 +1087,19 @@ public enum Tagging {
             else if lower.contains("pixel") { family = "Pixel" }
             else { family = nil }
             if let family { out.append(family) }
+        }
+        return out
+    }
+
+    /// Case-insensitive dedup (first-seen casing kept), capped at 16: mirrors the
+    /// Windows engine's retain(seen)+truncate(16) so stored tag sets match.
+    static func cappedTags(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for tag in tags {
+            guard seen.insert(tag.lowercased()).inserted else { continue }
+            out.append(tag)
+            if out.count >= 16 { break }
         }
         return out
     }
@@ -859,23 +1164,23 @@ public enum Tagging {
     }
 }
 
-private final class ContentHashContinuation: @unchecked Sendable {
+private final class OnceContinuation<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data?, Never>?
+    private var continuation: CheckedContinuation<Value, Never>?
     private var finished = false
 
-    func install(_ continuation: CheckedContinuation<Data?, Never>) {
+    func install(_ continuation: CheckedContinuation<Value, Never>, ifFinished fallback: Value) {
         lock.lock()
         if finished {
             lock.unlock()
-            continuation.resume(returning: nil)
+            continuation.resume(returning: fallback)
             return
         }
         self.continuation = continuation
         lock.unlock()
     }
 
-    func finish(_ value: Data?) {
+    func finish(_ value: Value) {
         lock.lock()
         guard !finished else {
             lock.unlock()

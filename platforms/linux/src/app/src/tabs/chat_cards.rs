@@ -60,7 +60,7 @@ enum Wait {
     Rename { ids: HashSet<i64>, old: HashMap<i64, String>, skipped: u64, undoing: bool },
     Person { person: i64, before: Option<PersonName> },
     Unknown,
-    Merge { outstanding: usize, failed: bool },
+    Merge { outstanding: usize, failed: bool, operations: Vec<String> },
     MomentsJobs { request_id: String },
 }
 
@@ -201,7 +201,7 @@ impl Runner {
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = rx.recv().await {
                 let Some(runner) = weak.upgrade() else { break };
-                runner.on_event(event);
+                runner.on_event(&event);
             }
         });
         RUNNER.with_borrow_mut(|slot| *slot = Some(runner.clone()));
@@ -483,24 +483,52 @@ impl Runner {
                 let (Some(target), Some(sources)) = (action.person_id, action.person_ids.clone()) else {
                     return;
                 };
-                let mut outstanding = 0;
-                for source in sources {
-                    if self.send(CommandPayload::MergeClusters(MergeClustersPayload {
-                        source_person_id: source,
-                        destination_person_id: target,
-                    })) {
-                        outstanding += 1;
-                    }
-                }
-                if outstanding == 0 {
-                    self.fail(id, NOT_READY);
-                    return;
-                }
-                self.wait(id, Wait::Merge { outstanding, failed: false });
-                self.set(id, Phase::Running("Merging".to_owned()));
+                let (runner, id) = (self.clone(), id.to_owned());
+                super::people_actions::confirm_merge(anchor, move || runner.merge_people(&id, target, sources));
             }
             _ => self.fail(id, "This action isn't available."),
         }
+    }
+
+    fn merge_people(self: &Rc<Self>, id: &str, target: i64, sources: Vec<i64>) {
+        if self.running(id) {
+            return;
+        }
+        let mut outstanding = 0;
+        for source in sources {
+            if self.send(CommandPayload::MergeClusters(MergeClustersPayload {
+                source_person_id: source,
+                destination_person_id: target,
+            })) {
+                super::merge_ledger::sent(super::merge_ledger::Owner::Chat, source, target);
+                outstanding += 1;
+            }
+        }
+        if outstanding == 0 {
+            self.fail(id, NOT_READY);
+            return;
+        }
+        self.wait(id, Wait::Merge { outstanding, failed: false, operations: Vec::new() });
+        self.set(id, Phase::Running("Merging".to_owned()));
+    }
+
+    /// Undoes a Chat merge through the engine's merge journal, newest first.
+    fn merge_undo(operations: Vec<String>) -> UndoFn {
+        Rc::new(move |runner, id| {
+            let (runner, id, operations) = (runner.clone(), id.to_owned(), operations.clone());
+            glib::MainContext::default().spawn_local(async move {
+                for operation in operations.into_iter().rev() {
+                    let detail = match super::people_actions::undo_merge_operation(&runner.engine, operation, 30).await {
+                        Some(page) if page.status == "ok" => continue,
+                        Some(page) => page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned()),
+                        None => "FileID restarted. Try again.".to_owned(),
+                    };
+                    runner.fail(&id, &super::people_actions::undo_merge_failed(&detail));
+                    return;
+                }
+                runner.finish(&id, super::people_actions::UNDO_MERGE_OK.to_owned(), None);
+            });
+        })
     }
 
     fn undo_move(self: &Rc<Self>, id: &str, root: String) -> bool {
@@ -627,12 +655,13 @@ impl Runner {
         });
     }
 
-    fn on_event(self: &Rc<Self>, event: EngineState) {
+    fn on_event(self: &Rc<Self>, shared: &Rc<EngineState>) {
+        let event = &**shared;
         match event {
             EngineState::Progress(progress) => {
                 let phase = progress.phase;
-                let text = rules::scan_progress(&progress);
-                self.scan.replace(Some(progress));
+                let text = rules::scan_progress(progress);
+                self.scan.replace(Some(progress.clone()));
                 match phase {
                     ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed => self.scan_done(phase, None),
                     _ => {
@@ -644,8 +673,8 @@ impl Runner {
                     }
                 }
             }
-            EngineState::ScanPhase(phase @ (ScanPhase::Cancelled | ScanPhase::Failed)) => self.scan_done(phase, None),
-            EngineState::ScanComplete(processed) => self.scan_done(ScanPhase::Completed, Some(processed)),
+            EngineState::ScanPhase(phase @ (ScanPhase::Cancelled | ScanPhase::Failed)) => self.scan_done(*phase, None),
+            EngineState::ScanComplete(processed) => self.scan_done(ScanPhase::Completed, Some(*processed)),
             EngineState::DeepAnalyzeStarting(_) => {
                 for id in self.waiting(|wait| matches!(wait, Wait::Describe)) {
                     self.progress(&id, "Loading the local AI model".to_owned());
@@ -663,12 +692,12 @@ impl Runner {
             }
             EngineState::DeepAnalyzeComplete(done) => {
                 while let Some(pending) = self.take(|wait| matches!(wait, Wait::Describe)) {
-                    self.finish(&pending.action, rules::describe_finished(&done), None);
+                    self.finish(&pending.action, rules::describe_finished(done), None);
                 }
             }
             EngineState::RestructurePlan(plan) => {
                 let root = plan.library_root.clone();
-                self.plan.replace(Some(plan));
+                self.plan.replace(Some(plan.clone()));
                 let summary = self.plan.borrow().as_ref().and_then(|plan| rules::plan_summary(plan, None));
                 while let Some(pending) = self.take(|wait| matches!(wait, Wait::Plan { root: wanted } if *wanted == root)) {
                     self.finish(&pending.action, rules::plan_ready(summary.as_ref()), None);
@@ -683,13 +712,20 @@ impl Runner {
                         let undo: UndoFn = Rc::new(move |runner, id| {
                             let _ = runner.undo_move(id, root.clone());
                         });
-                        self.finish(&pending.action, rules::apply_summary(&result), Some(("Undo moves", undo)));
+                        self.finish(&pending.action, rules::apply_summary(result), Some(("Undo moves", undo)));
                     }
-                    Some(_) => self.finish(&pending.action, rules::apply_summary(&result), None),
-                    None => self.finish(&pending.action, rules::undo_move_summary(&result), None),
+                    Some(_) => self.finish(&pending.action, rules::apply_summary(result), None),
+                    None => self.finish(&pending.action, rules::undo_move_summary(result), None),
                 }
             }
-            EngineState::BulkActionResult(result) => self.on_bulk(result),
+            EngineState::BulkActionResult(result) if result.action == "mergeClusters" => {
+                let ours = super::merge_ledger::entry_for(shared)
+                    .is_some_and(|entry| entry.owner == super::merge_ledger::Owner::Chat);
+                if ours {
+                    self.on_bulk(result.clone());
+                }
+            }
+            EngineState::BulkActionResult(result) => self.on_bulk(result.clone()),
             EngineState::CatalogResponse(response) => {
                 let request_id = response.request_id.clone();
                 if self.take(|wait| matches!(wait, Wait::MomentsJobs { request_id: id } if *id == request_id)).is_none() {
@@ -702,18 +738,19 @@ impl Runner {
                 }
             }
             EngineState::Error { kind, message, .. } => {
-                if rules::is_describe_error(&kind) {
+                if rules::is_describe_error(kind) {
                     while let Some(pending) = self.take(|wait| matches!(wait, Wait::Describe)) {
-                        self.fail(&pending.action, &message);
+                        self.fail(&pending.action, &crate::engine_errors::text(kind, message));
                     }
                 }
-                if rules::is_folder_error(&kind) {
+                if rules::is_folder_error(kind) {
                     while let Some(pending) = self.take(|wait| matches!(wait, Wait::Plan { .. } | Wait::Move { .. })) {
-                        self.fail(&pending.action, rules::folder_error_text(&kind));
+                        self.fail(&pending.action, rules::folder_error_text(kind));
                     }
                 }
             }
             EngineState::Exited | EngineState::Failed(_) => {
+                super::merge_ledger::clear();
                 let pending: Vec<Pending> = self.pending.borrow_mut().drain(..).collect();
                 for pending in pending {
                     if self.running(&pending.action) {
@@ -851,13 +888,14 @@ impl Runner {
                 self.finish(&pending.action, "Name put back.".to_owned(), None);
             }
             "mergeClusters" => {
-                let (action, done, failed) = {
+                let (action, done, failed, operations) = {
                     let mut pending = self.pending.borrow_mut();
                     let Some(entry) = pending.iter_mut().find(|p| matches!(p.wait, Wait::Merge { .. })) else { return };
-                    let Wait::Merge { outstanding, failed } = &mut entry.wait else { return };
+                    let Wait::Merge { outstanding, failed, operations } = &mut entry.wait else { return };
                     *outstanding = outstanding.saturating_sub(1);
                     *failed |= result.failed > 0 || result.succeeded == 0;
-                    (entry.action.clone(), *outstanding == 0, *failed)
+                    operations.extend(result.messages.iter().filter_map(|item| item.operation_id.clone()));
+                    (entry.action.clone(), *outstanding == 0, *failed, operations.clone())
                 };
                 if !done {
                     return;
@@ -866,7 +904,8 @@ impl Runner {
                 if failed {
                     self.fail(&action, "The merge didn't fully go through. Check People.");
                 } else {
-                    self.finish(&action, "Merged. These people are now one card in People.".to_owned(), None);
+                    let undo = (!operations.is_empty()).then(|| ("Undo merge", Self::merge_undo(operations)));
+                    self.finish(&action, "Merged. These people are now one card in People.".to_owned(), undo);
                 }
             }
             _ => {}

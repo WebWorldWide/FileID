@@ -10,7 +10,7 @@ struct TakeProposalsTests {
     }
 
     @Test func relationChipsAndEvidenceText() {
-        #expect(TakeProposals.relationLabel("repeatedAttempts") == "Repeated tries")
+        #expect(TakeProposals.relationLabel("repeatedAttempts") == "Repeated takes")
         #expect(TakeProposals.relationLabel("alternateViews") == "Other angles")
         #expect(TakeProposals.relationLabel("uncertain") == "Not sure")
         #expect(TakeProposals.relationLabel(nil) == nil && TakeProposals.relationLabel("other") == nil)

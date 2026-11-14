@@ -44,4 +44,5 @@ package final class ScanSideResult<T>: @unchecked Sendable {
     package init() {}
     package func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
     package func get() -> T? { lock.lock(); defer { lock.unlock() }; return value }
+    package func take() -> T? { lock.lock(); defer { value = nil; lock.unlock() }; return value }
 }

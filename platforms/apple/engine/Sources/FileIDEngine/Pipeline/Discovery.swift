@@ -35,6 +35,10 @@ public struct DiscoveredFile: Sendable {
     /// the Windows NTFS MFT file_ref. Propagated to TaggedFile so DBWriter's
     /// rename/move heal can re-bind a moved file's row instead of orphaning it.
     public let fileRef: UInt64?
+    /// The library already holds this exact file (same inode, size and date) at a
+    /// path that no longer exists: it was moved or renamed, so the row is re-bound
+    /// and nothing is decoded or analysed again.
+    public var movedFromKnownRow = false
 
     public typealias Kind = FileKind
 }
@@ -48,6 +52,9 @@ public actor Discovery {
         if s.unreadablePaths > 0 {
             parts.append("\(s.unreadablePaths) \(s.unreadablePaths == 1 ? "item" : "items") couldn't be opened (no permission, or removed during the scan)")
         }
+        if s.cloudOnlyFiles > 0 {
+            parts.append("\(s.cloudOnlyFiles) \(s.cloudOnlyFiles == 1 ? "file is" : "files are") stored in iCloud and not downloaded to this Mac, so \(s.cloudOnlyFiles == 1 ? "it was" : "they were") left out")
+        }
         if s.oversizedFiles > 0 {
             parts.append("\(s.oversizedFiles) \(s.oversizedFiles == 1 ? "file is" : "files are") over \(maxSizeMB) MB and \(s.oversizedFiles == 1 ? "was" : "were") left out")
         }
@@ -59,6 +66,7 @@ public actor Discovery {
     public struct Shortfall: Sendable, Equatable {
         public var unreadablePaths = 0
         public var oversizedFiles = 0
+        public var cloudOnlyFiles = 0
     }
     public private(set) var lastShortfall = Shortfall()
 
@@ -278,6 +286,9 @@ public actor Discovery {
         // (always > the upstream scanStart), flushed in bounded batches.
         var skippedTouch: [String] = []
         let touchTime = Date().timeIntervalSince1970
+        var cloudOnlyCount = 0
+        var movedCount = 0
+        let libraryHasRows = skip?.isEmpty == false
 
         // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
         // async contexts (Sendable issues). nextObject() is the sync escape.
@@ -329,14 +340,30 @@ public actor Discovery {
                 }
                 continue
             }
-            await emit(DiscoveredFile(
+            let identity = Self.identity(of: url)
+            // Reading a cloud-only file makes macOS download it. Leave it out
+            // (keeping any row it already has) until it is on this Mac.
+            if identity.cloudOnly {
+                cloudOnlyCount += 1
+                skippedTouch.append(url.path)
+                continue
+            }
+            var discovered = DiscoveredFile(
                 url: url,
                 sizeBytes: size,
                 creationDate: values?.creationDate,
                 modificationDate: values?.contentModificationDate,
-                kind: FileTypes.kind(forExtension: ext),
-                fileRef: Self.inode(of: url)
-            ))
+                kind: fileKind,
+                fileRef: identity.inode
+            )
+            if libraryHasRows, let inode = identity.inode, let database,
+               await Self.isMoveOfKnownRow(
+                   path: url.path, inode: inode, size: size,
+                   modified: values?.contentModificationDate?.timeIntervalSince1970, database: database) {
+                discovered.movedFromKnownRow = true
+                movedCount += 1
+            }
+            await emit(discovered)
             kept += 1
             sinceLastProgress += 1
             if kept == 1 || sinceLastProgress >= 16 {
@@ -352,7 +379,12 @@ public actor Discovery {
         // the app (Settings → Logs) can tell the user the library may be incomplete
         // instead of silently dropping them. Mirrors the Windows `discovery_partial`
         // event (scan_session.rs); the scan still completes.
-        lastShortfall = Shortfall(unreadablePaths: discoveryErrorCount, oversizedFiles: oversizedCount)
+        lastShortfall = Shortfall(unreadablePaths: discoveryErrorCount, oversizedFiles: oversizedCount,
+                                  cloudOnlyFiles: cloudOnlyCount)
+        if cloudOnlyCount > 0 || movedCount > 0 {
+            JSONLog.shared.info(ev: "discovery_shortcuts",
+                                extra: ["cloudOnly": AnyCodable(cloudOnlyCount), "moved": AnyCodable(movedCount)])
+        }
         if discoveryErrorCount > 0 {
             JSONLog.shared.info(ev: "discovery_partial",
                                 path: redactPathForLog(root.path),
@@ -410,12 +442,49 @@ public actor Discovery {
     /// otherwise a reused inode can re-bind a deleted file's row onto an unrelated
     /// new file. (Corroboration lives in DBWriter.healMovedRow.)
     static func inode(of url: URL) -> UInt64? {
+        identity(of: url).inode
+    }
+
+    /// One `stat` for both the inode and SF_DATALESS, the flag macOS sets on a
+    /// file whose contents live only in iCloud (or another file provider).
+    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool) {
         var st = stat()
         let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
             guard let rep else { return false }
             return stat(rep, &st) == 0
         }
-        return ok ? UInt64(st.st_ino) : nil
+        guard ok else { return (nil, false) }
+        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0)
+    }
+
+    /// True when no row sits at `path` yet and a successfully scanned row with the
+    /// same inode, size and modification date sits at a path that is gone from
+    /// disk. The same corroboration as DBWriter.healMovedRow, plus the date, so a
+    /// reused inode can't pass. Any error means "not a move" (the file is analysed).
+    static func isMoveOfKnownRow(
+        path: String, inode: UInt64, size: Int64, modified: Double?, database: Database
+    ) async -> Bool {
+        let oldPaths: [String] = (try? await database.pool.read { db -> [String] in
+            if try Bool.fetchOne(db.cachedStatement(sql: "SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?)"),
+                                 arguments: [path]) == true { return [] }
+            let rows = try Row.fetchAll(db.cachedStatement(sql: """
+                SELECT path_text, modified_at FROM files
+                WHERE file_ref = ? AND size_bytes = ? AND failed = 0 AND path_text != ?
+                LIMIT 8
+                """), arguments: [Int64(bitPattern: inode), size, path])
+            return rows.compactMap { row -> String? in
+                let stored: Double? = row["modified_at"]
+                guard let stored, let modified, abs(stored - modified) < 0.000_001 else { return nil }
+                return row["path_text"]
+            }
+        }) ?? []
+        return oldPaths.contains { old in
+            var st = stat()
+            return URL(fileURLWithPath: old).withUnsafeFileSystemRepresentation { rep in
+                guard let rep else { return false }
+                return lstat(rep, &st) != 0 && errno == ENOENT
+            }
+        }
     }
 
     /// Pure incremental-skip predicate (testable in isolation). Mirrors DBWriter's
@@ -474,8 +543,12 @@ public actor Discovery {
         // exclusion has the exact same shape for docs/pdfs (gated on BGE on disk):
         // BGE is opt-in, so the first scan usually predates it and the install-then-
         // rescan path must keep embeddingless docs in the pipeline to backfill them.
+        // "Installed" means the scan can really make an embedding: a model file
+        // that fails to load would otherwise send every image back through the
+        // full pass on every scan. The scan loads it before the walk starts.
         let clipInstalled = FileManager.default.fileExists(
             atPath: MobileCLIPService.defaultImageModelURL.path)
+            && MobileCLIPService.shared.canEmbed
         let clipExclusion = clipInstalled
             ? "AND \(DBWriter.skipSetClipBackfillExclusionSQL)" : ""
         // Same CLIP gate keeps an embeddingless `.obj` 3D model in the pipeline to backfill.

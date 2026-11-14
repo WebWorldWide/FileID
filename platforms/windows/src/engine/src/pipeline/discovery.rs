@@ -168,9 +168,59 @@ impl FileKind {
     }
 }
 
+/// `SF_DATALESS`: macOS sets it on a file whose contents live only in iCloud
+/// (or another File Provider); reading it downloads the file.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SF_DATALESS: u32 = 0x4000_0000;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn flags_are_dataless(st_flags: u32) -> bool {
+    st_flags & SF_DATALESS != 0
+}
+
+/// macOS leaves a cloud-only file out of the scan (the Swift engine's rule) and
+/// reports the count; Windows catalogs it from its metadata.
+const PLACEHOLDERS_LEFT_OUT: bool = cfg!(target_os = "macos");
+
+#[derive(Debug, PartialEq, Eq)]
+enum PlaceholderAction {
+    Process,
+    /// Not catalogued this scan; counted for the `discovery_partial` notice.
+    LeaveOut,
+    /// Already catalogued as a placeholder and still one: nothing to write.
+    AlreadyRecorded,
+}
+
+fn placeholder_action(
+    online_only: bool,
+    left_out: bool,
+    recorded: Option<&(i64, Option<f64>)>,
+    size: u64,
+    modified: f64,
+) -> PlaceholderAction {
+    if !online_only {
+        return PlaceholderAction::Process;
+    }
+    if left_out {
+        return PlaceholderAction::LeaveOut;
+    }
+    match recorded {
+        Some(&(db_size, Some(db_modified))) if db_size == size as i64 && (db_modified - modified).abs() < 0.000_001 => {
+            PlaceholderAction::AlreadyRecorded
+        }
+        _ => PlaceholderAction::Process,
+    }
+}
+
+/// Rows catalogued from metadata only: a content-bearing kind with no content
+/// hash. Callers append their path-range clause.
+pub(crate) const KNOWN_PLACEHOLDER_SQL: &str = "SELECT path_text, size_bytes, modified_at FROM files \
+     WHERE failed = 0 AND content_hash IS NULL \
+     AND kind IN ('image', 'video', 'pdf', 'doc', 'audio')";
+
 /// Cloud placeholder detection. OneDrive / generic Files-On-Demand mark
-/// dehydrated files with these attributes; touching their content forces a
-/// download.
+/// dehydrated files with these attributes, and macOS marks iCloud / File
+/// Provider files `SF_DATALESS`; touching their content forces a download.
 pub(crate) fn is_online_only(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -182,7 +232,12 @@ pub(crate) fn is_online_only(metadata: &std::fs::Metadata) -> bool {
             & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
             != 0
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        flags_are_dataless(metadata.st_flags())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = metadata;
         false
@@ -206,7 +261,8 @@ pub struct DiscoveredFile {
     /// `OFFLINE` / `RECALL_ON_*`). Reading its content would trigger a
     /// network hydration (a surprise download — and the only non-model
     /// egress), so the pipeline does a metadata-only pass and skips
-    /// decode / embed / OCR for it. Always false on non-Windows.
+    /// decode / embed / OCR for it. Windows only: macOS leaves such a file
+    /// out of the scan and Linux has no placeholder flag.
     pub online_only: bool,
     /// Volume-local file identity (NTFS MFT reference on Windows; inode on
     /// POSIX). The dbwriter's rename/move heal uses it to re-bind a moved
@@ -214,6 +270,96 @@ pub struct DiscoveredFile {
     /// open failed (permission, race, ...) — the heal then falls through to
     /// content_hash. Always `None` on non-Windows for now.
     pub file_ref: Option<u64>,
+    /// The catalog already holds this exact file (same file id, size and
+    /// date) at a path that no longer exists: it was moved or renamed, so its
+    /// row is re-bound and nothing is read, decoded or analysed again.
+    pub moved_from_known_row: bool,
+}
+
+/// Successfully scanned rows by volume-local file id, for spotting a file
+/// that only moved (the Swift engine's `Discovery.isMoveOfKnownRow`). Holds
+/// 32 bytes per row; paths are read from the catalog only for a candidate.
+pub(crate) struct MoveIndex {
+    /// `(file_ref, size, modified, row id)`, sorted by `file_ref`.
+    rows: Vec<(u64, i64, f64, i64)>,
+    conn: Arc<Mutex<rusqlite::Connection>>,
+}
+
+impl MoveIndex {
+    const CANDIDATE_LIMIT: usize = 8;
+
+    /// `None` when the catalog has no row a moved file could match.
+    pub(crate) fn load(conn: &Arc<Mutex<rusqlite::Connection>>) -> Option<Arc<Self>> {
+        let mut rows: Vec<(u64, i64, f64, i64)> = {
+            let db = conn.lock();
+            let mut stmt = db
+                .prepare(
+                    "SELECT file_ref, size_bytes, modified_at, id FROM files \
+                     WHERE failed = 0 AND file_ref IS NOT NULL AND modified_at IS NOT NULL",
+                )
+                .ok()?;
+            stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .ok()?
+                .flatten()
+                .collect()
+        };
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort_unstable_by_key(|row| row.0);
+        rows.shrink_to_fit();
+        Some(Arc::new(Self { rows, conn: conn.clone() }))
+    }
+
+    fn candidates(&self, file_ref: u64, size: u64, modified: f64) -> Vec<i64> {
+        let start = self.rows.partition_point(|row| row.0 < file_ref);
+        self.rows[start..]
+            .iter()
+            .take_while(|row| row.0 == file_ref)
+            .filter(|row| row.1 == size as i64 && (row.2 - modified).abs() < 0.000_001)
+            .map(|row| row.3)
+            .take(Self::CANDIDATE_LIMIT)
+            .collect()
+    }
+
+    /// True when no row sits at `path` and a successfully scanned row with
+    /// the same file id, size and date sits at a path that is gone from disk.
+    /// Any error means "not a move": the file is analysed.
+    pub(crate) fn is_move(&self, path: &str, file_ref: u64, size: u64, modified: f64) -> bool {
+        let ids = self.candidates(file_ref, size, modified);
+        if ids.is_empty() {
+            return false;
+        }
+        let old_paths: Vec<String> = {
+            let db = self.conn.lock();
+            let occupied = db
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1)")
+                .and_then(|mut stmt| stmt.query_row([path], |r| r.get::<_, bool>(0)))
+                .unwrap_or(true);
+            if occupied {
+                return false;
+            }
+            let Ok(mut stmt) = db.prepare_cached(
+                "SELECT path_text FROM files \
+                 WHERE id = ?1 AND file_ref = ?2 AND size_bytes = ?3 AND failed = 0 AND path_text != ?4",
+            ) else {
+                return false;
+            };
+            ids.iter()
+                .filter_map(|id| {
+                    stmt.query_row(rusqlite::params![id, file_ref as i64, size as i64, path], |r| r.get(0)).ok()
+                })
+                .collect()
+        };
+        old_paths.iter().any(|old| path_is_gone(old))
+    }
+}
+
+/// `lstat` says the path does not exist. A dangling symlink is present, and a
+/// dead mount (any other error) proves nothing.
+fn path_is_gone(path: &str) -> bool {
+    let long = crate::util::path_safety::to_extended_length(std::path::Path::new(path));
+    matches!(std::fs::symlink_metadata(long), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub struct Discovery {
@@ -224,6 +370,10 @@ pub struct Discovery {
     /// turning a re-run of a 1M-file corpus into a near-instant no-op.
     /// Empty = classic full-scan.
     skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    /// Rows already catalogued as cloud placeholders, by path: a file that is
+    /// still a placeholder with the same size and date is not written again.
+    known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    moves: Option<Arc<MoveIndex>>,
     /// User-excluded folders in `normalize_for_exclusion` form. The walk
     /// prunes an excluded directory at its parent's read_dir, so equality
     /// matching suffices — nothing beneath it is ever visited.
@@ -256,6 +406,8 @@ pub struct DiscoveryHandle {
     /// Walk errors swallowed during traversal. Surfaced as a non-fatal
     /// `discovery_partial` event by the scan orchestrator.
     pub error_count: Arc<AtomicU64>,
+    /// Cloud-only files left out of the scan (macOS), for the same notice.
+    pub cloud_only_count: Arc<AtomicU64>,
     /// Join handle retained by the scan orchestrator so a panic in the blocking
     /// walker becomes a failed scan instead of an apparently successful empty one.
     pub join: tokio::task::JoinHandle<()>,
@@ -265,6 +417,30 @@ struct ClassifiedEntry {
     discovered: Option<DiscoveredFile>,
     zero_byte: Option<ZeroByteObservation>,
     seen_path_hash: Option<i64>,
+}
+
+/// What `classify_entry` consults for every file of the walk.
+struct WalkContext {
+    skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
+    moves: Option<Arc<MoveIndex>>,
+    error_count: Arc<AtomicU64>,
+    cloud_only_count: Arc<AtomicU64>,
+    moved_count: Arc<AtomicU64>,
+}
+
+impl WalkContext {
+    #[cfg(test)]
+    fn for_skip(skip_paths: &HashMap<SkipFingerprint, (i64, Option<f64>)>) -> Self {
+        Self {
+            skip_paths: Arc::new(skip_paths.clone()),
+            known_placeholders: Arc::new(HashMap::new()),
+            moves: None,
+            error_count: Arc::new(AtomicU64::new(0)),
+            cloud_only_count: Arc::new(AtomicU64::new(0)),
+            moved_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl Discovery {
@@ -283,8 +459,23 @@ impl Discovery {
             root: root.into(),
             coordinator,
             skip_paths,
+            known_placeholders: Arc::new(HashMap::new()),
+            moves: None,
             exclusions: Arc::new(exclusions.iter().cloned().collect()),
         }
+    }
+
+    pub(crate) fn with_move_index(mut self, moves: Option<Arc<MoveIndex>>) -> Self {
+        self.moves = moves;
+        self
+    }
+
+    pub(crate) fn with_known_placeholders(
+        mut self,
+        placeholders: HashMap<SkipFingerprint, (i64, Option<f64>)>,
+    ) -> Self {
+        self.known_placeholders = Arc::new(placeholders);
+        self
     }
 
     /// Walk the root, sending each readable file onto the returned receiver.
@@ -303,6 +494,16 @@ impl Discovery {
         let heavy_count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
+        let cloud_only_count = Arc::new(AtomicU64::new(0));
+        let moved_count = Arc::new(AtomicU64::new(0));
+        let context = Arc::new(WalkContext {
+            skip_paths: skip_paths.clone(),
+            known_placeholders: self.known_placeholders.clone(),
+            moves: self.moves.clone(),
+            error_count: error_count.clone(),
+            cloud_only_count: cloud_only_count.clone(),
+            moved_count: moved_count.clone(),
+        });
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
         let seen_dirs: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_dirs_inner = seen_dirs.clone();
@@ -359,9 +560,8 @@ impl Discovery {
             // is unchanged: jwalk still yields entries in the same traversal
             // order regardless of which thread filled each client_state.
             let coord_for_dir = coordinator.clone();
-            let skip_for_dir = skip_paths.clone();
+            let context_for_dir = context.clone();
             let excl_for_dir = exclusions.clone();
-            let err_for_dir = error_count_inner.clone();
             let seen_for_dir = seen_paths_inner.clone();
             let dirs_for_dir = seen_dirs_inner.clone();
             // Walk a verbatim ("\\?\") root so directories whose full path
@@ -461,11 +661,7 @@ impl Discovery {
                             continue;
                         }
                         let entry_path = entry.path();
-                        let classified = classify_entry(
-                            &entry_path,
-                            skip_for_dir.as_ref(),
-                            err_for_dir.as_ref(),
-                        );
+                        let classified = classify_entry_in(&entry_path, &context_for_dir);
                         if let Some(path_hash) = classified.seen_path_hash {
                             seen_in_directory.push(path_hash);
                         }
@@ -550,6 +746,11 @@ impl Discovery {
                     break;
                 }
             }
+            let (cloud_only, moved) =
+                (context.cloud_only_count.load(Ordering::Relaxed), context.moved_count.load(Ordering::Relaxed));
+            if cloud_only > 0 || moved > 0 {
+                tracing::info!(cloud_only, moved, "[DISCOVERY] files left out as cloud-only or re-bound as moved");
+            }
             done_inner.store(true, Ordering::Release);
             // Channel auto-closes when tx drops here.
         });
@@ -563,6 +764,7 @@ impl Discovery {
             seen_paths,
             seen_dirs,
             error_count,
+            cloud_only_count,
             join,
         }
     }
@@ -577,11 +779,21 @@ impl Discovery {
 ///
 /// `entry_path` is the verbatim-prefixed walk path (children inherit the
 /// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
+#[cfg(test)]
 fn classify_entry(
     entry_path: &std::path::Path,
     skip_paths: &HashMap<SkipFingerprint, (i64, Option<f64>)>,
     error_count: &AtomicU64,
 ) -> ClassifiedEntry {
+    let context = WalkContext::for_skip(skip_paths);
+    let classified = classify_entry_in(entry_path, &context);
+    error_count.fetch_add(context.error_count.load(Ordering::Relaxed), Ordering::Relaxed);
+    classified
+}
+
+fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> ClassifiedEntry {
+    let skip_paths = context.skip_paths.as_ref();
+    let error_count = context.error_count.as_ref();
     // Strip the verbatim prefix back to normal form: this is what we store +
     // display + compare against the skip-set (which holds normal-form DB
     // paths). FS access reconverts via `to_extended_length` at the open site.
@@ -686,11 +898,43 @@ fn classify_entry(
         };
     }
 
+    // Reading a cloud-only file downloads it. macOS leaves it out (any row it
+    // already has stays, since the path is still seen); a placeholder Windows
+    // already catalogued is written again only when its state changes.
+    match placeholder_action(
+        online_only,
+        PLACEHOLDERS_LEFT_OUT,
+        context.known_placeholders.get(&fingerprint),
+        size,
+        modified,
+    ) {
+        PlaceholderAction::Process => {}
+        action => {
+            if action == PlaceholderAction::LeaveOut {
+                context.cloud_only_count.fetch_add(1, Ordering::Relaxed);
+            }
+            return ClassifiedEntry {
+                discovered: None,
+                zero_byte: None,
+                seen_path_hash: Some(seen_path_hash),
+            };
+        }
+    }
+
     // Volume-local file id: lets the dbwriter heal a renamed/moved file's
     // existing row instead of recomputing its tags. Cheap metadata-only open
     // via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors (the
     // heal then falls through to content_hash).
     let file_ref = crate::platform::file_ref(entry_path);
+    let moved_from_known_row = match (file_ref, context.moves.as_deref()) {
+        (Some(file_ref), Some(moves)) if !online_only => {
+            moves.is_move(&path.to_string_lossy(), file_ref, size, modified)
+        }
+        _ => false,
+    };
+    if moved_from_known_row {
+        context.moved_count.fetch_add(1, Ordering::Relaxed);
+    }
     ClassifiedEntry {
         discovered: Some(DiscoveredFile {
             path,
@@ -700,6 +944,7 @@ fn classify_entry(
             created_unix,
             online_only,
             file_ref,
+            moved_from_known_row,
         }),
         zero_byte: None,
         seen_path_hash: Some(seen_path_hash),
@@ -818,6 +1063,147 @@ mod tests {
         assert_eq!(FileKind::from_extension("jpg"), FileKind::Image);
         assert_eq!(FileKind::from_extension("HEIC"), FileKind::Image);
         assert_eq!(FileKind::from_extension("png"), FileKind::Image);
+    }
+
+    fn move_catalog() -> Arc<Mutex<rusqlite::Connection>> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT UNIQUE, size_bytes INTEGER, \
+             modified_at DOUBLE, failed INTEGER NOT NULL DEFAULT 0, file_ref INTEGER);",
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn insert_row(conn: &Arc<Mutex<rusqlite::Connection>>, path: &str, size: i64, modified: f64, failed: i64, file_ref: u64) {
+        conn.lock()
+            .execute(
+                "INSERT INTO files (path_text, size_bytes, modified_at, failed, file_ref) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![path, size, modified, failed, file_ref as i64],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn move_index_is_absent_for_a_catalog_without_file_ids() {
+        let conn = move_catalog();
+        assert!(MoveIndex::load(&conn).is_none());
+        conn.lock().execute("INSERT INTO files (path_text, size_bytes, modified_at) VALUES ('/a', 1, 1.0)", []).unwrap();
+        assert!(MoveIndex::load(&conn).is_none());
+    }
+
+    #[test]
+    fn a_move_needs_the_same_file_id_size_and_date_and_a_vanished_old_path() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-move-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let still_here = dir.join("still-here.jpg");
+        std::fs::write(&still_here, b"x").unwrap();
+        let gone = dir.join("gone.jpg").to_string_lossy().into_owned();
+        let new_path = dir.join("renamed.jpg").to_string_lossy().into_owned();
+
+        let conn = move_catalog();
+        insert_row(&conn, &gone, 100, 50.0, 0, 7);
+        insert_row(&conn, &still_here.to_string_lossy(), 200, 60.0, 0, 8);
+        insert_row(&conn, &dir.join("failed-before.jpg").to_string_lossy(), 300, 70.0, 1, 9);
+        // A file id above i64::MAX round-trips through the signed column.
+        insert_row(&conn, &dir.join("high-gone.jpg").to_string_lossy(), 400, 80.0, 0, u64::MAX - 5);
+        let index = MoveIndex::load(&conn).expect("rows with file ids");
+
+        assert!(index.is_move(&new_path, 7, 100, 50.0));
+        assert!(index.is_move(&new_path, 7, 100, 50.000_000_4), "dates compare within a microsecond");
+        assert!(index.is_move(&new_path, u64::MAX - 5, 400, 80.0));
+        assert!(!index.is_move(&new_path, 7, 101, 50.0), "a different size is another file on a reused id");
+        assert!(!index.is_move(&new_path, 7, 100, 51.0), "a different date is another file on a reused id");
+        assert!(!index.is_move(&new_path, 8, 200, 60.0), "the old path still exists: a hard link or copy");
+        assert!(!index.is_move(&new_path, 9, 300, 70.0), "a row that never scanned cleanly is analysed");
+        assert!(!index.is_move(&new_path, 77, 100, 50.0));
+        assert!(!index.is_move(&gone, 7, 100, 50.0), "a row already sits at this path");
+
+        // The row changed after the index was loaded: the catalog is asked again.
+        conn.lock().execute("UPDATE files SET failed = 1 WHERE file_ref = 7", []).unwrap();
+        assert!(!index.is_move(&new_path, 7, 100, 50.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_renamed_file_is_discovered_as_a_move_and_a_new_file_is_not() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.jpg");
+        std::fs::write(&old, b"jpegbytes").unwrap();
+        let before = classify_entry(&old, &HashMap::new(), &AtomicU64::new(0)).discovered.unwrap();
+        assert!(!before.moved_from_known_row);
+
+        let conn = move_catalog();
+        insert_row(&conn, &old.to_string_lossy(), 9, before.modified_unix, 0, before.file_ref.unwrap());
+        let renamed = dir.join("renamed.jpg");
+        std::fs::rename(&old, &renamed).unwrap();
+        let fresh = dir.join("fresh.jpg");
+        std::fs::write(&fresh, b"jpegbytes").unwrap();
+
+        let mut context = WalkContext::for_skip(&HashMap::new());
+        context.moves = MoveIndex::load(&conn);
+        let moved = classify_entry_in(&renamed, &context).discovered.unwrap();
+        assert!(moved.moved_from_known_row);
+        assert!(!classify_entry_in(&fresh, &context).discovered.unwrap().moved_from_known_row);
+        assert_eq!(context.moved_count.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dataless_flag_marks_a_cloud_only_file() {
+        assert!(flags_are_dataless(0x4000_0000));
+        assert!(flags_are_dataless(0x4000_0020));
+        assert!(!flags_are_dataless(0));
+        assert!(!flags_are_dataless(0x0000_8020), "hidden + compressed is a local file");
+    }
+
+    #[test]
+    fn local_files_are_never_online_only() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("local.jpg");
+        std::fs::write(&file, b"bytes").unwrap();
+        assert!(!is_online_only(&std::fs::symlink_metadata(&file).unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn placeholders_are_left_out_on_mac_and_written_once_elsewhere() {
+        use PlaceholderAction::{AlreadyRecorded, LeaveOut, Process};
+        let recorded = (10_i64, Some(100.0));
+        assert_eq!(placeholder_action(false, true, None, 10, 100.0), Process);
+        assert_eq!(placeholder_action(false, false, Some(&recorded), 10, 100.0), Process, "downloaded since: analyse it");
+        assert_eq!(placeholder_action(true, true, None, 10, 100.0), LeaveOut);
+        assert_eq!(placeholder_action(true, true, Some(&recorded), 10, 100.0), LeaveOut);
+        assert_eq!(placeholder_action(true, false, None, 10, 100.0), Process, "first sighting writes its metadata row");
+        assert_eq!(placeholder_action(true, false, Some(&recorded), 10, 100.0), AlreadyRecorded);
+        assert_eq!(placeholder_action(true, false, Some(&recorded), 11, 100.0), Process);
+        assert_eq!(placeholder_action(true, false, Some(&recorded), 10, 101.0), Process);
+        assert_eq!(placeholder_action(true, false, Some(&(10, None)), 10, 100.0), Process);
+    }
+
+    #[test]
+    fn known_placeholder_rows_are_metadata_only_content_kinds() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (path_text TEXT, kind TEXT, size_bytes INTEGER, modified_at DOUBLE, failed INTEGER, content_hash BLOB);
+             INSERT INTO files VALUES ('/c/placeholder.jpg', 'image', 5, 1.0, 0, NULL);
+             INSERT INTO files VALUES ('/c/local.jpg', 'image', 5, 1.0, 0, X'00');
+             INSERT INTO files VALUES ('/c/failed.jpg', 'image', 5, 1.0, 1, NULL);
+             INSERT INTO files VALUES ('/c/archive.bin', 'other', 5, 1.0, 0, NULL);",
+        )
+        .unwrap();
+        let rows: Vec<String> = conn
+            .prepare(KNOWN_PLACEHOLDER_SQL)
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec!["/c/placeholder.jpg".to_string()]);
     }
 
     #[test]

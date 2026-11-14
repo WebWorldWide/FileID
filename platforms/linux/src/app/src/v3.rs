@@ -206,16 +206,85 @@ pub fn busy_bar(width: i32) -> gtk::ProgressBar {
         .css_classes(["grain-bar", "mini", "tone-gold"])
         .build();
     let weak = bar.downgrade();
-    glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
-        let Some(bar) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if bar.is_mapped() {
+    while_on_screen(&bar, std::time::Duration::from_millis(120), move || {
+        if let Some(bar) = weak.upgrade() {
             bar.pulse();
         }
-        glib::ControlFlow::Continue
     });
     bar
+}
+
+/// Whether a repeating timer should exist: its widget is on screen and the
+/// window is not minimised or otherwise suspended.
+pub fn timer_wanted(mapped: bool, suspended: bool) -> bool {
+    mapped && !suspended
+}
+
+/// Runs `tick` every `interval`, but only while `widget` is on screen in a
+/// window that is not suspended. The timer is removed, not just skipped, the
+/// rest of the time, so a hidden page or a minimised window wakes nothing.
+pub fn while_on_screen(widget: &impl IsA<gtk::Widget>, interval: std::time::Duration, tick: impl Fn() + 'static) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    struct State {
+        timer: RefCell<Option<glib::SourceId>>,
+        window: RefCell<Option<(gtk::Window, glib::SignalHandlerId)>>,
+        tick: Box<dyn Fn()>,
+        interval: std::time::Duration,
+    }
+    fn sync(state: &Rc<State>, widget: &gtk::Widget) {
+        let suspended = state.window.borrow().as_ref().is_some_and(|(window, _)| window.is_suspended());
+        if !timer_wanted(widget.is_mapped(), suspended) {
+            if let Some(timer) = state.timer.take() {
+                timer.remove();
+            }
+            return;
+        }
+        if state.timer.borrow().is_some() {
+            return;
+        }
+        let weak = Rc::downgrade(state);
+        let timer = glib::timeout_add_local(state.interval, move || match weak.upgrade() {
+            Some(state) => {
+                (state.tick)();
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+        state.timer.replace(Some(timer));
+    }
+    let widget: gtk::Widget = widget.clone().upcast();
+    let state = Rc::new(State {
+        timer: RefCell::new(None),
+        window: RefCell::new(None),
+        tick: Box::new(tick),
+        interval,
+    });
+    widget.connect_map({
+        let state = state.clone();
+        move |widget| {
+            if let Some(window) = widget.root().and_downcast::<gtk::Window>() {
+                let (state_weak, widget_weak) = (Rc::downgrade(&state), widget.downgrade());
+                let handler = window.connect_suspended_notify(move |_| {
+                    if let (Some(state), Some(widget)) = (state_weak.upgrade(), widget_weak.upgrade()) {
+                        sync(&state, &widget);
+                    }
+                });
+                if let Some((old, id)) = state.window.replace(Some((window, handler))) {
+                    old.disconnect(id);
+                }
+            }
+            sync(&state, widget);
+        }
+    });
+    widget.connect_unmap(move |_| {
+        if let Some(timer) = state.timer.take() {
+            timer.remove();
+        }
+        if let Some((window, id)) = state.window.take() {
+            window.disconnect(id);
+        }
+    });
 }
 
 /// m:ss, h:mm:ss past an hour.
@@ -502,6 +571,13 @@ pub fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeating_timers_exist_only_on_screen() {
+        assert!(super::timer_wanted(true, false));
+        assert!(!super::timer_wanted(false, false));
+        assert!(!super::timer_wanted(true, true));
+    }
 
     #[test]
     fn timecodes_use_minutes_until_an_hour() {

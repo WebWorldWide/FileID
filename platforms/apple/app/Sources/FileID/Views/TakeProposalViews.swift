@@ -1,8 +1,8 @@
 import FileIDShared
 import SwiftUI
 
-/// The Best Takes rail section for library-wide related tries: Find related
-/// tries (the takeGrouping job, with its progress and controls) and the stored
+/// The Best Takes rail section for library-wide similar takes: the find button
+/// (the takeGrouping job, with its progress and controls) and the stored
 /// proposals, each with a relation chip and the evidence behind it.
 struct RelatedTriesSection: View {
     let proposals: [CatalogTakeAutoGroup]
@@ -16,15 +16,20 @@ struct RelatedTriesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             header
-            MetaText("Tries and other angles of the same moment, found across your whole library. Suggestions never change your files.", size: 11.5)
+            MetaText("Takes and other angles of the same moment, found across your whole library. Suggestions never change your files.", size: 11.5)
                 .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                 .fixedSize(horizontal: false, vertical: true)
+            Button("Find similar takes in my library", action: onFind)
+                .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
+                .disabled(!TakeProposals.canFind(job))
+                .help(TakeProposals.canFind(job) ? "Look through the whole library for takes of the same moment. Runs on this Mac." : "Already looking")
+                .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
             if let job, job.state != "completed" {
                 CatalogJobRow(job: job, control: onControl)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
             if loaded && proposals.isEmpty && job?.state != "running" {
-                MetaText(job == nil ? "Not looked yet. Find related tries to search the library." : "No related tries found yet.", size: 12)
+                MetaText(job == nil ? "FileID hasn't looked yet." : "No similar takes found yet.", size: 12)
                     .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -39,13 +44,8 @@ struct RelatedTriesSection: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            SectionLabel("Related tries · \(proposals.filter { $0.status == "open" }.count)", color: Theme.gold)
+            SectionLabel("Similar takes · \(proposals.filter { $0.status == "open" }.count)", color: Theme.gold)
             Spacer(minLength: 4)
-            Button("Find related tries", action: onFind)
-                .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
-                .disabled(!TakeProposals.canFind(job))
-                .help(TakeProposals.canFind(job) ? "Look through the whole library for related tries. Runs on this Mac." : "Already looking")
-                .accessibilityLabel("Find related tries across the library")
         }
         .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
     }
@@ -78,7 +78,8 @@ private struct ProposalRow: View {
     let action: () -> Void
 
     var body: some View {
-        let noun = group.kind == "videos" ? "clips" : "photos"
+        let noun = "takes"
+        let media = group.kind == "videos" ? "Videos" : "Photos"
         RailRow(selected: selected, action: action) {
             HStack(alignment: .top, spacing: 10) {
                 ShotFan(shots: group.shots)
@@ -88,7 +89,7 @@ private struct ProposalRow: View {
                             .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
                         RelationChip(relation: group.relation)
                     }
-                    Text(TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
+                    Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
                         .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
                     Text(TakeProposals.evidenceText(group.evidence))
                         .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(2)

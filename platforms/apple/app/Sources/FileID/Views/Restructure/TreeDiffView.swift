@@ -1,12 +1,13 @@
-// Beyond-Compare-style dual-pane tree view: current state on the
-// left, proposed state on the right. Each row carries a git-style
-// status letter (M=moved, =unchanged, +=new folder). Filter chips
-// jump to moves / new folders / everything.
+// Dual-pane tree view: folders losing files on the left, folders receiving
+// them on the right. Each row carries a status letter matching the legend
+// (T = some files move out, R = every file moves, + = files arriving).
 import SwiftUI
 
 struct TreeDiffView: View {
     let proposals: [RestructureView.Proposal]
-    let summary: RestructureView.AssistantSummary
+    /// Bumped by the parent whenever `proposals` is replaced; the rows are
+    /// rebuilt then, not on every body pass.
+    let planVersion: Int
     var onTapSource: (String) -> Void = { _ in }
     var onTapDestination: (String) -> Void = { _ in }
     /// Same hover bus the Sankey writes into. Hovering a folder row
@@ -16,19 +17,21 @@ struct TreeDiffView: View {
 
     enum FilterMode: String, CaseIterable, Identifiable {
         case all
-        case moves
-        case newFolders
+        case tidy
+        case reorganize
         var id: String { rawValue }
         var label: String {
             switch self {
             case .all:        return "All"
-            case .moves:      return "Moves"
-            case .newFolders: return "New folders"
+            case .tidy:       return "Tidied"
+            case .reorganize: return "Reorganized"
             }
         }
     }
 
     @State private var filter: FilterMode = .all
+    @State private var sourceRows: [SourceRow] = []
+    @State private var destRows: [DestRow] = []
 
     // MARK: - Data
 
@@ -40,73 +43,44 @@ struct TreeDiffView: View {
         let movingFiles: Int
         let kind: SourceKind
     }
-    private enum SourceKind { case anchor, mixed, junk }
+    private enum SourceKind { case mixed, junk }
 
     private struct DestRow: Identifiable {
         var id: String { bucket }
         let bucket: String
         let count: Int
-        let isExisting: Bool
     }
 
-    private var sourceRows: [SourceRow] {
-        var rows: [SourceRow] = summary.staysPutBreakdown.map { entry in
-            SourceRow(folder: entry.folder, displayName: entry.folder,
-                      totalFiles: entry.count, movingFiles: 0, kind: .anchor)
+    private func rebuildRows() {
+        var kindByFolder: [String: SourceKind] = [:]
+        var countByFolder: [String: Int] = [:]
+        for p in proposals {
+            countByFolder[p.sourceFolder, default: 0] += 1
+            if p.kind != .dissolved {
+                kindByFolder[p.sourceFolder] = .mixed
+            } else if kindByFolder[p.sourceFolder] == nil {
+                kindByFolder[p.sourceFolder] = .junk
+            }
         }
-        let bySource = Dictionary(grouping: proposals, by: { $0.sourceFolder })
-        for (folder, props) in bySource {
+        let wanted: SourceKind? = filter == .all ? nil : (filter == .tidy ? .mixed : .junk)
+        sourceRows = countByFolder.compactMap { folder, count -> SourceRow? in
+            let kind = kindByFolder[folder] ?? .junk
+            if let wanted, kind != wanted { return nil }
             let display = (folder as NSString).lastPathComponent
-            let isJunk = props.allSatisfy { $0.kind == .dissolved }
-            rows.append(SourceRow(
-                folder: folder,
-                displayName: display.isEmpty ? folder : display,
-                totalFiles: props.count,
-                movingFiles: props.count,
-                kind: isJunk ? .junk : .mixed
-            ))
+            return SourceRow(folder: folder, displayName: display.isEmpty ? folder : display,
+                             totalFiles: count, movingFiles: count, kind: kind)
         }
-        return rows
-            .filter { filterMatches($0) }
-            .sorted { (a, b) in
-                let order: [SourceKind: Int] = [.anchor: 0, .mixed: 1, .junk: 2]
-                if order[a.kind, default: 0] != order[b.kind, default: 0] {
-                    return order[a.kind, default: 0] < order[b.kind, default: 0]
-                }
-                return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
-            }
-    }
-
-    private var destRows: [DestRow] {
-        let byBucket = Dictionary(grouping: proposals, by: { $0.bucket })
-        var rows = byBucket.map { (bucket, props) in
-            DestRow(bucket: bucket, count: props.count, isExisting: false)
+        .sorted { a, b in
+            if a.kind != b.kind { return a.kind == .mixed }
+            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
         }
-        // Anchor "destinations" — folders staying put.
-        rows.append(contentsOf: summary.staysPutBreakdown.map {
-            DestRow(bucket: $0.folder, count: $0.count, isExisting: true)
-        })
-        return rows
-            .filter { destFilterMatches($0) }
-            .sorted { (a, b) in
-                if a.isExisting != b.isExisting { return a.isExisting }
-                return a.bucket.localizedCaseInsensitiveCompare(b.bucket) == .orderedAscending
-            }
-    }
-
-    private func filterMatches(_ row: SourceRow) -> Bool {
-        switch filter {
-        case .all:        return true
-        case .moves:      return row.kind != .anchor
-        case .newFolders: return row.kind == .junk
+        var countByBucket: [String: Int] = [:]
+        for p in proposals {
+            if let wanted, kindByFolder[p.sourceFolder] != wanted { continue }
+            countByBucket[p.bucket, default: 0] += 1
         }
-    }
-    private func destFilterMatches(_ row: DestRow) -> Bool {
-        switch filter {
-        case .all:        return true
-        case .moves:      return !row.isExisting
-        case .newFolders: return !row.isExisting
-        }
+        destRows = countByBucket.map { DestRow(bucket: $0.key, count: $0.value) }
+            .sorted { $0.bucket.localizedCaseInsensitiveCompare($1.bucket) == .orderedAscending }
     }
 
     // MARK: - Body
@@ -134,14 +108,16 @@ struct TreeDiffView: View {
                 }
             }
         }
+        .onChange(of: planVersion, initial: true) { _, _ in rebuildRows() }
+        .onChange(of: filter) { _, _ in rebuildRows() }
     }
 
     @ViewBuilder
     private var legendStrip: some View {
         HStack(spacing: 10) {
-            legendDot(letter: "=", tint: Theme.delight, label: "Unchanged")
-            legendDot(letter: "M", tint: Theme.warning, label: "Moved")
-            legendDot(letter: "+", tint: Theme.gold, label: "New folder")
+            legendDot(letter: "T", tint: Theme.warning, label: "Tidied: some files move out")
+            legendDot(letter: "R", tint: Theme.gold, label: "Reorganized: every file moves")
+            legendDot(letter: "+", tint: Theme.delight, label: "Files arrive")
         }
     }
 
@@ -176,10 +152,7 @@ struct TreeDiffView: View {
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    // Index-keyed: anchor rows derive their Identifiable id from
-                    // a folder basename, which collides when two anchors share a
-                    // last path component (.../2023/Receipts, .../2024/Receipts).
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, item in
+                    ForEach(rows) { item in
                         row(item)
                     }
                 }
@@ -200,17 +173,8 @@ struct TreeDiffView: View {
         let isHighlighted = hoverBus.touchesSource(row.folder)
         let label = sourceRowLabel(row, letter: letter, tint: tint,
                                    isHighlighted: isHighlighted)
-        Group {
-            // Anchor folders stay put — they generate no proposals, so a
-            // drill-down would open an empty "Nothing to show". Render the
-            // anchor row as a static (non-tappable) row instead.
-            if row.kind == .anchor {
-                label
-            } else {
-                Button { onTapSource(row.folder) } label: { label }
-                    .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
-            }
-        }
+        Button { onTapSource(row.folder) } label: { label }
+            .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
         .help(sourceHelp(for: row))
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
@@ -254,24 +218,12 @@ struct TreeDiffView: View {
 
     @ViewBuilder
     private func destRowView(_ row: DestRow) -> some View {
-        let letter = row.isExisting ? "=" : "+"
-        let tint: Color = row.isExisting ? Theme.delight : Theme.gold
         let isHighlighted = hoverBus.touchesDest(row.bucket)
-        let label = destRowLabel(row, letter: letter, tint: tint,
+        let label = destRowLabel(row, letter: "+", tint: Theme.delight,
                                  isHighlighted: isHighlighted)
-        Group {
-            // An existing/anchor destination is a folder staying put — there
-            // are no moving files to drill into, so keep it non-tappable.
-            if row.isExisting {
-                label
-            } else {
-                Button { onTapDestination(row.bucket) } label: { label }
-                    .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
-            }
-        }
-        .help(row.isExisting
-              ? "Existing folder — \(row.count) file\(row.count == 1 ? "" : "s") staying."
-              : "New folder — \(row.count) file\(row.count == 1 ? "" : "s") landing here.")
+        Button { onTapDestination(row.bucket) } label: { label }
+            .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
+        .help("\(row.count) file\(row.count == 1 ? "" : "s") arriving in this folder.")
         .onHover { hovering in
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
         }
@@ -314,20 +266,17 @@ struct TreeDiffView: View {
 
     private func sourceLetter(for kind: SourceKind) -> (String, Color) {
         switch kind {
-        case .anchor: return ("=", Theme.delight)
-        case .mixed:  return ("M", Theme.warning)
-        case .junk:   return ("M", Theme.gold)
+        case .mixed:  return ("T", Theme.warning)
+        case .junk:   return ("R", Theme.gold)
         }
     }
 
     private func sourceHelp(for row: SourceRow) -> String {
         switch row.kind {
-        case .anchor:
-            return "Stays put — \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") unchanged."
         case .mixed:
-            return "Tidy — \(row.movingFiles) file\(row.movingFiles == 1 ? "" : "s") moving out."
+            return "Tidied: \(row.movingFiles) file\(row.movingFiles == 1 ? "" : "s") moving out. The folder stays."
         case .junk:
-            return "Reorganize — all \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") moving."
+            return "Reorganized: \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") moving out."
         }
     }
 }

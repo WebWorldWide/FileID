@@ -979,7 +979,7 @@ async fn stop_cancelled_plan(
     }
     sink.send(EngineError::event(
         "plan_restructure_cancelled",
-        "Restructure planning was cancelled.",
+        "Organize Folders stopped making its plan.",
     ))
     .await;
     true
@@ -1000,7 +1000,7 @@ pub(crate) async fn handle_plan_restructure(
     if !library_root_path.is_absolute() || !library_root_path.is_dir() {
         sink.send(EngineError::event(
             "plan_restructure_root",
-            "Restructure planning requires an existing absolute library root.",
+            "Organize Folders can't find that folder. Choose the folder again.",
         ))
         .await;
         return;
@@ -1064,7 +1064,7 @@ pub(crate) async fn handle_plan_restructure(
                         tracing::warn!(?err, "large restructure planning failed");
                         sink.send(EngineError::event(
                             "plan_restructure_failed",
-                            format!("Restructure planning did not complete: {err}"),
+                            "Organize Folders couldn't finish its plan. Try again.",
                         ))
                         .await;
                     }
@@ -1072,7 +1072,7 @@ pub(crate) async fn handle_plan_restructure(
                         tracing::warn!(?err, "large restructure planning task failed");
                         sink.send(EngineError::event(
                             "plan_restructure_failed",
-                            format!("Restructure planning did not complete: {err}"),
+                            "Organize Folders couldn't finish its plan. Try again.",
                         ))
                         .await;
                     }
@@ -1123,7 +1123,7 @@ pub(crate) async fn handle_plan_restructure(
                 }
                 sink.send(EngineError::event(
                     "plan_restructure_db",
-                    format!("planRestructure query failed: {err}"),
+                    "Organize Folders couldn't read your library. Try again.",
                 ))
                 .await;
                 return;
@@ -1136,7 +1136,7 @@ pub(crate) async fn handle_plan_restructure(
                 tracing::warn!(?err, "planRestructure spawn_blocking failed");
                 sink.send(EngineError::event(
                     "plan_restructure_failed",
-                    format!("Restructure planning did not complete: {err}"),
+                    "Organize Folders couldn't finish its plan. Try again.",
                 ))
                 .await;
                 return;
@@ -1520,7 +1520,7 @@ pub(crate) async fn handle_plan_restructure(
             tracing::warn!(?err, "persisting paged restructure plan failed");
             sink.send(EngineError::event(
                 "plan_restructure_store",
-                format!("Could not store the restructure plan: {err}"),
+                "Organize Folders couldn't save its plan. Try again.",
             ))
             .await;
             return;
@@ -1529,7 +1529,7 @@ pub(crate) async fn handle_plan_restructure(
             tracing::warn!(?err, "encoding restructure plan task failed");
             sink.send(EngineError::event(
                 "plan_restructure_failed",
-                format!("Restructure planning did not complete: {err}"),
+                "Organize Folders couldn't finish its plan. Try again.",
             ))
             .await;
             return;
@@ -1609,7 +1609,7 @@ pub(crate) async fn handle_undo_restructure(
             .await;
             sink.send(EngineError::event(
                 "undo_restructure",
-                format!("Undo failed: {err}"),
+                "Organize Folders couldn't undo the move. Check that the folder is still connected and try again.",
             ))
             .await;
         }
@@ -1621,7 +1621,7 @@ pub(crate) async fn handle_undo_restructure(
             .await;
             sink.send(EngineError::event(
                 "undo_restructure",
-                format!("Undo did not complete: {err}"),
+                "Organize Folders couldn't undo the move. Check that the folder is still connected and try again.",
             ))
             .await;
         }
@@ -1705,7 +1705,7 @@ pub(crate) async fn handle_apply_restructure(
             .await;
             sink.send(EngineError::event(
                 "apply_restructure",
-                format!("Apply failed: {err}"),
+                "Organize Folders couldn't finish moving files. Check that the folder is still connected, then make a new plan and try again.",
             ))
             .await;
         }
@@ -1721,7 +1721,7 @@ pub(crate) async fn handle_apply_restructure(
             .await;
             sink.send(EngineError::event(
                 "apply_restructure",
-                format!("Apply did not complete: {err}"),
+                "Organize Folders couldn't finish moving files. Check that the folder is still connected, then make a new plan and try again.",
             ))
             .await;
         }

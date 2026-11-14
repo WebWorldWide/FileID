@@ -130,7 +130,7 @@ public sealed partial class TitleBar : UserControl
         {
             if (e.PropertyName == nameof(EngineClient.State) && EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
             {
-                DebugLog.Debug($"[ENGINE-SUB:TitleBar] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:TitleBar] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(() => _ = DebugLog.SafeRunAsync("TitleBar.RefreshRoots", () => AppViewModel.Instance.RefreshRootsAsync()));
             }
             if (e.PropertyName is nameof(EngineClient.LastProgress)
@@ -141,7 +141,7 @@ public sealed partial class TitleBar : UserControl
                               or nameof(EngineClient.DeepAnalyzeComplete)
                               or nameof(EngineClient.QueueState))
             {
-                DebugLog.Debug($"[ENGINE-SUB:TitleBar] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:TitleBar] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncActivity);
             }
         });

@@ -60,7 +60,7 @@ public sealed partial class FaceReviewPanel : UserControl
         => DebugLog.SafeRun("FaceReviewPanel.OnEngineChanged", () =>
         {
             if (_unloaded || e.PropertyName != nameof(EngineClient.LastFaceClustering)) return;
-            DebugLog.Debug($"[ENGINE-SUB:FaceReviewPanel] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:FaceReviewPanel] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(() => _ = ReloadAsync());
         });
 
@@ -368,7 +368,7 @@ public sealed partial class FaceReviewPanel : UserControl
         {
             var page = await EngineClient.Instance.UndoFaceReviewAsync(operationId);
             return FaceReviewPolicy.IsOk(page);
-        });
+        }, ChangePage.People);
     }
 
     private async void OnUndoClicked(object sender, RoutedEventArgs e)

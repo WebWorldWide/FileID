@@ -17,6 +17,7 @@ pub(crate) mod face_queues;
 pub(crate) mod face_refresh;
 pub(crate) mod face_review;
 pub(crate) mod folder_access;
+pub(crate) mod person_merge;
 pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;

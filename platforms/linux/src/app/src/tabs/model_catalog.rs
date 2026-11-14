@@ -355,7 +355,7 @@ fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            match event {
+            match &*event {
                 EngineState::Ready => catalog.refresh(),
                 EngineState::ModelCatalog(result) if result.request_id == *catalog.request.borrow() => {
                     catalog.hardware.set_label(&format!(
@@ -364,7 +364,7 @@ fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         result.vram_mb,
                         result.models.len()
                     ));
-                    *catalog.models.borrow_mut() = result.models;
+                    *catalog.models.borrow_mut() = result.models.clone();
                     catalog.render();
                 }
                 EngineState::BenchmarkProgress(progress) => catalog.status.set_label(&format!(

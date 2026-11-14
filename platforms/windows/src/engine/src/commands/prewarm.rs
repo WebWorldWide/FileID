@@ -115,26 +115,16 @@ fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'stat
     if pin_failure {
         (
             "download_tls_pin_failed",
-            "The download server presented a TLS certificate that isn't issued \
-             by any of the certificate authorities FileID pins for model \
-             downloads. Something on this network — a corporate proxy, \
-             antivirus HTTPS inspection, or a captive portal — is most likely \
-             intercepting the connection. This is not an ordinary network \
-             failure, and retrying on the same network won't help: try a \
-             different network, or, if you trust this one, set \
-             FILEID_DISABLE_TLS_PINNING=1 to trust the system certificate \
-             store instead.",
+            "Something on this network, such as a company proxy, antivirus or a \
+             sign-in page, is getting in the way of the secure download. \
+             Trying again on the same network won't help. Use a different network.",
         )
     } else if disk_full {
         (
             "model_download_disk_full",
-            "The disk is full — this is not a connection problem, and \
-             retrying without freeing space will fail the same way. \
-             Installing a model needs roughly TWICE its download size free \
-             while the partial .part files (kept next to the model under \
-             %LOCALAPPDATA%\\FileID\\Models) are combined into the final \
-             file. Free up space, then click Retry — already-downloaded \
-             parts are reused.",
+            "The disk is full. Installing an AI model needs about twice its \
+             download size in free space. Free up space, then try again. \
+             What has already downloaded is kept.",
         )
     } else {
         (
@@ -351,16 +341,12 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
     if let Err(err) = crate::paths::models_dir() {
         sink.send(EngineError::new(
             "models_dir_unavailable",
-            format!(
-                "FileID couldn't resolve its models folder, so '{model_kind}' \
-                 can't be installed: {err}. Check that the %LOCALAPPDATA% (or \
-                 %USERPROFILE%) environment variable is set."
-            ),
+            "FileID couldn't find where it keeps AI models, so this model can't be downloaded. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
         )
         .with_model(model_kind.clone())
         .into_event())
         .await;
-        tracing::warn!(model_kind = %model_kind, outcome = "models_dir_unavailable", "[PREWARM] exiting");
+        tracing::warn!(model_kind = %model_kind, error = %err, outcome = "models_dir_unavailable", "[PREWARM] exiting");
         return;
     }
 
@@ -378,11 +364,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
         LookupResult::Unknown => {
             sink.send(EngineError::new(
                 "unknown_model",
-                format!(
-                    "This FileID engine doesn't recognize the model '{model_kind}'. \
-                     The engine is most likely older than the app — reinstall or \
-                     rebuild FileID so the app and engine match, then try again."
-                ),
+                "This copy of FileID doesn't have that AI model. Reinstall FileID, then try again.",
             )
             .with_model(model_kind.clone())
             .into_event())
@@ -417,7 +399,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
                 sink.send(EngineError::new(
                     "model_download_disk_full",
                     format!(
-                        "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive. Free space and try again; no download was started.",
+                        "{} needs about {:.1} GB of free space to download, but only {:.1} GB is free. Free up some space and try again. Nothing was downloaded.",
                         model.display_name,
                         required_free as f64 / 1_073_741_824.0,
                         available as f64 / 1_073_741_824.0,
@@ -555,7 +537,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
         if cancel.load(Ordering::Relaxed) {
             sink.send(EngineError::new(
                 "prewarm_cancelled",
-                format!("Download of {model_kind} cancelled."),
+                "The AI model download was stopped.",
             )
             .with_model(model_kind.clone())
             .into_event())
@@ -627,7 +609,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             if cancel.load(Ordering::Relaxed) {
                 sink.send(EngineError::new(
                     "prewarm_cancelled",
-                    format!("Download of {model_kind} cancelled."),
+                    "The AI model download was stopped.",
                 )
                 .with_model(model_kind.clone())
                 .into_event())
@@ -659,7 +641,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             sink.send(EngineError::new(
                 "zip_extract_failed",
                 format!(
-                    "Couldn't extract {label}. The archive was rejected or couldn't be promoted safely; retry the download."
+                    "FileID couldn't unpack {label}. Download it again."
                 ),
             )
             .with_path(file.dest.display().to_string())
@@ -698,11 +680,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
                 tracing::error!(?err, dir = %crate::platform::redact_path_for_log(parent), "could not create .sentinels dir");
                 sink.send(EngineError::new(
                     "sentinel_dir_create_failed",
-                    format!(
-                        "Couldn't create the sentinel directory at {}. Model {} is downloaded but not registered as installed; try again.",
-                        parent.display(),
-                        model.display_name
-                    ),
+                    format!("FileID downloaded {} but couldn't finish installing it. Try again.", model.display_name),
                 )
                 .with_path(parent.display().to_string())
                 .with_model(model_kind.clone())
@@ -711,12 +689,10 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
                 return;
             }
         let Some(attestation) = registry::installation_attestation(&model) else {
+            tracing::error!(model_kind = %model_kind, "installed model files could not be attested");
             sink.send(EngineError::new(
                 "sentinel_attestation_failed",
-                format!(
-                    "Couldn't attest the installed files for {}. The model was not marked installed; try again.",
-                    model.display_name
-                ),
+                format!("FileID downloaded {} but couldn't finish installing it. Try again.", model.display_name),
             )
             .with_model(model_kind.clone())
             .into_event())
@@ -731,11 +707,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             let _ = tokio::fs::remove_file(&tmp).await;
             sink.send(EngineError::new(
                 "sentinel_write_failed",
-                format!(
-                    "Couldn't write the install marker for {}: {err}. The model is \
-                     downloaded but not registered as installed; try again.",
-                    model.display_name
-                ),
+                format!("FileID downloaded {} but couldn't finish installing it. Try again.", model.display_name),
             )
             .with_path(tmp.display().to_string())
             .with_model(model_kind.clone())
@@ -753,11 +725,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             let _ = tokio::fs::remove_file(&tmp).await;
             sink.send(EngineError::new(
                 "sentinel_rename_failed",
-                format!(
-                    "Couldn't finalize the install marker for {}: {err}. The model is \
-                     downloaded but not registered as installed; try again.",
-                    model.display_name
-                ),
+                format!("FileID downloaded {} but couldn't finish installing it. Try again.", model.display_name),
             )
             .with_path(sentinel.display().to_string())
             .with_model(model_kind.clone())

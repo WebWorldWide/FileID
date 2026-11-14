@@ -98,7 +98,7 @@ struct FileIDEngineMain {
             // Migration identifiers, not user paths — safe to log raw.
             await sink.emit(.error(EngineError(
                 kind: "db_newer_than_engine",
-                message: "\(error). Update FileID, or wipe the library to rescan."
+                message: "This library was made by a newer version of FileID. Update FileID to open it."
             )))
             JSONLog.shared.error(ev: "db_newer_than_engine", error: "\(error)")
             database = nil
@@ -135,7 +135,7 @@ struct FileIDEngineMain {
         // Engine ready handshake. App waits for this before sending the first
         // command, so it knows the pipe is live and the engine started clean.
         await sink.emit(.ready(EngineInfo(
-            version: "0.1.3",
+            version: EngineVersion.current,
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
             physicalMemoryGB: Hardware.physicalMemoryGB,
@@ -158,7 +158,7 @@ struct FileIDEngineMain {
                                 error: "mlx.metallib missing — Deep Analyze unavailable")
             await sink.emit(.error(EngineError(
                 kind: "deep_analyze_unavailable",
-                message: "Deep Analyze isn't available on this build because mlx.metallib wasn't compiled. Run ./run.sh — it will fail with install instructions if cmake or the Metal Toolchain are missing."
+                message: "Describe Files isn't available in this copy of FileID. Reinstall FileID."
             )))
         }
 
@@ -190,7 +190,7 @@ struct FileIDEngineMain {
             case .failure(let err):
                 JSONLog.shared.warn(ev: "command_decode_failed", error: "\(err)")
                 await sink.emit(.error(EngineError(kind: "command_decode_failed",
-                                                    message: "\(err)")))
+                                                    message: "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.")))
             }
         }
 
@@ -252,19 +252,19 @@ struct FileIDEngineMain {
         switch cmd.payload {
         case .chatRequest(let request):
             guard let database else {
-                await sink.emit(.chatResponse(ChatResponse(requestID: request.requestID, conversationID: request.conversationID, status: "error", message: "The catalog database is unavailable.")))
+                await sink.emit(.chatResponse(ChatResponse(requestID: request.requestID, conversationID: request.conversationID, status: "error", message: "FileID couldn't open its library. Quit and reopen FileID.")))
                 return
             }
             Task { await ChatService.shared.handle(request, database: database, sink: sink) }
         case .toolRequest(let request):
             guard let database else {
-                await sink.emit(.toolResponse(ToolResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
+                await sink.emit(.toolResponse(ToolResponse(requestID: request.requestID, status: "error", message: "FileID couldn't open its library. Quit and reopen FileID.")))
                 return
             }
             Task { await sink.emit(.toolResponse(await MediaTools.shared.handle(request, database: database))) }
         case .catalogRequest(let request):
             guard let database else {
-                await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
+                await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "FileID couldn't open its library. Quit and reopen FileID.")))
                 return
             }
             if ["search", "autoTakeGroups", "scoreTakes", "rankTakesWithGoal", "takeGroupProposals"].contains(request.action) {
@@ -308,7 +308,7 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot scan."
+                    message: "FileID couldn't open its library, so it can't scan. Quit and reopen FileID."
                 )))
                 // A bare error leaves the app's auto-pilot stuck on "Scanning…"
                 // forever — it advances only on a scan-terminal event. Emit an
@@ -325,7 +325,7 @@ struct FileIDEngineMain {
             if !(await JobQueue.shared.waitUntilIdle(category: .scan)) {
                 await sink.emit(.error(EngineError(
                     kind: "scan_already_queued",
-                    message: "A scan is already running or queued — cancel it first."
+                    message: "A scan is already running. Stop it first, or wait for it to finish."
                 )))
                 return
             }
@@ -409,7 +409,8 @@ struct FileIDEngineMain {
                 let roots = try await database.pool.read { try LibraryRoots.list($0) }
                 await sink.emit(.rootsList(RootsList(requestID: requestID, roots: roots)))
             } catch {
-                await sink.emit(.error(EngineError(kind: "list_roots_failed", message: error.localizedDescription)))
+                JSONLog.shared.warn(ev: "list_roots_failed", error: "\(error)")
+                await sink.emit(.error(EngineError(kind: "list_roots_failed", message: "FileID couldn't read your list of folders. Try again.")))
             }
         case .listModels(let requestID, let role):
             let roles: Set<String> = ["vision", "text", "embedding", "reranker", "speech"]
@@ -507,7 +508,7 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot cluster faces."
+                    message: "FileID couldn't open its library, so it can't group faces. Quit and reopen FileID."
                 )))
                 return
             }
@@ -517,13 +518,13 @@ struct FileIDEngineMain {
             if await JobQueue.shared.hasActive(category: .faceCluster) {
                 await sink.emit(.error(EngineError(
                     kind: "face_clustering_busy",
-                    message: "Face clustering is already running."
+                    message: "FileID is already grouping faces."
                 )))
                 return
             }
             await JobQueue.shared.enqueue(.init(
                 category: .faceCluster,
-                title: "Cluster faces",
+                title: "Group faces",
                 etaSeconds: nil
             ) {
                 JSONLog.shared.info(ev: "face_cluster_requested")
@@ -535,7 +536,7 @@ struct FileIDEngineMain {
         case .deepAnalyzeFile(let fileID, let modelKind):
             guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    kind: "db_failed", message: "FileID couldn't open its library, so Describe Files can't run. Quit and reopen FileID.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -546,7 +547,7 @@ struct FileIDEngineMain {
             }
             guard let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
-                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    kind: "unknown_model", message: "This copy of FileID doesn't have that AI model. Pick another one in Settings.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -565,7 +566,7 @@ struct FileIDEngineMain {
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
-                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
+                    message: "Describe Files is already running. Wait for it to finish, or stop it first."
                 )))
                 return
             }
@@ -578,7 +579,7 @@ struct FileIDEngineMain {
             )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
-                title: "Deep Analyze 1 file (\(kind.displayName))",
+                title: "Describe 1 file",
                 etaSeconds: kind.secondsPerImage + 10  // +10 for model load if cold
             ) {
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
@@ -588,7 +589,7 @@ struct FileIDEngineMain {
         case .deepAnalyzeFolder(let prefix, let modelKind):
             guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    kind: "db_failed", message: "FileID couldn't open its library, so Describe Files can't run. Quit and reopen FileID.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -599,7 +600,7 @@ struct FileIDEngineMain {
             }
             guard let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
-                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    kind: "unknown_model", message: "This copy of FileID doesn't have that AI model. Pick another one in Settings.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -614,7 +615,7 @@ struct FileIDEngineMain {
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
-                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
+                    message: "Describe Files is already running. Wait for it to finish, or stop it first."
                 )))
                 return
             }
@@ -623,7 +624,7 @@ struct FileIDEngineMain {
             )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
-                title: "Deep Analyze folder (\(kind.displayName))",
+                title: "Describe a folder",
                 etaSeconds: nil
             ) {
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
@@ -633,7 +634,7 @@ struct FileIDEngineMain {
         case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames, let fileIDs, let excludedFolders):
             guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    kind: "db_failed", message: "FileID couldn't open its library, so Describe Files can't run. Quit and reopen FileID.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -644,7 +645,7 @@ struct FileIDEngineMain {
             }
             guard let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
-                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    kind: "unknown_model", message: "This copy of FileID doesn't have that AI model. Pick another one in Settings.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -659,7 +660,7 @@ struct FileIDEngineMain {
             if let fileIDs, fileIDs.count > 10_000 {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_selection_too_large",
-                    message: "Analyze Selected accepts at most 10,000 files per run. Reduce the selection and try again.",
+                    message: "You can describe up to 10,000 files at a time. Select fewer files and try again.",
                     modelKind: modelKind
                 )))
                 await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -671,7 +672,7 @@ struct FileIDEngineMain {
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
-                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
+                    message: "Describe Files is already running. Wait for it to finish, or stop it first."
                 )))
                 return
             }
@@ -680,7 +681,7 @@ struct FileIDEngineMain {
             )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
-                title: "Deep Analyze entire library (\(kind.displayName))",
+                title: "Describe the whole library",
                 etaSeconds: nil
             ) {
                 // excludedFolders applies ONLY to the whole-library path — an
@@ -714,7 +715,7 @@ struct FileIDEngineMain {
                 // app can route it to the right install slot. (003)
                 await sink.emit(.error(EngineError(
                     kind: "unknown_model",
-                    message: "This FileID engine doesn't recognize the model '\(modelKey)'. Reinstall or rebuild FileID so the app and engine match, then try again.",
+                    message: "This copy of FileID doesn't have that AI model. Reinstall FileID, then try again.",
                     modelKind: modelKey
                 )))
                 return
@@ -752,7 +753,7 @@ struct FileIDEngineMain {
                 } catch is CancellationError {
                     await sink.emit(.error(EngineError(
                         kind: "prewarm_cancelled",
-                        message: "Prewarm \(kind.displayName) cancelled."
+                        message: "The AI model download was stopped."
                     )))
                     JSONLog.shared.info(ev: "prewarm_model_cancelled",
                                         extra: ["kind": AnyCodable(kind.rawValue)])
@@ -763,9 +764,12 @@ struct FileIDEngineMain {
                     } else {
                         isIntegrity = false
                     }
+                    JSONLog.shared.warn(ev: "prewarm_model_failed", error: "\(kind.rawValue): \(PlainError.logText(error))")
                     await sink.emit(.error(EngineError(
                         kind: isIntegrity ? "model_integrity_failed" : "prewarm_failed",
-                        message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)",
+                        message: isIntegrity
+                            ? "The download for \(kind.displayName) arrived damaged, so FileID threw it away. Try again."
+                            : "The AI model couldn't be downloaded or loaded. \(PlainError.reason(error))",
                         modelKind: isIntegrity ? kind.rawValue : nil
                     )))
                 }
@@ -783,14 +787,14 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot plan a restructure."
+                    message: "FileID couldn't open its library, so Organize Folders can't make a plan. Quit and reopen FileID."
                 )))
                 return
             }
             guard let restructureToken = await coordinator.reserveRestructure() else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
-                    message: "Another restructure operation is already running.")))
+                    message: "Organize Folders is already working. Wait for it to finish.")))
                 return
             }
             let planRoot = URL(fileURLWithPath: libraryRoot)
@@ -837,7 +841,7 @@ struct FileIDEngineMain {
                     JSONLog.shared.warn(ev: "plan_restructure_failed", error: "\(error)")
                     await sink.emit(.error(EngineError(
                         kind: "plan_restructure_failed",
-                        message: "Restructure planning did not complete: \(error)"
+                        message: "Organize Folders couldn't finish its plan. Try again."
                     )))
                 }
                 await coordinator.finishRestructure(token: restructureToken)
@@ -847,7 +851,7 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot apply a restructure."
+                    message: "FileID couldn't open its library, so Organize Folders can't move files. Quit and reopen FileID."
                 )))
                 return
             }
@@ -862,7 +866,7 @@ struct FileIDEngineMain {
             guard !useSymlinks else {
                 await sink.emit(.error(EngineError(
                     kind: "apply_restructure",
-                    message: "Symlink-preview mode is not supported by the macOS engine; it only performs real on-disk moves. Send useSymlinks: false."
+                    message: "FileID on Mac can't make a shortcut preview. It only moves the real files."
                 )))
                 return
             }
@@ -875,7 +879,7 @@ struct FileIDEngineMain {
             guard let restructureToken = await coordinator.reserveRestructure() else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
-                    message: "Another restructure apply or undo is already running.")))
+                    message: "Organize Folders is already moving files. Wait for it to finish.")))
                 return
             }
             let applyTask = Task.detached(priority: .userInitiated) {
@@ -910,9 +914,10 @@ struct FileIDEngineMain {
                             kind: "restructure_undo_journal",
                             message: journalError.localizedDescription)))
                     } else {
+                        JSONLog.shared.warn(ev: "apply_restructure_failed", error: "\(error)")
                         await sink.emit(.error(EngineError(
                             kind: "apply_restructure",
-                            message: "Apply failed: \(error.localizedDescription)")))
+                            message: "Organize Folders couldn't finish moving files. \(PlainError.reason(error, fallback: "Check that the folder is still connected and try again."))")))
                     }
                 }
                 await coordinator.finishRestructure(token: restructureToken)
@@ -944,21 +949,21 @@ struct FileIDEngineMain {
                     applied: 0, failed: 0, privilegeError: nil, cancelled: false)))
                 await sink.emit(.error(EngineError(
                     kind: "undo_restructure",
-                    message: "Shortcut-mode restructure is not supported by the macOS engine; there is no shortcut undo journal to replay."
+                    message: "FileID on Mac only moves real files, so there are no shortcuts to undo."
                 )))
                 return
             }
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot undo a restructure."
+                    message: "FileID couldn't open its library, so it can't undo Organize Folders. Quit and reopen FileID."
                 )))
                 return
             }
             guard let restructureToken = await coordinator.reserveRestructure() else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
-                    message: "Another restructure apply or undo is already running.")))
+                    message: "Organize Folders is already moving files. Wait for it to finish.")))
                 return
             }
             let undoRoot = URL(fileURLWithPath: libraryRoot)
@@ -978,7 +983,7 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot purge excluded folders."
+                    message: "FileID couldn't open its library, so it can't remove the excluded folders. Quit and reopen FileID."
                 )))
                 return
             }
@@ -1060,11 +1065,11 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot find merge suggestions."
+                    message: "FileID couldn't open its library, so it can't suggest people to merge. Quit and reopen FileID."
                 )))
                 await sink.emit(.error(EngineError(
                     kind: "find_merge_suggestions_failed",
-                    message: "Merge suggestions are unavailable because the library database could not be opened."
+                    message: "FileID couldn't open its library, so it can't suggest people to merge."
                 )))
                 return
             }
@@ -1079,7 +1084,7 @@ struct FileIDEngineMain {
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
-                    message: "Database failed to open at engine startup; cannot embed the file query."
+                    message: "FileID couldn't open its library, so it can't search. Quit and reopen FileID."
                 )))
                 return
             }
@@ -1095,7 +1100,7 @@ struct FileIDEngineMain {
         case .verifyCudaPack:
             await sink.emit(.error(EngineError(
                 kind: "not_applicable_on_platform",
-                message: "CUDA isn't available on Apple Silicon — the AppleProvider EP selects ANE/Metal automatically."
+                message: "This setting doesn't apply on a Mac. FileID already picks the fastest hardware by itself."
             )))
         }
     }
@@ -1120,8 +1125,9 @@ struct FileIDEngineMain {
         )))
     }
 
-    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil) -> BulkActionItem {
-        BulkActionItem(fileID: id, ok: ok, message: message)
+    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil, reason: String? = nil,
+                     operationID: String? = nil) -> BulkActionItem {
+        BulkActionItem(fileID: id, ok: ok, message: message, reason: reason, operationID: operationID)
     }
 
     static func applyTags(database: Database, fileIDs: [Int64], tags: [String], mode: String) async -> BulkActionResult {
@@ -1505,17 +1511,17 @@ struct FileIDEngineMain {
         } catch {
             return BulkActionResult(
                 action: "trashFiles", succeeded: 0, failed: uniqueIDs.count,
-                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription) })
+                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription, reason: "failed") })
         }
         for id in uniqueIDs {
             guard let state = states[id] else {
-                messages.append(item(id, ok: false, "File row not found."))
+                messages.append(item(id, ok: false, "File row not found.", reason: "missing"))
                 continue
             }
             let url = URL(fileURLWithPath: state.path)
             guard !Restructure.fileRefSwapped(
                 dbRef: state.fileRef, currentRef: Discovery.inode(of: url)) else {
-                messages.append(item(id, ok: false, "File changed since it was indexed."))
+                messages.append(item(id, ok: false, "File changed since it was indexed.", reason: "changed"))
                 continue
             }
             var verifiedCopy: ExactFileDigest.CacheKey?
@@ -1523,7 +1529,7 @@ struct FileIDEngineMain {
                 switch verifyExactDuplicate(expected, state: state) {
                 case .success(let identity): verifiedCopy = identity
                 case .failure(let refusal):
-                    messages.append(item(id, ok: false, refusal.message))
+                    messages.append(item(id, ok: false, refusal.message, reason: "changed"))
                     continue
                 }
             }
@@ -1531,7 +1537,7 @@ struct FileIDEngineMain {
                 try ReadOnlyLocations.requireSourceMutation(url)
                 let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
                 if let verifiedCopy, !ExactFileDigest.pathStillMatches(verifiedCopy) {
-                    messages.append(item(id, ok: false, "This copy changed since it was checked. Nothing was moved."))
+                    messages.append(item(id, ok: false, "This copy changed since it was checked. Nothing was moved.", reason: "changed"))
                     continue
                 }
                 // Write-ahead: record the file before it moves, so a kill right after the move
@@ -1558,7 +1564,8 @@ struct FileIDEngineMain {
                 }
                 messages.append(item(id, ok: true))
             } catch {
-                messages.append(item(id, ok: false, error.localizedDescription))
+                let protected = error is ReadOnlyLocations.ProtectionError || error is ReadOnlyLocations.ManagedLibraryError
+                messages.append(item(id, ok: false, error.localizedDescription, reason: protected ? "protected" : "failed"))
             }
         }
         writeJournal()
@@ -1576,8 +1583,11 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true, "No-op self merge.")])
         }
         do {
-            _ = try await database.mergePersons(target: destination, sources: [source])
-            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
+            let operation = try await database.pool.write { db in
+                try PersonMergeJournal.merge(db, target: destination, source: source)
+            }
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0,
+                                    messages: [item(source, ok: true, operationID: operation)])
         } catch {
             return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
         }
@@ -1919,6 +1929,7 @@ struct FileIDEngineMain {
         }
 
         let session = await coordinator.startSession(rootDisplayPath: (rootPath as NSString).lastPathComponent, epoch: epoch)
+        TwinReuse.reset()
         await sink.emit(.phaseChanged(.discovering))
         JSONLog.shared.info(ev: "scan_started", sess: session.id, path: redactPathForLog(url.path))
 
@@ -1969,6 +1980,10 @@ struct FileIDEngineMain {
         let catalogHadRows = await CaptureDateBackfill.catalogHasRows(database: database, root: url)
         let datesCurrent = rescan || !catalogHadRows
 
+        // Read which images earlier scans finished while the models warm up.
+        // A forced rescan asks for fresh analysis, so it reuses nothing stored.
+        async let seeding: Void = rescan ? () : TwinReuse.seed(database: database)
+
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
         // simultaneously. Each is a no-op if the model isn't installed.
@@ -1988,6 +2003,7 @@ struct FileIDEngineMain {
             // building its CoreML session delayed the first file by about 2 s.
             // Face clustering loads it when it runs.
         }.value
+        await seeding
 
         // Unbuffered (rendezvous) async channels: each `send` suspends until a
         // consumer calls `next`. They are NOT bounded buffers — see the cancel
@@ -2054,10 +2070,38 @@ struct FileIDEngineMain {
                     await sink.emit(.error(notice))
                 }
             }
+            let decodeAhead = ScanDecodeAhead.depth(workerCap: workerCap)
+            if decodeAhead > 0 {
+                group.addTask {
+                    let twins = TwinReuse.enabled ? TwinReuse.shared : nil
+                    let catalog = TwinReuse.catalog
+                    let budget = ScanDecodeAhead.budgetBytes()
+                    let summary = await ScanDecodeAhead.run(
+                        source: discoveryChan, depth: decodeAhead, budgetBytes: budget, workers: workerCap,
+                        twins: twins, catalog: catalog,
+                        isCancelled: { ScanCoordinator.isCancelledSync() },
+                        isPaused: { ScanCoordinator.isPausedSync() },
+                        admit: { bytes in
+                            await ResourceScheduler.shared.backgroundHeadroom(memoryMB: UInt64((bytes + 1_048_575) >> 20))
+                        },
+                        process: { prepared in
+                            do {
+                                return try await Self.processScanFile(prepared, pool: pool, twins: twins, catalog: catalog)
+                            } catch is CancellationError {
+                                return nil
+                            } catch {
+                                JSONLog.shared.warn(ev: "scan_worker_scheduler_failed", error: "\(error)")
+                                return nil
+                            }
+                        },
+                        emit: { await taggedChan.send($0) })
+                    Self.logDecodeAhead(summary, depth: decodeAhead, budgetBytes: budget, sessionID: session.id)
+                }
+            }
             // Workers — N concurrent. Each pulls files until the channel
             // closes, processes via the Vision pool, pushes to tagged.
             // Honors cancel + pause via the sync mirrors on ScanCoordinator.
-            for _ in 0..<workerCap {
+            for _ in 0..<(decodeAhead > 0 ? 0 : workerCap) {
                 group.addTask {
                     for await disc in discoveryChan {
                         if ScanCoordinator.isCancelledSync() { break }
@@ -2159,6 +2203,7 @@ struct FileIDEngineMain {
                                                        isCancelled: { ScanCoordinator.isCancelledSync() })
             }
             await autoEnqueueFaceClusteringIfNeeded(database: database, sink: sink)
+            await runCatchUp(database: database, root: url.path, coordinator: coordinator, sink: sink)
         }
 
         let totalDur = Date().timeIntervalSince(scanStart)
@@ -2168,6 +2213,29 @@ struct FileIDEngineMain {
     }
 
     static let visionTimeoutMessage = "Vision pass timed out (will retry next scan)"
+
+    /// RAM++ tags and careful text reads the main pass left owed, including what
+    /// an earlier cancelled or interrupted scan of this folder still owes.
+    private static func runCatchUp(
+        database: Database, root: String, coordinator: ScanCoordinator, sink: IPCSink
+    ) async {
+        guard await ScanCatchUp.owed(database: database, root: root).any else { return }
+        // The warm-up otherwise waits for the scan job to end; the main pass is
+        // over, so the Neural Engine is free for the compile now.
+        AccurateOCRWarmup.shared.start()
+        await ScanCatchUp.run(
+            database: database, root: root,
+            isCancelled: { ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync() },
+            isPaused: { ScanCoordinator.isPausedSync() }
+        ) { event in
+            switch event {
+            case .total(let total): await coordinator.setCatchUp(total: total)
+            case .advance(let count): await coordinator.bumpCatchUp(by: count)
+            }
+            if let snapshot = await coordinator.periodicSnapshot() { await sink.emit(.progress(snapshot)) }
+        }
+        await coordinator.endCatchUp()
+    }
 
     /// Photos under `root` whose Vision pass timed out during this scan.
     private static func visionTimeouts(database: Database, root: URL, since: Date) async -> Int {
@@ -2195,6 +2263,52 @@ struct FileIDEngineMain {
             tagged.admissionWaitMs = admissionWaitMs
             return tagged
         }
+    }
+
+    private static func processScanFile(
+        _ prepared: Tagging.PreparedFile,
+        pool: VisionWorkerPool,
+        twins: TwinRegistry?,
+        catalog: CatalogTwins?
+    ) async throws -> TaggedFile? {
+        try await ScanTaggingAdmission.withBackgroundCPU(
+            isCancelled: {
+                ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync()
+            }
+        ) { admissionWaitMs in
+            guard var tagged = await pool.with({ worker in
+                await Tagging.processFile(prepared: prepared, worker: worker, twins: twins, catalog: catalog)
+            }) else { return nil }
+            tagged.admissionWaitMs = admissionWaitMs
+            return tagged
+        }
+    }
+
+    /// One line per scan that ran with decode-ahead. `misses` are the times a
+    /// free inference worker found no file ready and waited `take_wait_ms`
+    /// in total; `reserve_wait_ms` is how long decoders stood still because
+    /// the queue was full (inference was the slower side).
+    private static func logDecodeAhead(
+        _ summary: ScanDecodeAhead.Summary, depth: Int, budgetBytes: Int, sessionID: String
+    ) {
+        let queue = summary.queue
+        JSONLog.shared.info(ev: "decode_ahead", sess: sessionID, extra: [
+            "depth": AnyCodable(depth),
+            "budget_mb": AnyCodable(budgetBytes >> 20),
+            "hits": AnyCodable(queue.hits),
+            "misses": AnyCodable(queue.misses),
+            "avg_queue_depth": AnyCodable(queue.averageDepth),
+            "take_wait_ms": AnyCodable(queue.takeWaitSeconds * 1000),
+            "reserve_waits": AnyCodable(queue.reserveWaits),
+            "reserve_wait_ms": AnyCodable(queue.reserveWaitSeconds * 1000),
+            "peak_held": AnyCodable(queue.peakHeld),
+            "peak_mb": AnyCodable(queue.peakBytes >> 20),
+            "decoded": AnyCodable(summary.decoded),
+            "not_admitted": AnyCodable(summary.notAdmitted),
+            "copies": AnyCodable(summary.copies),
+            "other": AnyCodable(summary.other),
+            "decode_ms": AnyCodable(summary.decodeSeconds * 1000)
+        ])
     }
 
     /// Post-scan orphan sweep: delete rows under `scanRootPath` whose file
@@ -2305,7 +2419,7 @@ struct FileIDEngineMain {
                                 error: "\(error)")
             await sink.emit(.error(EngineError(
                 kind: "orphan_sweep_failed",
-                message: "Could not delete \(missing.count) orphaned rows: \(error)"
+                message: "FileID couldn't clear \(missing.count) missing \(missing.count == 1 ? "file" : "files") from your library. It will try again on the next scan."
             )))
         }
     }
@@ -2413,7 +2527,7 @@ struct FileIDEngineMain {
                                 error: "\(error)")
             await sink.emit(.error(EngineError(
                 kind: "purge_excluded_failed",
-                message: "Could not remove excluded folders from the library: \(error)"
+                message: "FileID couldn't remove the excluded folders from your library. Try again."
             )))
             return -1
         }
@@ -2535,7 +2649,7 @@ struct FileIDEngineMain {
                             extra: ["unassigned": AnyCodable(needs)])
         await JobQueue.shared.enqueue(.init(
             category: .faceCluster,
-            title: "Cluster faces (auto)",
+            title: "Group faces",
             etaSeconds: nil
         ) {
             SleepGuard.shared.begin(reason: "Face clustering (auto)")
@@ -2593,6 +2707,7 @@ struct FileIDEngineMain {
         sink: IPCSink,
         totalSeconds: Double
     ) async {
+        TwinReuse.reset()
         let cancelled = await coordinator.isCancelled
         let finalPhase: ScanPhase = cancelled ? .cancelled : .completed
         let snap = await coordinator.snapshot()

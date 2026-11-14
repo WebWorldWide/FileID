@@ -22,11 +22,7 @@ impl Point for Embedding {
     fn distance(&self, other: &Self) -> f32 {
         // Squared L2. For unit vectors ||a−b||² = 2(1 − a·b), so the
         // ordering matches cosine similarity (no sqrt needed for ranking).
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum()
+        crate::util::vector_math::squared_l2(&self.0, &other.0)
     }
 }
 
@@ -56,6 +52,14 @@ pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f
             build()
         }
     }
+}
+
+/// An index for search only, built on every core. Thread scheduling changes
+/// which near-equal neighbours a node keeps, so two builds of the same points
+/// can differ; never use it where results must repeat exactly (clustering).
+pub(crate) fn build_search_index<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>, limit: usize) -> HnswMap<Embedding, V> {
+    let (embeds, values): (Vec<_>, Vec<_>) = points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
+    Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values)
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a

@@ -66,7 +66,7 @@ public actor IPCSink {
             if line.count > maxFrameBytes {
                 let replacement = IPCEvent(payload: .error(EngineError(
                     kind: "ipc_frame_too_large",
-                    message: "The engine refused to send an IPC event larger than 64 MiB. Narrow the requested operation and try again."
+                    message: "That was too much for FileID to show at once. Try a smaller selection."
                 )))
                 line = try IPCCoder.encodeLine(replacement)
             }

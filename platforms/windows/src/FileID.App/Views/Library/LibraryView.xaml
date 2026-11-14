@@ -103,9 +103,9 @@
                     Grid.Column="4"
                     Click="OnUndoLastClicked"
                     Visibility="Collapsed"
-                    ToolTipService.ToolTip="Undo last destructive action (Ctrl+Z)"
-                    AutomationProperties.Name="Undo last action"
-                    AutomationProperties.HelpText="Undoes the last destructive action such as rename, trash, tag, or restructure (Ctrl+Z)">
+                    ToolTipService.ToolTip="Undo your last change on this page (Ctrl+Z)"
+                    AutomationProperties.Name="Undo last change"
+                    AutomationProperties.HelpText="Undoes your last change on this page, such as a rename, a tag change or a move to the Recycle Bin (Ctrl+Z)">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE7A7;" FontSize="13" />
                     <TextBlock x:Name="UndoButtonText" Text="Undo" />

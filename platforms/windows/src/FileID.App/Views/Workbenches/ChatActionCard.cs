@@ -106,7 +106,7 @@ internal sealed class ChatActionCard : UserControl
         _status.Visibility = Visibility.Collapsed;
 
         _primary = ChatActionPolicy.IsDestructive(action) ? Danger(new Button()) : Styled(new Button(), "ShellPrimaryButtonStyle");
-        _primary.Click += (_, _) => DebugLog.SafeRun("ChatActionCard.Primary", () => _ = DebugLog.SafeRunAsync("ChatActionCard.Run", () => _runner.RunAsync(_action)));
+        _primary.Click += (_, _) => DebugLog.SafeRun("ChatActionCard.Primary", () => _ = DebugLog.SafeRunAsync("ChatActionCard.Run", async () => { if (await ConfirmedAsync()) await _runner.RunAsync(_action); }));
         _cancel = Styled(new Button { Content = "Cancel" }, "ShellSecondaryButtonStyle");
         _cancel.Click += (_, _) => DebugLog.SafeRun("ChatActionCard.Cancel", () => _runner.Cancel(_action));
         _stop = Styled(new Button { Content = "Stop" }, "ShellSecondaryButtonStyle");
@@ -148,6 +148,10 @@ internal sealed class ChatActionCard : UserControl
         });
         Sync();
     }
+
+    /// <summary>Merging people asks once more on the button itself, like every merge in People.</summary>
+    private async Task<bool> ConfirmedAsync() =>
+        _action.Kind != "mergePeople" || await global::FileID.Views.People.SuggestedMergesSheet.ConfirmMergeAsync(_primary);
 
     public string ActionID => _action.Id;
 

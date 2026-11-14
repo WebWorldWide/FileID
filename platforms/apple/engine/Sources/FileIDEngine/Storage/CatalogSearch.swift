@@ -138,7 +138,7 @@ enum CatalogSearch {
             let ordered = merged.filter { !weak.contains($0.fileID) } + merged.filter { weak.contains($0.fileID) }
             return (select(ordered, limit: limit, filesOnly: scope == "files"), weak)
         }
-        let message = mode == "hybrid" ? "Keyword, catalog evidence, and visual similarity results." : "Visual similarity results."
+        let message = mode == "hybrid" ? "Matches by name, text and what's in the picture." : "Visual similarity results."
         return Judged(response: CatalogResponse(requestID: request.requestID, status: "ok", message: message, hits: hits), weak: weak)
     }
 

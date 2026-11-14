@@ -410,13 +410,33 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             try
             {
                 var path = BuildCropPath(AnchorFaceId);
-                if (!System.IO.File.Exists(path)) return null;
+                // The load already looked at the crop off the UI thread and
+                // folded the answer into AnchorCacheRevision; only an instance
+                // built without one has to ask the disk here.
+                var presence = CropPresence(AnchorCacheRevision);
+                if (presence == false) return null;
+                if (presence is null && !System.IO.File.Exists(path)) return null;
+                var key = string.Concat(
+                    AnchorFaceId.ToString(System.Globalization.CultureInfo.InvariantCulture), "|", AnchorCacheRevision);
+                if (AnchorCacheRevision is not null && s_anchorImages.TryGetValue(key, out var shared))
+                {
+                    _cachedAnchorImage = shared;
+                    return shared;
+                }
+                // IgnoreImageCache stays on for the first decode because the
+                // engine rewrites a crop in place under the same file name;
+                // s_anchorImages then shares that decode for the same revision.
                 _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
                 {
                     DecodePixelWidth = 120,
                     CreateOptions = Microsoft.UI.Xaml.Media.Imaging.BitmapCreateOptions.IgnoreImageCache,
                     UriSource = new Uri(path),
                 };
+                if (AnchorCacheRevision is not null)
+                {
+                    if (s_anchorImages.Count >= MaxSharedAnchorImages) s_anchorImages.Clear();
+                    s_anchorImages[key] = _cachedAnchorImage;
+                }
                 return _cachedAnchorImage;
             }
             catch
@@ -424,6 +444,20 @@ internal sealed class PersonCluster : INotifyPropertyChanged
                 return null;
             }
         }
+    }
+
+    private const int MaxSharedAnchorImages = 600;
+    // Read and written only from the UI thread (the AnchorImage binding).
+    private static readonly Dictionary<string, Microsoft.UI.Xaml.Media.Imaging.BitmapImage> s_anchorImages = new(StringComparer.Ordinal);
+
+    /// <summary>What <see cref="ReadCropRevision"/> recorded about the crop
+    /// file: true = it was there, false = it was not, null = unknown.</summary>
+    internal static bool? CropPresence(string? revision)
+    {
+        if (string.IsNullOrEmpty(revision)) return null;
+        if (revision.EndsWith("|missing", StringComparison.Ordinal)) return false;
+        if (revision.EndsWith("|unavailable", StringComparison.Ordinal)) return null;
+        return true;
     }
 
     /// <summary>Resolve the absolute path of the per-face JPEG the engine

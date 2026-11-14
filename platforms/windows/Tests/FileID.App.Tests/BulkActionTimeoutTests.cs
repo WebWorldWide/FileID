@@ -16,4 +16,15 @@ public sealed class BulkActionTimeoutTests
     [Fact]
     public void MaximumMatchesTheDocumentedTwoHourSafetyBound()
         => Assert.Equal(TimeSpan.FromHours(2), BulkActionTimeout.Maximum);
+
+    [Theory]
+    [InlineData(0, 330)]
+    [InlineData(25, 331)]
+    [InlineData(1_000_000, 7_200)]
+    public void TrashGetsFiveMinutesOnTopAndStaysBounded(int fileCount, double expectedSeconds)
+        => Assert.Equal(expectedSeconds, BulkActionTimeout.ForTrash(fileCount).TotalSeconds);
+
+    [Fact]
+    public void AnUnansweredActionFreesItsSlotAfterTenMinutes()
+        => Assert.Equal(TimeSpan.FromMinutes(10), BulkActionTimeout.LateReplyHold);
 }

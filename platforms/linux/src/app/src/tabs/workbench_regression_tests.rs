@@ -86,7 +86,7 @@ fn catalog_selection_clears_chapters_and_rejects_stale_controls_through_failed_b
     assert!(ui.requests.borrow().busy("jobs"));
     assert!(ui.requests.borrow().busy("detail"));
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::CatalogResponse(CatalogResponse {
             request_id: "a-detail".into(),
             status: "ok".into(),
@@ -103,7 +103,7 @@ fn catalog_selection_clears_chapters_and_rejects_stale_controls_through_failed_b
             take_goal_ranking: None,
         }));
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::CatalogResponse(CatalogResponse {
             request_id: "b-detail".into(),
             status: "error".into(),
@@ -153,7 +153,7 @@ fn tools_receipts_stay_bound_to_preview_and_undo_remains_guarded() {
         message: "Fixture receipt".into(),
     };
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::ToolResponse(ToolResponse {
             request_id: "preview-a".into(),
             status: "ok".into(),
@@ -167,7 +167,7 @@ fn tools_receipts_stay_bound_to_preview_and_undo_remains_guarded() {
     assert!(ui.execute.is_sensitive());
     ui.state.borrow_mut().requests.begin("capabilities", "caps");
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::ToolResponse(ToolResponse {
             request_id: "caps".into(),
             status: "ok".into(),
@@ -182,7 +182,7 @@ fn tools_receipts_stay_bound_to_preview_and_undo_remains_guarded() {
     assert!(ui.execute.is_sensitive());
     ui.state.borrow_mut().requests.begin("history", "history-b");
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::ToolResponse(ToolResponse {
             request_id: "history-b".into(),
             status: "ok".into(),
@@ -210,7 +210,7 @@ fn tools_receipts_stay_bound_to_preview_and_undo_remains_guarded() {
         .requests
         .begin("history", "history-error");
     engine
-        .borrow()
+        .borrow_mut()
         .publish_test_event(EngineState::ToolResponse(ToolResponse {
             request_id: "history-error".into(),
             status: "error".into(),

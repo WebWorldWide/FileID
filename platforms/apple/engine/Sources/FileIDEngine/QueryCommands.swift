@@ -42,7 +42,7 @@ enum QueryCommands {
         } catch {
             JSONLog.shared.warn(ev: "find_merge_suggestions_failed", error: "\(error)")
             return .error(EngineError(kind: "find_merge_suggestions_failed",
-                                      message: "Find merge suggestions failed: \(error)"))
+                                      message: "FileID couldn't look for people to merge. Try again."))
         }
     }
 

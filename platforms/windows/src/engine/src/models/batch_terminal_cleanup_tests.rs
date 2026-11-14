@@ -1,5 +1,6 @@
 use super::*;
-use crate::commands::deep_analyze::emit_batch_terminal_after_cleanup;
+use crate::commands::deep_analyze::{emit_batch_terminal_after_cleanup, ScopeFailure, STOPPED_BY_HELPER};
+use crate::commands::deep_scope::ScopeError;
 use crate::ipc::{sink::Sink, DeepAnalyzeComplete, EventPayload};
 use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
 #[cfg(unix)]
@@ -106,13 +107,13 @@ fn assert_complete(event: EventPayload, cancelled: bool, failed: u64) {
         _ => panic!("expected exactly one owned batch completion"),
     }
 }
-async fn delayed(cancelled: bool, failed: u64, message: Option<&str>) {
+async fn delayed(cancelled: bool, failed: u64, failure: Option<ScopeFailure>) {
     let root = root();
     let (child, tracker, gate, killed, s) = fixture(false);
     let (sink, mut rx) = Sink::channel_for_test(8);
-    let reason = message.map(str::to_owned);
+    let reason = failure.clone();
     let task = tokio::spawn(async move {
-        emit_batch_terminal_after_cleanup(&sink, complete(cancelled, failed), reason, child.shutdown()).await;
+        emit_batch_terminal_after_cleanup(&sink, complete(cancelled, failed), reason, child.shutdown()).await
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         while killed.load(Ordering::Relaxed) == 0 {
@@ -126,14 +127,15 @@ async fn delayed(cancelled: bool, failed: u64, message: Option<&str>) {
     assert_eq!(s.snapshot().memory_mb, 64);
     assert!(!tracker.allows_fallback());
     gate.send_replace(true);
-    task.await.unwrap();
+    let reported = task.await.unwrap();
+    assert_eq!(reported, failure, "a clean reap reports the reason unchanged");
     assert_eq!(s.snapshot().memory_mb, 0);
-    if let Some(message) = message {
+    if let Some(failure) = &failure {
         match rx.recv().await.unwrap().payload {
             EventPayload::Error(error) => {
                 assert_eq!(error.inner.kind, "deep_analyze_failed");
                 assert_eq!(error.inner.model_kind.as_deref(), Some("generated-batch-model"));
-                assert_eq!(error.inner.message, message);
+                assert_eq!(error.inner.message, failure.message);
             }
             _ => panic!("owned failure must precede completion, after clean reap"),
         }
@@ -142,7 +144,7 @@ async fn delayed(cancelled: bool, failed: u64, message: Option<&str>) {
     assert!(rx.recv().await.is_none());
     assert!(tracker.allows_fallback());
     tracker.shutdown().await.unwrap();
-    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&serde_json::json!({"terminalAndFutureReturnBeforeReap": false, "residentHeldWhilePending": true, "cancelled": cancelled, "failedFiles": failed, "batchReason": message, "cleanedBeforeTerminal": true})).unwrap()).unwrap();
+    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&serde_json::json!({"terminalAndFutureReturnBeforeReap": false, "residentHeldWhilePending": true, "cancelled": cancelled, "failedFiles": failed, "batchReason": failure.map(|failure| failure.detail), "cleanedBeforeTerminal": true})).unwrap()).unwrap();
 }
 #[tokio::test]
 async fn batch_cleanup_success_terminal_and_future_return_wait_for_confirmed_reap() {
@@ -154,11 +156,19 @@ async fn batch_cleanup_cancel_terminal_preserves_counts_after_confirmed_reap() {
 }
 #[tokio::test]
 async fn batch_cleanup_scope_error_terminal_preserves_reason_and_counts_after_reap() {
-    delayed(false, 3, Some("generated scope root changed")).await;
+    let scope = ScopeFailure::from_error(&ScopeError::ExcludedTarget.into());
+    assert_eq!(scope.message, ScopeError::ExcludedTarget.to_string());
+    assert_eq!(scope.detail, scope.message);
+    delayed(false, 3, Some(scope)).await;
 }
 #[tokio::test]
 async fn batch_cleanup_host_error_terminal_preserves_reason_and_cancel_after_reap() {
-    delayed(true, 1, Some("generated host admission refused")).await;
+    let host = ScopeFailure::from_error(&anyhow::Error::new(crate::models::native_admission::HostAdmissionError(anyhow::anyhow!(
+        "generated host admission refused"
+    ))));
+    assert_eq!(host.message, STOPPED_BY_HELPER);
+    assert!(host.detail.starts_with("Native host admission: generated host admission refused"));
+    delayed(true, 1, Some(host)).await;
 }
 
 async fn fault(cancelled: bool, message: Option<&str>) {
@@ -167,21 +177,25 @@ async fn fault(cancelled: bool, message: Option<&str>) {
     let resources = child.handle.resources.clone();
     let state = child.handle.state.clone();
     let (sink, mut rx) = Sink::channel_for_test(8);
-    emit_batch_terminal_after_cleanup(
+    let reported = emit_batch_terminal_after_cleanup(
         &sink,
         complete(cancelled, 0),
-        message.map(str::to_owned),
+        message.map(ScopeFailure::internal),
         child.shutdown(),
     )
-    .await;
+    .await
+    .expect("a cleanup failure is always reported");
+    assert!(reported.detail.contains("generated batch cleanup kill failure"));
+    if let Some(message) = message {
+        assert!(reported.detail.starts_with(message));
+    }
+    assert_eq!(reported.message, STOPPED_BY_HELPER);
     match rx.recv().await.unwrap().payload {
         EventPayload::Error(error) => {
             assert_eq!(error.inner.kind, "deep_analyze_failed");
             assert_eq!(error.inner.model_kind.as_deref(), Some("generated-batch-model"));
-            assert!(error.inner.message.contains("generated batch cleanup kill failure"));
-            if let Some(message) = message {
-                assert!(error.inner.message.starts_with(message));
-            }
+            assert_eq!(error.inner.message, STOPPED_BY_HELPER);
+            assert!(!error.inner.message.contains("generated"));
         }
         _ => panic!("cleanup failure cannot emit a clean terminal only"),
     }
@@ -213,7 +227,7 @@ async fn batch_cleanup_failure_preserves_original_reason_and_cancel_without_unco
 async fn batch_cleanup_empty_owner_terminal_requires_no_native_side_effect() {
     let root = root();
     let (sink, mut rx) = Sink::channel_for_test(4);
-    emit_batch_terminal_after_cleanup(&sink, complete(false, 0), None, async { Ok(()) }).await;
+    assert_eq!(emit_batch_terminal_after_cleanup(&sink, complete(false, 0), None, async { Ok(()) }).await, None);
     assert_complete(rx.recv().await.unwrap().payload, false, 0);
     assert!(rx.try_recv().is_err());
     std::fs::write(root.join("receipt.json"), b"{\"nativeOwner\":null,\"terminalCount\":1}").unwrap();

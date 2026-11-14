@@ -155,6 +155,7 @@ pub async fn caption(
     on_token: impl FnMut(&str),
 ) -> Result<CaptionResult> {
     if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+    crate::pipeline::scan_models::release_for_other_models();
     if req.prompt.len() > 32 * 1024 || !(1..=4096).contains(&req.max_tokens) { bail!("VLM generation exceeds prompt/token bounds"); }
     let model_mb = crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path)
         .await.map_err(super::native_admission::HostAdmissionError)?;

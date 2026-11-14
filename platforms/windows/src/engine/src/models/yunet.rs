@@ -90,11 +90,32 @@ impl YuNet {
     /// Detect faces in an RGB8 image. Returns bboxes/landmarks in the source
     /// image's pixel coordinates (letterbox remap applied).
     pub fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
+        let Some(input) = Self::prepare(rgb, width, height)? else {
+            return Ok(Vec::new());
+        };
+        let outputs = self.forward(input.chw)?;
+        Ok(decode_outputs(&outputs, input.scale, width, height))
+    }
+
+    /// [`detect`](Self::detect) on a pooled session, holding its lock only for
+    /// the forward pass: the letterbox resize, the 4.9 MB tensor fill, the
+    /// stride decode and NMS run on the caller's thread while other workers
+    /// use the session.
+    pub fn detect_shared(pool: &[parking_lot::Mutex<Self>], preferred: usize, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
+        let Some(input) = Self::prepare(rgb, width, height)? else {
+            return Ok(Vec::new());
+        };
+        let outputs = super::checkout(pool, preferred).forward(input.chw)?;
+        Ok(decode_outputs(&outputs, input.scale, width, height))
+    }
+
+    /// The model's input tensor for an RGB8 image; `None` for an empty image.
+    fn prepare(rgb: &[u8], width: u32, height: u32) -> Result<Option<PreparedInput>> {
         if rgb.len() != (width as usize) * (height as usize) * 3 {
             anyhow::bail!("YuNet detect: rgb buffer/size mismatch");
         }
         if width == 0 || height == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         // Letterbox to a fixed 640x640 (top-left, zero-pad remainder) — the
         // export's only input shape, and a fixed shape keeps DirectML happy.
@@ -113,7 +134,11 @@ impl YuNet {
                 chw[[0, 2, y, x]] = f32::from(resized[i]); // R
             }
         }
+        Ok(Some(PreparedInput { chw, scale }))
+    }
 
+    /// One forward pass; the per-stride output tensors by name.
+    fn forward(&mut self, chw: Array4<f32>) -> Result<Vec<(String, Vec<f32>)>> {
         let input = Tensor::from_array(chw).context("YuNet input tensor")?;
         let input_name = self.input_name.clone();
         ensure_gpu_inference_alive()?;
@@ -132,52 +157,64 @@ impl YuNet {
                     .map(|(_, d)| (name.to_string(), d.to_vec()))
             })
             .collect();
-        let find = |prefix: &str, s: u32| -> Option<&[f32]> {
-            let key = format!("{prefix}_{s}");
-            named.iter().find(|(n, _)| *n == key).map(|(_, d)| d.as_slice())
-        };
-
-        let mut candidates: Vec<Detection> = Vec::new();
-        for &s in &STRIDES {
-            match (find("cls", s), find("obj", s), find("bbox", s), find("kps", s)) {
-                (Some(cls), Some(obj), Some(bbox), Some(kps)) => {
-                    decode_stride(s, INPUT, cls, obj, bbox, kps, &mut candidates);
-                }
-                _ => {
-                    tracing::warn!(model = "YuNet", stride = s, "missing cls/obj/bbox/kps output — skipping stride");
-                }
-            }
-        }
-
-        // Letterbox → source remap (top-left placement, no pad offset).
-        if scale > 0.0 {
-            for d in &mut candidates {
-                for v in &mut d.bbox {
-                    *v /= scale;
-                }
-                for lm in &mut d.landmarks {
-                    lm[0] /= scale;
-                    lm[1] /= scale;
-                }
-            }
-        }
-        let (iw, ih) = (width as f32, height as f32);
-        for d in &mut candidates {
-            d.bbox[0] = d.bbox[0].clamp(0.0, iw);
-            d.bbox[1] = d.bbox[1].clamp(0.0, ih);
-            d.bbox[2] = d.bbox[2].clamp(0.0, iw);
-            d.bbox[3] = d.bbox[3].clamp(0.0, ih);
-            // Do NOT clamp landmarks: the 5-point similarity transform in
-            // align_112 needs their true positions to fit the crop correctly,
-            // and align_112's bilinear sampler already edge-clamps pixel reads.
-            // Clamping a slightly-out-of-frame eye/mouth point skews the
-            // transform and warps the aligned face (#8). validate_face_geometry
-            // already tolerates landmarks up to 10% outside the bbox, and
-            // DetectedFace.landmarks is metadata-only.
-        }
-
-        Ok(nms(candidates, NMS_IOU))
+        Ok(named)
     }
+}
+
+/// A letterboxed input tensor and the scale that maps its boxes back.
+struct PreparedInput {
+    chw: Array4<f32>,
+    scale: f32,
+}
+
+/// Decode the per-stride outputs into detections in the source image's pixel
+/// coordinates, then NMS. Pure, so it runs outside the session lock.
+fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: u32) -> Vec<Detection> {
+    let find = |prefix: &str, s: u32| -> Option<&[f32]> {
+        let key = format!("{prefix}_{s}");
+        named.iter().find(|(n, _)| *n == key).map(|(_, d)| d.as_slice())
+    };
+
+    let mut candidates: Vec<Detection> = Vec::new();
+    for &s in &STRIDES {
+        match (find("cls", s), find("obj", s), find("bbox", s), find("kps", s)) {
+            (Some(cls), Some(obj), Some(bbox), Some(kps)) => {
+                decode_stride(s, INPUT, cls, obj, bbox, kps, &mut candidates);
+            }
+            _ => {
+                tracing::warn!(model = "YuNet", stride = s, "missing cls/obj/bbox/kps output — skipping stride");
+            }
+        }
+    }
+
+    // Letterbox → source remap (top-left placement, no pad offset).
+    if scale > 0.0 {
+        for d in &mut candidates {
+            for v in &mut d.bbox {
+                *v /= scale;
+            }
+            for lm in &mut d.landmarks {
+                lm[0] /= scale;
+                lm[1] /= scale;
+            }
+        }
+    }
+    let (iw, ih) = (width as f32, height as f32);
+    for d in &mut candidates {
+        d.bbox[0] = d.bbox[0].clamp(0.0, iw);
+        d.bbox[1] = d.bbox[1].clamp(0.0, ih);
+        d.bbox[2] = d.bbox[2].clamp(0.0, iw);
+        d.bbox[3] = d.bbox[3].clamp(0.0, ih);
+        // Do NOT clamp landmarks: the 5-point similarity transform in
+        // align_112 needs their true positions to fit the crop correctly,
+        // and align_112's bilinear sampler already edge-clamps pixel reads.
+        // Clamping a slightly-out-of-frame eye/mouth point skews the
+        // transform and warps the aligned face (#8). validate_face_geometry
+        // already tolerates landmarks up to 10% outside the bbox, and
+        // DetectedFace.landmarks is metadata-only.
+    }
+
+    nms(candidates, NMS_IOU)
 }
 
 /// Decode one stride's cls/obj/bbox/kps tensors into Detections. Pure function
@@ -242,6 +279,46 @@ pub fn default_weights_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_letterboxes_to_bgr_and_rejects_bad_buffers() {
+        assert!(YuNet::prepare(&[0u8; 5], 2, 1).is_err());
+        assert!(YuNet::prepare(&[], 0, 0).unwrap().is_none());
+        // One red pixel next to one blue pixel, 2x1: scaled to 640x320.
+        let input = YuNet::prepare(&[255, 0, 0, 0, 0, 255], 2, 1).unwrap().unwrap();
+        assert!((input.scale - 320.0).abs() < 1e-3);
+        assert_eq!(input.chw.dim(), (1, 3, 640, 640));
+        let at = |channel: usize, y: usize, x: usize| input.chw[[0, channel, y, x]] as u8;
+        assert_eq!((at(0, 0, 0), at(2, 0, 0)), (0, 255), "red lands in the R plane (BGR order)");
+        assert_eq!((at(0, 0, 639), at(2, 0, 639)), (255, 0));
+        assert_eq!(at(0, 400, 100), 0, "below the image is zero padding");
+    }
+
+    #[test]
+    fn outputs_decode_to_source_pixels_and_clamp_to_the_frame() {
+        let outputs: Vec<(String, Vec<f32>)> = STRIDES
+            .iter()
+            .flat_map(|&s| {
+                let cells = ((INPUT / s) * (INPUT / s)) as usize;
+                let mut cls = vec![0.0_f32; cells];
+                if s == 32 {
+                    cls[0] = 1.0;
+                }
+                [
+                    (format!("cls_{s}"), cls),
+                    (format!("obj_{s}"), vec![1.0; cells]),
+                    (format!("bbox_{s}"), vec![0.0; cells * 4]),
+                    (format!("kps_{s}"), vec![0.0; cells * 10]),
+                ]
+            })
+            .collect();
+        // Stride 32, cell (0,0): a 32px box centred on the origin in model space;
+        // at scale 0.5 it is 64px in the source and clamps to the frame.
+        let found = decode_outputs(&outputs, 0.5, 1280, 1280);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].bbox.map(|v| v.round() as i32), [0, 0, 32, 32]);
+        assert!(decode_outputs(&[], 0.5, 1280, 1280).is_empty(), "missing outputs are skipped, not a panic");
+    }
 
     #[test]
     fn low_scores_emit_nothing() {

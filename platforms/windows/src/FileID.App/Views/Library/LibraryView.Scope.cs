@@ -20,7 +20,7 @@ public sealed partial class LibraryView
         => DebugLog.SafeRun(nameof(OnAppScopeChanged), () =>
         {
             if (e.PropertyName != nameof(AppViewModel.Scope)) return;
-            DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
+            DebugLog.Info($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
             DispatcherQueue.TryEnqueue(ApplyScope);
         });
 

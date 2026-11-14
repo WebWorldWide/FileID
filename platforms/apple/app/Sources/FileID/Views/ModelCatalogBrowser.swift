@@ -13,6 +13,8 @@ struct ModelCatalogBrowser: View {
     @State private var installedOnly = false
     @State private var selection: String?
     @State private var statusMessage = ""
+    @State private var statusDetail = ""
+    @State private var confirmDownload: AIModelKind?
     private var ramGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
     private var selected: AIModelKind? { selection.flatMap(AIModelKind.init(rawValue:)) }
     private var filtered: [AIModelKind] {
@@ -28,9 +30,12 @@ struct ModelCatalogBrowser: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Find a local model").font(Theme.Font.body(20, .semibold))
-                    Text("\(MLXModelCatalog.entries.count) audited catalog entries · \(Int(ramGB)) GB Mac")
-                        .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
+                    Text("More AI models").font(Theme.Font.body(20, .semibold))
+                    Text("For the curious: try a different AI for descriptions and Chat. The models suggested in Settings suit most people.")
+                        .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\(MLXModelCatalog.entries.count) more models you can try · this Mac has \(Int(ramGB.rounded())) GB memory")
+                        .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
@@ -43,7 +48,7 @@ struct ModelCatalogBrowser: View {
             }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
             HStack {
                 if !visionOnly {
-                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Vision"), ("text", "Text")], height: 26)
+                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")], height: 26)
                 }
                 Spacer()
                 Toggle("Fits this Mac", isOn: $fitsOnly)
@@ -57,10 +62,10 @@ struct ModelCatalogBrowser: View {
                             .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(kind.displayName).font(Theme.Font.body(13.5, .semibold)).lineLimit(1)
-                            Text(kind.sourceRepo).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(1)
-                            Text("\(kind.supportsVision ? "Vision + chat" : "Text + chat") · \(kind.licenseName)")
-                                .font(Theme.Font.body(11)).foregroundStyle(Theme.text3).lineLimit(1)
+                            Text(kind.supportsVision ? "Describes files and answers Chat" : "Answers Chat only")
+                                .font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(1)
                         }
+                        .help("\(kind.sourceRepo) · \(kind.licenseName)")
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 4) {
                             Text(ByteCountFormatter.string(fromByteCount: kind.approxBytes, countStyle: .file)).monospacedDigit()
@@ -68,7 +73,7 @@ struct ModelCatalogBrowser: View {
                                 .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : .secondary)
                             if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
                             if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
-                                Text("\(Int(decode.rounded())) tok/s here").foregroundStyle(Theme.gold).monospacedDigit()
+                                Text("\(Int(decode.rounded())) words per second (approx.)").foregroundStyle(Theme.gold).monospacedDigit()
                             }
                         }.font(Theme.Font.body(11))
                     }.padding(.vertical, 6).tag(kind.rawValue)
@@ -78,7 +83,7 @@ struct ModelCatalogBrowser: View {
                     VStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
                         Text("No models match these filters").font(Theme.Font.body(14, .semibold))
-                        Button("Reset filters") { query = ""; fitsOnly = false; installedOnly = false; role = "all" }
+                        Button("Reset filters") { query = ""; fitsOnly = true; installedOnly = false; role = "all" }
                             .buttonStyle(.dsSecondary)
                     }
                 }
@@ -100,50 +105,99 @@ struct ModelCatalogBrowser: View {
                         if let peak = engine.benchmarkResults[selected.rawValue]?.peakResidentGB {
                             Text("Uses about \(String(format: "%.1f", peak)) GB on this Mac (measured). Quality and speed vary by model.")
                         } else {
-                            Text("Estimated memory: \(String(format: "%.1f", selected.ramBudgetGB)) GB. Quality and speed vary by model; benchmark it to measure this Mac.")
+                            Text("Needs about \(String(format: "%.1f", selected.ramBudgetGB)) GB memory. Quality and speed vary by model; measure it below to see how it does on this Mac.")
                         }
                     }
                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                    if let entry = selected.catalogEntry {
-                        Text("\(entry.quantization.bits)-bit · \(entry.bases.count) audited upstream license\(entry.bases.count == 1 ? "" : "s")")
-                            .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
-                    }
                     ModelBenchmarkPanel(engine: engine, kind: selected)
                 }
+                .help(selected.catalogEntry.map { "\(selected.sourceRepo) · \($0.quantization.bits)-bit · \($0.bases.count) audited upstream license\($0.bases.count == 1 ? "" : "s") · \(selected.licenseName)" } ?? selected.licenseName)
             }
             if let progress = engine.modelDownloadProgress {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(progress.message).font(Theme.Font.body(12)).lineLimit(2)
-                        ProgressView(value: progress.fraction).tint(Theme.gold)
+                        Text(progress.fraction >= 0.99 ? "Getting the model ready…" : "Downloading… \(Int((progress.fraction * 100).rounded()))%")
+                            .font(Theme.Font.body(12)).monospacedDigit()
+                        ProgressView(value: min(max(progress.fraction, 0), 1)).tint(Theme.gold)
                     }
-                    Button("Cancel") { engine.cancelPrewarm() }
-                        .buttonStyle(.dsSecondary)
+                    .help(progress.message)
+                    Button("Cancel") {
+                        engine.cancelPrewarm()
+                        engine.clearModelDownloadProgress(forModelKind: progress.modelKind)
+                        statusMessage = "Download cancelled."
+                        statusDetail = ""
+                    }
+                    .buttonStyle(.dsSecondary)
                 }
             }
-            if !statusMessage.isEmpty { Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).textSelection(.enabled) }
+            if !statusMessage.isEmpty {
+                Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true).help(statusDetail)
+            }
             HStack {
-                Text("Downloads require your action. Inference stays on this Mac.")
+                Text("Nothing downloads unless you ask. The AI runs on this Mac.")
                     .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 Spacer()
-                Button(selected.map { ModelInstallStatus.isInstalled(kind: $0) ? "Load model" : "Download & load" } ?? "Download & load") {
-                    if let selected {
-                        statusMessage = engine.prewarmModel(selected.rawValue) ? "Requested \(selected.displayName). Progress appears here when processing starts." : (ModelLicenseAcceptance.isAccepted(for: selected) ? "FileID isn't responding. Quit and reopen FileID, then try again." : "This model requires accepted source terms before downloading.")
-                    }
-                }.disabled(selected == nil || selected?.fits(ramGB: ramGB) != true || engine.modelDownloadProgress != nil)
-                Button("Use selection") {
-                    if let selected { onSelect(selected); dismiss() }
-                }.buttonStyle(.dsPrimary).tint(Theme.gold).disabled(selected == nil || selected?.fits(ramGB: ramGB) != true)
+                Button("Use this model") {
+                    if let selected { use(selected) }
+                }
+                .buttonStyle(.dsPrimary).tint(Theme.gold)
+                .disabled(selected == nil || selected?.fits(ramGB: ramGB) != true || engine.modelDownloadProgress != nil)
+                .help(selected.map { ModelInstallStatus.isInstalled(kind: $0) ? "Switch to this model" : "Switch to this model. It downloads about \(DescriptionModelStore.downloadSizeText($0)) once; you confirm first." } ?? "Pick a model in the list first")
+                .confirmationDialog(
+                    "This downloads about \(confirmDownload.map(DescriptionModelStore.downloadSizeText) ?? "") once. Continue?",
+                    isPresented: Binding(get: { confirmDownload != nil }, set: { if !$0 { confirmDownload = nil } }),
+                    titleVisibility: .visible, presenting: confirmDownload
+                ) { kind in
+                    Button("Download and use") { download(kind) }
+                    Button("Cancel", role: .cancel) { }
+                } message: { _ in
+                    Text("It downloads once from the internet (huggingface.co) and then works without a connection.")
+                }
             }
         }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 680, idealHeight: 760)
             .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in
-                if let error = engine.lastError, let selected, error.modelKind == selected.rawValue || error.kind.hasPrefix("prewarm") { statusMessage = error.message }
+                guard let error = engine.lastError, selected != nil, error.kind != "prewarm_cancelled",
+                      ModelFailureText.isModelFailure(error) else { return }
+                statusMessage = ModelFailureText.plain(error)
+                statusDetail = error.message
             }
             .onChange(of: filtered.map(\.rawValue)) { _, visible in
                 if let selection, !visible.contains(selection) { self.selection = nil }
             }
             .onExitCommand { dismiss() }
+    }
+
+    /// Selecting is the one action: accept the model's terms if it has any,
+    /// switch to it, and download it (after asking) when it isn't on this Mac.
+    private func use(_ kind: AIModelKind) {
+        statusDetail = ""
+        guard ModelLicenseGate.ensureAccepted(for: kind) else {
+            statusMessage = "This model can only be used after you accept its terms. Press Use this model to see them again."
+            return
+        }
+        if ModelInstallStatus.isInstalled(kind: kind) {
+            onSelect(kind)
+            dismiss()
+            return
+        }
+        if let free = DescriptionModelStore.freeDiskBytes(), !kind.fits(freeDiskBytes: free) {
+            statusMessage = ModelInstaller.notEnoughSpace(needed: kind.requiredFreeBytes, available: free)
+            return
+        }
+        statusMessage = ""
+        confirmDownload = kind
+    }
+
+    private func download(_ kind: AIModelKind) {
+        engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
+        guard engine.prewarmModel(kind.rawValue) else {
+            statusMessage = "FileID's helper isn't running. Quit and reopen FileID, then try again."
+            return
+        }
+        onSelect(kind)
+        statusMessage = "Now using this model. The download keeps going if you close this window."
     }
 }
 
@@ -164,11 +218,11 @@ struct ModelBenchmarkPanel: View {
                     Button("Cancel") { engine.cancelBenchmark() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3))
                 } else {
                     Button { engine.benchmarkModel(kind) } label: {
-                        Label(engine.benchmarkResults[kind.rawValue] == nil ? "Benchmark" : "Run again", systemImage: "speedometer")
+                        Label(engine.benchmarkResults[kind.rawValue] == nil ? "Measure speed" : "Measure again", systemImage: "speedometer")
                     }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))
                     .disabled(!installed || engine.benchmarkModelKind != nil || engine.modelDownloadProgress != nil)
-                    .help(installed ? "Runs fixed prompts twice on this Mac and keeps the medians. Nothing is downloaded." : "Download the model first. Benchmarks never download.")
+                    .help(installed ? "Runs a short test twice on this Mac. Nothing is downloaded." : "Download the model first. Measuring never downloads anything.")
                 }
             }
             if running, let progress = engine.benchmarkProgress {
@@ -179,14 +233,14 @@ struct ModelBenchmarkPanel: View {
             } else if let result = engine.benchmarkResults[kind.rawValue] {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                     GridRow {
-                        metric("Cold load", String(format: "%.1f s", result.loadSeconds))
-                        metric("Reading", result.promptTokensPerSecond.map { "\(Int($0.rounded())) tok/s" })
-                        metric("Writing", result.generatedTokensPerSecond.map { "\(Int($0.rounded())) tok/s" })
+                        metric("Time to start", String(format: "%.1f s", result.loadSeconds))
+                        metric("Reading (approx.)", result.promptTokensPerSecond.map { "\(Int($0.rounded())) words/s" })
+                        metric("Writing (approx.)", result.generatedTokensPerSecond.map { "\(Int($0.rounded())) words/s" })
                     }
                     GridRow {
                         metric("Per image", result.secondsPerImage.map { String(format: "%.1f s", $0) })
                         metric("Peak memory", result.peakResidentGB.map { String(format: "%.1f GB", $0) })
-                        metric("Valid JSON", result.jsonValidRate.map { "\(Int(($0 * 100).rounded()))%" })
+                        metric("Usable answers", result.jsonValidRate.map { "\(Int(($0 * 100).rounded()))%" })
                     }
                 }
                 Text(Self.footnote(result)).font(Theme.Font.body(11)).foregroundStyle(Theme.text3).lineLimit(2)

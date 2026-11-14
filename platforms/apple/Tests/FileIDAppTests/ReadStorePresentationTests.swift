@@ -109,7 +109,10 @@ struct ReadStorePresentationTests {
             fixture.store.close()
             try? FileManager.default.removeItem(at: fixture.root)
         }
-        let writer = try DatabaseQueue(path: fixture.root.appending(component: "fileid.sqlite").path)
+        // The store's background counter read can hold the file for a moment; wait as the engine's writer does.
+        var writerConfiguration = Configuration()
+        writerConfiguration.busyMode = .timeout(5)
+        let writer = try DatabaseQueue(path: fixture.root.appending(component: "fileid.sqlite").path, configuration: writerConfiguration)
         var previous = try #require(fixture.store.persons().first)
         for sql in [
             "UPDATE face_prints SET processing_version='v3' WHERE id=1",

@@ -122,12 +122,13 @@ pub struct Neighbor {
 
 /// Run the full pipeline. `embeddings[i]` must be L2-normalized.
 /// `searcher(i)` returns the kNN of face `i` with cosine similarities.
-pub fn cluster<F>(
-    embeddings: &[Vec<f32>],
+pub fn cluster<E, F>(
+    embeddings: &[E],
     searcher: F,
     params: Hyperparameters,
 ) -> ClusterResult
 where
+    E: AsRef<[f32]>,
     F: FnMut(usize) -> Vec<Neighbor>,
 {
     cluster_with_cannot_links(embeddings, searcher, params, &[])
@@ -137,13 +138,14 @@ where
 /// A cannot-linked pair can never share a Pass-1 component or receive the same
 /// Pass-2 core, including through a transitive bridge. Face clustering supplies
 /// same-physical-file pairs; semantic Restructure uses the unconstrained wrapper.
-pub fn cluster_with_cannot_links<F>(
-    embeddings: &[Vec<f32>],
+pub fn cluster_with_cannot_links<E, F>(
+    embeddings: &[E],
     searcher: F,
     params: Hyperparameters,
     cannot_links: &[(usize, usize)],
 ) -> ClusterResult
 where
+    E: AsRef<[f32]>,
     F: FnMut(usize) -> Vec<Neighbor>,
 {
     // MUTUAL-kNN is the DEFAULT here (label-validated 2026-07-05): an edge i—j is
@@ -162,17 +164,21 @@ where
 }
 
 /// `cluster_with_cannot_links` with the mutual-kNN gate chosen by the caller.
-pub fn cluster_with_options<F>(
-    embeddings: &[Vec<f32>],
+pub fn cluster_with_options<E, F>(
+    embeddings: &[E],
     mut searcher: F,
     params: Hyperparameters,
     cannot_links: &[(usize, usize)],
     mutual_knn: bool,
 ) -> ClusterResult
 where
+    E: AsRef<[f32]>,
     F: FnMut(usize) -> Vec<Neighbor>,
 {
     let started = Instant::now();
+    // Borrowed views: callers keep their vectors wherever they already live.
+    let views: Vec<&[f32]> = embeddings.iter().map(AsRef::as_ref).collect();
+    let embeddings = views.as_slice();
     let n = embeddings.len();
     if n == 0 {
         return ClusterResult {
@@ -369,8 +375,8 @@ where
             cores.push(vec![outlier]);
             // A singleton's unnormalized sum is the embedding itself; its
             // normalized centroid is the (already L2-normalized) embedding.
-            core_sums.push(v.clone());
-            core_centroids.push(v.clone());
+            core_sums.push(v.to_vec());
+            core_centroids.push(v.to_vec());
             core_of_face[outlier] = Some(singleton_index);
             outliers_as_singletons += 1;
         }
@@ -412,14 +418,14 @@ where
 }
 
 /// L2-normalized mean of the indexed embeddings.
-fn centroid_normalized(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
+fn centroid_normalized(indices: &[usize], embeddings: &[&[f32]], dim: usize) -> Vec<f32> {
     let sum = centroid_sum(indices, embeddings, dim);
     normalize_sum(&sum, dim)
 }
 
 /// Unnormalized component-wise sum of the indexed embeddings. Pass 2 keeps this
 /// alongside the normalized centroid so an outlier add is O(dim), not O(S).
-fn centroid_sum(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
+fn centroid_sum(indices: &[usize], embeddings: &[&[f32]], dim: usize) -> Vec<f32> {
     let mut sum = vec![0f32; dim];
     for &i in indices {
         let v = &embeddings[i];
@@ -452,12 +458,7 @@ fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
 /// Cosine on pre-normalized vectors = dot product.
 #[inline]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    let mut s: f32 = 0.0;
-    for i in 0..n {
-        s += a[i] * b[i];
-    }
-    s
+    crate::util::vector_math::dot(a, b)
 }
 
 /// Recursively split a cluster if it fails the variance / mean-cosine
@@ -467,7 +468,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 #[allow(clippy::similar_names)]
 fn validate_and_split(
     cluster: Vec<usize>,
-    embeddings: &[Vec<f32>],
+    embeddings: &[&[f32]],
     dim: usize,
     params: Hyperparameters,
     splits_remaining: usize,
@@ -530,8 +531,8 @@ fn validate_and_split(
 
     let mut group_a: Vec<usize> = Vec::new();
     let mut group_b: Vec<usize> = Vec::new();
-    let mut cent_a = embeddings[seed_a_idx].clone();
-    let mut cent_b = embeddings[seed_b_idx].clone();
+    let mut cent_a = embeddings[seed_a_idx].to_vec();
+    let mut cent_b = embeddings[seed_b_idx].to_vec();
     for _ in 0..10 {
         group_a.clear();
         group_b.clear();

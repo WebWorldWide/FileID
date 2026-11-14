@@ -21,6 +21,7 @@ struct SettingsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 AppearanceCard()
+                PrivacyCard()
 
                 LocationsCard(engine: engine)
 
@@ -39,8 +40,9 @@ struct SettingsTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Scanning").font(Theme.Font.body(14, .semibold))
                         SettingToggleRow("Faster text reading (Latin scripts only)",
-                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after you quit and reopen FileID.",
+                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after FileID's helper restarts.",
                                          isOn: $fastTextReading)
+                        restartHelperRow
                     }
                 }
 
@@ -50,9 +52,10 @@ struct SettingsTab: View {
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after you quit and reopen FileID.")
+                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.text3)
+                        restartHelperRow
                     }
                 }
 
@@ -60,6 +63,7 @@ struct SettingsTab: View {
 
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
+                EssentialModelsCard()
                 ModelInstallCard.clip
                 ModelInstallCard.ramPlus
                 ModelInstallCard.bge
@@ -80,7 +84,7 @@ struct SettingsTab: View {
 
                             // Engine
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Engine").font(Theme.Font.body(12.5, .semibold))
+                                Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
                                 if engine.rustEngineBundled && !EngineBackendPolicy.isAppStoreBuild {
                                     LabeledSegment("Engine") {
                                         SegmentedBar(selection: engineChoice, options: [(EngineBackend.rust, "Shared"), (EngineBackend.swift, "Swift")])
@@ -98,19 +102,14 @@ struct SettingsTab: View {
                                 if case .ready(let info) = engine.state {
                                     infoRow("Running", info.engine == "rust" ? "Shared engine" : "Swift engine")
                                     infoRow("Version", info.version)
-                                    infoRow("PID",     "\(info.pid)")
-                                    infoRow("Workers", "\(info.workerCap)")
-                                    infoRow("Memory",  "\(Int(info.physicalMemoryGB)) GB")
+                                    infoRow("Process number", "\(info.pid)")
+                                    infoRow("Files worked on at once", "\(info.workerCap)")
+                                    infoRow("This Mac's memory",  "\(Int(info.physicalMemoryGB)) GB")
                                 }
                                 HStack(spacing: 8) {
-                                    Button("Restart Engine") { engine.start() }
+                                    Button("Restart helper") { engine.start() }
                                         .buttonStyle(.dsSecondary)
                                         .help("Restart FileID's background helper. Stops any scan in progress.")
-                                    if case .ready = engine.state {
-                                        Button("Stop Engine") { engine.shutdown() }
-                                            .buttonStyle(.dsSecondary)
-                                            .help("Stop FileID's background helper.")
-                                    }
                                 }
                             }
 
@@ -120,11 +119,12 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Total files",   "\(store.totalFiles)")
-                                infoRow("Images tagged", "\(store.totalImages)")
-                                infoRow("Stored duplicate hints", "\(store.totalDuplicateGroups)")
-                                infoRow("Hint reclaimable", String(format: "%.1f MB", store.totalReclaimableMB))
-                                infoRow("Database", ReadStore.defaultDBURL.path)
-                                Button("Show database in Finder") {
+                                infoRow("Photos tagged", "\(store.totalImages)")
+                                infoRow("Sets of duplicates", "\(store.totalDuplicateGroups)")
+                                infoRow("Space duplicates use", String(format: "%.1f MB", store.totalReclaimableMB))
+                                infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path))
+                                    .help(ReadStore.defaultDBURL.path)
+                                Button("Show library file in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
                                 }
                                 .buttonStyle(.dsSecondary)
@@ -153,16 +153,12 @@ struct SettingsTab: View {
                                 Text("Detailed scan + app logs for troubleshooting.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 HStack(spacing: 8) {
-                                    Button("Open scan log") {
-                                        NSWorkspace.shared.open(SettingsTab.scanLogURL)
+                                    Button("Show scan log in Finder") {
+                                        NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
                                     }
                                     .buttonStyle(.dsSecondary)
                                     Button("Open app log") {
                                         NSWorkspace.shared.open(SettingsTab.appLogURL)
-                                    }
-                                    .buttonStyle(.dsSecondary)
-                                    Button("Show logs in Finder") {
-                                        NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
                                     }
                                     .buttonStyle(.dsSecondary)
                                 }
@@ -254,7 +250,15 @@ struct SettingsTab: View {
         switch engine.state {
         case .starting:           return "Starting…"
         case .ready:              return "Ready"
-        case .crashed(let why):   return "Crashed — \(why)"
+        case .crashed(let why):   return "Stopped unexpectedly: \(why)"
+        }
+    }
+
+    private var restartHelperRow: some View {
+        HStack(spacing: 8) {
+            Button("Restart helper now") { engine.start() }
+                .buttonStyle(DSSecondaryButtonStyle(height: 24))
+            MetaText("Applies the change right away. Stops a scan that is running.", size: 11)
         }
     }
 
@@ -360,6 +364,7 @@ struct ModelInstallCard: View {
     struct Row {
         let name: String
         var detail: String? = nil
+        var technical: String? = nil
         let path: URL
     }
 
@@ -371,7 +376,6 @@ struct ModelInstallCard: View {
     let removeTitle: String
     let fallback: String
     var onRemoved: () -> Void = {}
-    var localZip: ((URL) -> Void)? = nil
     @State private var confirmRemove = false
 
     private var sizeLabel: String { ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file) }
@@ -411,13 +415,10 @@ struct ModelInstallCard: View {
                 if let detail = row.detail {
                     Text(detail).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
-                Text(PathText.abbreviated(row.path.path))
-                    .font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
-                    .lineLimit(1).truncationMode(.middle)
-                    .help(row.path.path)
             }
             Spacer()
         }
+        .help([row.technical, row.path.path].compactMap { $0 }.joined(separator: "\n"))
     }
 
     @ViewBuilder
@@ -436,14 +437,12 @@ struct ModelInstallCard: View {
         case .unknown:
             ProgressView().controlSize(.small)
         case .missing(let reason):
-            MetaText("\(reason) About \(sizeLabel) from huggingface.co.", size: 11)
+            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11)
             HStack(spacing: 8) {
                 Button { installer.install() } label: {
                     Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
-                localZipButton
-                openFolderButton
                 Spacer()
             }
         case .downloading(let fraction, let message, _, _):
@@ -464,14 +463,13 @@ struct ModelInstallCard: View {
         case .extracting:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                MetaText("Extracting…")
+                MetaText("Finishing…")
                 Spacer()
             }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on disk", size: 11)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11)
                 Spacer()
-                openFolderButton
                 Button("Remove") { confirmRemove = true }
                     .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                     .padding(.trailing, -6)
@@ -481,35 +479,57 @@ struct ModelInstallCard: View {
                 Text(why).font(Theme.Font.body(12)).foregroundStyle(Theme.danger)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
-                    localZipButton
-                    openFolderButton
+                    Button("Try again") { installer.install() }.buttonStyle(.dsSecondary)
                     Spacer()
                 }
             }
         }
     }
 
-    @ViewBuilder
-    private var localZipButton: some View {
-        if let localZip {
-            Button("Install from local zip…") {
-                let panel = NSOpenPanel()
-                panel.allowedContentTypes = [.zip]
-                panel.allowsMultipleSelection = false
-                panel.message = "Choose the clip-models.zip file."
-                panel.prompt = "Install"
-                if panel.runModal() == .OK, let url = panel.url { localZip(url) }
-            }
-            .buttonStyle(.dsSecondary)
-        }
+}
+
+/// One button for every required model that is still missing.
+struct EssentialModelsCard: View {
+    @State private var clip = CLIPModelInstaller.shared
+    @State private var ramPlus = ModelInstaller.ramPlus
+    @State private var bge = ModelInstaller.bge
+    @State private var face = ModelInstaller.face
+
+    private var items: [(installer: any ModelInstalling, bytes: Int64)] {
+        [(clip, CLIPModelInstaller.approxDownloadBytes), (ramPlus, ramPlus.spec.approxBytes),
+         (bge, bge.spec.approxBytes), (face, face.spec.approxBytes)]
+    }
+    private var missing: [(installer: any ModelInstalling, bytes: Int64)] {
+        items.filter { !$0.installer.status.isInstalled }
     }
 
-    private var openFolderButton: some View {
-        Button("Open Models folder") {
-            NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
+    var body: some View {
+        let missing = missing
+        let busy = missing.contains { $0.installer.status.inProgress }
+        let idle = missing.filter { !$0.installer.status.inProgress }
+        Panel(padding: 16) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("AI models").font(Theme.Font.body(14, .semibold))
+                    MetaText(missing.isEmpty
+                             ? "Search, tags, faces and documents are all downloaded."
+                             : "Search, tags, faces and documents each need a small model. Without them, FileID still finds files by name and by text inside them.")
+                }
+                Spacer()
+                if !missing.isEmpty {
+                    Button {
+                        for item in idle { item.installer.install() }
+                    } label: {
+                        Label(idle.isEmpty ? "Downloading…" : "Download the essentials · about \(ByteCountFormatter.string(fromByteCount: idle.reduce(0) { $0 + $1.bytes }, countStyle: .file))",
+                              systemImage: "arrow.down.circle.fill")
+                    }
+                    .buttonStyle(.dsPrimary)
+                    .disabled(idle.isEmpty)
+                    .help(busy ? "Each model's progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
+                }
+            }
         }
-        .buttonStyle(DSGhostButtonStyle(color: Theme.text2))
+        .onAppear { for item in items { item.installer.refreshStatus() } }
     }
 }
 
@@ -519,16 +539,15 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Search by description",
-            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Model: OpenCLIP ViT-B/32 (MIT), runs on this Mac.",
+            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Runs on this Mac.",
             rows: [
-                Row(name: "CLIP ViT-B/32 (image)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
-                Row(name: "CLIP ViT-B/32 (text)", path: CLIPTextEncoder.defaultModelURL),
-                Row(name: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
+                Row(name: "Understands photos", detail: "Looks at each photo during a scan.", technical: "OpenCLIP ViT-B/32 image model (MIT)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
+                Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPTextEncoder.defaultModelURL),
+                Row(name: "Word list", detail: "The words the search model knows.", technical: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
             ],
             approxBytes: CLIPModelInstaller.approxDownloadBytes,
             removeTitle: "Remove the Search by description model?",
-            fallback: "Search goes back to matching names and tags until you download it again.",
-            localZip: { installer.installFromLocalZip($0) })
+            fallback: "Search goes back to matching names and tags until you download it again.")
     }
 
     static var ramPlus: ModelInstallCard {
@@ -536,8 +555,8 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Photo tags",
-            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Model: RAM++ (Apache-2.0). Without it, FileID uses a simpler built-in tagger.",
-            rows: [Row(name: "RAM++ (Recognize Anything Plus)", detail: "Swin-Large @384 · 4585-tag English vocabulary", path: installer.spec.primaryFile)],
+            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Without it, FileID uses a simpler built-in tagger.",
+            rows: [Row(name: "Photo tagger", detail: "Knows about 4,500 everyday things, in English.", technical: "RAM++ (Recognize Anything Plus), Swin-Large @384, Apache-2.0", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Photo tags model?",
             fallback: "Tagging falls back to the simpler built-in tagger.")
@@ -548,8 +567,8 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Documents",
-            blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Model: BGE-small (MIT). Without it, documents are grouped by file name.",
-            rows: [Row(name: "BGE-small-en-v1.5", detail: "384-d BERT text embedder · runs on the Neural Engine", path: installer.spec.primaryFile)],
+            blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Without it, documents are grouped by file name.",
+            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the Neural Engine", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Documents model?",
             fallback: "Organize Folders groups documents by file name instead.")
@@ -561,8 +580,8 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Faces",
-            blurb: "Recognizes the same person across your photos so People can group them. Model: SFace (Apache-2.0), runs on this Mac.",
-            rows: [Row(name: kind.displayName, detail: kind.subtitle, path: installer.spec.primaryFile)],
+            blurb: "Recognizes the same person across your photos so People can group them. Runs on this Mac.",
+            rows: [Row(name: "Face matcher", detail: "Tells which faces belong to the same person.", technical: "\(kind.displayName) · \(kind.subtitle) · \(kind.licenseName)", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove face model?",
             fallback: "Grouping faces stops until you download it again.")
@@ -573,14 +592,36 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Closed eyes in Best Takes",
-            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Model: MediaPipe Face Mesh V2 (Apache-2.0), runs on this Mac. Without it, FileID uses Apple's built-in eye check.",
-            rows: [Row(name: "MediaPipe Face Mesh V2", detail: "478 face landmarks · eyelid gap over eye width", path: installer.spec.primaryFile)],
+            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Runs on this Mac. Without it, FileID uses Apple's built-in eye check.",
+            rows: [Row(name: "Eye checker", detail: "Measures how open each eye is.", technical: "MediaPipe Face Mesh V2 (Apache-2.0), 478 face landmarks", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the closed-eyes model?",
             fallback: "Best Takes goes back to Apple's built-in eye check.")
     }
 }
 
+
+/// What leaves FileID's own library: Spotlight gets names, tags and descriptions.
+struct PrivacyCard: View {
+    @AppStorage(AppSettings.spotlightKey) private var spotlight: Bool = AppSettings.spotlightDefault
+    var body: some View {
+        Panel(padding: 16) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Privacy").font(Theme.Font.body(14, .semibold))
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show results in Spotlight").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+                        MetaText("File names, tags and descriptions FileID wrote become searchable with ⌘Space by anyone using this Mac. Turning this off removes them from Spotlight.")
+                    }
+                    Spacer()
+                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(.switch)
+                        .accessibilityLabel("Show results in Spotlight")
+                }
+                MetaText("Nothing is sent anywhere. The only network use is a model download you start yourself.")
+            }
+        }
+    }
+}
 
 /// Prototype v3 appearance: lava lamp Full / Calm / Off, and the page text size.
 struct AppearanceCard: View {

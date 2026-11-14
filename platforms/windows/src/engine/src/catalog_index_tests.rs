@@ -229,10 +229,29 @@ fn incompatible_model_nonce_dimension_and_topology_never_restore() {
     }
     std::fs::write(index.manifest_path(), &original).unwrap();
     let manifest: Manifest = serde_json::from_slice(&original).unwrap();
+    assert_eq!(manifest.format, Some(snapshot::VERSION));
     let graph_path = index.directory.join(format!("{}.graph", manifest.graph_hash));
     let bytes = std::fs::read(graph_path).unwrap();
-    assert!(validate_graph(&bytes).is_ok());
-    let mut graph: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let shape = CatalogIndex::shape();
+    let read = |bytes: &[u8]| snapshot::read_graph(bytes, bytes.len() as u64, &clip_space::digest(bytes), &shape);
+    assert!(read(&bytes).is_ok());
+    let header = 8 + 4 + 4 + 4 + clip_space::model_id().len() + 8;
+    let first_neighbour = header + 8 + 8 + 3 * (8 + 4 * 512) + 8;
+    let mut topology = bytes.clone();
+    topology[first_neighbour..first_neighbour + 4].copy_from_slice(&200_000u32.to_le_bytes());
+    assert!(read(&topology).err().unwrap().to_string().contains("out of bounds"));
+    let mut dimension = bytes.clone();
+    dimension[12..16].copy_from_slice(&1u32.to_le_bytes());
+    assert!(read(&dimension).is_err());
+    let mut vector = bytes.clone();
+    let first_value = header + 8 + 8 + 8;
+    vector[first_value..first_value + 4].copy_from_slice(&9.0f32.to_le_bytes());
+    assert!(read(&vector).err().unwrap().to_string().contains("vector"));
+
+    let cache = index.state.lock().cache.clone().unwrap();
+    let json = serde_json::to_vec(&*cache.graph).unwrap();
+    assert!(validate_graph(&json).is_ok());
+    let mut graph: serde_json::Value = serde_json::from_slice(&json).unwrap();
     graph["hnsw"]["zero"][0][0] = serde_json::json!(200000);
     assert!(validate_graph(&serde_json::to_vec(&graph).unwrap()).is_err());
     graph["hnsw"]["points"][0] = serde_json::json!([1.0]);
@@ -363,8 +382,8 @@ fn fingerprint_eligibility_and_terminal_close_are_revalidated() {
     {
         let mut state = index.state.lock();
         let cache = Arc::get_mut(state.cache.as_mut().unwrap()).unwrap();
-        cache
-            .graph
+        Arc::get_mut(&mut cache.graph)
+            .unwrap()
             .values
             .iter_mut()
             .find(|entry| entry.file_id == 2)
@@ -673,4 +692,293 @@ fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() 
     let seeded = index.judged(&request(serde_json::json!({"requestID":"f","action":"search","searchMode":"semantic","fileID":1})), &|_| None).unwrap();
     assert!(seeded.weak.is_none());
     assert_eq!(seeded.response.message.as_deref(), Some("Visual similarity results."));
+}
+
+fn unit(seed: u64, dimension: usize) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut vector: Vec<f32> = (0..dimension)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % 2001) as f32 / 1000.0 - 1.0
+        })
+        .collect();
+    normalize(&mut vector);
+    vector
+}
+fn add_photo(index: &CatalogIndex, id: i64, vector: &[f32]) {
+    let conn = index.writer.lock();
+    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,10,0,'image','png','extra')", params![id, format!("/internal/{id}.png")]).unwrap();
+    let blob = vector.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    conn.execute("INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, blob, clip_space::model_id()]).unwrap();
+}
+fn seeded_ids(index: &Arc<CatalogIndex>) -> Vec<i64> {
+    index.search(&seed()).unwrap().hits.iter().map(|hit| hit.file_id).collect()
+}
+fn graph_entries(graph: &HnswMap<Embedding, Entry>) -> Vec<(Vec<u32>, i64, String)> {
+    graph
+        .iter()
+        .zip(&graph.values)
+        .map(|((_, point), entry)| (point.0.iter().map(|v| v.to_bits()).collect(), entry.file_id, entry.fingerprint.clone()))
+        .collect()
+}
+
+#[test]
+fn small_changes_ride_beside_the_graph_and_survive_a_restart() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    let built = index.state.lock().cache.clone().unwrap();
+    assert_eq!(built.pending(), 0);
+
+    let mut near = vector(0);
+    near[1] = 0.05;
+    normalize(&mut near);
+    add_photo(&index, 50, &near);
+    ready(&index);
+    let advanced = index.state.lock().cache.clone().unwrap();
+    assert!(Arc::ptr_eq(&advanced.graph, &built.graph), "one new photo must not rebuild the graph");
+    assert_eq!(advanced.added.len(), 1);
+    assert_eq!(seeded_ids(&index), vec![2, 50, 3]);
+
+    index.writer.lock().execute("DELETE FROM files WHERE id=2", []).unwrap();
+    ready(&index);
+    let advanced = index.state.lock().cache.clone().unwrap();
+    assert!(Arc::ptr_eq(&advanced.graph, &built.graph));
+    assert_eq!(advanced.removed, HashSet::from([2]));
+    assert_eq!(seeded_ids(&index), vec![50, 3]);
+
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    assert_eq!(Some(&manifest.graph_hash), built.saved.lock().graph_hash.as_ref(), "the graph file is not rewritten for a small change");
+    let delta = manifest.delta_hash.clone().expect("changes are saved beside the graph");
+    let files = |extension: &str| {
+        std::fs::read_dir(&index.directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|found| found == extension))
+            .count()
+    };
+    assert_eq!((files("graph"), files("delta")), (1, 1), "superseded snapshots are removed");
+
+    let restarted = CatalogIndex::with_scheduler(index.writer.clone(), index.database.clone(), index.directory.clone(), index.scheduler.clone());
+    ready(&restarted);
+    let restored = restarted.state.lock().cache.clone().unwrap();
+    assert_eq!(restored.added.len(), 1);
+    assert_eq!(restored.removed, HashSet::from([2]));
+    assert_eq!(seeded_ids(&restarted), vec![50, 3]);
+    assert_eq!(std::fs::read(index.manifest_path()).unwrap(), serde_json::to_vec(&manifest).unwrap(), "a restart at the same revision writes nothing");
+
+    let delta_path = index.directory.join(format!("{delta}.delta"));
+    let mut bytes = std::fs::read(&delta_path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&delta_path, &bytes).unwrap();
+    let rebuilt = CatalogIndex::with_scheduler(index.writer.clone(), index.database.clone(), index.directory.clone(), index.scheduler.clone());
+    ready(&rebuilt);
+    assert_eq!(rebuilt.state.lock().cache.as_ref().unwrap().pending(), 0, "a damaged change file falls back to a rebuild");
+    assert_eq!(seeded_ids(&rebuilt), vec![50, 3]);
+    rebuilt.close();
+    restarted.close();
+    index.close();
+}
+
+#[test]
+fn a_change_that_returns_to_the_indexed_vector_needs_no_extra_entry() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index.writer.lock().execute("UPDATE files SET failed=1 WHERE id=2", []).unwrap();
+    ready(&index);
+    assert_eq!(index.state.lock().cache.as_ref().unwrap().removed, HashSet::from([2]));
+    index.writer.lock().execute("UPDATE files SET failed=0 WHERE id=2", []).unwrap();
+    ready(&index);
+    let cache = index.state.lock().cache.clone().unwrap();
+    assert_eq!(cache.pending(), 0);
+    assert_eq!(seeded_ids(&index), vec![2, 3]);
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    assert!(manifest.delta_hash.is_none());
+    index.close();
+}
+
+#[test]
+fn many_changes_rebuild_the_graph_once_and_fold_them_in() {
+    assert!(!needs_rebuild(3, MIN_PENDING_BEFORE_REBUILD));
+    assert!(needs_rebuild(3, MIN_PENDING_BEFORE_REBUILD + 1));
+    assert!(!needs_rebuild(100_000, 10_000));
+    assert!(needs_rebuild(100_000, 10_001));
+
+    let (_directory, index) = fixture();
+    ready(&index);
+    let built = index.state.lock().cache.clone().unwrap();
+    for id in 1000..=1000 + MIN_PENDING_BEFORE_REBUILD as i64 {
+        add_photo(&index, id, &unit(id as u64, 512));
+    }
+    ready(&index);
+    let rebuilt = index.state.lock().cache.clone().unwrap();
+    assert!(!Arc::ptr_eq(&rebuilt.graph, &built.graph));
+    assert_eq!(rebuilt.pending(), 0);
+    assert_eq!(rebuilt.graph.values.len(), 3 + MIN_PENDING_BEFORE_REBUILD + 1);
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    assert!(manifest.delta_hash.is_none());
+    assert_ne!(Some(&manifest.graph_hash), built.saved.lock().graph_hash.as_ref());
+    let hits = seeded_ids(&index);
+    assert_eq!(hits[0], 2, "the identical photo stays the closest after a rebuild");
+    index.close();
+}
+
+#[test]
+fn a_failed_save_keeps_search_working_and_is_retried() {
+    let (_directory, index) = fixture();
+    std::fs::write(&index.directory, b"in the way").unwrap();
+    ready(&index);
+    assert_eq!(seeded_ids(&index), vec![2, 3], "search runs from memory when the snapshot cannot be written");
+    let cache = index.state.lock().cache.clone().unwrap();
+    assert!(cache.saved.lock().retry_at.is_some());
+    assert!(cache.saved.lock().graph_hash.is_none());
+
+    assert_eq!(seeded_ids(&index), vec![2, 3]);
+    assert!(index.state.lock().worker.is_none(), "no retry before its time");
+
+    std::fs::remove_file(&index.directory).unwrap();
+    cache.saved.lock().retry_at = Some(std::time::Instant::now());
+    assert_eq!(seeded_ids(&index), vec![2, 3]);
+    wait(&index);
+    assert!(index.manifest_path().exists());
+    assert!(cache.saved.lock().retry_at.is_none());
+    assert_eq!(state(&index), "completed");
+
+    let restarted = CatalogIndex::with_scheduler(index.writer.clone(), index.database.clone(), index.directory.clone(), index.scheduler.clone());
+    ready(&restarted);
+    assert_eq!(seeded_ids(&restarted), vec![2, 3]);
+    restarted.close();
+    index.close();
+}
+
+#[test]
+fn a_json_snapshot_from_an_older_engine_is_read_once_and_rewritten_as_binary() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    let cache = index.state.lock().cache.clone().unwrap();
+    let binary: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    let json = serde_json::to_vec(&*cache.graph).unwrap();
+    let legacy_hash = clip_space::digest(&json);
+    std::fs::remove_file(index.directory.join(format!("{}.graph", binary.graph_hash))).unwrap();
+    std::fs::write(index.directory.join(format!("{legacy_hash}.graph")), &json).unwrap();
+    let legacy = serde_json::json!({"model": binary.model, "dimension": binary.dimension, "revision": binary.revision, "graph_hash": legacy_hash});
+    std::fs::write(index.manifest_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    index.close();
+
+    let migrated = CatalogIndex::with_scheduler(index.writer.clone(), index.database.clone(), index.directory.clone(), index.scheduler.clone());
+    ready(&migrated);
+    assert_eq!(seeded_ids(&migrated), vec![2, 3]);
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    assert_eq!(manifest.format, Some(snapshot::VERSION));
+    assert_eq!(manifest.graph_hash, binary.graph_hash, "the migrated graph is the one the JSON held");
+    assert!(!index.directory.join(format!("{legacy_hash}.graph")).exists(), "the JSON snapshot is removed after migration");
+    let restored = migrated.state.lock().cache.clone().unwrap();
+    assert_eq!(graph_entries(&restored.graph), graph_entries(&cache.graph));
+    migrated.close();
+}
+
+#[test]
+fn truncated_and_damaged_binary_snapshots_are_refused_without_panicking() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
+    let bytes = std::fs::read(index.directory.join(format!("{}.graph", manifest.graph_hash))).unwrap();
+    let shape = CatalogIndex::shape();
+    assert!(snapshot::read_graph(&bytes[..], bytes.len() as u64, &manifest.graph_hash, &shape).is_ok());
+    for cut in [0usize, 7, 8, 20, 40, 60, 100, bytes.len() / 3, bytes.len() / 2, bytes.len() - 80, bytes.len() - 1] {
+        let part = &bytes[..cut];
+        assert!(snapshot::read_graph(part, part.len() as u64, &clip_space::digest(part), &shape).is_err(), "cut at {cut}");
+        assert!(snapshot::read_graph(part, bytes.len() as u64, &manifest.graph_hash, &shape).is_err(), "short read at {cut}");
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(snapshot::read_graph(&longer[..], longer.len() as u64, &clip_space::digest(&longer), &shape).is_err());
+    assert!(snapshot::read_graph(&longer[..], bytes.len() as u64, &manifest.graph_hash, &shape).is_err());
+
+    let mut state = 0x1234_5678_9ABC_DEF1u64;
+    for _ in 0..400 {
+        let mut damaged = bytes.clone();
+        for _ in 0..3 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let at = (state as usize) % damaged.len();
+            damaged[at] ^= 1 << (state >> 61);
+        }
+        assert!(snapshot::read_graph(&damaged[..], damaged.len() as u64, &manifest.graph_hash, &shape).is_err());
+        if let Ok(graph) = snapshot::read_graph(&damaged[..], damaged.len() as u64, &clip_space::digest(&damaged), &shape) {
+            let _ = Searcher::default().top_k(&graph, &vector(0), 10);
+        }
+    }
+    let huge = {
+        let mut claim = bytes.clone();
+        let count_at = 8 + 4 + 4 + 4 + clip_space::model_id().len();
+        claim[count_at..count_at + 8].copy_from_slice(&(MAX_FILES as u64).to_le_bytes());
+        claim
+    };
+    assert!(snapshot::read_graph(&huge[..], huge.len() as u64, &clip_space::digest(&huge), &shape).is_err());
+    index.close();
+}
+
+#[test]
+fn a_library_past_eighty_thousand_photos_round_trips_within_the_size_limit() {
+    const COUNT: usize = 81_000;
+    const DIMENSION: usize = 8;
+    let points: Vec<(Vec<f32>, Entry)> = (0..COUNT)
+        .map(|index| (unit(index as u64 + 1, DIMENSION), Entry { file_id: index as i64 + 1, fingerprint: format!("{:064x}", index) }))
+        .collect();
+    let graph = hnsw_index::build_search_index(points, EF_SEARCH);
+    let valid = |vector: &[f32]| vector.len() == DIMENSION && vector.iter().all(|value| value.is_finite());
+    let shape = snapshot::Shape { model: "test-model", dimension: DIMENSION, max_points: MAX_FILES, ef_search: EF_SEARCH as u64, valid: &valid };
+    let mut bytes = Vec::new();
+    let (hash, written) = snapshot::write_graph(&mut bytes, shape.model, DIMENSION, &graph, &|| false).unwrap();
+    assert_eq!(written, bytes.len() as u64);
+    assert_eq!(hash, clip_space::digest(&bytes));
+    assert!(written <= snapshot::max_graph_bytes(DIMENSION, COUNT), "{written} bytes for {COUNT} points");
+    let per_point_overhead = (written - (COUNT * 4 * DIMENSION) as u64).div_ceil(COUNT as u64);
+    let at_full_size = MAX_FILES as u64 * (4 * clip_space::DIMENSION as u64 + per_point_overhead);
+    assert!(at_full_size <= MAX_GRAPH_BYTES, "a full library of real vectors needs {at_full_size} bytes");
+    assert!(COUNT as u64 * (4 * clip_space::DIMENSION as u64 + per_point_overhead) < LEGACY_MAX_GRAPH_BYTES);
+    const { assert!(MAX_GRAPH_BYTES < 1 << 30) };
+
+    let restored = snapshot::read_graph(&bytes[..], written, &hash, &shape).unwrap();
+    assert_eq!(graph_entries(&restored), graph_entries(&graph));
+    let mut again = Vec::new();
+    snapshot::write_graph(&mut again, shape.model, DIMENSION, &restored, &|| false).unwrap();
+    assert!(again == bytes, "the restored graph has the same neighbours");
+    let query = unit(7, DIMENSION);
+    let ids = |graph: &HnswMap<Embedding, Entry>| Searcher::default().top_k(graph, &query, 50).into_iter().map(|(entry, _)| entry.file_id).collect::<Vec<_>>();
+    assert_eq!(ids(&restored), ids(&graph));
+    assert_eq!(ids(&graph)[0], 7);
+
+    let stopped = snapshot::write_graph(&mut Vec::new(), shape.model, DIMENSION, &graph, &|| true);
+    assert!(stopped.is_err(), "a cancelled save stops writing");
+}
+
+#[test]
+fn change_files_round_trip_and_reject_damage() {
+    let valid = |vector: &[f32]| vector.len() == 4;
+    let shape = snapshot::Shape { model: "m", dimension: 4, max_points: 10, ef_search: EF_SEARCH as u64, valid: &valid };
+    let delta = snapshot::Delta {
+        added: vec![(vec![1.0, 0.0, 0.0, 0.0], Entry { file_id: 9, fingerprint: "a".repeat(64) }), (vec![0.0, 1.0, 0.0, 0.0], Entry { file_id: 4, fingerprint: "b".repeat(64) })],
+        removed: vec![4, 7],
+    };
+    let mut bytes = Vec::new();
+    let (hash, written) = snapshot::write_delta(&mut bytes, 4, &delta, &|| false).unwrap();
+    assert_eq!(written, bytes.len() as u64);
+    assert!(written <= snapshot::max_delta_bytes(4, 2, 2));
+    let restored = snapshot::read_delta(&bytes[..], written, &hash, &shape).unwrap();
+    assert_eq!(restored.removed, vec![4, 7]);
+    assert_eq!(restored.added.iter().map(|(vector, entry)| (vector.clone(), entry.file_id)).collect::<Vec<_>>(), vec![(vec![1.0, 0.0, 0.0, 0.0], 9), (vec![0.0, 1.0, 0.0, 0.0], 4)]);
+    for cut in 0..bytes.len() {
+        let part = &bytes[..cut];
+        assert!(snapshot::read_delta(part, part.len() as u64, &clip_space::digest(part), &shape).is_err());
+    }
+    let mut repeated = bytes.clone();
+    let second_id = 8 + 4 + 4 + 8 + 8 + 8 + 64 + 16;
+    repeated[second_id..second_id + 8].copy_from_slice(&9i64.to_le_bytes());
+    assert!(snapshot::read_delta(&repeated[..], repeated.len() as u64, &clip_space::digest(&repeated), &shape).is_err());
+    assert!(snapshot::read_delta(&bytes[..], written, &"0".repeat(64), &shape).is_err());
 }

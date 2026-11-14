@@ -102,9 +102,10 @@ fn centroid<'a>(vectors: impl IntoIterator<Item = &'a [f32]>) -> Option<Vec<f32>
 fn people(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<Vec<Person>> {
     let mut out: Vec<Person> = Vec::new();
     let mut statement = conn.prepare(&format!(
-        "SELECT p.id, {DISPLAY_P} IS NOT NULL, (SELECT COUNT(*) FROM face_prints a WHERE a.person_id=p.id), p.representative_face_id, \
+        "WITH sizes AS (SELECT person_id, COUNT(*) AS faces FROM face_prints WHERE person_id IS NOT NULL GROUP BY person_id) \
+         SELECT p.id, {DISPLAY_P} IS NOT NULL, sizes.faces, p.representative_face_id, \
                 fp.id, COALESCE(fp.face_quality,0), fp.arcface_embedding \
-         FROM face_prints fp JOIN persons p ON p.id=fp.person_id \
+         FROM face_prints fp JOIN persons p ON p.id=fp.person_id JOIN sizes ON sizes.person_id=p.id \
          WHERE COALESCE(p.is_unknown,0)=0 AND COALESCE(fp.excluded,0)=0 AND length(fp.arcface_embedding)=512 \
            AND fp.embedding_model=?1 AND fp.processing_version=?2 ORDER BY p.id, fp.id"
     ))?;
@@ -128,7 +129,7 @@ fn people(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<
     Ok(out)
 }
 
-fn ordered(a: i64, b: i64) -> (i64, i64) {
+pub(super) fn ordered(a: i64, b: i64) -> (i64, i64) {
     if a < b { (a, b) } else { (b, a) }
 }
 
@@ -427,11 +428,11 @@ pub(crate) fn split_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(&format!("SELECT COUNT(*) {SPLIT_FROM}"), [None::<i64>], |row| row.get(0))
 }
 
-fn queue_page(request: &str, action: &str, status: &str, queue: &str) -> FaceReviewPage {
+pub(super) fn queue_page(request: &str, action: &str, status: &str, queue: &str) -> FaceReviewPage {
     FaceReviewPage { queue: Some(queue.to_string()), ..page(request, action, status) }
 }
 
-fn queue_refused(request: &str, action: &str, queue: &str, message: &str) -> FaceReviewPage {
+pub(super) fn queue_refused(request: &str, action: &str, queue: &str, message: &str) -> FaceReviewPage {
     FaceReviewPage { queue: Some(queue.to_string()), ..refused(request, action, message) }
 }
 
@@ -499,13 +500,13 @@ pub(crate) fn list_splits(conn: &Connection, payload: &ListFaceReviewPayload) ->
     Ok(FaceReviewPage { total, offset, splits: Some(splits), ..queue_page(&payload.request_id, "list", "ok", "splits") })
 }
 
-struct Anchor {
+pub(super) struct Anchor {
     face: i64,
-    file: i64,
+    pub(super) file: i64,
     bbox: String,
 }
 
-fn anchor(conn: &Connection, person: i64) -> rusqlite::Result<Option<Anchor>> {
+pub(super) fn anchor(conn: &Connection, person: i64) -> rusqlite::Result<Option<Anchor>> {
     conn.query_row(
         "SELECT fp.id, fp.file_id, fp.bbox FROM face_prints fp WHERE fp.person_id=?1 \
          ORDER BY (fp.id=(SELECT representative_face_id FROM persons WHERE id=?1)) DESC, (fp.arcface_embedding IS NOT NULL) DESC, \
@@ -588,7 +589,7 @@ fn write_verification(conn: &Connection, people: (i64, i64), anchors: (&Anchor, 
     Ok(())
 }
 
-fn journal(conn: &Connection, kind: &str, file: Option<i64>, before: &serde_json::Value, after: &serde_json::Value, at: f64) -> rusqlite::Result<String> {
+pub(super) fn journal(conn: &Connection, kind: &str, file: Option<i64>, before: &serde_json::Value, after: &serde_json::Value, at: f64) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let before = before.to_string();
     let plan = serde_json::json!({"type": kind, "resolution": after["resolution"], "personID": after["personID"]}).to_string();
@@ -605,7 +606,7 @@ fn journal(conn: &Connection, kind: &str, file: Option<i64>, before: &serde_json
 
 const NAME_FIELDS: [&str; 6] = ["name", "title", "first_name", "middle_name", "last_name", "suffix"];
 
-fn person_json(conn: &Connection, person: i64) -> rusqlite::Result<Option<serde_json::Value>> {
+pub(super) fn person_json(conn: &Connection, person: i64) -> rusqlite::Result<Option<serde_json::Value>> {
     conn.query_row(
         "SELECT name,title,first_name,middle_name,last_name,suffix,COALESCE(is_unknown,0),created_at,representative_face_id,anchor_radius,last_clustered_at \
          FROM persons WHERE id=?1",
@@ -626,11 +627,11 @@ fn person_json(conn: &Connection, person: i64) -> rusqlite::Result<Option<serde_
     .optional()
 }
 
-fn names(value: &serde_json::Value) -> Vec<Option<String>> {
+pub(super) fn names(value: &serde_json::Value) -> Vec<Option<String>> {
     NAME_FIELDS.iter().map(|field| value[*field].as_str().map(str::to_string)).collect()
 }
 
-fn blank(fields: &[Option<String>]) -> bool {
+pub(super) fn blank(fields: &[Option<String>]) -> bool {
     fields.iter().all(|field| field.as_deref().is_none_or(|text| text.trim().is_empty()))
 }
 
@@ -830,7 +831,7 @@ fn dismiss_split_in(conn: &Connection, request: &str, person: i64) -> rusqlite::
     })
 }
 
-fn person_exists(conn: &Connection, person: i64) -> rusqlite::Result<bool> {
+pub(super) fn person_exists(conn: &Connection, person: i64) -> rusqlite::Result<bool> {
     conn.query_row("SELECT EXISTS(SELECT 1 FROM persons WHERE id=?1)", [person], |row| row.get(0))
 }
 
@@ -867,7 +868,7 @@ fn restore_split_row(conn: &Connection, person: i64, suggestion: &serde_json::Va
     Ok(())
 }
 
-fn id_list(value: &serde_json::Value) -> Vec<i64> {
+pub(super) fn id_list(value: &serde_json::Value) -> Vec<i64> {
     value.as_array().into_iter().flatten().filter_map(serde_json::Value::as_i64).collect()
 }
 

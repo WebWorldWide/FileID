@@ -26,6 +26,11 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private let countersLock = NSLock()
     @ObservationIgnored private var countersDirty = false
     @ObservationIgnored private var countersRunning = false
+    /// Last duplicate totals and when they were measured. That GROUP BY walks
+    /// every file, so it runs at most once per `duplicateInterval`.
+    @ObservationIgnored private var duplicateTotals: (groups: Int, bytes: Int64, at: Date)?
+    @ObservationIgnored private var duplicateTotalsStale = false
+    private static let duplicateInterval: TimeInterval = 5
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
@@ -178,15 +183,24 @@ public final class ReadStore: @unchecked Sendable {
                 // context under Swift 6 (it must never be held across a
                 // suspension point — it isn't here, but the scoped form makes
                 // that guarantee explicit and silences the diagnostic).
-                let shouldStop = self.countersLock.withLock { () -> Bool in
-                    if !self.countersDirty {
-                        self.countersRunning = false
-                        return true
+                // nil: stop. Otherwise how long to wait first, which is non-zero
+                // only when the sole work left is a deferred duplicate total.
+                let wait = self.countersLock.withLock { () -> TimeInterval? in
+                    if self.countersDirty {
+                        self.countersDirty = false
+                        return 0
                     }
-                    self.countersDirty = false
-                    return false
+                    guard self.duplicateTotalsStale, let last = self.duplicateTotals else {
+                        self.countersRunning = false
+                        return nil
+                    }
+                    return max(0.05, Self.duplicateInterval - Date().timeIntervalSince(last.at))
                 }
-                if shouldStop { return }
+                guard let wait else { return }
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    self.countersLock.withLock { self.countersDirty = false }
+                }
 
                 switch self.computeCounters() {
                 case .ok(let snapshot):
@@ -226,16 +240,31 @@ public final class ReadStore: @unchecked Sendable {
                 // Copies in a group share content hash AND size, so the space
                 // a cleanup frees is (copies - 1) x size whichever one is kept.
                 // Grouping first avoids ranking every file (4.6x faster at 100k).
-                let dupRow = try Row.fetchOne(db, sql: """
-                    SELECT COUNT(*) AS groups, COALESCE(SUM((n - 1) * size_bytes), 0) AS reclaimable
-                    FROM (
-                        SELECT size_bytes, COUNT(*) AS n
-                        FROM files
-                        WHERE content_hash IS NOT NULL AND failed = 0
-                        GROUP BY content_hash, size_bytes
-                        HAVING COUNT(*) > 1
-                    )
-                    """)
+                let cached = self.countersLock.withLock { self.duplicateTotals }
+                let groups: Int
+                let reclaimableBytes: Int64
+                if let cached, Date().timeIntervalSince(cached.at) < Self.duplicateInterval {
+                    groups = cached.groups
+                    reclaimableBytes = cached.bytes
+                    self.countersLock.withLock { self.duplicateTotalsStale = true }
+                } else {
+                    let dupRow = try Row.fetchOne(db, sql: """
+                        SELECT COUNT(*) AS groups, COALESCE(SUM((n - 1) * size_bytes), 0) AS reclaimable
+                        FROM (
+                            SELECT size_bytes, COUNT(*) AS n
+                            FROM files
+                            WHERE content_hash IS NOT NULL AND failed = 0
+                            GROUP BY content_hash, size_bytes
+                            HAVING COUNT(*) > 1
+                        )
+                        """)
+                    groups = dupRow?["groups"] ?? 0
+                    reclaimableBytes = dupRow?["reclaimable"] ?? 0
+                    self.countersLock.withLock {
+                        self.duplicateTotals = (groups, reclaimableBytes, Date())
+                        self.duplicateTotalsStale = false
+                    }
+                }
                 let hasFacePrints = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM face_prints)") ?? false
                 let hasNamedPerson = try Bool.fetchOne(db, sql: """
                     SELECT EXISTS(SELECT 1 FROM persons WHERE IFNULL(is_unknown, 0) = 0 AND \(Self.personHasNameSQL()))
@@ -243,8 +272,6 @@ public final class ReadStore: @unchecked Sendable {
                 let hasCaptions = try Bool.fetchOne(db, sql: """
                     SELECT EXISTS(SELECT 1 FROM files WHERE failed = 0 AND vlm_proposed_name IS NOT NULL AND vlm_proposed_name <> '')
                     """) ?? false
-                let groups: Int = dupRow?["groups"] ?? 0
-                let reclaimableBytes: Int64 = dupRow?["reclaimable"] ?? 0
                 return .ok(CounterSnapshot(
                     totalFiles: totalFiles,
                     totalImages: totalImages,
@@ -267,18 +294,19 @@ public final class ReadStore: @unchecked Sendable {
 
     @MainActor
     private func applyCounters(_ snapshot: CounterSnapshot) {
-        self.totalFiles = snapshot.totalFiles
-        self.totalImages = snapshot.totalImages
-        self.unreadableFiles = snapshot.unreadableFiles
-        self.otherFiles = snapshot.otherFiles
-        self.scopedTotalFiles = snapshot.scopedTotalFiles
-        self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles
-        self.scopedOtherFiles = snapshot.scopedOtherFiles
-        self.totalDuplicateGroups = snapshot.totalDuplicateGroups
-        self.totalReclaimableMB = snapshot.totalReclaimableMB
-        self.hasFacePrints = snapshot.hasFacePrints
-        self.hasNamedPerson = snapshot.hasNamedPerson
-        self.hasCaptions = snapshot.hasCaptions
+        // Observation notifies on every set, changed or not; unchanged counters stay quiet.
+        if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
+        if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
+        if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }
+        if self.otherFiles != snapshot.otherFiles { self.otherFiles = snapshot.otherFiles }
+        if self.scopedTotalFiles != snapshot.scopedTotalFiles { self.scopedTotalFiles = snapshot.scopedTotalFiles }
+        if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
+        if self.scopedOtherFiles != snapshot.scopedOtherFiles { self.scopedOtherFiles = snapshot.scopedOtherFiles }
+        if self.totalDuplicateGroups != snapshot.totalDuplicateGroups { self.totalDuplicateGroups = snapshot.totalDuplicateGroups }
+        if self.totalReclaimableMB != snapshot.totalReclaimableMB { self.totalReclaimableMB = snapshot.totalReclaimableMB }
+        if self.hasFacePrints != snapshot.hasFacePrints { self.hasFacePrints = snapshot.hasFacePrints }
+        if self.hasNamedPerson != snapshot.hasNamedPerson { self.hasNamedPerson = snapshot.hasNamedPerson }
+        if self.hasCaptions != snapshot.hasCaptions { self.hasCaptions = snapshot.hasCaptions }
     }
 
     // MARK: - Library queries
@@ -295,69 +323,74 @@ public final class ReadStore: @unchecked Sendable {
         let scope = self.scope
         do {
             return try q.read { db in
-                let unreadable = kindFilter == Self.unreadableFilter
-                var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
-                var args: StatementArguments = []
-                let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
-                if !trimmedSearch.isEmpty {
-                    // Escape SQL LIKE metacharacters so a search for
-                    // "100%_discount" matches the literal string and not
-                    // "100" + arbitrary chars + "_discount". The
-                    // ESCAPE '\' clause is appended to every LIKE so
-                    // SQLite knows about the escape character we used.
-                    // NFC-normalize first: SQLite LIKE compares bytes, and
-                    // path_search stores the NFC form (v16) so an NFC query
-                    // matches names regardless of on-disk normalization.
-                    let escapedSearch = trimmedSearch
-                        .precomposedStringWithCanonicalMapping
-                        .replacingOccurrences(of: "\\", with: "\\\\")
-                        .replacingOccurrences(of: "%", with: "\\%")
-                        .replacingOccurrences(of: "_", with: "\\_")
-                    let like = "%\(escapedSearch)%"
-                    let ftsQuery = FTSQuery.quoted(trimmedSearch)
-                    // Keyword search across filename, OCR text, extracted
-                    // document text, vision tags, smart names, VLM captions,
-                    // and person names. CLIP semantic search runs separately
-                    // when the encoder is installed.
-                    sql += """
-                         AND (
-                              id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
-                              OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
-                              OR path_search LIKE ? ESCAPE '\\'
-                              OR vlm_proposed_name LIKE ? ESCAPE '\\'
-                              OR vlm_description LIKE ? ESCAPE '\\'
-                              OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
-                              OR id IN (
-                                  SELECT face_prints.file_id FROM face_prints
-                                  INNER JOIN persons ON persons.id = face_prints.person_id
-                                  WHERE persons.name LIKE ? ESCAPE '\\'
-                                     OR persons.first_name LIKE ? ESCAPE '\\'
-                                     OR persons.last_name LIKE ? ESCAPE '\\'
-                                     OR persons.middle_name LIKE ? ESCAPE '\\'
-                                     OR persons.title LIKE ? ESCAPE '\\'
-                                     OR persons.suffix LIKE ? ESCAPE '\\'
-                              )
-                            )
-                        """
-                    args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
-                }
-                if let k = kindFilter, !unreadable {
-                    sql += " AND kind = ?"
-                    args += [k]
-                }
-                if let scope {
-                    sql += " AND " + LibraryScope.sql("path_text")
-                    args += [scope.param]
-                }
-                sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
-                args += [limit, offset]
-                let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-                return rows.map { Self.toFileRow($0) }
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
             }
         } catch {
             reportError("Library query failed: \(error)")
             return []
         }
+    }
+
+    private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
+                                   kindFilter: String?, scope: LibraryScope?) throws -> [FileRow] {
+        let unreadable = kindFilter == Self.unreadableFilter
+        var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
+        var args: StatementArguments = []
+        let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
+        if !trimmedSearch.isEmpty {
+            // Escape SQL LIKE metacharacters so a search for
+            // "100%_discount" matches the literal string and not
+            // "100" + arbitrary chars + "_discount". The
+            // ESCAPE '\' clause is appended to every LIKE so
+            // SQLite knows about the escape character we used.
+            // NFC-normalize first: SQLite LIKE compares bytes, and
+            // path_search stores the NFC form (v16) so an NFC query
+            // matches names regardless of on-disk normalization.
+            let escapedSearch = trimmedSearch
+                .precomposedStringWithCanonicalMapping
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            let like = "%\(escapedSearch)%"
+            let ftsQuery = FTSQuery.quoted(trimmedSearch)
+            // Keyword search across filename, OCR text, extracted
+            // document text, vision tags, smart names, VLM captions,
+            // and person names. CLIP semantic search runs separately
+            // when the encoder is installed.
+            sql += """
+                 AND (
+                      id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
+                      OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
+                      OR path_search LIKE ? ESCAPE '\\'
+                      OR vlm_proposed_name LIKE ? ESCAPE '\\'
+                      OR vlm_description LIKE ? ESCAPE '\\'
+                      OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
+                      OR id IN (
+                          SELECT face_prints.file_id FROM face_prints
+                          INNER JOIN persons ON persons.id = face_prints.person_id
+                          WHERE persons.name LIKE ? ESCAPE '\\'
+                             OR persons.first_name LIKE ? ESCAPE '\\'
+                             OR persons.last_name LIKE ? ESCAPE '\\'
+                             OR persons.middle_name LIKE ? ESCAPE '\\'
+                             OR persons.title LIKE ? ESCAPE '\\'
+                             OR persons.suffix LIKE ? ESCAPE '\\'
+                      )
+                    )
+                """
+            args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
+        }
+        if let k = kindFilter, !unreadable {
+            sql += " AND kind = ?"
+            args += [k]
+        }
+        if let scope {
+            sql += " AND " + LibraryScope.sql("path_text")
+            args += [scope.param]
+        }
+        sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
+        args += [limit, offset]
+        let rows = try Row.fetchAll(db, sql: sql, arguments: args)
+        return rows.map { Self.toFileRow($0) }
     }
 
     /// Off-main twin of `files(...)`. The keyword search runs a
@@ -368,9 +401,18 @@ public final class ReadStore: @unchecked Sendable {
     public func filesAsync(offset: Int = 0, limit: Int = 200,
                            search: String = "",
                            kindFilter: String? = nil) async -> [FileRow] {
-        await Task.detached(priority: .userInitiated) { [self] in
-            files(offset: offset, limit: limit, search: search, kindFilter: kindFilter)
-        }.value
+        guard let q = queue else { return [] }
+        let scope = self.scope
+        do {
+            // GRDB's async read interrupts the query when the calling task is
+            // cancelled, so a superseded search stops instead of running out.
+            return try await q.read { db in
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+            }
+        } catch {
+            if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
+            return []
+        }
     }
 
     public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {

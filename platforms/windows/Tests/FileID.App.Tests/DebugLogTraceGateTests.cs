@@ -3,8 +3,9 @@
 // The Trace level exists to move the per-tile/per-frame [THUMB] firehose off
 // the synchronous locked-file-I/O hot path that runs on the UI thread during
 // scroll. It is gated OFF by default and must skip I/O entirely when disabled.
-// Everything at Debug and above stays always-on so the [APPLY:N]/[ENGINE-SUB]
-// forensic tail (CLAUDE.md: load-bearing) is never suppressed. These tests lock
+// Debug is gated by FILEID_DEBUG_LOG; everything at Info and above stays
+// always-on so the [APPLY:N]/[ENGINE-SUB] forensic tail (CLAUDE.md:
+// load-bearing) is never suppressed. These tests lock
 // that contract so a future refactor can't silently un-gate the firehose or,
 // worse, gate the forensics.
 
@@ -85,25 +86,74 @@ public class DebugLogTraceGateTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void DebugAndAbove_AlwaysWrite_RegardlessOfTraceFlag(bool traceEnabled)
+    public void InfoAndAbove_AlwaysWrite_RegardlessOfTraceAndDebugFlags(bool enabled)
     {
-        var original = DebugLog.TraceEnabled;
+        var originalTrace = DebugLog.TraceEnabled;
+        var originalDebug = DebugLog.DebugEnabled;
         try
         {
-            DebugLog.TraceEnabled = traceEnabled;
-            // The forensic tail ([APPLY:N]/[ENGINE-SUB] are Debug; SafeRun logs
-            // at Error) must fire irrespective of the Trace flag.
-            var dbg = $"[APPLY:0] gate-test-debug-{Guid.NewGuid():N}";
+            DebugLog.TraceEnabled = enabled;
+            DebugLog.DebugEnabled = enabled;
+            // The forensic tail ([APPLY:N]/[ENGINE-SUB] are Info; SafeRun logs
+            // at Error) must fire irrespective of either gate.
+            var info = $"[APPLY:0] gate-test-info-{Guid.NewGuid():N}";
             var err = $"[ENGINE-SUB] gate-test-error-{Guid.NewGuid():N}";
-            DebugLog.Debug(dbg);
+            DebugLog.Info(info);
             DebugLog.Error(err);
             var log = ReadLog();
-            Assert.Contains(dbg, log);
+            Assert.Contains(info, log);
             Assert.Contains(err, log);
         }
         finally
         {
-            DebugLog.TraceEnabled = original;
+            DebugLog.TraceEnabled = originalTrace;
+            DebugLog.DebugEnabled = originalDebug;
+        }
+    }
+
+    [Fact]
+    public void Debug_IsSkippedUnlessDebugLoggingIsOn()
+    {
+        var original = DebugLog.DebugEnabled;
+        try
+        {
+            DebugLog.DebugEnabled = false;
+            var skipped = $"[THUMB] gate-test-debug-off-{Guid.NewGuid():N}";
+            DebugLog.Debug(skipped);
+            DebugLog.DebugEnabled = true;
+            var written = $"[THUMB] gate-test-debug-on-{Guid.NewGuid():N}";
+            DebugLog.Debug(written);
+            var log = ReadLog();
+            Assert.DoesNotContain(skipped, log);
+            Assert.Contains(written, log);
+        }
+        finally
+        {
+            DebugLog.DebugEnabled = original;
+        }
+    }
+
+    [Fact]
+    public void ForensicSubscriberLinesStayAtInfo()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "platforms", "windows", "FileID.sln")))
+        {
+            dir = dir.Parent;
+        }
+        Assert.NotNull(dir);
+        var app = Path.Combine(dir!.FullName, "platforms", "windows", "src", "FileID.App");
+        foreach (var file in Directory.EnumerateFiles(app, "*.cs", SearchOption.AllDirectories))
+        {
+            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var source = File.ReadAllText(file);
+            Assert.DoesNotContain("DebugLog.Debug($\"[ENGINE-SUB", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("DebugLog.Debug($\"[APPLY", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("DebugLog.Trace($\"[ENGINE-SUB", source, StringComparison.Ordinal);
         }
     }
 }

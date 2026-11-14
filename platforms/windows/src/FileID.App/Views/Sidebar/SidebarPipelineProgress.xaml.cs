@@ -129,7 +129,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
                               or nameof(EngineClient.DeepAnalyzeStarting)
                               or nameof(EngineClient.LastProgress))
             {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarPipelineProgress] {e.PropertyName}");
+                DebugLog.Info($"[ENGINE-SUB:SidebarPipelineProgress] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncStage);
             }
         });

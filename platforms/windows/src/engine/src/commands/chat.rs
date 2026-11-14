@@ -95,7 +95,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
         });
         match database {
             Some(database) => super::chat_selection::send(sink, database, request, model).await,
-            None => emit(&sink, failed(id, conversation, "The catalog database is unavailable".into())).await,
+            None => emit(&sink, failed(id, conversation, "FileID couldn't open its library. Quit and reopen FileID.".into())).await,
         }
         return;
     }
@@ -109,7 +109,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     let action = request.action.clone();
     let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| {
         let Some(database) = database else {
-            bail!("The catalog database is unavailable")
+            bail!("FileID couldn't open its library. Quit and reopen FileID.")
         };
         if request.action == "send" {
             validate(&request)?;
@@ -183,9 +183,8 @@ fn prepare_unlocked(database: &Mutex<Connection>, request: &ChatRequest) -> Resu
 }
 
 fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, semantic: &Semantic) -> Result<Prepared> {
-    let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
-    match path {
-        Some(path) => prepare_send(&crate::db::open_read(&path)?, request, semantic),
+    match crate::db::reader_for(database)? {
+        Some(reader) => prepare_send(&reader, request, semantic),
         None => prepare_send(&database.lock(), request, semantic),
     }
 }

@@ -11,7 +11,7 @@ enum TakeProposals {
 
     static func relationLabel(_ relation: String?) -> String? {
         switch relation {
-        case "repeatedAttempts": "Repeated tries"
+        case "repeatedAttempts": "Repeated takes"
         case "alternateViews": "Other angles"
         case "uncertain": "Not sure"
         default: nil
@@ -28,9 +28,9 @@ enum TakeProposals {
 
     static func relationHelp(_ relation: String?) -> String? {
         switch relation {
-        case "repeatedAttempts": "One camera took these one after another, so they are separate tries of the same shot."
-        case "alternateViews": "Different cameras caught the same moment, so these are other angles or copies rather than separate tries."
-        case "uncertain": "Camera details are missing or mixed, so FileID can't tell separate tries from other angles."
+        case "repeatedAttempts": "One camera took these one after another, so they are separate takes of the same shot."
+        case "alternateViews": "Different cameras caught the same moment, so these are other angles or copies rather than separate takes."
+        case "uncertain": "Camera details are missing or mixed, so FileID can't tell separate takes from other angles."
         default: nil
         }
     }

@@ -67,6 +67,18 @@ fn env_bool(key: &str, default: bool) -> bool {
 /// the installed face model (or the one model the catalog used there); any
 /// engine clusters a catalog whose faces all sit in one macOS space the same way.
 pub(crate) fn selected_space(conn: &Connection) -> Option<Space> {
+    // A catalog with no macOS-space face at all is the common portable case;
+    // answer it from the index instead of reading every vector.
+    let any: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM face_prints WHERE processing_version >= ?1 AND processing_version < ?2)",
+            [MAC_PREFIX, "macos."],
+            |row| row.get(0),
+        )
+        .unwrap_or(true);
+    if !any {
+        return None;
+    }
     let platform = super::face_refresh::processing();
     if platform.starts_with(MAC_PREFIX) {
         let present: bool = conn
@@ -860,10 +872,12 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
         |row| row.get(0),
     )?;
     ensure!(free as usize == seen.len(), "invalid plan");
+    // Only rows whose person changes are written; each write fires a trigger.
     tx.execute(
         "UPDATE face_prints SET person_id=NULL WHERE id IN (SELECT value FROM json_each(?1)) \
-           AND (person_id IS NULL OR person_id NOT IN (SELECT value FROM json_each(?2)))",
-        params![selected, protected],
+           AND person_id IS NOT NULL AND person_id NOT IN (SELECT value FROM json_each(?2)) \
+           AND id NOT IN (SELECT value FROM json_each(?3))",
+        params![selected, protected, output],
     )?;
     for cluster in clusters {
         let blob = encode(&cluster.centroid);
@@ -885,7 +899,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
             }
         };
         tx.execute(
-            "UPDATE face_prints SET person_id=?1 WHERE id IN (SELECT value FROM json_each(?2))",
+            "UPDATE face_prints SET person_id=?1 WHERE id IN (SELECT value FROM json_each(?2)) AND person_id IS NOT ?1",
             params![person, face_review::json_ids(&cluster.faces)],
         )?;
     }
@@ -1797,7 +1811,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let decoded: Vec<(i64, Vec<f32>)> = decoded.into_iter().filter(|(_, v)| v.len() == first_dim).collect();
     let file_by_face: HashMap<i64, i64> = partition.snapshots.iter().map(|s| (s.id, s.file_id)).collect();
     let files: Vec<i64> = decoded.iter().map(|(id, _)| file_by_face.get(id).copied().unwrap_or(-id)).collect();
-    let vectors: Vec<Vec<f32>> = decoded.iter().map(|(_, v)| v.clone()).collect();
+    let (decoded, vectors): (Vec<i64>, Vec<Vec<f32>>) = decoded.into_iter().unzip();
     let _lease = crate::resource_scheduler::ResourceScheduler::shared().reserve(
         crate::resource_scheduler::Demand { memory_mb: 64 + (vectors.len() as u64).saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
         crate::resource_scheduler::Priority::Background,
@@ -1805,7 +1819,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     );
     let mut raw: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (cluster, members) in cluster(&vectors, &files) {
-        let rows: Vec<usize> = members.iter().filter_map(|dense| row_by_face.get(&decoded[*dense].0).copied()).collect();
+        let rows: Vec<usize> = members.iter().filter_map(|dense| row_by_face.get(&decoded[*dense]).copied()).collect();
         raw.insert(cluster, rows);
     }
     let min_size = env_int("FILEID_FACE_MIN_CLUSTER_SIZE", 3, 1..=10_000);
