@@ -50,6 +50,12 @@ enum ScanImageFixtures {
         private let lock = NSLock()
         private var value = 0
         func bump() { lock.lock(); value += 1; lock.unlock() }
+        func bumpIfBelow(_ limit: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard value < limit else { return false }
+            value += 1
+            return true
+        }
         var count: Int { lock.lock(); defer { lock.unlock() }; return value }
         func bumpIfBelow(_ limit: Int) -> Bool {
             lock.lock(); defer { lock.unlock() }
