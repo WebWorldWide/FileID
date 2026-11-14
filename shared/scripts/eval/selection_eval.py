@@ -8,10 +8,12 @@ Prints precision and recall over the questions that have matches, and how many
 no-match questions answered none. Works with either engine (`--flavor`).
 
     selection_eval.py --engine <bin> --flavor swift|rust --scratch <dir> --hf-root <model copy>
-        [--model qwen3_vl_2b] [--json out.json]
+        [--model qwen3_vl_2b] [--set selection] [--split tune|held] [--json out.json]
 
-labels.json: {"questions": [{"id": "Q01", "text": "...", "expected": ["s06", ...]}]}, where
-the expected ids are photo file stems. The model is read from a scratch copy only.
+labels.json: {"questions": [{"id": "Q01", "text": "...", "expected": ["s06", ...], "ignore": ["s07"], "split": "tune"}]},
+where the ids are photo file stems. Photos in `ignore` are arguable and count neither way; `--split`
+keeps only questions with that split. `--set` names the folder under the eval root. The model is read
+from a scratch copy only.
 """
 from __future__ import annotations
 
@@ -48,13 +50,15 @@ def main():
     parser.add_argument("--scratch", required=True, type=Path)
     parser.add_argument("--hf-root", required=True, type=Path)
     parser.add_argument("--model", default="qwen3_vl_2b")
+    parser.add_argument("--set", default="selection")
+    parser.add_argument("--split")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     live = LIVE_HF_MODELS.parent.resolve()
     if args.hf_root.resolve() == live or live in args.hf_root.resolve().parents or args.hf_root.resolve() in live.parents:
         parser.error("--hf-root must be a scratch copy of the model, not the live folder")
-    root = EVAL_ROOT / "selection"
-    labels = json.loads((root / "labels.json").read_text())["questions"]
+    root = EVAL_ROOT / args.set
+    labels = [q for q in json.loads((root / "labels.json").read_text())["questions"] if not args.split or q.get("split") == args.split]
     state = args.scratch.resolve() / f"selection-{args.flavor}-{int(time.time())}"
     state.mkdir(parents=True)
     engine = Engine(args.engine, engine_env(state, args.hf_root.resolve()))
@@ -67,8 +71,9 @@ def main():
         by_id = {file_id: stem for stem, file_id in ids.items()}
         for question in labels:
             value, seconds = ask(engine, args.model, question["text"], sorted(ids.values()))
-            yes = sorted(by_id[hit["fileID"]] for hit in value.get("hits", []) if hit.get("match") == "yes" and hit.get("fileID") in by_id)
-            unsure = sorted(by_id[hit["fileID"]] for hit in value.get("hits", []) if hit.get("match") == "unsure" and hit.get("fileID") in by_id)
+            skip = set(question.get("ignore", []))
+            yes = sorted(by_id[hit["fileID"]] for hit in value.get("hits", []) if hit.get("match") == "yes" and hit.get("fileID") in by_id and by_id[hit["fileID"]] not in skip)
+            unsure = sorted(by_id[hit["fileID"]] for hit in value.get("hits", []) if hit.get("match") == "unsure" and hit.get("fileID") in by_id and by_id[hit["fileID"]] not in skip)
             rows.append({"id": question["id"], "expected": question["expected"], "yes": yes, "unsure": unsure,
                          "status": value.get("status"), "seconds": round(seconds, 1)})
             print(f"{question['id']} {len(yes)} yes ({len(set(yes) & set(question['expected']))} right of {len(question['expected'])}), "
