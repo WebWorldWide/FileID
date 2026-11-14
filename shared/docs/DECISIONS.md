@@ -4929,3 +4929,9 @@ The Mac setting (`FILEID_CAREFUL_READ=latin`) skips Vision's automatic language 
 ## 2026-11-12 — Best Takes goal panel on Windows and Linux
 
 The engine side of `rankTakesWithGoal` was finished on 2026-11-05 (see NEXT); only the pages were missing. Both pages mirror the Mac panel and wording. After a `ranked` answer the top try replaces the kept pick only when the quality pick was the sole mark, so a hand-made choice is never overridden (Mac rule). Answers with status `unclear` or `unavailable` show their summary and leave the order alone.
+
+## 2026-11-14 — One PR for the open branches; Chat merges ask first on every app
+
+- **One PR.** `agent/main-ci-fix` (#335) and `agent/winui-audit` (#332) are merged into the integration branch (#331) instead of landing separately. All three conflicted with main, a conflicting PR runs no CI, and each would have had to be re-merged after the others landed. The cost is a larger PR; the WinUI part is still compiled only by CI, as before.
+- **Verify the merged tree before pushing.** The merge of main compiled cleanly as text but broke the GTK app (two pages used an API this branch replaced). The local run of CI's builds, tests and three conformance suites is the gate for integration merges, not the absence of textual conflicts.
+- **Chat merges ask first.** The Chat action card already names the people and has its own Merge button, but People asks before every merge on all three apps since the 2026-11-12 audit and the Mac's Chat does too, so GTK and WinUI Chat now show the same confirmation. Undo is offered only when every merge in the action succeeded and the engine returned an operation id for each, so "Undo merge" never leaves a half-undone set behind silently: a failed step reports that it could not put them back.
