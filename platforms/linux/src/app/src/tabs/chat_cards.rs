@@ -60,7 +60,7 @@ enum Wait {
     Rename { ids: HashSet<i64>, old: HashMap<i64, String>, skipped: u64, undoing: bool },
     Person { person: i64, before: Option<PersonName> },
     Unknown,
-    Merge { outstanding: usize, failed: bool },
+    Merge { outstanding: usize, failed: bool, operations: Vec<String> },
     MomentsJobs { request_id: String },
 }
 
@@ -483,25 +483,52 @@ impl Runner {
                 let (Some(target), Some(sources)) = (action.person_id, action.person_ids.clone()) else {
                     return;
                 };
-                let mut outstanding = 0;
-                for source in sources {
-                    if self.send(CommandPayload::MergeClusters(MergeClustersPayload {
-                        source_person_id: source,
-                        destination_person_id: target,
-                    })) {
-                        super::merge_ledger::sent(super::merge_ledger::Owner::Chat, source, target);
-                        outstanding += 1;
-                    }
-                }
-                if outstanding == 0 {
-                    self.fail(id, NOT_READY);
-                    return;
-                }
-                self.wait(id, Wait::Merge { outstanding, failed: false });
-                self.set(id, Phase::Running("Merging".to_owned()));
+                let (runner, id) = (self.clone(), id.to_owned());
+                super::people_actions::confirm_merge(anchor, move || runner.merge_people(&id, target, sources));
             }
             _ => self.fail(id, "This action isn't available."),
         }
+    }
+
+    fn merge_people(self: &Rc<Self>, id: &str, target: i64, sources: Vec<i64>) {
+        if self.running(id) {
+            return;
+        }
+        let mut outstanding = 0;
+        for source in sources {
+            if self.send(CommandPayload::MergeClusters(MergeClustersPayload {
+                source_person_id: source,
+                destination_person_id: target,
+            })) {
+                super::merge_ledger::sent(super::merge_ledger::Owner::Chat, source, target);
+                outstanding += 1;
+            }
+        }
+        if outstanding == 0 {
+            self.fail(id, NOT_READY);
+            return;
+        }
+        self.wait(id, Wait::Merge { outstanding, failed: false, operations: Vec::new() });
+        self.set(id, Phase::Running("Merging".to_owned()));
+    }
+
+    /// Undoes a Chat merge through the engine's merge journal, newest first.
+    fn merge_undo(operations: Vec<String>) -> UndoFn {
+        Rc::new(move |runner, id| {
+            let (runner, id, operations) = (runner.clone(), id.to_owned(), operations.clone());
+            glib::MainContext::default().spawn_local(async move {
+                for operation in operations.into_iter().rev() {
+                    let detail = match super::people_actions::undo_merge_operation(&runner.engine, operation, 30).await {
+                        Some(page) if page.status == "ok" => continue,
+                        Some(page) => page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned()),
+                        None => "FileID restarted. Try again.".to_owned(),
+                    };
+                    runner.fail(&id, &super::people_actions::undo_merge_failed(&detail));
+                    return;
+                }
+                runner.finish(&id, super::people_actions::UNDO_MERGE_OK.to_owned(), None);
+            });
+        })
     }
 
     fn undo_move(self: &Rc<Self>, id: &str, root: String) -> bool {
@@ -861,13 +888,14 @@ impl Runner {
                 self.finish(&pending.action, "Name put back.".to_owned(), None);
             }
             "mergeClusters" => {
-                let (action, done, failed) = {
+                let (action, done, failed, operations) = {
                     let mut pending = self.pending.borrow_mut();
                     let Some(entry) = pending.iter_mut().find(|p| matches!(p.wait, Wait::Merge { .. })) else { return };
-                    let Wait::Merge { outstanding, failed } = &mut entry.wait else { return };
+                    let Wait::Merge { outstanding, failed, operations } = &mut entry.wait else { return };
                     *outstanding = outstanding.saturating_sub(1);
                     *failed |= result.failed > 0 || result.succeeded == 0;
-                    (entry.action.clone(), *outstanding == 0, *failed)
+                    operations.extend(result.messages.iter().filter_map(|item| item.operation_id.clone()));
+                    (entry.action.clone(), *outstanding == 0, *failed, operations.clone())
                 };
                 if !done {
                     return;
@@ -876,7 +904,8 @@ impl Runner {
                 if failed {
                     self.fail(&action, "The merge didn't fully go through. Check People.");
                 } else {
-                    self.finish(&action, "Merged. These people are now one card in People.".to_owned(), None);
+                    let undo = (!operations.is_empty()).then(|| ("Undo merge", Self::merge_undo(operations)));
+                    self.finish(&action, "Merged. These people are now one card in People.".to_owned(), undo);
                 }
             }
             _ => {}
