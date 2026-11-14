@@ -1,0 +1,33 @@
+import Testing
+import CoreGraphics
+@testable import FileID
+
+@Suite struct PageThumbnailTests {
+    private func page(width: Int, height: Int, markTop: Bool) -> CGImage {
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        if markTop {
+            context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+            context.fill(CGRect(x: 20, y: height - 40, width: width - 40, height: 6))
+        }
+        return context.makeImage()!
+    }
+
+    @Test func portraitPageShowsItsTop() throws {
+        let crop = try #require(PageThumbnail.topCrop(width: 314, height: 512))
+        #expect(crop.minY > 0.5 && crop.maxY == 1 && crop.width == 1)
+    }
+
+    @Test func landscapeImagesFillTheTile() {
+        #expect(PageThumbnail.topCrop(width: 800, height: 600) == nil)
+        #expect(PageThumbnail.topCrop(width: 0, height: 0) == nil)
+    }
+
+    @Test func blankPageIsDetectedAndTextIsNot() {
+        let crop = PageThumbnail.topCrop(width: 314, height: 512)
+        #expect(PageThumbnail.isBlank(page(width: 314, height: 512, markTop: false), crop: crop))
+        #expect(!PageThumbnail.isBlank(page(width: 314, height: 512, markTop: true), crop: crop))
+    }
+}

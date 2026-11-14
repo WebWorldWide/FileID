@@ -407,6 +407,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let check = NSImageView()
     private let textGlyph = NSImageView()
     private let unreadableGlyph = NSImageView()
+    private let kindGlyph = NSImageView()
     private var findsSimilar = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
@@ -453,7 +454,11 @@ final class LibraryTileItem: NSCollectionViewItem {
             .withSymbolConfiguration(.init(pointSize: 26, weight: .regular))
         unreadableGlyph.contentTintColor = Theme.nsText3
         unreadableGlyph.setAccessibilityElement(false)
+        kindGlyph.contentTintColor = Theme.nsText3
+        kindGlyph.isHidden = true
+        kindGlyph.setAccessibilityElement(false)
         for layer in [badge, offlineBadge, name, size, date] + chips { root.layer?.addSublayer(layer) }
+        root.addSubview(kindGlyph)
         root.addSubview(check)
         root.addSubview(textGlyph)
         root.addSubview(unreadableGlyph)
@@ -476,6 +481,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
         unreadableGlyph.frame = CGRect(x: thumbFrame.midX - 18, y: thumbFrame.midY - 18, width: 36, height: 36)
+        kindGlyph.frame = CGRect(x: thumbFrame.midX - 24, y: thumbFrame.midY - 24, width: 48, height: 48)
         var y = b.height - thumbHeight - TileTextMetrics.gap - metrics.name
         name.frame = CGRect(x: 0, y: y, width: b.width, height: metrics.name)
         y -= TileTextMetrics.lineGap + metrics.chip
@@ -536,13 +542,21 @@ final class LibraryTileItem: NSCollectionViewItem {
 
     private func loadThumbnail(for row: FileRow, keepCurrent: Bool) {
         thumbTask?.cancel()
-        if !keepCurrent { thumbLayer.contents = nil }
+        if !keepCurrent { thumbLayer.contents = nil; thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1); kindGlyph.isHidden = true }
         let id = row.id
         thumbTask = Task { @MainActor [weak self] in
             let image = await ThumbnailService.shared.thumbnail(for: row.url, size: 224)
             guard let self, !Task.isCancelled, self.rowID == id else { return }
+            let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            let isPage = row.kind == "doc" || row.kind == "pdf"
+            let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) } : nil
+            let blank = isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true
             CATransaction.begin(); CATransaction.setDisableActions(true)
-            self.thumbLayer.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
+            self.thumbLayer.contents = blank ? nil : cgImage
+            self.kindGlyph.image = blank ? NSImage(systemSymbolName: row.kind == "pdf" ? "doc.richtext" : "doc.text", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 34, weight: .light)) : nil
+            self.kindGlyph.isHidden = !blank
             CATransaction.commit()
         }
     }
@@ -553,6 +567,8 @@ final class LibraryTileItem: NSCollectionViewItem {
         thumbTask = nil
         rowID = nil
         thumbLayer.contents = nil
+        thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+        kindGlyph.isHidden = true
         hovering = false
     }
 
