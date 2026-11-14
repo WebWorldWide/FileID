@@ -133,6 +133,44 @@ internal static class TakeReviewPolicy
         : reason.Contains("goal", StringComparison.Ordinal) ? ReasonTone.Goal
         : ReasonTone.Positive;
 
+    public const string GoalPlaceholder = "What should happen? e.g. Alex gets a hit, everyone smiling";
+    public const string GoalIdleHint = "Without a goal, FileID picks on sharpness, faces, eyes and exposure. Add a goal to find the try where it happens.";
+    public const string GoalFailed = "The goal check didn't finish. The ranking stays on photo quality.";
+    public const string GoalHelp = "Looks at all the photos together with the description model from Describe Files. Runs on this computer.";
+
+    /// <summary>The tries in photo-quality order, the order the goal check starts from.</summary>
+    public static IReadOnlyList<long> GoalOrder(IReadOnlyList<CatalogTakeQuality> qualities) =>
+        qualities.OrderBy(q => q.Rank).Select(q => q.PrimaryFileID).ToArray();
+
+    public static bool CanRank(string goal, IReadOnlyList<CatalogTakeQuality> qualities) =>
+        !string.IsNullOrWhiteSpace(goal) && qualities.Count >= 2;
+
+    /// <summary>Puts "Shows the goal" or "Closest to the goal" in front of each try's reasons after a ranked
+    /// answer, replacing the marks of an earlier answer.</summary>
+    public static IReadOnlyList<CatalogTakeQuality> MarkGoal(IReadOnlyList<CatalogTakeQuality> qualities, CatalogTakeGoalRanking? ranking)
+    {
+        var ranked = ranking is { Status: "ranked" };
+        return qualities.Select(q =>
+        {
+            var reasons = q.Reasons.Where(r => r != "Shows the goal" && r != "Closest to the goal").ToList();
+            if (ranked && ranking!.MetFileIDs.Contains(q.PrimaryFileID)) reasons.Insert(0, "Shows the goal");
+            else if (ranked && ranking!.Order.Count > 0 && ranking.Order[0] == q.PrimaryFileID) reasons.Insert(0, "Closest to the goal");
+            return q with { Reasons = reasons };
+        }).ToArray();
+    }
+
+    /// <summary>After a ranked answer the top try is kept in place of the quality pick (only when that pick is
+    /// the sole mark) and takes the focus. Null when the answer does not rank.</summary>
+    public static (HashSet<long> Keep, int Focus)? AdoptGoal(IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep, CatalogTakeGoalRanking ranking)
+    {
+        if (ranking.Status != "ranked" || ranking.Order.Count == 0) return null;
+        var best = ranking.Order[0];
+        var focus = qualities.ToList().FindIndex(q => q.PrimaryFileID == best);
+        if (focus < 0) return null;
+        var previous = qualities.Where(q => q.Recommended).Select(q => q.PrimaryFileID).Take(1).ToHashSet();
+        return (keep.SetEquals(previous) ? new HashSet<long> { best } : new HashSet<long>(keep), focus);
+    }
+
     public static IReadOnlyList<string> Reasons(CatalogTakeQuality quality) => quality.Reasons.Take(4).ToArray();
 
     public const string NoReasons = "Nothing stands out";

@@ -407,6 +407,56 @@ struct CrashSafetyTests {
         #expect(try String(contentsOf: photo, encoding: .utf8) == "bytes")
     }
 
+    @Test("Startup drops catalog rows for files a killed Rust Trash batch already moved, reading its log read-only")
+    func reconcileReadsTheRustLogAfterAKill() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let catalog = root.appendingPathComponent("catalog.sqlite")
+        let db = try FileIDEngine.Database(at: catalog)
+        let bin = root.appendingPathComponent("FakeTrash")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let moved = root.appendingPathComponent("moved.jpg")
+        let recorded = root.appendingPathComponent("recorded.jpg")
+        let stayed = root.appendingPathComponent("stayed.jpg")
+        for url in [moved, recorded, stayed] { try Data(url.lastPathComponent.utf8).write(to: url) }
+        try await insert(db, id: 1, path: moved.path)
+        try await insert(db, id: 2, path: recorded.path)
+        try await insert(db, id: 3, path: stayed.path)
+        let journal = root.appendingPathComponent("trash-journal.json")
+        let snapshots = try await db.pool.read { sql in try (1...3).map { try TrashJournal.snapshot(sql, fileID: Int64($0)) } }
+
+        // Rust batch killed midway: file 2 moved and recorded, file 1 moved before its location was
+        // saved, file 3 never moved. Only the Trash entries stand in for the real Trash.
+        for url in [moved, recorded] {
+            try FileManager.default.moveItem(at: url, to: bin.appendingPathComponent(url.lastPathComponent))
+        }
+        let entry = RustTrashLog.Entry(batchID: "rust-killed", timestamp: 1, items: [
+            .init(fileID: 2, originalPath: recorded.path, sourceIdentity: nil,
+                  trashedPath: bin.appendingPathComponent("recorded.jpg").path, rows: snapshots[1]),
+            .init(fileID: 1, originalPath: moved.path, sourceIdentity: nil, trashedPath: nil, rows: snapshots[0]),
+            .init(fileID: 3, originalPath: stayed.path, sourceIdentity: nil, trashedPath: nil, rows: snapshots[2]),
+        ])
+        try RustTrashLog.append(entry, to: RustTrashLog.url(beside: journal))
+        // An entry signed with another key must not drop anything.
+        let forgedKey = Data(repeating: 9, count: 32)
+        let forged = RustTrashLog.Entry(batchID: "forged", timestamp: 2, items: [
+            .init(fileID: 3, originalPath: stayed.path, sourceIdentity: nil, trashedPath: bin.path, rows: snapshots[2])])
+        let logURL = RustTrashLog.url(beside: journal)
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: try RustTrashLog.line(forged, key: forgedKey))
+        try handle.close()
+        let logBefore = try Data(contentsOf: logURL)
+
+        // Restart: a new engine on the same catalog runs its startup reconcile.
+        let restarted = try FileIDEngine.Database(at: catalog)
+        await TrashJournal.reconcile(database: restarted, journal: journal, trashFolders: [bin])
+        let left = try await restarted.pool.read { try Int64.fetchAll($0, sql: "SELECT id FROM files ORDER BY id") }
+        #expect(left == [3], "rows of files provably in the Trash are dropped; the file that never left keeps its row")
+        #expect(try Data(contentsOf: logURL) == logBefore, "the Rust log is read-only")
+        #expect(!FileManager.default.fileExists(atPath: journal.path), "no Swift journal is created")
+    }
+
     @Test("A write-ahead entry whose file never moved is completed as already home")
     func killBeforeTheMoveLeavesTheFileInPlace() async throws {
         let root = try makeRoot()

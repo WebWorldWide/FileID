@@ -497,5 +497,178 @@
         }
       }
     ]
+  },
+  {
+    "name": "models-mac-benchmarks-shared-format",
+    "description": "Both engines the Mac app hosts read the Swift model-benchmarks.json (a plain object keyed by model id, each entry carrying its hardware) and list identical benchmark fields: this Mac's result appears, a result measured on other hardware and an unrecorded model carry none. No model loads.",
+    "os": [
+      "darwin"
+    ],
+    "appHosted": true,
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "{state}/FileID/model-benchmarks.json",
+        "content": "{\n \"qwen3_vl_2b\": {\n  \"measuredAt\": \"2026-11-01T10:00:00Z\",\n  \"hardware\": \"{hardware}\",\n  \"loadSeconds\": 3.25,\n  \"promptTokensPerSecond\": 410.5,\n  \"generatedTokensPerSecond\": 62.4,\n  \"secondsPerImage\": 1.8,\n  \"peakResidentGB\": 2.7,\n  \"jsonValidRate\": 0.95,\n  \"probeAccuracy\": 0.8,\n  \"tunedArguments\": [\n   \"--flash-attn\"\n  ]\n },\n \"qwen3_vl_4b\": {\n  \"measuredAt\": \"2026-11-01T10:00:00Z\",\n  \"hardware\": \"Some Other Mac\",\n  \"loadSeconds\": 9.0,\n  \"promptTokensPerSecond\": 410.5,\n  \"generatedTokensPerSecond\": 62.4,\n  \"secondsPerImage\": 1.8,\n  \"peakResidentGB\": 2.7,\n  \"jsonValidRate\": 0.95,\n  \"probeAccuracy\": 0.8,\n  \"tunedArguments\": [\n   \"--flash-attn\"\n  ]\n }\n}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "shared-format file",
+        "command": {
+          "listModels": {
+            "requestID": "bench-shared",
+            "role": "vision"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "bench-shared"
+        },
+        "expect": {
+          "models": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": "qwen3_vl_2b",
+                "benchmark": {
+                  "$tol": "exact",
+                  "value": {
+                    "measuredAt": "2026-11-01T10:00:00Z",
+                    "hardware": "{hardware}",
+                    "loadSeconds": 3.25,
+                    "promptTokensPerSecond": 410.5,
+                    "generatedTokensPerSecond": 62.4,
+                    "secondsPerImage": 1.8,
+                    "peakResidentGB": 2.7,
+                    "jsonValidRate": 0.95,
+                    "probeAccuracy": 0.8,
+                    "tunedArguments": [
+                      "--flash-attn"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "qwen3_vl_4b",
+                "benchmark": null
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "models-mac-benchmarks-rust-format-import",
+    "description": "The Rust engine the Mac app hosts imports its earlier model-benchmarks.json ({results:[{model,hardware,benchmark}]}) once, rewriting it in the Swift format, and lists the same benchmark fields as the shared-format case. The Swift engine never wrote that format.",
+    "os": [
+      "darwin"
+    ],
+    "appHosted": true,
+    "engines": [
+      "rust"
+    ],
+    "env": {
+      "FILEID_HF_CACHE_ROOT": "{root}/hf"
+    },
+    "tree": [
+      {
+        "path": "{state}/FileID/model-benchmarks.json",
+        "content": "{\n \"results\": [\n  {\n   \"model\": \"qwen3_vl_2b\",\n   \"hardware\": \"{hardware}\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"{hardware}\",\n    \"loadSeconds\": 3.25,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  },\n  {\n   \"model\": \"qwen3_vl_4b\",\n   \"hardware\": \"Some Other Mac\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"Some Other Mac\",\n    \"loadSeconds\": 9.0,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  }\n ]\n}"
+      }
+    ],
+    "steps": [
+      {
+        "label": "first read imports",
+        "command": {
+          "listModels": {
+            "requestID": "bench-import-1",
+            "role": "vision"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "bench-import-1"
+        },
+        "expect": {
+          "models": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": "qwen3_vl_2b",
+                "benchmark": {
+                  "$tol": "exact",
+                  "value": {
+                    "measuredAt": "2026-11-01T10:00:00Z",
+                    "hardware": "{hardware}",
+                    "loadSeconds": 3.25,
+                    "promptTokensPerSecond": 410.5,
+                    "generatedTokensPerSecond": 62.4,
+                    "secondsPerImage": 1.8,
+                    "peakResidentGB": 2.7,
+                    "jsonValidRate": 0.95,
+                    "probeAccuracy": 0.8,
+                    "tunedArguments": [
+                      "--flash-attn"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "qwen3_vl_4b",
+                "benchmark": null
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "second read is stable",
+        "command": {
+          "listModels": {
+            "requestID": "bench-import-2",
+            "role": "vision"
+          }
+        },
+        "await": "modelCatalog",
+        "filter": {
+          "requestID": "bench-import-2"
+        },
+        "expect": {
+          "models": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": "qwen3_vl_2b",
+                "benchmark": {
+                  "$tol": "exact",
+                  "value": {
+                    "measuredAt": "2026-11-01T10:00:00Z",
+                    "hardware": "{hardware}",
+                    "loadSeconds": 3.25,
+                    "promptTokensPerSecond": 410.5,
+                    "generatedTokensPerSecond": 62.4,
+                    "secondsPerImage": 1.8,
+                    "peakResidentGB": 2.7,
+                    "jsonValidRate": 0.95,
+                    "probeAccuracy": 0.8,
+                    "tunedArguments": [
+                      "--flash-attn"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "qwen3_vl_4b",
+                "benchmark": null
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]

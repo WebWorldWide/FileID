@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 
 use fileid_engine::ipc::{
-    BulkActionResult, CatalogTakeAutoGroup, CatalogTakeBox, CatalogTakeDecision, CatalogTakeQuality,
+    BulkActionResult, CatalogTakeAutoGroup, CatalogTakeBox, CatalogTakeDecision,
+    CatalogTakeGoalRanking, CatalogTakeQuality,
 };
 
 pub fn is_video(group: &CatalogTakeAutoGroup) -> bool {
@@ -394,6 +395,62 @@ pub fn reason_tone(reason: &str) -> ReasonTone {
     }
 }
 
+pub const GOAL_PLACEHOLDER: &str = "What should happen? e.g. Alex gets a hit, everyone smiling";
+pub const GOAL_IDLE_HINT: &str = "Without a goal, FileID picks on sharpness, faces, eyes and exposure. Add a goal to find the try where it happens.";
+pub const GOAL_FAILED: &str = "The goal check didn't finish. The ranking stays on photo quality.";
+
+/// The tries in photo-quality order, the order the goal check starts from.
+pub fn goal_order(qualities: &[CatalogTakeQuality]) -> Vec<i64> {
+    let mut sorted: Vec<&CatalogTakeQuality> = qualities.iter().collect();
+    sorted.sort_by_key(|quality| quality.rank);
+    sorted.iter().map(|quality| quality.primary_file_id).collect()
+}
+
+/// A goal can be ranked when it has text and there are at least two tries.
+pub fn can_rank(goal: &str, qualities: &[CatalogTakeQuality]) -> bool {
+    !goal.trim().is_empty() && qualities.len() >= 2
+}
+
+/// Puts "Shows the goal" or "Closest to the goal" in front of each try's reasons
+/// after a ranked answer, replacing the marks of an earlier answer.
+pub fn mark_goal(qualities: &mut [CatalogTakeQuality], ranking: Option<&CatalogTakeGoalRanking>) {
+    for quality in qualities.iter_mut() {
+        quality
+            .reasons
+            .retain(|reason| reason != "Shows the goal" && reason != "Closest to the goal");
+        let Some(ranking) = ranking.filter(|ranking| ranking.status == "ranked") else {
+            continue;
+        };
+        if ranking.met_file_ids.contains(&quality.primary_file_id) {
+            quality.reasons.insert(0, "Shows the goal".into());
+        } else if ranking.order.first() == Some(&quality.primary_file_id) {
+            quality.reasons.insert(0, "Closest to the goal".into());
+        }
+    }
+}
+
+/// After a ranked answer the top try is kept in place of the quality pick (only
+/// when that pick is the sole mark) and takes the focus.
+pub fn adopt_goal(
+    qualities: &[CatalogTakeQuality],
+    keep: &BTreeSet<i64>,
+    ranking: &CatalogTakeGoalRanking,
+) -> Option<(BTreeSet<i64>, usize)> {
+    if ranking.status != "ranked" {
+        return None;
+    }
+    let best = *ranking.order.first()?;
+    let focus = qualities.iter().position(|quality| quality.primary_file_id == best)?;
+    let previous: BTreeSet<i64> = qualities
+        .iter()
+        .find(|quality| quality.recommended)
+        .map(|quality| quality.primary_file_id)
+        .into_iter()
+        .collect();
+    let keep = if *keep == previous { BTreeSet::from([best]) } else { keep.clone() };
+    Some((keep, focus))
+}
+
 pub fn reasons(quality: &CatalogTakeQuality) -> Vec<String> {
     quality.reasons.iter().take(4).cloned().collect()
 }
@@ -502,6 +559,35 @@ mod tests {
             subject: None,
             faces: vec![],
         }
+    }
+
+    fn ranking(status: &str, order: &[i64], met: &[i64]) -> CatalogTakeGoalRanking {
+        CatalogTakeGoalRanking {
+            goal: "hit".into(),
+            status: status.into(),
+            order: order.to_vec(),
+            met_file_ids: met.to_vec(),
+            summary: String::new(),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn goal_marks_and_adoption() {
+        let mut tries = vec![quality(1, 1, true, &[1]), quality(2, 2, false, &[2]), quality(3, 3, false, &[3])];
+        assert_eq!(goal_order(&tries), vec![1, 2, 3]);
+        assert!(can_rank(" hit ", &tries) && !can_rank("  ", &tries) && !can_rank("hit", &tries[..1]));
+        let answer = ranking("ranked", &[2, 3, 1], &[3]);
+        mark_goal(&mut tries, Some(&answer));
+        assert_eq!(tries[1].reasons, vec!["Closest to the goal"]);
+        assert_eq!(tries[2].reasons, vec!["Shows the goal"]);
+        let (keep, focus) = adopt_goal(&tries, &BTreeSet::from([1]), &answer).unwrap();
+        assert_eq!((keep, focus), (BTreeSet::from([2]), 1));
+        let (kept, _) = adopt_goal(&tries, &BTreeSet::from([1, 3]), &answer).unwrap();
+        assert_eq!(kept, BTreeSet::from([1, 3]), "a hand-made choice stays");
+        mark_goal(&mut tries, Some(&ranking("unclear", &[1, 2, 3], &[])));
+        assert!(tries.iter().all(|t| t.reasons.is_empty()));
+        assert!(adopt_goal(&tries, &BTreeSet::new(), &ranking("unavailable", &[1], &[])).is_none());
     }
 
     fn keyed(key: &str, kind: &str, status: &str, ids: &[i64]) -> CatalogTakeAutoGroup {

@@ -1,0 +1,350 @@
+[
+  {
+    "name": "timeline-cross-swift-then-rust",
+    "description": "A real model is staged for both engines in a scratch Hugging Face root. swift runs a quick timeline on a synthetic clip, then the other engine is started on the same catalog and enqueues it again: the job completes and the stored scenes (ids, model version, times and captions) are unchanged, so either engine resumes the other's work.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "swift",
+    "model": {
+      "repo": "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+    },
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "prewarm",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0,
+          "message": "Qwen3-VL 2B (4-bit) ready."
+        },
+        "timeout": 120
+      },
+      {
+        "label": "first engine",
+        "catalog": {
+          "action": "enqueueTimeline",
+          "fileIDs": [
+            1
+          ]
+        },
+        "expect": {
+          "status": "ok"
+        },
+        "save": {
+          "name": "job",
+          "path": "jobs.0.id"
+        }
+      },
+      {
+        "label": "job completes",
+        "catalog": {
+          "action": "jobs"
+        },
+        "until": 180,
+        "timeout": 30,
+        "expect": {
+          "status": "ok",
+          "jobs": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": {
+                  "$var": "job"
+                },
+                "state": "completed"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "rows after first",
+        "db": "SELECT id, model_version, start_seconds, end_seconds, text FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": {
+          "$tol": "count",
+          "value": 2
+        },
+        "save": "rows1"
+      },
+      {
+        "label": "scene ids, version and cuts",
+        "db": "SELECT substr(id, instr(id, 'timeline-scene-v1')), model_version, start_seconds, end_seconds FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": [
+          [
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:0",
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+            0.0,
+            2.0
+          ],
+          [
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:2000",
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+            2.0,
+            3.0
+          ]
+        ]
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "prewarm",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0,
+          "message": "Qwen3-VL 2B (4-bit) ready."
+        },
+        "timeout": 120
+      },
+      {
+        "label": "second engine",
+        "catalog": {
+          "action": "enqueueTimeline",
+          "fileIDs": [
+            1
+          ]
+        },
+        "expect": {
+          "status": "ok"
+        },
+        "save": {
+          "name": "job",
+          "path": "jobs.0.id"
+        }
+      },
+      {
+        "label": "job completes",
+        "catalog": {
+          "action": "jobs"
+        },
+        "until": 180,
+        "timeout": 30,
+        "expect": {
+          "status": "ok",
+          "jobs": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": {
+                  "$var": "job"
+                },
+                "state": "completed"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "rows after second",
+        "db": "SELECT id, model_version, start_seconds, end_seconds, text FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": {
+          "$var": "rows1"
+        }
+      }
+    ]
+  },
+  {
+    "name": "timeline-cross-rust-then-swift",
+    "description": "A real model is staged for both engines in a scratch Hugging Face root. rust runs a quick timeline on a synthetic clip, then the other engine is started on the same catalog and enqueues it again: the job completes and the stored scenes (ids, model version, times and captions) are unchanged, so either engine resumes the other's work.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "appHosted": true,
+    "os": [
+      "darwin"
+    ],
+    "start": "rust",
+    "model": {
+      "repo": "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+    },
+    "tree": [
+      {
+        "path": "Clip.mov",
+        "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+        "row": {
+          "id": 1,
+          "kind": "video"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "prewarm",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0,
+          "message": "Qwen3-VL 2B (4-bit) ready."
+        },
+        "timeout": 120
+      },
+      {
+        "label": "first engine",
+        "catalog": {
+          "action": "enqueueTimeline",
+          "fileIDs": [
+            1
+          ]
+        },
+        "expect": {
+          "status": "ok"
+        },
+        "save": {
+          "name": "job",
+          "path": "jobs.0.id"
+        }
+      },
+      {
+        "label": "job completes",
+        "catalog": {
+          "action": "jobs"
+        },
+        "until": 180,
+        "timeout": 30,
+        "expect": {
+          "status": "ok",
+          "jobs": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": {
+                  "$var": "job"
+                },
+                "state": "completed"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "rows after first",
+        "db": "SELECT id, model_version, start_seconds, end_seconds, text FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": {
+          "$tol": "count",
+          "value": 2
+        },
+        "save": "rows1"
+      },
+      {
+        "label": "scene ids, version and cuts",
+        "db": "SELECT substr(id, instr(id, 'timeline-scene-v1')), model_version, start_seconds, end_seconds FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": [
+          [
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:0",
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+            0.0,
+            2.0
+          ],
+          [
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:2000",
+            "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+            2.0,
+            3.0
+          ]
+        ]
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "prewarm",
+        "command": {
+          "prewarmModel": {
+            "modelKind": "qwen3_vl_2b"
+          }
+        },
+        "await": "modelDownloadProgress",
+        "filter": {
+          "modelKind": "qwen3_vl_2b",
+          "fraction": 1.0,
+          "message": "Qwen3-VL 2B (4-bit) ready."
+        },
+        "timeout": 120
+      },
+      {
+        "label": "second engine",
+        "catalog": {
+          "action": "enqueueTimeline",
+          "fileIDs": [
+            1
+          ]
+        },
+        "expect": {
+          "status": "ok"
+        },
+        "save": {
+          "name": "job",
+          "path": "jobs.0.id"
+        }
+      },
+      {
+        "label": "job completes",
+        "catalog": {
+          "action": "jobs"
+        },
+        "until": 180,
+        "timeout": 30,
+        "expect": {
+          "status": "ok",
+          "jobs": {
+            "$tol": "contains",
+            "value": [
+              {
+                "id": {
+                  "$var": "job"
+                },
+                "state": "completed"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "rows after second",
+        "db": "SELECT id, model_version, start_seconds, end_seconds, text FROM catalog_passages WHERE file_id=1 AND id LIKE 'scene:%' ORDER BY id",
+        "expect": {
+          "$var": "rows1"
+        }
+      }
+    ]
+  }
+]

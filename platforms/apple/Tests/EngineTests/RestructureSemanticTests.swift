@@ -148,6 +148,82 @@ struct RestructureSemanticTests {
         #expect(allReview)
     }
 
+    // MARK: - Stay-put, settled files and tagless naming (mirror Rust restructure_semantic.rs)
+
+    @Test("Well-placed members stay put instead of reshuffling")
+    func wellPlacedMembersStayPut() {
+        var files: [RestructureSemantic.SemanticFile] = []
+        for i in 0..<4 { files.append(file(Int64(i), "/lib/A/a\(i).jpg", [1, 0, 0, 0], ["dog"])) }
+        for i in 0..<4 { files.append(file(Int64(10 + i), "/lib/B/b\(i).jpg", [1, 0, 0, 0], ["dog"])) }
+        let protos = RestructureSemantic.folderPrototypes(files, minFiles: 4)
+        #expect(protos.count == 2)
+        var used = Set<String>(), settled = Set<Int64>()
+        let moves = RestructureSemantic.classify(
+            files: files, prototypes: protos, libraryRoot: "/lib",
+            usedGroupNames: &used, settled: &settled)
+        #expect(moves.isEmpty)
+        #expect(settled.count == 8)
+    }
+
+    @Test("Misplaced members still route to the matching folder")
+    func misplacedMembersRoute() {
+        var files: [RestructureSemantic.SemanticFile] = []
+        for i in 0..<4 { files.append(file(Int64(i), "/lib/Beach/a\(i).jpg", [1, 0, 0, 0], ["beach"])) }
+        for i in 0..<2 { files.append(file(Int64(10 + i), "/lib/New Folder/s\(i).jpg", [1, 0, 0, 0], ["beach"])) }
+        let protos = RestructureSemantic.folderPrototypes(files, minFiles: 4)
+        #expect(protos.count == 1)
+        let moves = RestructureSemantic.classify(files: files, prototypes: protos, libraryRoot: "/lib")
+        #expect(moves.count == 2)
+        #expect(moves.allSatisfy { $0.source.hasPrefix("/lib/New Folder") && $0.destinationDir == "/lib/Beach" })
+    }
+
+    @Test("A tagless dated cluster is named by month and year, not Unsorted")
+    func taglessClusterNamedByMonth() {
+        let june2014 = 1_402_444_800.0
+        let files = (0..<6).map { i in
+            RestructureSemantic.SemanticFile(
+                fileID: Int64(i), source: "/lib/dump/p\(i).jpg", clip: unit([1, 0, 0, 0]),
+                tags: [], timeUnix: june2014 + Double(i))
+        }
+        let moves = RestructureSemantic.classify(files: files, prototypes: [], libraryRoot: "/lib")
+        #expect(!moves.isEmpty)
+        #expect(moves.allSatisfy { $0.category == "June 2014" && $0.destinationDir == "/lib/June 2014" })
+    }
+
+    /// Labelled check (shared with Rust `labelled_tree_moves_only_the_strays`): 44 well-placed files
+    /// (four 8-file topic folders plus two identical-content twin folders of 6) and 6 labelled strays.
+    /// A plan is better when it moves fewer well-placed files while still routing the strays.
+    @Test("Labelled tree: only the strays move")
+    func labelledTreeMovesOnlyStrays() {
+        func vec(_ cls: Int, _ i: Int) -> [Float] {
+            var v = [Float](repeating: 0, count: 8)
+            v[cls] = 1
+            v[5] = 0.04 * Float(i % 3)
+            v[6] = 0.03 * Float(i % 2)
+            return v
+        }
+        var files: [RestructureSemantic.SemanticFile] = []
+        var id: Int64 = 0
+        func add(_ path: String, _ cls: Int, _ i: Int) {
+            id += 1
+            files.append(file(id, path, vec(cls, i), ["topic\(cls)"]))
+        }
+        for c in 0..<4 { for i in 0..<8 { add("/lib/Topic\(c)/f\(i).jpg", c, i) } }
+        for i in 0..<6 { add("/lib/TwinA/f\(i).jpg", 4, i) }
+        for i in 0..<6 { add("/lib/TwinB/f\(i).jpg", 4, i) }
+        let strayStart = id + 1
+        for i in 0..<3 { add("/lib/Inbox/z\(i).jpg", 0, i) }
+        for i in 0..<3 { add("/lib/Inbox/y\(i).jpg", 2, i) }
+        let protos = RestructureSemantic.folderPrototypes(files, minFiles: 4)
+            .filter { !RestructureSemantic.isJunkPrototypeFolder($0.path) }
+        let moves = RestructureSemantic.classify(files: files, prototypes: protos, libraryRoot: "/lib")
+        let wellPlacedMoved = moves.filter { $0.fileID < strayStart && ($0.source as NSString).deletingLastPathComponent != $0.destinationDir }.count
+        #expect(wellPlacedMoved == 0)
+        let strays = moves.filter { $0.fileID >= strayStart }
+        #expect(strays.count == 6)
+        #expect(strays.allSatisfy { $0.destinationDir == ($0.source.contains("/z") ? "/lib/Topic0" : "/lib/Topic2") })
+    }
+
     // MARK: - Non-image pass (RESTRUCTURE.md R1)
 
     /// Filename tokenizer keeps content words and drops numeric / very-short /

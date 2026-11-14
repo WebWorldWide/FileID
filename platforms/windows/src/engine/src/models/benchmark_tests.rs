@@ -84,18 +84,39 @@ async fn tuning_keeps_fastest_identical_output_only() {
 }
 
 #[test]
-fn stored_results_round_trip_per_model_and_hardware() {
+fn stored_results_round_trip_in_the_swift_format() {
     let directory = std::env::temp_dir().join(format!("fileid-bench-store-{}", uuid::Uuid::new_v4()));
     let path = directory.join("first-run").join("model-benchmarks.json");
     let benchmark = summarize(&Measurement { load_seconds: 1.0, ..Measurement::default() }, "h1", None);
-    save_in(&path, StoredBenchmark { model: "m".into(), hardware: "h1".into(), benchmark: benchmark.clone() }).unwrap();
-    save_in(&path, StoredBenchmark { model: "m".into(), hardware: "h2".into(), benchmark: benchmark.clone() }).unwrap();
-    let newer = ModelBenchmark { load_seconds: 2.0, ..benchmark };
-    save_in(&path, StoredBenchmark { model: "m".into(), hardware: "h1".into(), benchmark: newer.clone() }).unwrap();
-    let stored = load_in(&path);
-    assert_eq!(stored.len(), 2);
-    assert_eq!(stored.iter().find(|r| r.hardware == "h1").unwrap().benchmark, newer);
+    save_in(&path, "m", benchmark.clone(), "h1").unwrap();
+    let other = ModelBenchmark { hardware: "h2".into(), ..benchmark.clone() };
+    save_in(&path, "n", other, "h2").unwrap();
+    assert!(load_in(&path, "h1").is_empty(), "other hardware's save replaces the rest, as in Swift");
+    let newer = ModelBenchmark { load_seconds: 2.0, hardware: "h2".into(), ..benchmark.clone() };
+    save_in(&path, "n", newer.clone(), "h2").unwrap();
+    assert_eq!(load_in(&path, "h2").get("n"), Some(&newer));
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(raw["n"]["loadSeconds"], 2.0, "a plain object keyed by model id");
     std::fs::write(&path, b"not json").unwrap();
-    assert!(load_in(&path).is_empty());
+    assert!(load_in(&path, "h2").is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn rust_format_file_is_imported_once() {
+    let directory = std::env::temp_dir().join(format!("fileid-bench-import-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("model-benchmarks.json");
+    let benchmark = summarize(&Measurement { load_seconds: 1.0, ..Measurement::default() }, "h1", None);
+    let old = serde_json::json!({"results": [
+        {"model": "m", "hardware": "h1", "benchmark": benchmark},
+        {"model": "m", "hardware": "h2", "benchmark": ModelBenchmark { hardware: "h2".into(), ..benchmark.clone() }},
+    ]});
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(load_in(&path, "h1").get("m"), Some(&benchmark));
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(raw.get("results").is_none() && raw["m"]["hardware"] == "h1", "rewritten in the Swift format");
+    assert!(directory.join("model-benchmarks.json.rust-v1").exists());
+    assert_eq!(load_in(&path, "h1").get("m"), Some(&benchmark), "second read changes nothing");
     std::fs::remove_dir_all(directory).unwrap();
 }
