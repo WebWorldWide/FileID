@@ -77,7 +77,9 @@ impl<T> TwinRegistry<T> {
         let mut held = self.held.lock();
         let claim = self.claim(hash);
         if matches!(claim, TwinClaim::Owner) {
-            held.insert(hash, Vec::new());
+            // An earlier owner that failed may not have handed its copies
+            // over yet: keep them.
+            held.entry(hash).or_default();
         }
         claim
     }
@@ -137,7 +139,7 @@ impl<T> TwinRegistry<T> {
     /// `notify` is the waiter's handle on the owner it is waiting for. Another
     /// owner in flight means that one failed and a later copy took over: the
     /// old handle will never be notified again, so the wait is over.
-    fn done(&self, hash: &ContentHash, notify: &Notify) -> Option<bool> {
+    pub fn settled(&self, hash: &ContentHash, notify: &Notify) -> Option<bool> {
         match self.map.lock().get(hash) {
             Some(State::Done(ok)) => Some(*ok),
             Some(State::InFlight(current)) if std::ptr::eq(Arc::as_ptr(current), notify) => None,
@@ -154,7 +156,7 @@ impl<T> TwinRegistry<T> {
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(ok) = self.done(hash, notify) {
+            if let Some(ok) = self.settled(hash, notify) {
                 return ok;
             }
             notified.await;
@@ -174,6 +176,19 @@ impl<T> TwinRegistry<T> {
 mod tests {
     use super::*;
     type TwinRegistry = super::TwinRegistry<&'static str>;
+
+    #[test]
+    fn a_new_owner_keeps_the_copies_a_failed_owner_still_holds() {
+        let registry = TwinRegistry::new();
+        let hash = [7u8; 32];
+        assert!(matches!(registry.claim_queued(hash), TwinClaim::Owner));
+        assert_eq!(registry.hold(&hash, "copy 1"), None);
+        // The owner fails before its decoder has handed the copies over, and
+        // another decoder claims the image.
+        registry.publish(hash, false);
+        assert!(matches!(registry.claim_queued(hash), TwinClaim::Owner));
+        assert_eq!(registry.owner_queued(&hash), vec!["copy 1"]);
+    }
 
     #[test]
     fn copies_are_held_until_their_owner_is_queued() {

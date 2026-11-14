@@ -1057,6 +1057,37 @@ const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
 /// copies behind it wait on it) before it analyzes itself unshared.
 const TWIN_RECLAIM_LIMIT: u32 = 2;
 
+/// How many workers may wait for a twin at once: one fewer than the pool. A
+/// copy can reach a worker before the owner it waits for (after an earlier
+/// owner failed, the next one may still be decoding); with every worker
+/// waiting, nothing would pick that owner up until the waits ran out.
+struct TwinWaiters {
+    waiting: std::sync::atomic::AtomicUsize,
+    limit: usize,
+}
+
+struct TwinWaiting(Arc<TwinWaiters>);
+
+impl TwinWaiters {
+    fn new(workers: usize) -> Arc<Self> {
+        Arc::new(Self { waiting: std::sync::atomic::AtomicUsize::new(0), limit: workers.saturating_sub(1) })
+    }
+
+    fn enter(self: &Arc<Self>) -> Option<TwinWaiting> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.waiting
+            .fetch_update(SeqCst, SeqCst, |waiting| (waiting < self.limit).then_some(waiting + 1))
+            .ok()
+            .map(|_| TwinWaiting(self.clone()))
+    }
+}
+
+impl Drop for TwinWaiting {
+    fn drop(&mut self) {
+        self.0.waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// How long one scan file may wait for CPU/memory admission before it is
 /// recorded as failed. Searches, residents and low free memory are transient;
 /// the wait ends at once when the scan is cancelled.
@@ -1302,7 +1333,9 @@ impl Tagger {
 
         let runtime = tokio::runtime::Handle::current();
         let mut workers_started = 0usize;
+        let twin_waiters = TwinWaiters::new(self.worker_count);
         for worker_idx in 0..self.worker_count {
+            let twin_waiters = twin_waiters.clone();
             let rx = predecoded_rx.clone();
             let tx = out_tx.clone();
             let coord = self.coordinator.clone();
@@ -1351,7 +1384,8 @@ impl Tagger {
                     // A copy of an image another worker is analyzing waits here,
                     // holding no frame, no admission and no per-file timer.
                     let Some(predecoded) =
-                        settle_twin(predecoded, &twins, &coord, &budget, legacy, TWIN_WAIT_PATIENCE).await
+                        settle_twin(predecoded, &twins, &twin_waiters, &coord, &budget, legacy, TWIN_WAIT_PATIENCE)
+                            .await
                     else {
                         break;
                     };
@@ -1522,6 +1556,7 @@ fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
 async fn settle_twin(
     mut predecoded: PreDecoded,
     twins: &Arc<TwinRegistry>,
+    waiters: &Arc<TwinWaiters>,
     coord: &ScanCoordinator,
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
@@ -1533,10 +1568,18 @@ async fn settle_twin(
             return Some(predecoded);
         };
         let hash = predecoded.content_hash.expect("a pending twin claim carries a hash");
-        let outcome = tokio::select! {
-            ok = twins.wait(&hash, notify) => Some(ok),
-            _ = tokio::time::sleep(patience) => None,
-            _ = coord.wait_cancelled() => return None,
+        let outcome = match twins.settled(&hash, notify) {
+            Some(ok) => Some(ok),
+            None => match waiters.enter() {
+                Some(_waiting) => tokio::select! {
+                    ok = twins.wait(&hash, notify) => Some(ok),
+                    _ = tokio::time::sleep(patience) => None,
+                    _ = coord.wait_cancelled() => return None,
+                },
+                // Every other worker is waiting already: analyze unshared and
+                // stay free for the owner.
+                None => None,
+            },
         };
         if outcome == Some(true) {
             predecoded.twin = TwinClaim::Ready;
@@ -4100,6 +4143,7 @@ mod tests {
             item
         };
         let patience = Duration::from_secs(30);
+        let waiters = TwinWaiters::new(3);
 
         // The owner finishes: the copy is ready and was never decoded.
         let twins = TwinRegistry::new();
@@ -4113,7 +4157,7 @@ mod tests {
                 twins.publish(hash, true);
             })
         };
-        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        let settled = settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience).await.unwrap();
         publisher.await.unwrap();
         assert!(matches!(settled.twin, TwinClaim::Ready));
         assert!(settled.decoded.is_none());
@@ -4124,7 +4168,7 @@ mod tests {
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         twins.publish(hash, false);
-        let settled = settle_twin(copy, &twins, &coord, &budget, false, patience).await.unwrap();
+        let settled = settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience).await.unwrap();
         assert!(matches!(settled.twin, TwinClaim::Owner));
         assert!(matches!(settled.decoded, Some(Ok(_))));
         assert!(matches!(twins.claim(hash), TwinClaim::Pending(_)));
@@ -4133,16 +4177,35 @@ mod tests {
         let twins = TwinRegistry::new();
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
-        let settled = settle_twin(copy, &twins, &coord, &budget, false, Duration::from_millis(20)).await.unwrap();
+        let settled = settle_twin(copy, &twins, &waiters, &coord, &budget, false, Duration::from_millis(20)).await.unwrap();
         assert!(matches!(settled.twin, TwinClaim::None));
         assert!(matches!(settled.decoded, Some(Ok(_))));
+
+        // The last free worker does not wait: it analyzes the copy unshared,
+        // even though the owner never finishes.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let copy = pending(&twins, "b.png");
+        let lone = TwinWaiters::new(2);
+        let _other_worker = lone.enter().expect("the first waiter is admitted");
+        let settled = settle_twin(copy, &twins, &lone, &coord, &budget, false, patience).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::None));
+        assert!(matches!(settled.decoded, Some(Ok(_))));
+        // A finished owner is read without taking a waiting place.
+        let twins = TwinRegistry::new();
+        let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
+        let copy = pending(&twins, "b.png");
+        twins.publish(hash, true);
+        let settled = settle_twin(copy, &twins, &lone, &coord, &budget, false, patience).await.unwrap();
+        assert!(matches!(settled.twin, TwinClaim::Ready));
+        assert!(TwinWaiters::new(1).enter().is_none(), "a lone worker never waits");
 
         // A cancelled scan stops waiting.
         let twins = TwinRegistry::new();
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         coord.request_cancel();
-        assert!(settle_twin(copy, &twins, &coord, &budget, false, patience).await.is_none());
+        assert!(settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience).await.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
