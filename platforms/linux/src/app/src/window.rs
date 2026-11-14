@@ -348,16 +348,33 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     // Dev-only self-capture for compositors without a screenshot API. Gated by
     // `FILEID_SELF_SHOT=<path>`; `FILEID_SELF_SHOT_TAB=<name>` selects a tab.
     if let Ok(path) = std::env::var("FILEID_SELF_SHOT") {
+        // `FILEID_SELF_SHOT_TAB_DELAY_MS` opens the page that long after launch,
+        // to see a page built in the middle of a running job.
+        let delay = std::env::var("FILEID_SELF_SHOT_TAB_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.trim().parse::<u64>().ok())
+            .unwrap_or(0);
         if let Some(page) = std::env::var("FILEID_SELF_SHOT_TAB")
             .ok()
             .and_then(|tab| shell::page(&tab))
         {
-            shell.navigate(page.id);
+            if delay == 0 {
+                shell.navigate(page.id);
+            } else {
+                let shell = shell.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
+                    shell.navigate(page.id);
+                });
+            }
         }
         let window = window.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(2200), move || {
-            self_capture(&window, &path);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay + 2200), move || {
+            self_capture(&window, &path, 6);
         });
+    }
+    // Dev-only: `FILEID_SELF_SCAN=<folder>` starts a scan as soon as the engine is ready.
+    if let Some(folder) = std::env::var_os("FILEID_SELF_SCAN") {
+        shell.choose(Path::new(&folder));
     }
 }
 
@@ -1195,8 +1212,9 @@ fn install_drop_target(overlay: &gtk::Overlay, hint: &gtk::Box, shell: &Rc<Shell
     overlay.add_controller(target);
 }
 
-/// Render the window's current frame to a PNG via GTK's own renderer.
-fn self_capture(window: &adw::ApplicationWindow, path: &str) {
+/// Render the window's current frame to a PNG via GTK's own renderer. A window
+/// that has not drawn yet gives an empty tree, so it tries again a second later.
+fn self_capture(window: &adw::ApplicationWindow, path: &str, tries_left: u32) {
     let widget = window.upcast_ref::<gtk::Widget>();
     let (width, height) = (widget.width(), widget.height());
     if width <= 0 || height <= 0 {
@@ -1217,6 +1235,12 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
     );
     let Some(node) = snapshot.to_node() else {
         eprintln!("[self_capture] empty render node");
+        if tries_left > 0 {
+            let (window, path) = (window.clone(), path.to_owned());
+            glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || {
+                self_capture(&window, &path, tries_left - 1);
+            });
+        }
         return;
     };
     match renderer.render_texture(&node, None).save_to_png(path) {

@@ -1639,6 +1639,31 @@ mod tests {
     }
 
     #[test]
+    fn a_page_built_mid_job_is_told_what_is_running_and_others_are_not() {
+        let mut client = EngineClient::new();
+        client.publish_test_event(EngineState::Scanning);
+        client.publish_test_event(EngineState::ModelDownloadProgress(ModelDownloadProgress {
+            model_kind: "clip".into(),
+            fraction: 0.4,
+            message: String::new(),
+            bytes_done: None,
+            total_bytes: None,
+        }));
+        let ordinary = client.subscribe();
+        assert!(ordinary.try_recv().is_none());
+        client.replay_to_new_subscribers(true);
+        let late = client.subscribe();
+        client.replay_to_new_subscribers(false);
+        let after = client.subscribe();
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::Scanning)));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ModelDownloadProgress(p)) if p.model_kind == "clip"));
+        assert!(late.try_recv().is_none());
+        assert!(after.try_recv().is_none());
+        client.publish_test_event(EngineState::ScanComplete(3));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ScanComplete(3))));
+    }
+
+    #[test]
     fn closed_one_shot_subscribers_are_pruned() {
         let (closed_sender, closed_receiver) = crate::event_queue::channel();
         let (live_sender, _live_receiver) = crate::event_queue::channel();
