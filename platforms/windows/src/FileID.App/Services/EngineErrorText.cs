@@ -1,4 +1,4 @@
-namespace FileID.Services;
+﻿namespace FileID.Services;
 
 /// <summary>Plain titles and sentences for the errors FileID's helper
 /// reports, keyed on the error kind. Mirrors the Mac app's

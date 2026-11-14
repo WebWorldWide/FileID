@@ -1,4 +1,4 @@
-using FileID.IpcSchema;
+﻿using FileID.IpcSchema;
 
 namespace FileID.ViewModels;
 
