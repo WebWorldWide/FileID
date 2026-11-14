@@ -77,6 +77,11 @@ Five agents fixed the audit's open items on disjoint files; integrated on `agent
 
 - **GTK:** Library text searches of three or more characters now also ask the engine (embed the text, then a hybrid catalog search), like the Mac. The grid takes the engine's order (good matches first) and the count shows its summary, for example "3 good matches, 1 weaker.". With no embedding, no reply or no message, the keyword rows and file count stay.
 - **Tests:** three unit tests in `tabs/library.rs` (singular, plural, zero weaker, zero good, no message, three-character rule). WinUI shows no summary yet.
+
+## 2026-11-13 — Fix main CI on the self-hosted runners (`agent/main-ci-fix`)
+
+- **Four main-only failures:** conformance prints UTF-8 now (a cp1252 console crashed on a non-ASCII failure message and hid the case); `restructure-shortcut-apply-and-undo` is skipped (`requiresSymlinks`) when the runner account cannot create symlinks (the likely Windows failure, to be confirmed by the next main run); the two `archive_names` zip tests build their archives in-process (no `zip` tool, also run on Windows); the identity test sets an explicit mtime after rewriting; the Windows app job installs the 10.0.1xx SDK band because the runner's VS 2022 MSBuild 17.14 rejects SDK 10.0.4xx.
+
 ## 2026-11-12 — Swift startup reconcile reads Rust's Trash log (`agent/left-trash-reconcile`)
 
 - `TrashJournal.reconcile` now also walks the valid entries of `trash_log.json` (HMAC-checked with the shared key, never modified) and drops catalog rows of files provably in the Trash (original path gone, Trash entry found by recorded path or inode), the same rules as for its own journal. It no longer returns early when its own journal is empty. `RustTrashLog.verifiedBatches` is shared with `find`.
