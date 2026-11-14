@@ -9,7 +9,7 @@ import hashlib, json, os, struct, sys
 
 def wav(rate=44100, channels=1, bits=16, data=b"\0\0" * 200, claim=None, fmt_size=16, block=None, tag=1, riff_size=None):
     block = channels * bits // 8 if block is None else block
-    fmt = struct.pack("<HHIIHH", tag, channels, rate, rate * block, block, bits)[:fmt_size]
+    fmt = struct.pack("<HHIIHH", tag, channels, rate, (rate * block) & 0xFFFFFFFF, block, bits)[:fmt_size]
     d = b"data" + struct.pack("<I", len(data) if claim is None else claim) + data
     body = b"WAVE" + b"fmt " + struct.pack("<I", fmt_size) + fmt + d
     return b"RIFF" + struct.pack("<I", len(body) if riff_size is None else riff_size) + body
