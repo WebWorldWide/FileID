@@ -11,7 +11,7 @@ use gtk::glib;
 
 use crate::engine_client::{EngineClient, EngineEvent, read_db};
 
-struct Subscription(async_channel::Receiver<EngineEvent>);
+struct Subscription(crate::engine_client::EventReceiver);
 
 impl Drop for Subscription {
     fn drop(&mut self) {
@@ -39,18 +39,19 @@ pub(super) async fn send_and_collect(
     if sent == 0 {
         return None;
     }
-    let closer = subscription.0.clone();
+    let closer = subscription.0.closer();
     glib::timeout_add_seconds_local_once(timeout_secs, move || {
         closer.close();
     });
     let mut results = Vec::new();
     while results.len() < sent {
-        match subscription.0.recv().await {
-            Ok(EngineEvent::BulkActionResult(result)) if result.action == action => {
-                results.push(result)
+        let Ok(event) = subscription.0.recv().await else { break };
+        match &*event {
+            EngineEvent::BulkActionResult(result) if result.action == action => {
+                results.push(result.clone())
             }
-            Ok(EngineEvent::Exited) | Err(_) => break,
-            Ok(_) => {}
+            EngineEvent::Exited => break,
+            _ => {}
         }
     }
     Some(results)
@@ -68,15 +69,16 @@ pub(super) async fn undo_merge_operation(
     let request_id = super::face_review::request_id();
     let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload { request_id: request_id.clone(), operation_id: operation });
     engine.borrow_mut().send(payload).ok()?;
-    let closer = subscription.0.clone();
+    let closer = subscription.0.closer();
     glib::timeout_add_seconds_local_once(timeout_secs, move || {
         closer.close();
     });
     loop {
-        match subscription.0.recv().await {
-            Ok(EngineEvent::FaceReview(page)) if page.request_id == request_id => return Some(page),
-            Ok(EngineEvent::Exited) | Err(_) => return None,
-            Ok(_) => {}
+        let Ok(event) = subscription.0.recv().await else { return None };
+        match &*event {
+            EngineEvent::FaceReview(page) if page.request_id == request_id => return Some(page.clone()),
+            EngineEvent::Exited => return None,
+            _ => {}
         }
     }
 }
@@ -144,6 +146,28 @@ pub(super) fn move_status(
         }
     }
     line
+}
+
+pub(super) const MERGE_CONFIRM_HEADING: &str = "Merge these people?";
+pub(super) const MERGE_CONFIRM_BODY: &str = "You can undo this right after.";
+
+/// Every People merge asks first; `merge` runs only on the Merge answer.
+pub(super) fn confirm_merge(anchor: &impl gtk::prelude::IsA<gtk::Widget>, merge: impl FnOnce() + 'static) {
+    use adw::prelude::*;
+    let dialog = adw::AlertDialog::new(Some(MERGE_CONFIRM_HEADING), Some(MERGE_CONFIRM_BODY));
+    dialog.add_responses(&[("cancel", "Cancel"), ("merge", "Merge")]);
+    dialog.set_response_appearance("merge", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let merge = RefCell::new(Some(merge));
+    dialog.connect_response(None, move |_, response| {
+        if response == "merge"
+            && let Some(merge) = merge.borrow_mut().take()
+        {
+            merge();
+        }
+    });
+    dialog.present(Some(anchor));
 }
 
 pub(super) fn undo_merge_label(source_name: &str, destination_name: &str) -> String {

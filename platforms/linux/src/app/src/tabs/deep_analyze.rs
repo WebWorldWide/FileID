@@ -23,6 +23,7 @@ use crate::engine_client::{EngineClient, EngineEvent};
 mod deep_scope;
 
 const PROPOSED_LIMIT: i64 = 200;
+const APPLY_TAGS_TIMEOUT_SECS: u64 = 15;
 
 // ─── VLM registry (Linux mirror of macOS `AIModelKind`) ──────────────────────
 // `model_kind` keys are the exact strings the engine accepts (see the shared
@@ -418,7 +419,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         async move {
             let rx = ui.engine.borrow_mut().subscribe();
             while let Ok(ev) = rx.recv().await {
-                apply_event(&ui, ev);
+                apply_event(&ui, &ev);
             }
         }
     ));
@@ -711,29 +712,32 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
     });
     let modes = modes.to_vec();
     let ui = ui.clone();
-    let event_rx = ui.engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         let mut expected_results = 0usize;
         let mut requested_files = 0usize;
+        let mut groups = Vec::new();
         for people in modes {
-            let groups = query_tag_groups(people).recv().await.unwrap_or_default();
-            for (tag, ids) in groups {
-                if ids.is_empty() {
-                    continue;
-                }
-                let sent = ui.engine.borrow_mut().send(CommandPayload::ApplyTags(
-                    fileid_engine::ipc::ApplyTagsPayload {
-                        file_ids: ids.clone(),
-                        tags: vec![tag],
-                        mode: fileid_engine::ipc::TagMode::Add,
-                    },
-                ));
-                if sent.is_ok() {
-                    requested_files += ids.len();
-                    expected_results += 1;
-                } else {
-                    tracing::warn!(target: "deep_analyze", "applyTags command could not be sent");
-                }
+            groups.extend(query_tag_groups(people).recv().await.unwrap_or_default());
+        }
+        // Listen only once the reads are done, and before the first command
+        // goes out, so no result can be missed.
+        let event_rx = ui.engine.borrow_mut().subscribe();
+        for (tag, ids) in groups {
+            if ids.is_empty() {
+                continue;
+            }
+            let sent = ui.engine.borrow_mut().send(CommandPayload::ApplyTags(
+                fileid_engine::ipc::ApplyTagsPayload {
+                    file_ids: ids.clone(),
+                    tags: vec![tag],
+                    mode: fileid_engine::ipc::TagMode::Add,
+                },
+            ));
+            if sent.is_ok() {
+                requested_files += ids.len();
+                expected_results += 1;
+            } else {
+                tracing::warn!(target: "deep_analyze", "applyTags command could not be sent");
             }
         }
 
@@ -742,35 +746,28 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
             return;
         }
 
-        // A missing result must not strand the controls after an engine crash.
-        // The generation check keeps a late result from an expired job from
-        // overwriting the status of a newer apply operation.
-        let timeout_ui = ui.clone();
-        glib::timeout_add_local_once(Duration::from_secs(15), move || {
-            if timeout_ui.apply_in_flight.get()
-                && timeout_ui.apply_generation.get() == generation
-            {
-                finish_apply_tags(
-                    &timeout_ui,
-                    generation,
-                    "FileID didn't finish adding tags. Try again in a moment.",
-                );
-            }
-        });
+        // A missing result must not strand the controls: the timeout ends the
+        // wait itself, so this task and its subscription never outlive it.
+        let deadline = event_rx.deadline(Duration::from_secs(APPLY_TAGS_TIMEOUT_SECS));
 
         let mut received_results = 0usize;
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         while received_results < expected_results {
-            match event_rx.recv().await {
-                Ok(EngineEvent::BulkActionResult(result)) if result.action == "applyTags" => {
+            let Ok(event) = event_rx.recv().await else { break };
+            match &*event {
+                EngineEvent::BulkActionResult(result) if result.action == "applyTags" => {
                     received_results += 1;
                     succeeded = succeeded.saturating_add(result.succeeded);
                     failed = failed.saturating_add(result.failed);
                 }
-                Ok(EngineEvent::Exited) | Err(_) => break,
-                Ok(_) => {}
+                EngineEvent::Exited => break,
+                _ => {}
             }
+        }
+        if deadline.fired() {
+            finish_apply_tags(&ui, generation, "FileID didn't finish adding tags. Try again in a moment.");
+            return;
         }
         if received_results == expected_results {
             let status = if failed == 0 {
@@ -935,7 +932,7 @@ fn end_run(ui: &Rc<DeepUi>) {
 
 // ─── Event handling ──────────────────────────────────────────────────────────
 
-fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
+fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
     match ev {
         EngineEvent::DeepAnalyzeStarting(s) => {
             ui.in_flight.set(true);
@@ -1035,7 +1032,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             }
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
-        EngineEvent::Error { kind, .. } if error_ends_deep_run(&kind) => end_run(ui),
+        EngineEvent::Error { kind, .. } if error_ends_deep_run(kind) => end_run(ui),
         EngineEvent::Exited => end_run(ui),
         _ => {}
     }

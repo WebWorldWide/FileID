@@ -25,6 +25,7 @@ struct ScanCard {
     next_step: gtk::Button,
     details: crate::motion::SpringRevealer,
     stats: gtk::Box,
+    stat_rows: RefCell<Vec<StatRow>>,
     scan: gtk::Button,
     scan_content: adw::ButtonContent,
     rescan: gtk::Button,
@@ -33,6 +34,48 @@ struct ScanCard {
     pause: gtk::Button,
     resume: gtk::Button,
     cancel: gtk::Button,
+}
+
+struct StatRow {
+    root: gtk::Box,
+    key: gtk::Label,
+    value: gtk::Label,
+    trailing: gtk::Label,
+}
+
+impl StatRow {
+    fn new() -> Self {
+        let root = hbox(6);
+        let key = label("", &["stat-key"]);
+        key.set_width_chars(8);
+        root.append(&key);
+        let value = label("", &["stat-value"]);
+        root.append(&value);
+        root.append(&spacer());
+        let trailing = label("", &["stat-trailing"]);
+        trailing.set_visible(false);
+        root.append(&trailing);
+        Self { root, key, value, trailing }
+    }
+
+    fn set(&self, key: &str, value: &str, trailing: Option<&str>, tone: Tone) {
+        set_text_if_changed(&self.key, key);
+        set_text_if_changed(&self.value, value);
+        for other in Tone::ALL {
+            self.value.remove_css_class(other.css());
+        }
+        if matches!(tone, Tone::Warning | Tone::Danger) {
+            self.value.add_css_class(tone.css());
+        }
+        set_text_if_changed(&self.trailing, trailing.unwrap_or_default());
+        self.trailing.set_visible(trailing.is_some());
+    }
+}
+
+fn set_text_if_changed(label: &gtk::Label, text: &str) {
+    if label.text() != text {
+        label.set_text(text);
+    }
 }
 
 pub struct Sidebar {
@@ -190,10 +233,16 @@ impl Sidebar {
     }
 
     pub fn set_note(&self, text: Option<&str>) {
+        self.set_note_detail(text, None);
+    }
+
+    /// `detail` is the technical line (code, model id, raw message); it only
+    /// ever appears in the tooltip.
+    pub fn set_note_detail(&self, text: Option<&str>, detail: Option<&str>) {
         match text {
             Some(text) => {
                 self.note_label.set_text(text);
-                self.note_label.set_tooltip_text(Some(text));
+                self.note_label.set_tooltip_text(Some(detail.unwrap_or(text)));
                 self.note.set_visible(true);
             }
             None => self.note.set_visible(false),
@@ -607,6 +656,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         next_step,
         details,
         stats,
+        stat_rows: RefCell::default(),
         scan,
         scan_content,
         rescan,
@@ -662,25 +712,22 @@ impl ScanCard {
         if rows.is_empty() {
             self.details.set_reveal_child(false);
         }
-        while let Some(child) = self.stats.first_child() {
-            self.stats.remove(&child);
-        }
-        for (key, value, trailing, tone) in rows {
-            let row = hbox(6);
-            let key = label(key, &["stat-key"]);
-            key.set_width_chars(8);
-            row.append(&key);
-            let value = label(&value, &["stat-value"]);
-            if matches!(tone, Tone::Warning | Tone::Danger) {
-                set_tone(&value, tone);
+        // Rows are kept and retexted: this runs for every progress update.
+        let mut shown = self.stat_rows.borrow_mut();
+        while shown.len() > rows.len() {
+            if let Some(row) = shown.pop() {
+                self.stats.remove(&row.root);
             }
-            row.append(&value);
-            row.append(&spacer());
-            if let Some(trailing) = trailing {
-                row.append(&label(&trailing, &["stat-trailing"]));
-            }
-            self.stats.append(&row);
         }
+        while shown.len() < rows.len() {
+            let row = StatRow::new();
+            self.stats.append(&row.root);
+            shown.push(row);
+        }
+        for (row, (key, value, trailing, tone)) in shown.iter().zip(rows) {
+            row.set(key, &value, trailing.as_deref(), tone);
+        }
+        drop(shown);
 
         let can_start = status.can_start();
         let running = matches!(controls, ScanControls::Running { .. });

@@ -301,7 +301,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                 if dialog_weak.upgrade().is_none() {
                     break;
                 }
-                match event {
+                match &*event {
                     EngineState::ModelDownloadProgress(progress) => {
                         if let Some(&index) = by_kind.get(progress.model_kind.as_str()) {
                             let row = &rows[index];
@@ -314,14 +314,23 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                         }
                     }
                     EngineState::Error {
+                        kind,
                         model_kind: Some(model_kind),
                         message,
-                        ..
                     } => {
                         if let Some(&index) = by_kind.get(model_kind.as_str()) {
                             let row = &rows[index];
                             row.bar.set_visible(false);
-                            row.state.set_text(&format!("Failed: {message}"));
+                            row.state.set_text(&if kind == "prewarm_cancelled" {
+                                "Download stopped.".to_owned()
+                            } else {
+                                crate::engine_errors::sentence(kind, message)
+                            });
+                            row.state.set_tooltip_text(Some(&crate::engine_errors::detail(
+                                kind,
+                                message,
+                                Some(model_kind),
+                            )));
                         }
                     }
                     _ => {}
