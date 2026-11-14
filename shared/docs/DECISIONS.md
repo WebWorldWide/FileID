@@ -4944,3 +4944,23 @@ A copy of an image normally reaches a worker after the copy that owns the analys
 - **Not chosen:** handing the copy back to the decoder that holds the new owner (keeps every reuse, but adds a second hand-over path between the two pools), or shortening the patience (still a stall, only shorter).
 - **Cost:** in that narrow case one copy per stuck round is analyzed twice. Sharing in the normal case is unchanged.
 - **Evidence:** the pipeline test that failed 1 in 25 runs under 60 busy processes (each failure a full 20 s) passes 500 of 500 with the slowest run at 0.66 s.
+
+## 2026-11-14 — 4B selection check: the count-and-framing question is not adopted
+
+NEXT asked for the Qwen3-VL 4B confirmation question to learn framing (close-up vs wide) and counting, measured on a fresh held-out question set. A variant that makes the model state the number of people and the framing before its yes/no (extra `people` and `framing` fields ahead of `answer`) was run through the Swift engine on the new `selection-v2` set (10 tune and 10 held-out questions, about 28 minutes per run, load 2.6–9.1).
+
+- **Tune:** precision 0.475 → 0.542, recall 0.717 → 0.736.
+- **Held-out:** precision 0.478 → 0.364, recall 0.500 → 0.545. The extra yeses are wrong ones (H01: 10 photos confirmed, 2 of the 3 wanted; H02: 7 confirmed for one wanted photo).
+- **Decision:** keep the current question in both engines. The gain on tune does not carry to held-out, and precision is what a confirmed "yes" is for. The prompt edits stay uncommitted in the `selection-4b` worktree and should be discarded; only the eval script's `--set`, `--split` and ignore-list options are kept.
+- **Next lever, not tried:** framing and counting from evidence the engine already has (face boxes and their size in the frame) instead of asking the model, or the 8B model.
+
+## 2026-11-14 — Production pass: what was left unchanged, and why
+
+The remaining agent-doable follow-ups were read in the code before deciding. None was changed, because each either needs a screen or hardware to be judged, or is larger than its follow-up line suggests. Findings are in NEXT "Production to-do", section 5.
+
+- **GTK pages built on first visit:** not done blind. Pages subscribe to engine events when built; a page first opened mid-job would have to rebuild its state, and that cannot be checked without a Linux desktop. A wrong idle-looking Describe Files page is worse than a slower start.
+- **WinUI shimmer:** the storyboard animates a gradient offset without `EnableDependentAnimation`, so by WinUI's rule it does not run. Turning it on puts one UI-thread animation on every loading tile, which is the cost the Mac removed. Left for a decision on Windows hardware.
+- **Command id on bulk results:** the right fix for GTK's merge matching, but it touches about 30 reply sites per engine, several in digest-reviewed files, and all three conformance suites. Its own change, not a rider.
+- **Location filter JSON:** left as is (see NEXT).
+- **Scan models on the Mac-hosted engine:** the missing eviction call is a two-line change, but the models that matter live in the Swift adapter, which has no unload. Changing only the Rust side would look fixed and free almost nothing, so both halves go together with a measurement.
+- **Merging #331** stays with the owner: the agent session's permission check refuses a merge without review.

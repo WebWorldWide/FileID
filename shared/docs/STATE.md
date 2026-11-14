@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-11-14 — Production pass: one to-do list, follow-ups read in the code, no engine or app code changed (`agent/production-pass`)
+
+Asked for a to-do list of everything left before production quality and for the list to be completed. The list is NEXT "Production to-do (2026-11-14)". Most of it cannot be done from an agent session: the session could not merge a PR (permission check) or capture the Mac's screen, and the release gates need the owner's signatures and hardware. **This branch changes documents and one eval script only; nothing was built or run for it beyond the docs check.**
+
+- **State of the tree:** PR #331 (`agent/engine-tagging-breakthroughs`) has 24 of 24 checks green and merges cleanly; it already contains #332, #333 and #335. `main` is still red on Linux, Windows engine and Windows app until the owner merges it. `agent/production-pass` is stacked on #331's head.
+- **Follow-ups read, not changed** (reasons in DECISIONS, findings in NEXT section 5): scan models that are never freed on the Mac-hosted engine (no unload in the Swift adapter, and the MLX load path skips the eviction call), a command id on bulk results, the WinUI shimmer that should not be animating, GTK pages built at startup, the location filter's JSON.
+- **4B selection question:** the interrupted `selection-4b` experiment had finished its runs. The count-and-framing question raises tune precision (0.475 → 0.542) and lowers held-out precision (0.478 → 0.364), so it is not adopted. The eval script commit (`--set`, `--split`, ignore lists) is cherry-picked here; the prompt edits stay uncommitted in that worktree.
+- **Docs:** NEXT ticks two items that were already done (Mac identical-image reuse, the Swift test Trash root); SHIP's description of the product and CI dated from before the Linux app and the shared engine on the Mac, and now states the current platforms, catalog and workflows.
+
 ## 2026-11-14 — One branch for everything open: main, the main-CI fix and the WinUI audit merged in; merge-time breaks fixed; Chat merges confirm and undo on GTK and WinUI
 
 `agent/engine-tagging-breakthroughs` (PR #331) now also holds origin/main (#334 leftovers, #336 GTK search strength), `agent/main-ci-fix` (#335) and `agent/winui-audit` (#332). PR #331 had stopped running CI because it conflicted with main. Local results on the Mac for the merged tree: Swift release builds (engine, app, AppleKit, test-Trash engine) and 1,115 tests; Rust engine fmt + clippy + 1,420 tests plain and clippy + 1,443 tests with `apple-adapters` (1.98); GTK app clippy + 292 tests; CLI 62 and TUI 99 tests; all 22 policy scripts; the three conformance suites as CI builds them (Swift 92 pass + 1 known, plain Rust 72, app-hosted Rust 95). **Nothing checked on screen; the WinUI app is compiled only by CI.**
