@@ -30,6 +30,22 @@ public class IpcEventTests
     }
 
     [Fact]
+    public void BulkActionResult_CarriesTheCommandId_AndDecodesWithoutIt()
+    {
+        var withId = IpcCoder.Encode(IpcEvent.Now(new BulkActionResultEvent(
+            new BulkActionResult("mergeClusters", 1, 0, System.Array.Empty<BulkActionItem>(), "linux-7"))));
+        Assert.Contains("\"commandID\":\"linux-7\"", withId);
+        var decoded = Assert.IsType<BulkActionResultEvent>(IpcCoder.Decode<IpcEvent>(withId).Payload);
+        Assert.Equal("linux-7", decoded.Result.CommandId);
+
+        var without = IpcCoder.Encode(IpcEvent.Now(new BulkActionResultEvent(
+            new BulkActionResult("mergeClusters", 1, 0, System.Array.Empty<BulkActionItem>()))));
+        Assert.DoesNotContain("commandID", without);
+        var old = Assert.IsType<BulkActionResultEvent>(IpcCoder.Decode<IpcEvent>(without).Payload);
+        Assert.Null(old.Result.CommandId);
+    }
+
+    [Fact]
     public void DiscoveryComplete_DoesNotUse_0Wrapper()
     {
         var ev = IpcEvent.Now(new DiscoveryCompleteEvent(50_000));
