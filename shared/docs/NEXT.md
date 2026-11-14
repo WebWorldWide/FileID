@@ -4,17 +4,19 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## Production to-do (2026-11-14)
 
-Everything between the current tree and a release, in one list. The sections below and `SHIP.md` hold the detail for each line. "Owner" means the item needs the owner's account, signature, screen or hardware; an agent session cannot do it (on 2026-11-14 the session could not capture the Mac's screen or merge a PR).
+Everything between the current tree and a release, in one list. The sections below and `SHIP.md` hold the detail for each line. "Owner" means the item needs the owner's account, signature, screen or hardware; an agent session cannot do it (on 2026-11-14 the session could not take a screenshot, send input or merge a PR).
 
 **1. Land what is built**
 - [ ] **Owner: merge PR #331.** 24 of 24 checks pass and it merges cleanly. `main` is red on Linux, Windows engine and Windows app until it lands; #331 contains the fix (#335) and the WinUI (#332) and GTK (#333) audit branches, which GitHub will then show as merged.
 - [ ] Confirm exact-main CI after the merge, then delete the merged branches and their worktrees in `~/FileIDDev/Worktrees`. The `selection-4b` worktree holds uncommitted prompt edits that were measured and not adopted (DECISIONS 2026-11-14); discard them.
 - [ ] Dependabot #322 (`actions/setup-dotnet` 4.3.1 → 6.1.0): rebase it after #331 and merge only if both Windows app jobs pass, because the main-CI fix pins the 10.0.1xx SDK band in the same workflow.
-- [ ] Merge `agent/production-pass` (this list, the decision record and the selection eval script options; no engine or app code).
+- [ ] **Owner: merge PR #337** (`agent/production-pass`) after #331: this list and the 2026-11-14 code below. It is stacked on #331.
 
-**2. See it running (owner)** — no change since the 2026-11-12 audits has been seen on screen, and the Mac app now starts the shared Rust engine by default.
-- [ ] Mac on-screen pass ("After the 2026-11-13 integration", first item) and the Stage 0–10 owner walks under "Converge macOS onto the shared Rust engine".
-- [ ] Linux desktop pass and Windows hardware pass (same section), plus the per-page checks listed under "Next, in dependency order".
+**2. See it running** — the Mac app was seen for the first time on 2026-11-14 through its new self-capture (below), with the Swift engine only. Everything else is still unseen.
+- [x] Mac app, all ten pages, with no folder, during a scan and after a scan of a generated 65-file library (Swift engine; captures in `~/FileIDDev/scratch/mac-selfshot/captures`). Debug builds picture their own window: `FILEID_SELF_SHOT_DIR=<dir>` (pages, settle time, a folder to scan and a Search & Moments query are optional; see `Core/SelfCapture.swift`). It needs no screen permission and is compiled out of release builds. It cannot show sheets, hover states, scrolled-off content or playback.
+- [ ] The same captures with the bundled Rust engine, which Developer ID builds start by default: needs a non-test `fileidd` and the official ONNX Runtime 1.22.0 dylib on the Mac (Stage 10 owner step 1).
+- [ ] Owner, Mac: the interactive walk ("After the 2026-11-13 integration", first item) and the Stage 0–10 owner walks under "Converge macOS onto the shared Rust engine". Captures do not replace clicking through sheets, Undo and drag and drop.
+- [ ] Linux desktop pass and Windows hardware pass (same section), plus the per-page checks listed under "Next, in dependency order". The GTK app runs on the Mac through Homebrew GTK and has the same self-capture (`FILEID_SELF_SHOT`), which is how its pages were compared on 2026-11-14; that is not a Linux desktop.
 
 **3. Release gates (owner; `SHIP.md`)**
 - [ ] macOS: official ONNX Runtime 1.22.0 archive in place, notarized Developer ID DMG, signed TestFlight build, App Store Connect answers (export compliance, privacy questionnaire, age rating, screenshots, review notes), sandbox acceptance of the Rust engine before the App Store gate lifts.
@@ -24,19 +26,33 @@ Everything between the current tree and a release, in one list. The sections bel
 
 **4. Measurements (quiet Mac or the Windows GPU PC)** — the "Measure" line under "After the 2026-11-13 integration", "Tagging accuracy and scan speed", the Stage 10 quiet-machine re-time, and the ONNX Runtime hardware checks.
 
-**5. Code follow-ups an agent can do** (looked at on 2026-11-14; none was changed blind)
-- [ ] **Scan models are never freed on the Mac-hosted engine.** `Resident::acquire` and `MlxLease::resident` in `apple/vlm.rs` reserve memory and load a description model without calling `scan_models::release_for_other_models()`; the llama.cpp paths (`models/vlm.rs`, `models/vlm_server.rs`) call it. The larger part: `ScanCLIP` and `ScanRamPlus` in `FileIDAppleKit/ScanModels.swift` keep their MLX models for the life of the process and the adapter has load functions only, so the 120 s idle period frees just what the Rust side holds. Needs an unload entry point in the adapter (reviewed `ffi.rs` digest), a guard so a running scan keeps its models, calls from the idle park and the MLX load path, and a before/after footprint measurement with a real scan. Whether the Swift engine frees its own copies was not checked.
-- [ ] **Command id on bulk results.** `IPCCommand.id` is documented as echoed in replies, but no event carries it. Add an optional `commandID` to `BulkActionResult` (IPC 1.28, additive): about 30 construction sites in the Rust engine (`bulk.rs`, `trash.rs`, `scan.rs`, `server.rs`, `conformance.rs`), the Swift engine and the C# DTO. GTK's `tabs/merge_ledger.rs` can then match a merge result by id instead of reading the two people out of the message, which breaks if the sentence is reworded.
+**5. Code follow-ups** (state after the 2026-11-14 pass; details in STATE and DECISIONS of that date)
+- [x] **Scan models freed on the Mac-hosted engine.** The adapter has an unload, the Rust engine counts holders and unloads with the last one, and an MLX description model load frees idle scan models first. Engine footprint after the idle period: 1,304–1,316 MB before, 206–891 MB after (8 runs).
+  - [ ] In most runs about 655 MB of MLX arrays stays live after the unload (IOAccelerator memory; `Memory.activeMemory` 655 MB with the cache at 0), although the models are released. Suspected, not proven: MLX's compile cache keeps RAM++'s weights as constants (`RamPlusMLX` builds its forward pass with `compile`). A second cache clear and a 30 s wait do not help.
+  - [ ] The Swift engine keeps CLIP and RAM++ for the life of the process (`MobileCLIPService`, `RamPlusService` have no unload). Port the same idle release, or leave it to the engine's retirement.
+- [x] **Command id on bulk results** (IPC 1.28.0, optional `commandID`): both engines stamp it at one point; GTK matches merge results by it.
+  - [ ] The Mac app (`CatalogWrites.request`, `EngineClient.bulkActionResult(after:prefix:)`) and WinUI (`WaitForBulkActionResultAsync`, one `LastBulkAction` slot) still match a bulk result by action name, so two same-action requests in flight can be confused. Send the id and match on it, keeping today's match as the fallback.
+- [x] **WinUI Library search summary** ("3 good matches, 1 weaker."), compiled and tested by CI; check it on Windows. It shows only when the helper ranks, so not with a kind filter.
+- [x] **GTK Ctrl+Z** covers People merges, Best Takes Trash, Organize Folders moves, smart renames, Library bulk rename and tags, and finished Chat cards with an undo. Recording rules are unit-tested; none was clicked through. People rename has no engine undo.
+- [ ] **GTK pages built on first visit**: done on `agent/gtk-lazy` (job replay for late pages, Organize Folders kept at startup, 313 tests), not merged. Launch time before and after was within noise on a loaded machine; measure on a quiet one and merge only if it is a real gain.
+- [x] **Best Takes: copies are not takes.** Byte-identical files count as one try in automatic groups, and a reason chip needs a rival that scores lower (both engines, shared conformance case).
+  - [ ] A hand-made group can still hold copies, and the library-wide proposals match copies by stored hash alone (sampled above 16 MB) while automatic groups require a full hash; align them.
+- [x] **Mac app, from the first captures:** file counts refresh when a scan ends on any page (they stayed at 0 unless Library was open); Search & Moments and Best Takes buttons no longer wrap; the Library never shows fewer total files than rows.
+  - [ ] Seen, not fixed: `.docx` tiles are blank white with a badge; on Settings the Browse/Analyze/Act switcher keeps the last area highlighted.
+- [ ] **Found by the soak (shared Rust engine):**
+  - Organize Folders planning took 40–86 s at just over 5,000 files and under 2 s just below, on the library the soak left behind (a fresh 5,400-file library takes 0.7 s). 5,000 is where clustering switches to HNSW (`restructure_semantic.rs`). Reproduce with `shared/scripts/e2e/soak_plan_cliff.py`.
+  - A 204-byte malformed m4a (`hdlr` box of size 0 inside `mdia`) makes the audio library panic; the scan catches it and catalogs the file. Add the guard in `container_guard`.
+  - Rows for files that are gone are hidden and never removed, with their tags and text: 6,128 hidden rows beside about 5,050 live after 208 rounds, catalog 3.7 → 22 MB. Needs a retention rule (owner decision, section 6).
+  - Swift engine: nine `scan_already_queued` errors in a 57-round soak that the driver did not cause on purpose; not reproduced.
 - [ ] **WinUI shimmer.** `ShimmerView.xaml` animates `GradientStop.Offset` without `EnableDependentAnimation="True"`; WinUI does not run dependent animations unless that is set, so the band should be standing still at 0.6 opacity (not confirmed on screen). Enabling it animates on the UI thread for every loading tile, and the Mac dropped its per-tile shimmer for scroll cost. Decide on Windows hardware: a deliberately static placeholder, or a fixed band moved by a `RenderTransform`.
-- [ ] **GTK builds all ten pages at startup** (`window.rs`). Building a page on first visit is simple for the widgets, but pages subscribe to engine events when built, so a page first opened in the middle of a job must rebuild its state from the engine. Do it with a Linux desktop to check Deep Analyze, Chat and People opened mid-job.
 - [ ] Engine, next catalog version (batch them, each bump makes older apps refuse the library): failure memory in its own column, a `files(file_ref)` index, the "careful read owed" flag from the Apple adapter. Windows OCR engine reuse and directory-listing discovery need a Windows build.
-- [ ] Apps: the WinUI Library has no "N good matches, M weaker" summary (Mac and GTK do); other GTK pages should record into `changes.rs` so Ctrl+Z covers them.
 - [ ] Best Takes: queue the grouping job after scans; calibrate thresholds on labelled fixtures.
 - [ ] Face clustering: mutual-kNN or density-gated edges for pass 1 (`BUGS.md`, the only open defect), with a larger labelled set.
 - [ ] Restructure P2–P4 (`RESTRUCTURE.md`); retire the Swift engine one release after the default flip.
+- [ ] Rerun the soak (`shared/scripts/e2e/soak.py`, both flavors) before each release; add a round with models installed (hybrid search and tagging were not soaked).
 - Not doing: the location filter (`roots::clause`) reads its bounds with `json_extract` per row. SQLite keeps the parsed form of a repeated JSON text, so the remaining cost should be small, and a rewrite makes every caller bind 3 + 3n parameters. Not profiled; revisit only if a profile shows it.
 
-**6. Decisions waiting for the owner** — Spotlight indexing default (on, with a switch); the RAM++ threshold cap (recall 0.420 → 0.442 for precision 0.789 → 0.757, not applied); catalog v35 means an older installed app refuses a library this build has opened; Gemma 4's licence is unverified.
+**6. Decisions waiting for the owner** — a retention rule for hidden rows of files that are gone (see section 5); Spotlight indexing default (on, with a switch); the RAM++ threshold cap (recall 0.420 → 0.442 for precision 0.789 → 0.757, not applied); catalog v35 means an older installed app refuses a library this build has opened; Gemma 4's licence is unverified.
 
 ## Backlog plan (2026-11-03, from four read-only gap analyses)
 

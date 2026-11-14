@@ -130,7 +130,7 @@ tens of thousands of files locally. Three desktop apps, plus a CLI and a TUI:
 - **Windows** — shared Rust engine (`fileid-engine`) + WinUI 3 / .NET 10 C# app.
 - **Linux** — shared Rust engine + GTK4 / libadwaita app (Flatpak first).
 
-App and engine talk newline-delimited JSON over stdio (IPC 1.27.0); the engine owns
+App and engine talk newline-delimited JSON over stdio (IPC 1.28.0); the engine owns
 a SQLite WAL catalog (schema v35, the same in the Swift GRDB and Rust rusqlite
 stores, so a library opens in either engine).
 
