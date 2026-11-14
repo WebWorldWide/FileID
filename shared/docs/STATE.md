@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-13 — GTK Library shows the search strength summary (`agent/gtk-search-strength`)
+
+- **GTK:** Library text searches of three or more characters now also ask the engine (embed the text, then a hybrid catalog search), like the Mac. The grid takes the engine's order (good matches first) and the count shows its summary, for example "3 good matches, 1 weaker.". With no embedding, no reply or no message, the keyword rows and file count stay.
+- **Tests:** three unit tests in `tabs/library.rs` (singular, plural, zero weaker, zero good, no message, three-character rule). WinUI shows no summary yet.
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".
