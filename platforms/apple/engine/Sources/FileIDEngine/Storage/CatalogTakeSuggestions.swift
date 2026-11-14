@@ -22,7 +22,7 @@ enum CatalogTakeSuggestions {
         }
         let scope = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
         let rows = try Row.fetchCursor(db, sql: """
-            SELECT f.id, f.path_text, f.created_at, f.content_hash, e.embedding
+            SELECT f.id, f.path_text, f.created_at, f.content_hash, f.size_bytes, e.embedding
             FROM files f
             JOIN clip_embeddings e ON e.file_id=f.id AND e.model=?
             WHERE f.id IN (SELECT value FROM json_each(?))
@@ -34,7 +34,7 @@ enum CatalogTakeSuggestions {
 
         var active: [Group] = []
         var finished: [Group] = []
-        var seenHashes: Set<Data> = []
+        var seenContents: Set<CatalogTakeAuto.Content> = []
         while let row = try rows.next() {
             let time: Double = row["created_at"]
             let blob: Data = row["embedding"]
@@ -43,7 +43,8 @@ enum CatalogTakeSuggestions {
             let vector = storedVector.map { Float(Double($0) / norm) }
             let member = CatalogTakeGroupMember(fileID: row["id"], path: row["path_text"])
             let hash: Data? = row["content_hash"]
-            if let hash, !seenHashes.insert(hash).inserted { continue }
+            let size: Int64? = row["size_bytes"]
+            if let content = CatalogTakeAuto.contentIdentity(hash: hash, size: size), !seenContents.insert(content).inserted { continue }
             while let first = active.first, time - first.anchorTime > maximumGap {
                 finished.append(active.removeFirst())
             }

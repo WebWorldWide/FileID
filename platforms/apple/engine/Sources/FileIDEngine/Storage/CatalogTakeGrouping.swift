@@ -242,13 +242,14 @@ actor CatalogTakeGrouping {
               AND NOT EXISTS (SELECT 1 FROM catalog_event_files ef WHERE ef.file_id=f.id)
             ORDER BY f.id
             """, arguments: [model, dimension * 4])
-        var hashes = Set<Data>()
+        var contents = Set<CatalogTakeAuto.Content>()
         var files: [(String, File)] = []
         while let row = try rows.next() {
             let time: Double = row["created_at"]
             guard time.isFinite else { continue }
             let hash: Data? = row["content_hash"]
-            if let hash, !hashes.insert(hash).inserted { continue }
+            let size: Int64? = row["size_bytes"]
+            if let content = CatalogTakeAuto.contentIdentity(hash: hash, size: size), !contents.insert(content).inserted { continue }
             files.append(file(row, time: time, subjects: subjects))
         }
         return files
