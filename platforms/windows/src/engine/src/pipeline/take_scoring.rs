@@ -937,7 +937,7 @@ mod tests {
     fn identical_tries_get_no_chip() {
         let one = signals(&pattern(96, 64, 0, 0), vec![], None);
         let scored = score(&[shot(1, one.clone()), shot(2, one)]);
-        assert_eq!(scored[0].score, scored[1].score);
+        assert!(scored[0].score.total_cmp(&scored[1].score).is_eq());
         assert!(scored.iter().all(|q| q.reasons.is_empty()), "{:?}", scored.iter().map(|q| &q.reasons).collect::<Vec<_>>());
         assert!(scored[0].recommended);
     }
