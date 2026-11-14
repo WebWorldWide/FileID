@@ -118,6 +118,12 @@ fn execute_with_index(
             return Ok(result);
         }
     }
+    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
+    if ["search", "detail", "jobs"].contains(&request.action.as_str())
+        && let Some(mut reader) = crate::db::reader_for(&database)?
+    {
+        return execute(&mut reader, &request);
+    }
     let mut conn = database.lock();
     execute(&mut conn, &request)
 }
@@ -137,11 +143,10 @@ fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result
         super::catalog_take_auto::compute_with(job, &mut workers)
     };
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
-    let scored = {
-        let mut faces = super::catalog_take_auto::YuNetFaces::load();
+    let scored = super::catalog_take_auto::YuNetFaces::with_loaded(|faces| -> Result<_> {
         let job = prepare(&database.lock(), ids, faces.id())?;
-        super::catalog_take_auto::compute(job, &mut faces)
-    };
+        Ok(super::catalog_take_auto::compute(job, faces))
+    })?;
     if let Err(error) = store(&database.lock(), &scored) {
         tracing::warn!(%error, "take scores were not cached");
     }

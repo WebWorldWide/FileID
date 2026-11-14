@@ -193,27 +193,42 @@ fn exact_hash_pool() -> &'static rayon::ThreadPool {
     })
 }
 
-/// Full-file SHA-256 grouping. Only files sharing an indexed size can be
-/// duplicates, so singleton sizes are never read. `should_cancel` is polled on
-/// the calling thread; once it fires, unread files count as skipped.
-pub fn group_exact_duplicates_until(
-    candidates: Vec<ExactDuplicateCandidate>,
-    should_cancel: impl Fn() -> bool,
-) -> ExactDuplicateGrouping {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let mut skipped = 0;
-    let mut by_size: BTreeMap<u64, Vec<ExactDuplicateCandidate>> = BTreeMap::new();
-    for candidate in candidates {
-        match u64::try_from(candidate.indexed_size) {
-            Ok(size) => by_size.entry(size).or_default().push(candidate),
-            Err(_) => skipped += 1,
-        }
+/// Files above this size are first compared by a head and tail sample; only
+/// files whose samples agree are read in full.
+const SAMPLE_MIN_BYTES: u64 = 1024 * 1024;
+const SAMPLE_CHUNK: usize = 64 * 1024;
+
+/// SHA-256 of the first and last `SAMPLE_CHUNK` bytes. Never proof of equality.
+fn sample_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
+    let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "file type or size changed before sampling"));
     }
-    let work: Vec<(u64, ExactDuplicateCandidate)> = by_size
-        .into_iter()
-        .filter(|(_, files)| files.len() > 1)
-        .flat_map(|(size, files)| files.into_iter().map(move |file| (size, file)))
-        .collect();
+    let mut sha = sha2::Sha256::new();
+    let mut buffer = vec![0u8; SAMPLE_CHUNK];
+    let head = SAMPLE_CHUNK.min(expected_size as usize);
+    file.read_exact(&mut buffer[..head])?;
+    sha.update(&buffer[..head]);
+    let tail = SAMPLE_CHUNK.min((expected_size - head as u64) as usize);
+    if tail > 0 {
+        file.seek(SeekFrom::End(-(tail as i64)))?;
+        file.read_exact(&mut buffer[..tail])?;
+        sha.update(&buffer[..tail]);
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&sha.finalize());
+    Ok(hash)
+}
+
+/// Runs `hash` over `work` on the exact-hash pool. `should_cancel` is polled on
+/// the calling thread; items not reached after it fires stay `None`.
+fn hash_in_pool<T: Sync>(
+    work: &[T],
+    should_cancel: &impl Fn() -> bool,
+    hash: impl Fn(&T, &std::sync::atomic::AtomicBool) -> Option<[u8; 32]> + Sync,
+) -> Vec<Option<[u8; 32]>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let hashes = parking_lot::Mutex::new(vec![None; work.len()]);
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
@@ -223,12 +238,10 @@ pub fn group_exact_duplicates_until(
         for _ in 0..pool.current_num_threads().min(work.len()) {
             scope.spawn(|_| loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some((size, candidate)) = work.get(index) else { break };
+                let Some(item) = work.get(index) else { break };
                 if !cancelled.load(Ordering::Relaxed) {
-                    let hash = exact_file_sha256_until(&candidate.path, *size, || {
-                        cancelled.load(Ordering::Relaxed)
-                    });
-                    hashes.lock()[index] = hash.ok();
+                    let hash = hash(item, &cancelled);
+                    hashes.lock()[index] = hash;
                 }
                 done.fetch_add(1, Ordering::Release);
             });
@@ -240,9 +253,52 @@ pub fn group_exact_duplicates_until(
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     });
+    hashes.into_inner()
+}
+
+/// Full-file SHA-256 grouping. Only files sharing an indexed size can be
+/// duplicates, so singleton sizes are never read; among large same-size files,
+/// only those whose head and tail samples also agree are read in full. Groups
+/// are always formed from the full digest. `should_cancel` is polled on the
+/// calling thread; once it fires, unread files count as skipped.
+pub fn group_exact_duplicates_until(
+    candidates: Vec<ExactDuplicateCandidate>,
+    should_cancel: impl Fn() -> bool,
+) -> ExactDuplicateGrouping {
+    use std::sync::atomic::Ordering;
+    let mut skipped = 0;
+    let mut by_size: BTreeMap<u64, Vec<ExactDuplicateCandidate>> = BTreeMap::new();
+    for candidate in candidates {
+        match u64::try_from(candidate.indexed_size) {
+            Ok(size) => by_size.entry(size).or_default().push(candidate),
+            Err(_) => skipped += 1,
+        }
+    }
+    let (large, mut work): (Vec<_>, Vec<_>) = by_size
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .flat_map(|(size, files)| files.into_iter().map(move |file| (size, file)))
+        .partition(|(size, _)| *size > SAMPLE_MIN_BYTES);
+    let samples = hash_in_pool(&large, &should_cancel, |(size, candidate), _| sample_sha256(&candidate.path, *size).ok());
+    let mut by_sample: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> = BTreeMap::new();
+    for ((size, candidate), sample) in large.into_iter().zip(samples) {
+        match sample {
+            Some(sample) => by_sample.entry((size, sample)).or_default().push(candidate),
+            None => skipped += 1,
+        }
+    }
+    work.extend(
+        by_sample
+            .into_iter()
+            .filter(|(_, files)| files.len() > 1)
+            .flat_map(|((size, _), files)| files.into_iter().map(move |file| (size, file))),
+    );
+    let hashes = hash_in_pool(&work, &should_cancel, |(size, candidate), cancelled| {
+        exact_file_sha256_until(&candidate.path, *size, || cancelled.load(Ordering::Relaxed)).ok()
+    });
     let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
         BTreeMap::new();
-    for ((size, candidate), hash) in work.into_iter().zip(hashes.into_inner()) {
+    for ((size, candidate), hash) in work.into_iter().zip(hashes) {
         match hash {
             Some(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
             None => skipped += 1,
@@ -484,6 +540,44 @@ mod tests {
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
         let _ = std::fs::remove_file(different);
+    }
+
+    #[test]
+    fn large_files_are_sampled_first_and_grouped_only_by_the_full_digest() {
+        const SIZE: usize = 3 * 1024 * 1024;
+        let base: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+        let mut middle = base.clone();
+        middle[SIZE / 2] ^= 1;
+        let mut head = base.clone();
+        head[10] ^= 1;
+        let mut tail = base.clone();
+        tail[SIZE - 10] ^= 1;
+        let paths: Vec<PathBuf> = [&base, &base, &middle, &head, &tail].iter().map(|bytes| tmp_with(bytes)).collect();
+        let size = SIZE as u64;
+        assert_eq!(sample_sha256(&paths[0], size).unwrap(), sample_sha256(&paths[2], size).unwrap(), "a middle difference is invisible to the sample");
+        assert_ne!(sample_sha256(&paths[0], size).unwrap(), sample_sha256(&paths[3], size).unwrap());
+        assert_ne!(sample_sha256(&paths[0], size).unwrap(), sample_sha256(&paths[4], size).unwrap());
+        assert!(sample_sha256(&paths[0], size - 1).is_err(), "a changed size is refused");
+        let mut candidates: Vec<ExactDuplicateCandidate> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| ExactDuplicateCandidate { id: index as i64 + 1, path: path.clone(), indexed_size: SIZE as i64 })
+            .collect();
+        candidates.push(ExactDuplicateCandidate { id: 9, path: PathBuf::from("/nonexistent/fileid-large"), indexed_size: SIZE as i64 });
+        let grouping = group_exact_duplicates(candidates.clone());
+        assert_eq!(grouping.skipped, 1, "the missing file");
+        assert_eq!(grouping.groups.len(), 1);
+        assert_eq!(grouping.groups[0].files.iter().map(|file| file.id).collect::<Vec<_>>().len(), 2);
+        let mut ids: Vec<i64> = grouping.groups[0].files.iter().map(|file| file.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2], "the sample-equal file with a different middle is not a duplicate");
+        assert_eq!(grouping.groups[0].hash, exact_file_sha256(&paths[0], size).unwrap());
+        let cancelled = group_exact_duplicates_until(candidates, || true);
+        assert!(cancelled.groups.is_empty());
+        assert_eq!(cancelled.skipped, 6);
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

@@ -183,9 +183,8 @@ fn prepare_unlocked(database: &Mutex<Connection>, request: &ChatRequest) -> Resu
 }
 
 fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, semantic: &Semantic) -> Result<Prepared> {
-    let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
-    match path {
-        Some(path) => prepare_send(&crate::db::open_read(&path)?, request, semantic),
+    match crate::db::reader_for(database)? {
+        Some(reader) => prepare_send(&reader, request, semantic),
         None => prepare_send(&database.lock(), request, semantic),
     }
 }

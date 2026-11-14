@@ -392,6 +392,43 @@ impl YuNetFaces {
     }
 }
 
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+static TAKE_FACES: crate::models::idle::IdleSlot<YuNetFaces> =
+    crate::models::idle::IdleSlot::new("take faces", crate::models::idle::PARK_AFTER);
+
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+impl YuNetFaces {
+    /// Runs `work` with the face models, kept loaded between requests and
+    /// parked when idle. Nothing is kept while the detector is not installed,
+    /// so installing it takes effect on the next request.
+    pub fn with_loaded<R>(work: impl FnOnce(&mut Self) -> R) -> R {
+        let mut work = Some(work);
+        if !crate::coordinator::process_gpu_device_removed() {
+            let held = TAKE_FACES.with(
+                || {
+                    let loaded = Self::load();
+                    anyhow::ensure!(loaded.model.is_some(), "face detector not installed");
+                    Ok(loaded)
+                },
+                |faces| {
+                    if faces.mesh.is_none() {
+                        faces.mesh = crate::models::face_mesh::default_weights_path()
+                            .ok()
+                            .filter(|path| path.exists())
+                            .and_then(|path| crate::models::face_mesh::FaceMesh::load(path).ok());
+                    }
+                    work.take().map(|work| work(faces))
+                },
+            );
+            if let Ok(Some(result)) = held {
+                return result;
+            }
+        }
+        let mut fresh = Self::load();
+        (work.take().expect("not run by the held models"))(&mut fresh)
+    }
+}
+
 impl TakeFaceAnalyzer for YuNetFaces {
     fn id(&self) -> &str {
         match (&self.model, &self.mesh) {

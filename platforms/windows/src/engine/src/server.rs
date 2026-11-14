@@ -320,17 +320,25 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
-    // Structural integrity check on the now-open writer. A torn page or a
+    // Emit `ready` first thing so the app sidebar can transition out of
+    // .starting. The handshake is one-way; the app doesn't ack.
+    commands::hardware::emit_ready(&sink).await;
+
+    // Structural integrity check, after `ready` and on its own read-only
+    // connection so a large library never delays launch. A torn page or a
     // truncated file (power-loss mid-checkpoint, failing disk) would otherwise
-    // surface later as opaque per-query failures; quick_check catches it once,
-    // up front, with actionable guidance. Non-fatal — the engine keeps running
-    // so the user can wipe + rescan to rebuild (the DB may be partly readable).
-    if let Some(conn) = db_conn.as_ref() {
-        // Bind in its own statement so the lock guard drops at the semicolon —
-        // a temporary in an `if let` scrutinee would otherwise be held across
-        // the `.await` below (clippy::await_holding_lock).
-        let verdict = db::quick_check(&conn.lock());
-        if let Err(detail) = verdict {
+    // surface later as opaque per-query failures. Non-fatal — the engine keeps
+    // running so the user can wipe + rescan to rebuild.
+    let integrity_check = Arc::new(db::IntegrityCheck::default());
+    if db_conn.is_some() {
+        let check = integrity_check.clone();
+        let sink = sink.clone();
+        let db_path = db_path.clone();
+        tokio::spawn(async move {
+            let path = db_path.clone();
+            let Ok(Some(detail)) = tokio::task::spawn_blocking(move || check.run(&path)).await else {
+                return;
+            };
             tracing::error!(%detail, "database failed PRAGMA quick_check");
             sink.send(EngineError::new(
                 "db_integrity_check_failed",
@@ -339,12 +347,10 @@ async fn async_main() -> Result<()> {
             .with_path(db_path.display().to_string())
             .into_event())
             .await;
-        }
+        });
+    } else {
+        integrity_check.skip();
     }
-
-    // Emit `ready` first thing so the app sidebar can transition out of
-    // .starting. The handshake is one-way; the app doesn't ack.
-    commands::hardware::emit_ready(&sink).await;
 
     // Coordinated shutdown signal. set() once, awaited by the stdio loop +
     // the parent watchdog so they cooperate on exit.
@@ -610,6 +616,11 @@ async fn async_main() -> Result<()> {
     if let Some(index) = catalog_index {
         index.close();
     }
+    {
+        let check = integrity_check.clone();
+        let _ = tokio::task::spawn_blocking(move || check.cancel()).await;
+    }
+    db::close_readers();
     if mutation_guard.is_some() {
         let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
             let guard = conn_arc.lock();

@@ -1060,7 +1060,30 @@ where
 
 pub(crate) async fn handle_list(sink: Sink, db: Option<Writer>, payload: ListFaceReviewPayload) {
     let request_id = payload.request_id.clone();
-    run(sink, db, request_id, "list", "The review list could not be read.", move |conn| list(conn, &payload)).await;
+    if !valid_request_id(&request_id) {
+        invalid(&sink).await;
+        return;
+    }
+    let Some(db) = db else {
+        sink.send(reply_event(failed(&request_id, "list", "FileID couldn't open its library. Quit and reopen FileID."))).await;
+        return;
+    };
+    // Listing only reads, so it runs on a pooled read-only connection instead of the writer.
+    let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<FaceReviewPage> {
+        match crate::db::reader_for(&db) {
+            Ok(Some(reader)) => list(&reader, &payload),
+            _ => list(&db.lock(), &payload),
+        }
+    })
+    .await;
+    let page = match result {
+        Ok(Ok(page)) => page,
+        other => {
+            tracing::warn!(failed = ?other.map(|inner| inner.err()), "face review list failed");
+            failed(&request_id, "list", "The review list could not be read.")
+        }
+    };
+    sink.send(reply_event(page)).await;
 }
 
 pub(crate) async fn handle_resolve(sink: Sink, db: Option<Writer>, payload: ResolveFaceReviewPayload) {
