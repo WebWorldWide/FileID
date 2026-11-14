@@ -3738,6 +3738,7 @@ mod tests {
         ok: bool,
     ) -> BulkActionResult {
         BulkActionResult {
+            command_id: None,
             action: action.into(),
             succeeded,
             failed,

@@ -671,6 +671,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             shortcut_undo_token: None,
         })),
         EventPayload::BulkActionResult(Wrap::new(BulkActionResult {
+            command_id: None,
             action: "trashFiles:00000000-0000-0000-0000-000000000000".into(),
             succeeded: 2,
             failed: 1,
@@ -780,6 +781,7 @@ fn mark_persons_different_bulk_result_matches_schema() {
     let root = load_schema();
     let event = IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
         BulkActionResult {
+            command_id: None,
             action: "markPersonsDifferent".into(),
             succeeded: 1,
             failed: 0,

@@ -83,6 +83,7 @@ pub fn route_events_to_stderr(logs_dir: &std::path::Path) -> std::io::Result<()>
 #[derive(Clone)]
 pub struct Sink {
     tx: mpsc::Sender<IpcEvent>,
+    command_id: Option<std::sync::Arc<str>>,
 }
 
 impl Sink {
@@ -108,12 +109,13 @@ impl Sink {
             }
         });
 
-        (Self { tx }, writer)
+        (Self { tx, command_id: None }, writer)
     }
 
     /// Send an event. Blocks the caller's task if the channel is full —
     /// applying backpressure so the engine slows down rather than dropping.
     pub async fn send(&self, event: IpcEvent) {
+        let event = self.stamped(event);
         if self.tx.send(event).await.is_err() {
             // Receiver dropped — sink is shutting down. Silent: the engine
             // is exiting anyway.
@@ -124,7 +126,21 @@ impl Sink {
     /// the channel is full; logs a warning at most once per N drops (caller
     /// is responsible for the dedup if it cares).
     pub fn try_send(&self, event: IpcEvent) -> Result<(), mpsc::error::TrySendError<IpcEvent>> {
-        self.tx.try_send(event)
+        self.tx.try_send(self.stamped(event))
+    }
+
+    /// A handle to the same channel that stamps `command_id` on every
+    /// `BulkActionResult` it sends, so each reply, refusal and result from a
+    /// spawned task carries the id of the command it answers (schema 1.28.0).
+    pub fn for_command(&self, id: &str) -> Self {
+        Self { tx: self.tx.clone(), command_id: Some(id.into()) }
+    }
+
+    fn stamped(&self, mut event: IpcEvent) -> IpcEvent {
+        if let (Some(id), super::EventPayload::BulkActionResult(result)) = (&self.command_id, &mut event.payload) {
+            result.inner.command_id.get_or_insert_with(|| id.to_string());
+        }
+        event
     }
 
     /// Test-only sink backed by a caller-held receiver instead of the stdout
@@ -133,7 +149,7 @@ impl Sink {
     #[cfg(test)]
     pub(crate) fn channel_for_test(capacity: usize) -> (Self, mpsc::Receiver<IpcEvent>) {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
-        (Self { tx }, rx)
+        (Self { tx, command_id: None }, rx)
     }
 }
 

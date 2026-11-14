@@ -1,7 +1,9 @@
-// Which page asked for each `mergeClusters`. The result carries no request
-// id, so every sender files its merge here and each listener asks who a
+// Which page asked for each `mergeClusters`. Every sender files its merge
+// here with the id of the command it sent, and each listener asks who a
 // result belongs to; a Chat merge can then never be filed against a People
-// undo record (or the other way round).
+// undo record (or the other way round). A result matches by the command id it
+// echoes (schema 1.28.0); one from a helper that does not echo it is matched
+// by the two people its sentence names.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -24,9 +26,15 @@ pub(super) struct Entry {
     pub destination: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waiting {
+    command_id: String,
+    entry: Entry,
+}
+
 #[derive(Default)]
 struct Ledger {
-    pending: VecDeque<Entry>,
+    pending: VecDeque<Waiting>,
     /// The last result resolved, kept alive so every listener of that one
     /// event gets the same answer.
     last: Option<(Rc<EngineEvent>, Option<Entry>)>,
@@ -36,8 +44,10 @@ thread_local! {
     static LEDGER: RefCell<Ledger> = RefCell::default();
 }
 
-pub(super) fn sent(owner: Owner, source: i64, destination: i64) {
-    LEDGER.with_borrow_mut(|ledger| ledger.pending.push_back(Entry { owner, source, destination }));
+pub(super) fn sent(owner: Owner, command_id: String, source: i64, destination: i64) {
+    LEDGER.with_borrow_mut(|ledger| {
+        ledger.pending.push_back(Waiting { command_id, entry: Entry { owner, source, destination } });
+    });
 }
 
 /// The merge this `mergeClusters` result answers, if one of ours.
@@ -63,18 +73,24 @@ pub(super) fn clear() {
     LEDGER.with_borrow_mut(|ledger| ledger.pending.clear());
 }
 
-/// A result that names its two people is matched by them; one that names
-/// none (a failure) answers the oldest merge still waiting.
-fn resolve(pending: &mut VecDeque<Entry>, result: &BulkActionResult) -> Option<Entry> {
-    let named = result.messages.iter().find_map(|item| item.message.as_deref().and_then(named_pair));
-    let index = match named {
-        Some((source, destination)) => {
-            pending.iter().position(|entry| entry.source == source && entry.destination == destination)?
+/// A result that echoes a command id is matched by it, and belongs to no one
+/// here when we sent no such command. One without an id that names its two
+/// people is matched by them; one that names none (a failure) answers the
+/// oldest merge still waiting.
+fn resolve(pending: &mut VecDeque<Waiting>, result: &BulkActionResult) -> Option<Entry> {
+    let index = if let Some(id) = result.command_id.as_deref() {
+        pending.iter().position(|waiting| waiting.command_id == id)?
+    } else {
+        let named = result.messages.iter().find_map(|item| item.message.as_deref().and_then(named_pair));
+        match named {
+            Some((source, destination)) => pending
+                .iter()
+                .position(|waiting| waiting.entry.source == source && waiting.entry.destination == destination)?,
+            None if pending.is_empty() => return None,
+            None => 0,
         }
-        None if pending.is_empty() => return None,
-        None => 0,
     };
-    pending.remove(index)
+    pending.remove(index).map(|waiting| waiting.entry)
 }
 
 fn named_pair(message: &str) -> Option<(i64, i64)> {
@@ -98,6 +114,7 @@ mod tests {
 
     fn result(ok: bool, message: &str) -> BulkActionResult {
         BulkActionResult {
+            command_id: None,
             action: "mergeClusters".into(),
             succeeded: u32::from(ok),
             failed: u32::from(!ok),

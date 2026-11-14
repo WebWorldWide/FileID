@@ -694,6 +694,7 @@ pub(crate) async fn handle_restore_from_trash(
             crate::shell::trash::forget_restore_record(std::path::Path::new(&original));
         }
         Ok(BulkActionResult {
+            command_id: None,
             action: "restoreFromTrash".into(),
             succeeded,
             failed,
@@ -1221,6 +1222,7 @@ pub(crate) async fn handle_revert_merge(
             )
         };
         Ok(BulkActionResult {
+            command_id: None,
             action: "revertMerge".into(),
             succeeded: u32::from(complete),
             failed: u32::from(!complete),

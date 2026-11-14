@@ -222,12 +222,14 @@ mod tests {
     fn the_first_failure_is_the_first_unsuccessful_message() {
         let results = vec![
             BulkActionResult {
+                command_id: None,
                 action: "reassignFace".into(),
                 succeeded: 1,
                 failed: 0,
                 messages: vec![item(true, None)],
             },
             BulkActionResult {
+                command_id: None,
                 action: "reassignFace".into(),
                 succeeded: 0,
                 failed: 1,
