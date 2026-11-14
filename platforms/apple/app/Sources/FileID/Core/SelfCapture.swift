@@ -77,13 +77,13 @@ enum SelfShot {
             if let size = plan.windowSize { window()?.setContentSize(size) }
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
             if let folder = plan.folder {
-                await waitUntil(timeout: 5) { store.totalFiles > 0 }
+                await waitUntil(timeout: 3) { store.totalFiles > 0 }
                 let needsScan = store.totalFiles == 0
                 openFolder(folder, needsScan)
                 if needsScan {
                     await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
                     navigate(plan.pages.first ?? MainWindow.Tab.library.rawValue)
-                    try? await Task.sleep(for: .seconds(min(plan.settle, 1.5)))
+                    try? await Task.sleep(for: .seconds(min(plan.settle, 0.4)))
                     let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
                     write(name: "\(SelfShotPlan.slug(plan.pages.first ?? "library"))-scanning\(scanning ? "" : "-finished")", plan: plan)
                     await waitUntil(timeout: 600) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }

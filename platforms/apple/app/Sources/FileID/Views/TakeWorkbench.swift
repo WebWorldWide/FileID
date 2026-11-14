@@ -235,10 +235,12 @@ struct TakeWorkbench: View {
             HStack(spacing: 6) {
                 Button("Group these results") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                    .fixedSize()
                     .disabled(pool.count < 2)
                     .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups among the videos you found: ones that look alike and were filmed close together")
                 Button { startManual(); newGroup() } label: { Label("New group", systemImage: "plus") }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                    .fixedSize()
             }
             if !suggestedGroups.isEmpty {
                 ForEach(suggestedGroups.indices, id: \.self) { index in
