@@ -52,6 +52,9 @@ files into <state>/Trash instead of the user's Trash, divergences marked
 (true, or a list of OS names such as ["darwin"] where only that OS needs it) run;
 they are skipped otherwise, so no engine ever reaches the user's Trash. The Swift
 engine has the same root when built with -Xswiftc -DFILEID_TEST_TRASH_ROOT.
+
+Cases marked "requiresSymlinks" are skipped when the runner's account cannot create
+symlinks (Windows without Developer Mode or the privilege).
 """
 from __future__ import annotations
 
@@ -732,6 +735,18 @@ def start(binaries, flavor, ctx):
     return engine
 
 
+def can_symlink(parent):
+    """Windows needs Developer Mode or SeCreateSymbolicLinkPrivilege; the self-hosted runner's account may have neither."""
+    with tempfile.TemporaryDirectory(prefix="FileIDSymlinkProbe-", dir=parent) as temporary:
+        target = Path(temporary) / "target"
+        target.write_text("x")
+        try:
+            os.symlink(target, Path(temporary) / "link")
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
 def divergence_for(case, flavor, os_name):
     for item in case.get("knownDivergences", []):
         if item.get("liftedByTestTrashRoot") and TEST_TRASH_ROOT:
@@ -826,18 +841,21 @@ def main():
         binaries[peer_flavor] = peer
         hosted[peer_flavor] = peer_hosted
     counts = {"pass": 0, "fail": 0, "known": 0, "stale": 0, "skip": 0}
+    symlinks_ok = can_symlink(parent)
     print(f"conformance: {flavor} engine {binary} on {args.os}")
     for case in load_cases(args.case):
         name = case["name"]
         missing = set(case.get("requires", [])) - set(binaries)
         trash_root = case.get("requiresTestTrashRoot")
         needs_trash_root = not TEST_TRASH_ROOT and (args.os in trash_root if isinstance(trash_root, list) else bool(trash_root))
+        needs_symlinks = bool(case.get("requiresSymlinks")) and not symlinks_ok
         unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted \
+        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted or needs_symlinks \
                 or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
             reason = (f"needs {', '.join(sorted(missing))} engine" if missing
                       else "needs test-trash-root engine builds (--test-trash-root)" if needs_trash_root
+                      else "needs a runner account that may create symlinks" if needs_symlinks
                       else "needs engines the Mac app hosts" if unhosted
                       else "not applicable here")
             print(f"SKIP   {name} ({reason})")
@@ -871,4 +889,7 @@ def main():
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

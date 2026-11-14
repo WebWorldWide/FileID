@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-13 — Fix main CI on the self-hosted runners (`agent/main-ci-fix`)
+
+- **Four main-only failures:** conformance prints UTF-8 now (a cp1252 console crashed on a non-ASCII failure message and hid the case); `restructure-shortcut-apply-and-undo` is skipped (`requiresSymlinks`) when the runner account cannot create symlinks (the likely Windows failure, to be confirmed by the next main run); the two `archive_names` zip tests build their archives in-process (no `zip` tool, also run on Windows); the identity test sets an explicit mtime after rewriting; the Windows app job installs the 10.0.1xx SDK band because the runner's VS 2022 MSBuild 17.14 rejects SDK 10.0.4xx.
+
 ## 2026-11-11 — Convergence Stage 10: Developer ID builds run the shared Rust engine by default (`agent/converge-10`)
 
 - **App** (agent): `fileidd` is the default engine whenever it is bundled. The Swift engine stays bundled and selectable through Settings ▸ Advanced ▸ Engine, `engine.backend` or `FILEID_ENGINE_BACKEND`. The app falls back to Swift for the session when Rust is missing, fails the signing check, can't launch, exits twice before `ready` or uses up its respawn budget. App Store/TestFlight builds stay on Swift: one gate, `EngineBackendPolicy.isAppStoreBuild`, and `testflight.sh` never bundles `fileidd`. Details in CONVERGENCE "Stage 10 status".

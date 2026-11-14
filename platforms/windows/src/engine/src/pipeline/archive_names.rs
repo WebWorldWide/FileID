@@ -88,37 +88,82 @@ pub(crate) fn list(path: &Path) -> Option<String> {
     (!names.is_empty()).then(|| names.join("\n"))
 }
 
-// The test builds its fixture with the `zip` command-line tool, which Unix runners have.
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
 
-    #[cfg(unix)]
-    fn zip_with(dir: &Path, files: &[&str]) -> std::path::PathBuf {
-        zip_with_flags(dir, files, &[])
-    }
-
-    #[cfg(unix)]
-    fn zip_with_flags(dir: &Path, files: &[&str], flags: &[&str]) -> std::path::PathBuf {
-        let src = dir.join("src");
-        for name in files {
-            let p = src.join(name);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, name.as_bytes()).unwrap();
+    // Stored (uncompressed) zip built in-process, so the tests need no `zip` tool and run on every OS.
+    fn zip_with_flags(dir: &Path, files: &[&str], zip64: bool) -> std::path::PathBuf {
+        fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(bytes);
         }
+        let (mut body, mut central) = (Vec::new(), Vec::new());
+        for name in files {
+            let data = name.as_bytes();
+            let offset = body.len() as u32;
+            let crc = {
+                let mut c = 0xFFFF_FFFFu32;
+                for &b in data {
+                    c ^= u32::from(b);
+                    for _ in 0..8 {
+                        c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+                    }
+                }
+                !c
+            };
+            for (out, sig, version) in [(&mut body, [0x50, 0x4B, 0x03, 0x04], false), (&mut central, [0x50, 0x4B, 0x01, 0x02], true)] {
+                put(out, &sig);
+                if version {
+                    put(out, &20u16.to_le_bytes());
+                }
+                put(out, &20u16.to_le_bytes());
+                put(out, &[0; 8]);
+                put(out, &crc.to_le_bytes());
+                put(out, &(data.len() as u32).to_le_bytes());
+                put(out, &(data.len() as u32).to_le_bytes());
+                put(out, &(name.len() as u16).to_le_bytes());
+                put(out, &0u16.to_le_bytes());
+                if version {
+                    put(out, &[0; 10]);
+                    put(out, &offset.to_le_bytes());
+                }
+                put(out, name.as_bytes());
+            }
+            put(&mut body, data);
+        }
+        let (dir_offset, count) = (body.len() as u64, files.len() as u16);
+        let mut raw = body;
+        raw.extend_from_slice(&central);
+        if zip64 {
+            let record_offset = raw.len() as u64;
+            put(&mut raw, &[0x50, 0x4B, 0x06, 0x06]);
+            put(&mut raw, &44u64.to_le_bytes());
+            put(&mut raw, &[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            put(&mut raw, &u64::from(count).to_le_bytes());
+            put(&mut raw, &u64::from(count).to_le_bytes());
+            put(&mut raw, &(central.len() as u64).to_le_bytes());
+            put(&mut raw, &dir_offset.to_le_bytes());
+            put(&mut raw, &[0x50, 0x4B, 0x06, 0x07, 0, 0, 0, 0]);
+            put(&mut raw, &record_offset.to_le_bytes());
+            put(&mut raw, &1u32.to_le_bytes());
+        }
+        put(&mut raw, &[0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0]);
+        let (n, len, off) = if zip64 { (0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF) } else { (count, central.len() as u32, dir_offset as u32) };
+        put(&mut raw, &u16::to_le_bytes(n));
+        put(&mut raw, &u16::to_le_bytes(n));
+        put(&mut raw, &u32::to_le_bytes(len));
+        put(&mut raw, &u32::to_le_bytes(off));
+        put(&mut raw, &0u16.to_le_bytes());
         let zip = dir.join("bundle.zip");
-        let status = std::process::Command::new("zip").arg("-qr").args(flags).arg(&zip).arg(".").current_dir(&src).status();
-        assert!(status.is_ok_and(|s| s.success()), "zip tool needed for this test");
+        std::fs::write(&zip, raw).unwrap();
         zip
     }
 
-    #[cfg(unix)]
     #[test]
     fn lists_zip64_archives() {
         let dir = std::env::temp_dir().join(format!("fileid-zip64-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let zip = zip_with_flags(&dir, &["big/report.rpt", "notes.txt"], &["-fz"]);
+        let zip = zip_with_flags(&dir, &["big/report.rpt", "notes.txt"], true);
         let raw = std::fs::read(&zip).unwrap();
         assert!(raw.windows(4).any(|w| w == [0x50, 0x4B, 0x06, 0x06]), "fixture must carry a ZIP64 end record");
         let listed = list(&zip).unwrap();
@@ -127,12 +172,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn lists_names_and_survives_corruption() {
         let dir = std::env::temp_dir().join(format!("fileid-zip-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let zip = zip_with(&dir, &["notes/jeff-rule-changes.txt", "photo.jpg", ".DS_Store"]);
+        let zip = zip_with_flags(&dir, &["notes/jeff-rule-changes.txt", "photo.jpg", ".DS_Store"], false);
         let listed = list(&zip).unwrap();
         let names: std::collections::HashSet<&str> = listed.lines().collect();
         assert!(names.contains("notes/jeff-rule-changes.txt") && names.contains("photo.jpg"));
