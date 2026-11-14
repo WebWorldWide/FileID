@@ -98,6 +98,9 @@ pub(super) struct BulkBar {
     undo_tags: gtk::Button,
     status: gtk::Label,
     busy: Cell<bool>,
+    /// Recent changes lines for the batches the undo buttons would reverse.
+    rename_entry: Cell<Option<u64>>,
+    tag_entry: Cell<Option<u64>>,
 }
 
 impl BulkBar {
@@ -144,6 +147,8 @@ impl BulkBar {
             undo_tags,
             status,
             busy: Cell::new(false),
+            rename_entry: Cell::new(None),
+            tag_entry: Cell::new(None),
         });
         bar.selection_changed(0);
         bar.refresh_undo();
@@ -160,12 +165,16 @@ impl BulkBar {
         bar.undo_rename.connect_clicked(clone!(
             #[strong]
             bar,
-            move |_| run_undo_rename(&bar)
+            move |_| {
+                run_undo_rename(&bar, bar.rename_entry.get());
+            }
         ));
         bar.undo_tags.connect_clicked(clone!(
             #[strong]
             bar,
-            move |_| run_undo_tags(&bar)
+            move |_| {
+                run_undo_tags(&bar, bar.tag_entry.get());
+            }
         ));
         bar
     }
@@ -184,6 +193,44 @@ impl BulkBar {
             .is_some();
         self.undo_rename.set_visible(has_rename);
         self.undo_tags.set_visible(has_tags);
+    }
+
+    /// Lists a rename batch in Recent changes. Only the newest batch has a
+    /// journal, so recording one retires the line of the batch before it.
+    fn record_rename(self: &Rc<Self>, renamed: usize) {
+        crate::changes::supersede(self.rename_entry.take(), "A newer rename replaced it");
+        let slot = Rc::new(Cell::new(None::<u64>));
+        let reverse: crate::changes::Reverse = {
+            let weak = Rc::downgrade(self);
+            let slot = slot.clone();
+            Rc::new(move || weak.upgrade().is_some_and(|bar| run_undo_rename(&bar, slot.get())))
+        };
+        let entry = crate::changes::record(
+            renamed as u64,
+            || crate::changes::count_label("Renamed", renamed as u64, "file"),
+            Some(reverse),
+        );
+        slot.set(entry);
+        self.rename_entry.set(entry);
+    }
+
+    /// Lists a tag batch in Recent changes; `tagged` is 0 when nothing new was
+    /// added, which also clears the journal and so retires the earlier line.
+    fn record_tags(self: &Rc<Self>, tagged: usize) {
+        crate::changes::supersede(self.tag_entry.take(), "A newer tag batch replaced it");
+        let slot = Rc::new(Cell::new(None::<u64>));
+        let reverse: crate::changes::Reverse = {
+            let weak = Rc::downgrade(self);
+            let slot = slot.clone();
+            Rc::new(move || weak.upgrade().is_some_and(|bar| run_undo_tags(&bar, slot.get())))
+        };
+        let entry = crate::changes::record(
+            tagged as u64,
+            || format!("Tagged {}", crate::changes::count_label("", tagged as u64, "file").trim_start()),
+            Some(reverse),
+        );
+        slot.set(entry);
+        self.tag_entry.set(entry);
     }
 
     fn say(&self, text: &str) {
@@ -565,6 +612,9 @@ impl RenameSheet {
             let (renamed, failed, error) = rename_plans(&this.bar.engine, &chosen).await;
             if let Some(path) = model::rename_journal_path() {
                 model::save_rename_batch(&path, &renamed, now_secs());
+                if !renamed.is_empty() {
+                    this.bar.record_rename(renamed.len());
+                }
             }
             this.in_flight.set(false);
             this.status.set_label(&model::rename_status(
@@ -630,16 +680,16 @@ async fn rename_plans(
     (renamed, failed, error)
 }
 
-fn run_undo_rename(bar: &Rc<BulkBar>) {
+fn run_undo_rename(bar: &Rc<BulkBar>, entry: Option<u64>) -> bool {
     let Some(path) = model::rename_journal_path() else {
-        return;
+        return false;
     };
     let Some(batch) = model::load_rename_batch(&path, now_secs()) else {
         bar.refresh_undo();
-        return;
+        return false;
     };
     if bar.busy.replace(true) {
-        return;
+        return false;
     }
     bar.say("Putting names back…");
     let ids: Vec<i64> = batch.iter().map(|entry| entry.file_id).collect();
@@ -673,6 +723,7 @@ fn run_undo_rename(bar: &Rc<BulkBar>) {
     glib::MainContext::default().spawn_local(async move {
         let Ok((ready, total)) = rx.recv().await else {
             bar.busy.set(false);
+            crate::changes::settle_failed(entry, "FileID couldn't read the files. Try again.");
             return;
         };
         let mut undone = 0;
@@ -708,10 +759,13 @@ fn run_undo_rename(bar: &Rc<BulkBar>) {
         let skipped = total - ready.len();
         if failed == 0 && skipped == 0 {
             model::clear_journal(&path);
+            bar.rename_entry.set(None);
         }
+        crate::changes::settle(entry, (failed + skipped) as u64, "name");
         bar.say(&model::undo_rename_status(undone, skipped, failed));
         bar.finished();
     });
+    true
 }
 
 // ── Tag sheet ────────────────────────────────────────────────────────────────
@@ -800,7 +854,10 @@ fn open_tag_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
             status.set_visible(false);
             let (bar, in_flight, ids) = (bar.clone(), in_flight.clone(), ids.clone());
             glib::MainContext::default().spawn_local(async move {
-                let (line, clean) = tag_files(&bar, &ids, &tags).await;
+                let (line, clean, tagged) = tag_files(&bar, &ids, &tags).await;
+                if tagged > 0 || clean {
+                    bar.record_tags(tagged);
+                }
                 in_flight.set(false);
                 apply.set_label("Apply");
                 apply.set_sensitive(true);
@@ -834,7 +891,7 @@ fn open_tag_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
 
 /// Adds `tags` to `ids` and journals what was actually new. Returns the
 /// status line and whether nothing failed.
-async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, bool) {
+async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, bool, usize) {
     let read_ids = ids.to_vec();
     let existing = read_db(move |conn| {
         let mut have: HashMap<i64, HashSet<String>> = HashMap::new();
@@ -870,6 +927,7 @@ async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, 
         return (
             "FileID didn't finish adding tags. Try again in a moment.".to_owned(),
             false,
+            0,
         );
     };
     let ok = landed(&result, &id_set);
@@ -899,19 +957,20 @@ async fn tag_files(bar: &Rc<BulkBar>, ids: &[i64], tags: &[String]) -> (String, 
             first_error(&result).as_deref(),
         ),
         failed == 0,
+        outcomes.len(),
     )
 }
 
-fn run_undo_tags(bar: &Rc<BulkBar>) {
+fn run_undo_tags(bar: &Rc<BulkBar>, entry: Option<u64>) -> bool {
     let Some(path) = model::tag_journal_path() else {
-        return;
+        return false;
     };
     let Some(batch) = model::load_tag_batch(&path) else {
         bar.refresh_undo();
-        return;
+        return false;
     };
     if bar.busy.replace(true) {
-        return;
+        return false;
     }
     bar.say("Removing tags…");
     let bar = bar.clone();
@@ -957,7 +1016,9 @@ fn run_undo_tags(bar: &Rc<BulkBar>) {
         undone.retain(|id| !failed.contains(id));
         if failed.is_empty() {
             model::clear_journal(&path);
+            bar.tag_entry.set(None);
         }
+        crate::changes::settle(entry, failed.len() as u64, "file");
         bar.say(&model::undo_tag_status(
             undone.len(),
             failed.len(),
@@ -965,4 +1026,5 @@ fn run_undo_tags(bar: &Rc<BulkBar>) {
         ));
         bar.finished();
     });
+    true
 }

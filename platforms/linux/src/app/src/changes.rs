@@ -168,6 +168,20 @@ pub fn settle(entry: Option<u64>, failed: u64, what: &str) {
     );
 }
 
+/// Retires an entry that can no longer be put back (a newer change replaced
+/// the only record that could undo it). A change already undone stays as is.
+pub fn supersede(entry: Option<u64>, reason: &str) {
+    let Some(id) = entry else { return };
+    let open = LOG.with_borrow(|log| {
+        log.entries
+            .iter()
+            .any(|e| e.id == id && matches!(e.status, Status::Undoable | Status::Failed(_)))
+    });
+    if open {
+        set_status(id, Status::NotUndoable(reason.to_owned()));
+    }
+}
+
 /// Settles an entry whose undo never got an answer (the helper restarted).
 pub fn settle_failed(entry: Option<u64>, reason: &str) {
     if let Some(id) = entry {
@@ -284,6 +298,22 @@ mod tests {
         assert!(!undo(id));
         settle(None, 0, "face");
         settle_failed(None, "gone");
+    }
+
+    #[test]
+    fn a_newer_change_retires_the_older_one_it_replaced_but_not_an_undone_one() {
+        reset();
+        let old = push("old", Some(Rc::new(|| true)));
+        let done = push("done", Some(Rc::new(|| true)));
+        set_status(done, Status::Undone);
+        supersede(Some(old), "A newer rename replaced it");
+        supersede(Some(done), "A newer rename replaced it");
+        supersede(None, "nothing");
+        let listed = entries();
+        assert_eq!(listed[1].status, Status::NotUndoable("A newer rename replaced it".to_owned()));
+        assert_eq!(listed[0].status, Status::Undone);
+        assert_eq!(most_recent_undoable(), None);
+        assert!(!undo(old));
     }
 
     #[test]

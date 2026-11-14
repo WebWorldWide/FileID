@@ -84,6 +84,9 @@ struct Ui {
     operation: Cell<Option<Operation>>,
     stopping: Cell<bool>,
     moved: Cell<bool>,
+    /// Recent changes lines: the last move that can be put back, and the one being put back.
+    apply_entry: Cell<Option<u64>>,
+    undoing_entry: Cell<Option<u64>>,
     library: RefCell<Library>,
     cells: [StepCell; 3],
     plan_button: gtk::Button,
@@ -326,6 +329,8 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         operation: Cell::new(None),
         stopping: Cell::new(false),
         moved: Cell::new(false),
+        apply_entry: Cell::new(None),
+        undoing_entry: Cell::new(None),
         library: RefCell::new(Library::default()),
         cells,
         plan_button,
@@ -1058,6 +1063,7 @@ impl Ui {
         if let Some(message) = result.privilege_error.as_deref().filter(|m| !m.is_empty()) {
             self.set_notice(Tone::Warning, "Something went wrong", message);
         } else if operation == Some(Operation::Undoing) {
+            crate::changes::settle(self.undoing_entry.take(), u64::from(result.failed), "file");
             if result.failed == 0 {
                 self.moved.set(false);
                 self.set_notice(
@@ -1107,9 +1113,50 @@ impl Ui {
             if result.applied > 0 {
                 self.plan.replace(None);
                 self.render_plan();
+                self.record_move(result.applied);
             }
         }
         self.refresh();
+    }
+
+    /// Lists the move in Recent changes, so Ctrl+Z puts the files back.
+    fn record_move(self: &Rc<Self>, applied: u32) {
+        let slot = Rc::new(Cell::new(None::<u64>));
+        let reverse: crate::changes::Reverse = {
+            let weak = Rc::downgrade(self);
+            let slot = slot.clone();
+            Rc::new(move || weak.upgrade().is_some_and(|ui| ui.start_undo(slot.get())))
+        };
+        let entry = crate::changes::record(
+            u64::from(applied),
+            || format!("{} into new folders", crate::changes::count_label("Moved", u64::from(applied), "file")),
+            Some(reverse),
+        );
+        slot.set(entry);
+        self.apply_entry.set(entry);
+    }
+
+    /// Puts the last move back; false when another operation is running or nothing was sent.
+    fn start_undo(self: &Rc<Self>, entry: Option<u64>) -> bool {
+        if self.operation.get().is_some() {
+            return false;
+        }
+        let Some(root) = self.root.borrow().clone() else {
+            return false;
+        };
+        self.undoing_entry.set(entry);
+        self.send(
+            Operation::Undoing,
+            CommandPayload::UndoRestructure(UndoRestructurePayload {
+                library_root: root,
+                shortcut_undo_token: None,
+            }),
+        );
+        let started = self.operation.get() == Some(Operation::Undoing);
+        if !started {
+            self.undoing_entry.set(None);
+        }
+        started
     }
 
     fn send(self: &Rc<Self>, operation: Operation, command: CommandPayload) {
@@ -1231,16 +1278,7 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     let weak = Rc::downgrade(ui);
     ui.undo_button.connect_clicked(move |_| {
         let Some(ui) = weak.upgrade() else { return };
-        let Some(root) = ui.root.borrow().clone() else {
-            return;
-        };
-        ui.send(
-            Operation::Undoing,
-            CommandPayload::UndoRestructure(UndoRestructurePayload {
-                library_root: root,
-                shortcut_undo_token: None,
-            }),
-        );
+        ui.start_undo(ui.apply_entry.get());
     });
     let weak = Rc::downgrade(ui);
     ui.clip_button.connect_clicked(move |button| {
@@ -1289,6 +1327,7 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                 {
                     ui.operation.set(None);
                     ui.stopping.set(false);
+                    crate::changes::settle_failed(ui.undoing_entry.take(), &crate::engine_errors::text(kind, message));
                     ui.set_notice(
                         Tone::Warning,
                         crate::engine_errors::title(kind),
@@ -1301,6 +1340,7 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                 EngineState::Exited => {
                     ui.operation.set(None);
                     ui.stopping.set(false);
+                    crate::changes::settle_failed(ui.undoing_entry.take(), "FileID restarted. Try again.");
                     ui.set_notice(
                         Tone::Warning,
                         "FileID restarted",
