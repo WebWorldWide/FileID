@@ -603,7 +603,81 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
             Err(_) => return,
         };
         show_rows(&ctx, rows, total, &searched, filtered);
+        if visual_wanted(&searched) {
+            run_visual(&ctx, g, searched).await;
+        }
     });
+}
+
+/// Typed searches of three or more characters also ask the engine's visual
+/// search, like the Mac (Library `reload`).
+fn visual_wanted(query: &str) -> bool {
+    query.trim().chars().count() >= 3
+}
+
+/// The engine's result summary ("3 good matches, 1 weaker."), shown in place
+/// of the file count; nothing when the engine sent none.
+fn strength_label(message: Option<&str>) -> Option<String> {
+    message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)
+}
+
+/// Replaces the keyword rows with the engine's visual-search order (good
+/// matches first) and shows its summary. Any failure keeps the keyword rows.
+async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
+    let query = searched.trim().to_owned();
+    let request = fileid_engine::ipc::EmbedTextQueryPayload { query: query.clone(), query_id: super::workbench_state::request_id() };
+    let events = ctx.engine.borrow_mut().subscribe();
+    let closer = events.clone();
+    let query_id = request.query_id.clone();
+    if ctx.engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::EmbedTextQuery(request)).is_err() {
+        events.close();
+        return;
+    }
+    let timeout = glib::timeout_add_seconds_local_once(15, move || {
+        closer.close();
+    });
+    let mut vector = None;
+    while let Ok(event) = events.recv().await {
+        match event {
+            EngineEvent::ClipTextEmbedding(reply) if reply.query_id == query_id => {
+                if fileid_engine::models::clip_space::valid(&reply.embedding) {
+                    vector = Some(reply.embedding);
+                }
+                break;
+            }
+            EngineEvent::Exited => break,
+            _ => {}
+        }
+    }
+    timeout.remove();
+    events.close();
+    let Some(vector) = vector else { return };
+    if ctx.query_gen.get() != generation {
+        return;
+    }
+    let mut request = super::workbench_state::catalog_request("search");
+    request.query = Some(query.clone());
+    request.search_mode = Some("hybrid".into());
+    request.query_vector = Some(vector);
+    request.embedding_model = Some(fileid_engine::models::clip_space::model_id().to_owned());
+    request.limit = Some(SIMILAR_LIMIT as _);
+    request.root_id = super::library_scope::current_id();
+    request.result_scope = Some("files".into());
+    let Some(response) = catalog_roundtrip(&ctx.engine, request).await.filter(|r| r.status == "ok") else { return };
+    if ctx.query_gen.get() != generation {
+        return;
+    }
+    let ids: Vec<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
+    let kind = ctx.kind_filter.borrow().clone();
+    let rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
+    if ctx.query_gen.get() != generation {
+        return;
+    }
+    let total = rows.len() as i64;
+    show_rows(ctx, rows, total, &query, true);
+    if let Some(label) = strength_label(response.message.as_deref()) {
+        ctx.count_label.set_text(&label);
+    }
 }
 
 fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str, filtered: bool) {
@@ -728,6 +802,13 @@ async fn similar_request(
     request.limit = Some(SIMILAR_LIMIT as _);
     request.root_id = super::library_scope::current_id();
     request.result_scope = Some("files".into());
+    catalog_roundtrip(engine, request).await
+}
+
+async fn catalog_roundtrip(
+    engine: &Rc<RefCell<EngineClient>>,
+    request: fileid_engine::ipc::CatalogRequest,
+) -> Option<fileid_engine::ipc::CatalogResponse> {
     let id = request.request_id.clone();
     let events = engine.borrow_mut().subscribe();
     let closer = events.clone();
@@ -1629,5 +1710,29 @@ mod tests {
         assert_eq!(reload_limit(true, 1800), 1800);
         assert_eq!(reload_limit(true, 9000), LIVE_RELOAD_MAX);
         assert_eq!(reload_limit(false, 1800), QUERY_LIMIT);
+    }
+
+    #[test]
+    fn summary_text_matches_the_mac_wording() {
+        use fileid_engine::models::search_strength::summary;
+        let shown = |good, weak| strength_label(Some(&summary(good, weak)));
+        assert_eq!(shown(1, 0).as_deref(), Some("1 good match."));
+        assert_eq!(shown(3, 0).as_deref(), Some("3 good matches."));
+        assert_eq!(shown(1, 2).as_deref(), Some("1 good match, 2 weaker."));
+        assert_eq!(shown(4, 1).as_deref(), Some("4 good matches, 1 weaker."));
+        assert_eq!(shown(0, 5).as_deref(), Some("No good matches, 5 weaker."));
+        assert_eq!(shown(0, 0).as_deref(), Some("No matches."));
+    }
+
+    #[test]
+    fn no_summary_when_the_engine_sends_none() {
+        assert_eq!(strength_label(None), None);
+        assert_eq!(strength_label(Some("  ")), None);
+    }
+
+    #[test]
+    fn visual_search_needs_three_characters() {
+        assert!(!visual_wanted(" ab "));
+        assert!(visual_wanted("dog"));
     }
 }

@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-13 — GTK Library shows the search strength summary (`agent/gtk-search-strength`)
+
+- **GTK:** Library text searches of three or more characters now also ask the engine (embed the text, then a hybrid catalog search), like the Mac. The grid takes the engine's order (good matches first) and the count shows its summary, for example "3 good matches, 1 weaker.". With no embedding, no reply or no message, the keyword rows and file count stay.
+- **Tests:** three unit tests in `tabs/library.rs` (singular, plural, zero weaker, zero good, no message, three-character rule). WinUI shows no summary yet.
 ## 2026-11-12 — Swift startup reconcile reads Rust's Trash log (`agent/left-trash-reconcile`)
 
 - `TrashJournal.reconcile` now also walks the valid entries of `trash_log.json` (HMAC-checked with the shared key, never modified) and drops catalog rows of files provably in the Trash (original path gone, Trash entry found by recorded path or inode), the same rules as for its own journal. It no longer returns early when its own journal is empty. `RustTrashLog.verifiedBatches` is shared with `find`.
