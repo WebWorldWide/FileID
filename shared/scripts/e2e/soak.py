@@ -161,15 +161,20 @@ class Engine:
         raise TimeoutError(f"{self.label}: no matching event in {timeout}s")
 
     def drain(self):
+        """Discard queued events; returns the scan-terminal event among them (scanComplete or a cancelled/failed phase)
+        so a caller that is waiting for one does not lose it."""
+        terminal = None
         while True:
             try:
                 ev = self.q.get_nowait()
             except queue.Empty:
-                return
+                return terminal
             if kind(ev) == "error":
                 k = inner(ev).get("kind")
                 ERROR_KINDS[k] = ERROR_KINDS.get(k, 0) + 1
                 note_sample(k, inner(ev))
+            elif kind(ev) == "scanComplete" or (kind(ev) == "phaseChanged" and inner(ev) in ("cancelled", "failed")):
+                terminal = ev
 
     def request(self, command, action_key, body, timeout=300):
         rid = str(uuid.uuid4())
@@ -355,6 +360,11 @@ class Soak:
             return False
         return True
 
+    def never_catalogued(self, path, root):
+        """Swift only: Discovery uses .skipsHiddenFiles, so a file with a dot-prefixed path component under the root is
+        deliberately not catalogued. Such a file must have no visible row (checked by the callers)."""
+        return self.a.flavor == "swift" and any(c.startswith(".") for c in os.path.relpath(path, root).split(os.sep))
+
     @staticmethod
     def tombstone(row):
         """A row the engine keeps but hides after the file vanished: failed=1 with the 'no longer present' message."""
@@ -367,7 +377,10 @@ class Soak:
         disk = {os.path.join(root, r) for r in model}
         visible = {p for p, v in rows.items() if not self.tombstone(v)}
         stale = sorted(visible - disk)
-        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0)
+        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
+        hidden_rows = sorted(p for p in visible & disk if self.never_catalogued(p, root))
+        if hidden_rows:
+            fail(rnd, f"{name}: hidden files are not catalogued (swift)", [os.path.relpath(h, root) for h in hidden_rows[:4]])
         zero_rows = sorted(p for p in visible & disk if os.path.getsize(p) == 0)
         hidden_present = sorted(p for p, v in rows.items() if self.tombstone(v) and p in disk)
         if first:
@@ -423,17 +436,23 @@ class Soak:
         if k != "scanComplete":
             fail(rnd, "scan completes", (k, v))
             return
+        # The Rust engine leaves scanned_at alone for an unchanged file. The Swift engine stamps it on every skipped file
+        # (Discovery.swift bumpScannedAt: the orphan sweep deletes rows with scanned_at < scanStart), so for swift the
+        # check compares every other column, ids included, and requires processedFiles == 0 besides.
+        cols = "id, scanned_at" if self.a.flavor == "rust" else "id, size_bytes, modified_at, kind, content_hash, phash, failed, error_message"
         with ro(eng.db) as c:
-            before = dict(c.execute("SELECT id, scanned_at FROM files WHERE path_text LIKE ?", (self.lib + "/%",)).fetchall())
+            before = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
         k, v = eng.scan(self.lib)
         with ro(eng.db) as c:
-            after = dict(c.execute("SELECT id, scanned_at FROM files WHERE path_text LIKE ?", (self.lib + "/%",)).fetchall())
-        changed = [i for i in after if before.get(i) != after[i]]
+            after = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
+        changed = [i for i in set(after) | set(before) if before.get(i) != after.get(i)]
         with ro(eng.db) as c:
             failed_ids = {r[0] for r in c.execute("SELECT id FROM files WHERE failed=1")}
         retried = [i for i in changed if i in failed_ids]
         self.retried_failed = len(retried)
         changed = [i for i in changed if i not in failed_ids]
+        if self.a.flavor == "swift" and k == "scanComplete" and v.get("processedFiles"):
+            changed.append(f"processedFiles={v.get('processedFiles')}")
         if k != "scanComplete" or changed:
             fail(rnd, "rescan analyses nothing new", f"{k} reprocessed={len(changed)} {v}")
         return round(time.time() - t, 1)
@@ -665,9 +684,12 @@ class Soak:
         eng.wait(lambda e: kind(e) == "progress", 120)
         eng.send("pauseScan")
         time.sleep(1.5)
-        eng.drain()
+        done = eng.drain()
         eng.send("resumeScan")
-        k, v = eng.wait_scan_end(600)
+        if done is not None:
+            k, v = ("scanComplete", inner(done)) if kind(done) == "scanComplete" else (inner(done), {})
+        else:
+            k, v = eng.wait_scan_end(600)
         if k != "scanComplete":
             fail(rnd, "paused then resumed scan completes", (k, v))
         # cancel then a normal scan completes with the same catalog
@@ -799,8 +821,9 @@ class Soak:
             stale = {p for p, v in rows.items() if not self.tombstone(v)} - disk
             if stale:
                 fail(rnd, "victim catalog has no rows for missing files", sorted(stale)[:3])
-            if [d for d in disk - set(rows) if os.path.getsize(d) != 0]:
-                fail(rnd, "victim catalog covers its files", len([d for d in disk - set(rows) if os.path.getsize(d) != 0]))
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            if uncovered:
+                fail(rnd, "victim catalog covers its files", len(uncovered))
             k, res = v.scan(self.victim_lib)
             if k != "scanComplete":
                 fail(rnd, "second scan after restart completes", (k, res))
