@@ -144,6 +144,45 @@ pub fn undo_latest() -> bool {
     most_recent_undoable().is_some_and(undo)
 }
 
+/// Records a change only when something actually changed and there is a way
+/// to put it back; a result with no successes, or an engine that returned no
+/// undo handle, leaves the list alone.
+pub fn record(changed: u64, label: impl FnOnce() -> String, reverse: Option<Reverse>) -> Option<u64> {
+    if changed == 0 {
+        return None;
+    }
+    reverse.map(|reverse| push(&label(), Some(reverse)))
+}
+
+/// Settles an entry once the engine answers its undo: `failed` things that
+/// could not be put back leave it retryable.
+pub fn settle(entry: Option<u64>, failed: u64, what: &str) {
+    let Some(id) = entry else { return };
+    set_status(
+        id,
+        if failed == 0 {
+            Status::Undone
+        } else {
+            Status::Failed(format!("{} couldn't be put back", counted(failed, what)))
+        },
+    );
+}
+
+/// Settles an entry whose undo never got an answer (the helper restarted).
+pub fn settle_failed(entry: Option<u64>, reason: &str) {
+    if let Some(id) = entry {
+        set_status(id, Status::Failed(reason.to_owned()));
+    }
+}
+
+fn counted(count: u64, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+pub fn count_label(verb: &str, count: u64, noun: &str) -> String {
+    format!("{verb} {}", counted(count, noun))
+}
+
 pub fn status_text(status: &Status) -> String {
     match status {
         Status::Undoable => String::new(),
@@ -206,6 +245,45 @@ mod tests {
         assert_eq!(count(), CAPACITY);
         assert_eq!(pending_count(), 0);
         assert!(!undo_latest());
+    }
+
+    #[test]
+    fn only_a_real_change_with_an_undo_is_recorded() {
+        reset();
+        let undo = || -> Option<Reverse> { Some(Rc::new(|| true)) };
+        assert_eq!(record(0, || "none".to_owned(), undo()), None);
+        assert_eq!(record(3, || "no undo".to_owned(), None), None);
+        assert_eq!(count(), 0);
+        let id = record(2, || count_label("Renamed", 2, "file"), undo()).unwrap();
+        assert_eq!(entries()[0].label, "Renamed 2 files");
+        assert_eq!(most_recent_undoable(), Some(id));
+    }
+
+    #[test]
+    fn labels_count_in_the_singular_and_the_plural() {
+        assert_eq!(count_label("Moved", 1, "file"), "Moved 1 file");
+        assert_eq!(count_label("Moved", 12, "file"), "Moved 12 files");
+    }
+
+    #[test]
+    fn an_undo_settles_its_entry_and_a_partial_one_can_be_retried() {
+        reset();
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let counter = calls.clone();
+        let id = push("merge", Some(Rc::new(move || {
+            counter.set(counter.get() + 1);
+            true
+        })));
+        assert!(undo(id));
+        settle(Some(id), 2, "face");
+        assert_eq!(entries()[0].status, Status::Failed("2 faces couldn't be put back".to_owned()));
+        assert!(undo(id));
+        assert_eq!(calls.get(), 2);
+        settle(Some(id), 0, "face");
+        assert_eq!(entries()[0].status, Status::Undone);
+        assert!(!undo(id));
+        settle(None, 0, "face");
+        settle_failed(None, "gone");
     }
 
     #[test]

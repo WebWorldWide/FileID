@@ -59,6 +59,7 @@ pub(super) struct Ui {
     pending_decision: RefCell<Option<(CatalogTakeAutoGroup, String)>>,
     pending_trash: RefCell<Option<PendingTrash>>,
     restoring: RefCell<Option<Option<(CatalogTakeAutoGroup, Vec<i64>)>>>,
+    restore_entry: Cell<Option<u64>>,
     tile_token: RefCell<CancelToken>,
     fan_token: RefCell<CancelToken>,
     shots: RefCell<HashMap<i64, Shot>>,
@@ -332,6 +333,7 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
         pending_decision: RefCell::new(None),
         pending_trash: RefCell::new(None),
         restoring: RefCell::new(None),
+        restore_entry: Cell::new(None),
         tile_token: RefCell::new(CancelToken::default()),
         fan_token: RefCell::new(CancelToken::default()),
         shots: RefCell::new(HashMap::new()),
@@ -1238,18 +1240,27 @@ impl Ui {
         match batch {
             Some(batch_id) => {
                 let group = pending.group.clone();
-                self.toast_undo(&text, 10, move |ui| {
-                    *ui.restoring.borrow_mut() =
-                        Some(reopen.clone().map(|files| (group.clone(), files)));
-                    let sent = ui
-                        .engine
-                        .borrow_mut()
-                        .send(CommandPayload::RestoreFromTrash(RestoreFromTrashPayload {
-                            batch_id: batch_id.clone(),
-                        }));
-                    if sent.is_err() {
-                        ui.restoring.borrow_mut().take();
-                        ui.toast("FileID is still getting ready. Try again in a moment.");
+                let slot = Rc::new(Cell::new(None::<u64>));
+                let reverse: crate::changes::Reverse = {
+                    let weak = Rc::downgrade(self);
+                    let (batch_id, group, reopen, slot) = (batch_id.clone(), group.clone(), reopen.clone(), slot.clone());
+                    Rc::new(move || {
+                        weak.upgrade()
+                            .is_some_and(|ui| ui.restore_trash(&batch_id, &group, reopen.clone(), slot.get()))
+                    })
+                };
+                let entry = crate::changes::record(
+                    u64::from(result.succeeded),
+                    || format!("{} to Trash", crate::changes::count_label("Moved", u64::from(result.succeeded), "file")),
+                    Some(reverse),
+                );
+                slot.set(entry);
+                self.toast_undo(&text, 10, move |ui| match entry {
+                    Some(id) => {
+                        crate::changes::undo(id);
+                    }
+                    None => {
+                        ui.restore_trash(&batch_id, &group, reopen.clone(), None);
                     }
                 });
             }
@@ -1258,10 +1269,39 @@ impl Ui {
         self.after_resolve(&pending.group.group_key);
     }
 
+    /// Starts putting one Trash batch back; false when it could not start.
+    fn restore_trash(
+        self: &Rc<Self>,
+        batch_id: &str,
+        group: &CatalogTakeAutoGroup,
+        reopen: Option<Vec<i64>>,
+        entry: Option<u64>,
+    ) -> bool {
+        if self.restoring.borrow().is_some() {
+            return false;
+        }
+        *self.restoring.borrow_mut() = Some(reopen.map(|files| (group.clone(), files)));
+        self.restore_entry.set(entry);
+        let sent = self
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::RestoreFromTrash(RestoreFromTrashPayload {
+                batch_id: batch_id.to_owned(),
+            }));
+        if sent.is_err() {
+            self.restoring.borrow_mut().take();
+            self.restore_entry.set(None);
+            self.toast("FileID is still getting ready. Try again in a moment.");
+            return false;
+        }
+        true
+    }
+
     fn finish_restore(self: &Rc<Self>, result: BulkActionResult) {
         let Some(follow_up) = self.restoring.borrow_mut().take() else {
             return;
         };
+        crate::changes::settle(self.restore_entry.take(), u64::from(result.failed), "file");
         if let Some((group, files)) = follow_up {
             let mut request = catalog_request("decideTakeGroup");
             request.take_decision = Some(model::decision_for(&group, "reopen", files));
@@ -1435,6 +1475,10 @@ fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
                     ui.manual.request_failed();
                     ui.pending_decision.borrow_mut().take();
                     ui.restoring.borrow_mut().take();
+                    crate::changes::settle_failed(
+                        ui.restore_entry.take(),
+                        "FileID restarted before the files were put back",
+                    );
                     ui.groups_finished();
                     if ui.end_trash().is_some() {
                         ui.toast("FileID restarted before the move to Trash finished. Check Trash, then try again.");
