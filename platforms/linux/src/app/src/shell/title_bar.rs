@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use gtk::glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::status::{percent, Job, JobAction, Status, Tone};
@@ -73,6 +73,7 @@ pub struct TitleBar {
     scope_section: gtk::Box,
     scope_list: gtk::Box,
     scope_shape: RefCell<ScopeShape>,
+    scope_revision: Cell<Option<u64>>,
     folder_row: gtk::Box,
     folder_row_name: gtk::Label,
     folder_row_path: gtk::Label,
@@ -327,6 +328,7 @@ impl TitleBar {
             scope_section,
             scope_list,
             scope_shape: RefCell::new((Vec::new(), Some(-1))),
+            scope_revision: Cell::new(None),
             folder_row,
             folder_row_name,
             folder_row_path,
@@ -488,11 +490,17 @@ impl TitleBar {
     }
 
     pub fn update(self: &Rc<Self>, status: &Status, folder_path: Option<&str>) {
-        let roots = crate::tabs::library_scope::roots();
         let scope = crate::tabs::library_scope::current();
-        let title = crate::tabs::library_scope::title(scope.as_deref(), &roots, status.folder.as_deref());
+        let title = crate::tabs::library_scope::with_roots(|roots| {
+            crate::tabs::library_scope::title(scope.as_deref(), roots, status.folder.as_deref())
+        });
         self.set_title(&title);
-        self.sync_scope(&roots, scope.map(|scope| scope.root.id));
+        // The location list is copied only when it or the choice changed.
+        let revision = crate::tabs::library_scope::revision();
+        if self.scope_revision.replace(Some(revision)) != Some(revision) {
+            let roots = crate::tabs::library_scope::roots();
+            self.sync_scope(&roots, scope.map(|scope| scope.root.id));
+        }
         if let Some(name) = status.folder.as_deref() {
             self.folder_row_name.set_text(name);
             self.folder_row_path

@@ -40,7 +40,13 @@ use fileid_engine::ipc::{
 const CARD_THUMB_PX: i32 = 256;
 const PHOTO_THUMB_PX: i32 = 240;
 const PERSON_FILE_LIMIT: i64 = 500;
-const PERSON_THUMB_CACHE_CAP: usize = 256;
+/// Face crops kept decoded, by size: about 700 cards at standard density.
+const PERSON_THUMB_CACHE_BYTES: usize = 192 * 1024 * 1024;
+/// While a scan runs and People is on screen, new faces are read this often.
+const LIVE_RELOAD_EVERY: Duration = Duration::from_millis(2500);
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(400);
+const PERSON_SAVE_TIMEOUT_SECS: u64 = 30;
+const MERGE_SUGGESTIONS_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -60,7 +66,7 @@ struct PersonThumbKey {
     face_revision: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct PersonRow {
     id: i64,
     title: Option<String>,
@@ -166,6 +172,8 @@ struct MergeRecord {
     source_name: String,
     destination_name: String,
     faces: Vec<i64>,
+    /// The engine's undo record for this merge; older engines return none.
+    operation: Option<String>,
 }
 
 #[derive(Default)]
@@ -175,10 +183,13 @@ struct Snapshot {
     total_images: i64,
 }
 
+/// Least-recently-used cache bounded by the bytes its values hold, not by
+/// how many there are: crops differ four-fold in size with display density.
 struct BoundedLru<K, V> {
-    values: HashMap<K, V>,
+    values: HashMap<K, (V, usize)>,
     order: VecDeque<K>,
-    capacity: usize,
+    budget: usize,
+    held: usize,
 }
 
 impl<K, V> BoundedLru<K, V>
@@ -186,32 +197,33 @@ where
     K: Clone + Eq + Hash,
     V: Clone,
 {
-    fn new(capacity: usize) -> Self {
-        Self {
-            values: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity,
-        }
+    fn new(budget: usize) -> Self {
+        Self { values: HashMap::new(), order: VecDeque::new(), budget, held: 0 }
     }
 
     fn get(&mut self, key: &K) -> Option<V> {
-        let value = self.values.get(key)?.clone();
+        let value = self.values.get(key)?.0.clone();
         self.order.retain(|existing| existing != key);
         self.order.push_back(key.clone());
         Some(value)
     }
 
-    fn insert(&mut self, key: K, value: V) {
-        if self.capacity == 0 {
-            return;
-        }
-        if self.values.insert(key.clone(), value).is_some() {
+    /// A value larger than the whole budget is not kept.
+    fn insert(&mut self, key: K, value: V, bytes: usize) {
+        if let Some((_, old)) = self.values.remove(&key) {
+            self.held -= old;
             self.order.retain(|existing| existing != &key);
         }
+        if bytes > self.budget {
+            return;
+        }
+        self.values.insert(key.clone(), (value, bytes));
+        self.held += bytes;
         self.order.push_back(key);
-        while self.values.len() > self.capacity {
-            if let Some(evicted) = self.order.pop_front() {
-                self.values.remove(&evicted);
+        while self.held > self.budget {
+            let Some(evicted) = self.order.pop_front() else { break };
+            if let Some((_, freed)) = self.values.remove(&evicted) {
+                self.held -= freed;
             }
         }
     }
@@ -219,6 +231,11 @@ where
     #[cfg(test)]
     fn len(&self) -> usize {
         self.values.len()
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.held
     }
 }
 
@@ -398,6 +415,10 @@ struct Ui {
     // representative photo but crop different faces from it, so the path alone
     // would make the second card reuse the first card's face crop.
     thumb_cache: RefCell<BoundedLru<PersonThumbKey, gtk::gdk::Texture>>,
+    gate: super::reload_gate::ReloadGate,
+    reload_queued: Cell<bool>,
+    /// The cards on screen, in order, with what each was built from.
+    cards: RefCell<Vec<(CardState, gtk::FlowBoxChild)>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
@@ -591,7 +612,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         unknown_checked: RefCell::new(HashSet::new()),
         reload_gen: Cell::new(0),
         face_clustering: RefCell::new(FaceClusteringLifecycle::new(engine_ready)),
-        thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_CAP)),
+        thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_BYTES)),
+        gate: super::reload_gate::ReloadGate::default(),
+        reload_queued: Cell::new(false),
+        cards: RefCell::new(Vec::new()),
         count_label: count_label.clone(),
         status_label: status_label.clone(),
         actions_box: actions_box.clone(),
@@ -644,7 +668,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         glib::MainContext::default().spawn_local(async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
-                match ev {
+                match &*ev {
                     EngineEvent::Spawning => {
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
@@ -660,7 +684,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_review_count(&ui);
                     }
                     EngineEvent::BatchLanded(_) => {
-                        if last.elapsed() >= Duration::from_millis(1200) {
+                        if !ui.gate.is_mapped() {
+                            ui.gate.mark_stale();
+                        } else if last.elapsed() >= LIVE_RELOAD_EVERY {
                             last = Instant::now();
                             reload(&ui);
                         }
@@ -668,7 +694,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::ScanComplete(_) => reload(&ui),
                     EngineEvent::FaceClusteringComplete(result) => {
                         ui.face_clustering.borrow_mut().finish_active();
-                        set_status(&ui, face_grouping_status(&result));
+                        set_status(&ui, face_grouping_status(result));
                         reload(&ui);
                         refresh_review_count(&ui);
                     }
@@ -684,6 +710,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_view(&ui);
                     }
                     EngineEvent::Exited => {
+                        abandon_merges(&ui);
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
                                 &ui,
@@ -693,13 +720,19 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         refresh_view(&ui);
                     }
                     EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
-                        let confirmed = ui.merge_journal.borrow_mut().pop_front();
+                        let Some(entry) = super::merge_ledger::entry_for(&ev)
+                            .filter(|entry| entry.owner == super::merge_ledger::Owner::People)
+                        else {
+                            continue;
+                        };
+                        let confirmed = take_journaled(&mut ui.merge_journal.borrow_mut(), entry.source, entry.destination);
+                        let operation = result.messages.iter().find_map(|item| item.operation_id.clone());
                         if let Some(record) = confirmed
                             && result.failed == 0
                             && result.succeeded > 0
-                            && !record.faces.is_empty()
+                            && (operation.is_some() || !record.faces.is_empty())
                         {
-                            ui.merge_undo.borrow_mut().push(record);
+                            ui.merge_undo.borrow_mut().push(MergeRecord { operation, ..record });
                             refresh_undo_merge(&ui);
                         }
                         let outstanding = ui.merge_results_pending.get();
@@ -757,18 +790,22 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    reload(&ui);
     refresh_view(&ui);
-    // Re-read whenever the tab becomes visible: the startup read can race the
-    // engine's own DB open (transient BUSY → empty snapshot), and clustering
-    // finished on another tab must show up on switch — not only on scan events.
+    // People are read the first time the page is shown, and again on a later
+    // visit only if something changed while it was away.
     {
         let ui = ui.clone();
         root.connect_map(move |_| {
-            reload(&ui);
+            if ui.gate.on_map() {
+                reload(&ui);
+            }
             refresh_review_count(&ui);
             ui.refresh_bar.request();
         });
+    }
+    {
+        let ui = ui.clone();
+        root.connect_unmap(move |_| ui.gate.on_unmap());
     }
     root.upcast()
 }
@@ -1004,8 +1041,9 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
             set_status(ui, "Saving…".to_string());
             let ui = ui.clone();
             glib::MainContext::default().spawn_local(async move {
+                let deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result)
                             if result.action == "markPersonsAsUnknown" =>
                         {
@@ -1045,6 +1083,14 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                         _ => {}
                     }
                 }
+                if deadline.fired() {
+                    finish_person_action(&ui, "markPersonsAsUnknown");
+                    set_status(
+                        &ui,
+                        "Couldn't mark as unknown: FileID didn't answer in time. Try again.".to_string(),
+                    );
+                    update_bulk_strip(&ui);
+                }
             });
         }
         Mode::Normal => {}
@@ -1053,13 +1099,73 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
 
 // ── Person grid + cards ───────────────────────────────────────────────────────
 
+/// Everything a card is built from; a card is rebuilt only when this changes.
+#[derive(Clone, PartialEq)]
+struct CardState {
+    person: PersonRow,
+    mode: Mode,
+    checked: bool,
+}
+
+/// For each wanted card, the index of a card already on screen that shows
+/// exactly that, or `None` when one has to be built.
+fn reuse_plan(shown: &[CardState], wanted: &[CardState]) -> Vec<Option<usize>> {
+    let mut by_id: HashMap<i64, usize> = shown.iter().enumerate().map(|(index, card)| (card.person.id, index)).collect();
+    wanted
+        .iter()
+        .map(|card| {
+            let index = *by_id.get(&card.person.id)?;
+            (shown[index] == *card).then(|| by_id.remove(&card.person.id)).flatten()
+        })
+        .collect()
+}
+
+/// Brings the grid in line with `ui.persons`, keeping every card that still
+/// shows the same thing (and its loaded photo) instead of rebuilding them all.
 fn rebuild_grid(ui: &Rc<Ui>) {
-    ui.grid.remove_all();
-    let persons = ui.persons.borrow();
-    for p in persons.iter() {
-        let card = build_card(ui, p);
-        ui.grid.append(&card);
+    let mode = ui.mode.get();
+    let wanted: Vec<CardState> = ui
+        .persons
+        .borrow()
+        .iter()
+        .map(|person| CardState {
+            checked: match mode {
+                Mode::Merge => ui.merge_checked.borrow().contains(&person.id),
+                Mode::Unknown => ui.unknown_checked.borrow().contains(&person.id),
+                Mode::Normal => false,
+            },
+            person: person.clone(),
+            mode,
+        })
+        .collect();
+    let shown: Vec<CardState> = ui.cards.borrow().iter().map(|(state, _)| state.clone()).collect();
+    if shown == wanted {
+        return;
     }
+    let plan = reuse_plan(&shown, &wanted);
+    let mut old: Vec<Option<gtk::FlowBoxChild>> = ui.cards.take().into_iter().map(|(_, child)| Some(child)).collect();
+    // An unchanged run at the front stays where it is, so a face landing
+    // mid-scan (appended) never touches the cards already there.
+    let kept = plan.iter().enumerate().take_while(|(index, from)| **from == Some(*index)).count();
+    for child in old.iter().skip(kept).flatten() {
+        ui.grid.remove(child);
+    }
+    let mut cards = Vec::with_capacity(wanted.len());
+    for (index, (state, from)) in wanted.into_iter().zip(plan).enumerate() {
+        let child = match from.and_then(|from| old[from].take()) {
+            Some(child) => child,
+            None => {
+                let child = gtk::FlowBoxChild::new();
+                child.set_child(Some(&build_card(ui, &state.person)));
+                child
+            }
+        };
+        if index >= kept {
+            ui.grid.append(&child);
+        }
+        cards.push((state, child));
+    }
+    ui.cards.replace(cards);
 }
 
 fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
@@ -1236,8 +1342,9 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
         let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
             return;
         };
+        let bytes = decoded.rgba.len();
         let tex = texture_from_decoded(decoded);
-        ui.thumb_cache.borrow_mut().insert(key, tex.clone());
+        ui.thumb_cache.borrow_mut().insert(key, tex.clone(), bytes);
         if let Some(pic) = pic_weak.upgrade() {
             pic.set_paintable(Some(&tex));
         }
@@ -1246,7 +1353,14 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
 
 // ── Reload (DB → caches → view) ───────────────────────────────────────────────
 
+/// Reads people again, but only while this page is on screen; otherwise it
+/// is marked stale and reads once the next time it is shown.
 fn reload(ui: &Rc<Ui>) {
+    if !ui.gate.is_mapped() {
+        ui.gate.mark_stale();
+        return;
+    }
+    ui.gate.loaded();
     let g = ui.reload_gen.get().wrapping_add(1);
     ui.reload_gen.set(g);
     let rx = read_snapshot_async();
@@ -1284,11 +1398,16 @@ fn reload(ui: &Rc<Ui>) {
     });
 }
 
+/// One reload shortly after a change; several changes close together share it.
 fn schedule_reload_burst(ui: &Rc<Ui>) {
-    for ms in [500u64, 1500, 3000] {
-        let ui = ui.clone();
-        glib::timeout_add_local_once(Duration::from_millis(ms), move || reload(&ui));
+    if ui.reload_queued.replace(true) {
+        return;
     }
+    let ui = ui.clone();
+    glib::timeout_add_local_once(RELOAD_DEBOUNCE, move || {
+        ui.reload_queued.set(false);
+        reload(&ui);
+    });
 }
 
 fn begin_person_action(ui: &Rc<Ui>, action: &'static str) -> bool {
@@ -1909,10 +2028,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
+                let _deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result) => {
-                            match classify_rename_terminal(&result, pid) {
+                            match classify_rename_terminal(result, pid) {
                                 RenameTerminal::Ignore => continue,
                                 RenameTerminal::Success => {
                                     finish_person_action(&ui, "renamePerson");
@@ -2074,10 +2194,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
+                let _deadline = events.deadline(Duration::from_secs(PERSON_SAVE_TIMEOUT_SECS));
                 while let Ok(event) = events.recv().await {
-                    match event {
+                    match &*event {
                         EngineEvent::BulkActionResult(result) => {
-                            match classify_person_terminal(&result, "markPersonsAsUnknown", pid) {
+                            match classify_person_terminal(result, "markPersonsAsUnknown", pid) {
                                 RenameTerminal::Ignore => continue,
                                 RenameTerminal::Success => {
                                     finish_person_action(&ui, "markPersonsAsUnknown");
@@ -2182,28 +2303,31 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                 return;
             }
             if !matches!(
-                event,
+                *event,
                 EngineEvent::ScanComplete(_) | EngineEvent::FaceClusteringComplete(_)
             ) {
                 continue;
             }
-            let files = read_person_files_async(pid)
-                .recv()
-                .await
-                .unwrap_or_default();
-            let Some(photos) = photos_weak.upgrade() else {
-                return;
-            };
-            let shown: Vec<i64> = (0..photos.n_items())
-                .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
-                .map(|object| object.borrow::<PersonFace>().face_id)
-                .collect();
-            if !person_photos_changed(&shown, &files) {
-                continue;
-            }
-            let items: Vec<glib::BoxedAnyObject> =
-                files.into_iter().map(glib::BoxedAnyObject::new).collect();
-            photos.splice(0, photos.n_items(), &items);
+            let photos_weak = photos_weak.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let files = read_person_files_async(pid)
+                    .recv()
+                    .await
+                    .unwrap_or_default();
+                let Some(photos) = photos_weak.upgrade() else {
+                    return;
+                };
+                let shown: Vec<i64> = (0..photos.n_items())
+                    .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
+                    .map(|object| object.borrow::<PersonFace>().face_id)
+                    .collect();
+                if !person_photos_changed(&shown, &files) {
+                    return;
+                }
+                let items: Vec<glib::BoxedAnyObject> =
+                    files.into_iter().map(glib::BoxedAnyObject::new).collect();
+                photos.splice(0, photos.n_items(), &items);
+            });
         }
     });
 }
@@ -2463,35 +2587,39 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                 set_status(&ui2, "Wait for the current merge to finish.".to_string());
                 return;
             }
-            ui2.merge_failed.set(false);
-            let sources: Vec<i64> = ids2
-                .iter()
-                .copied()
-                .filter(|source| *source != target_id)
-                .collect();
-            ui2.merge_results_pending.set(sources.len());
-            let faces_rx = actions::read_face_ids(sources.clone());
-            let (ui3, dialog3, total) = (ui2.clone(), dialog2.clone(), ids2.len());
-            glib::MainContext::default().spawn_local(async move {
-                let faces = faces_rx.recv().await.unwrap_or_default();
-                let sent = send_merges(&ui3, target_id, &sources, &faces);
-                ui3.merge_results_pending.set(sent);
-                if sent < sources.len() {
-                    ui3.merge_failed.set(true);
+            let (ui2, ids2, dialog2) = (ui2.clone(), ids2.clone(), dialog2.clone());
+            actions::confirm_merge(&dialog2.clone(), move || {
+                if ui2.merge_results_pending.get() > 0 {
+                    set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                    return;
                 }
-                if sent > 0 {
-                    let status = if sent == sources.len() {
-                        format!("Combining {total} cards into one…")
-                    } else {
-                        format!(
-                            "Sent {sent} of {} merges; reloading after a connection failure.",
-                            sources.len()
-                        )
-                    };
-                    set_status(&ui3, status);
-                    set_mode(&ui3, Mode::Normal);
-                    dialog3.close();
-                }
+                ui2.merge_failed.set(false);
+                let sources: Vec<i64> = ids2
+                    .iter()
+                    .copied()
+                    .filter(|source| *source != target_id)
+                    .collect();
+                ui2.merge_results_pending.set(sources.len());
+                let faces_rx = actions::read_face_ids(sources.clone());
+                let (ui3, dialog3, total) = (ui2.clone(), dialog2.clone(), ids2.len());
+                glib::MainContext::default().spawn_local(async move {
+                    let faces = faces_rx.recv().await.unwrap_or_default();
+                    let sent = send_merges(&ui3, target_id, &sources, &faces);
+                    ui3.merge_results_pending.set(sent);
+                    if sent < sources.len() {
+                        ui3.merge_failed.set(true);
+                    }
+                    if sent > 0 {
+                        let status = if sent == sources.len() {
+                            format!("Combining {total} cards into one…")
+                        } else {
+                            format!("Merged {sent} of {} cards. FileID restarted before the rest.", sources.len())
+                        };
+                        set_status(&ui3, status);
+                        set_mode(&ui3, Mode::Normal);
+                        dialog3.close();
+                    }
+                });
             });
         });
         listbox.append(&row);
@@ -2524,6 +2652,7 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             source_name: name(source),
             destination_name: name(destination),
             faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
+            operation: None,
         };
         if !send_cmd(
             ui,
@@ -2535,9 +2664,35 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             break;
         }
         ui.merge_journal.borrow_mut().push_back(record);
+        super::merge_ledger::sent(super::merge_ledger::Owner::People, source, destination);
         sent += 1;
     }
     sent
+}
+
+fn take_journaled(journal: &mut VecDeque<MergeRecord>, source: i64, destination: i64) -> Option<MergeRecord> {
+    let index = journal
+        .iter()
+        .position(|record| record.source == source && record.destination == destination)?;
+    journal.remove(index)
+}
+
+/// The helper stopped before answering: nothing sent is coming back, so the
+/// merge controls must not stay locked behind results that will never land.
+fn abandon_merges(ui: &Rc<Ui>) {
+    super::merge_ledger::clear();
+    ui.merge_journal.borrow_mut().clear();
+    let waiting = ui.merge_results_pending.replace(0);
+    for pending in ui.pending_suggestions.borrow_mut().drain(..) {
+        if let Some(button) = pending.button.upgrade() {
+            button.set_sensitive(true);
+            button.set_label("Merge");
+        }
+    }
+    if waiting > 0 {
+        set_status(ui, "FileID restarted before the merge finished. Check the cards, then try again.".to_string());
+        schedule_reload_burst(ui);
+    }
 }
 
 fn refresh_undo_merge(ui: &Rc<Ui>) {
@@ -2549,7 +2704,9 @@ fn refresh_undo_merge(ui: &Rc<Ui>) {
     }
 }
 
-/// Splits the last merged-in card back out (`revertMerge`).
+/// Splits the last merged-in card back out: through the engine's own undo
+/// record when the merge returned one, else by moving the faces back
+/// (`revertMerge`).
 fn undo_last_merge(ui: &Rc<Ui>) {
     let Some(record) = ui.merge_undo.borrow().last().cloned() else {
         return;
@@ -2566,13 +2723,39 @@ fn undo_last_merge(ui: &Rc<Ui>) {
     });
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
+        let forget = |ui: &Rc<Ui>| {
+            ui.merge_undo.borrow_mut().retain(|r| {
+                r.source != record.source || r.destination != record.destination || r.faces != record.faces || r.operation != record.operation
+            });
+            refresh_undo_merge(ui);
+        };
+        if let Some(operation) = record.operation.clone() {
+            let page = actions::undo_merge_operation(&ui.engine, operation, 30).await;
+            finish_person_action(&ui, "revertMerge");
+            ui.undo_merge_button.set_sensitive(true);
+            match page {
+                Some(page) if page.status == "ok" => {
+                    forget(&ui);
+                    set_status(&ui, actions::UNDO_MERGE_OK.to_string());
+                    schedule_reload_burst(&ui);
+                }
+                Some(page) => {
+                    if page.status == "refused" {
+                        forget(&ui);
+                    }
+                    let detail = page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                    set_status(&ui, actions::undo_merge_failed(&detail));
+                }
+                None => set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again.")),
+            }
+            return;
+        }
         let results = actions::send_and_collect(&ui.engine, vec![payload], "revertMerge", 30).await;
         finish_person_action(&ui, "revertMerge");
         ui.undo_merge_button.set_sensitive(true);
         match results.as_deref().and_then(<[_]>::first) {
             Some(result) if result.failed == 0 && result.succeeded > 0 => {
-                ui.merge_undo.borrow_mut().retain(|r| r.source != record.source || r.destination != record.destination || r.faces != record.faces);
-                refresh_undo_merge(&ui);
+                forget(&ui);
                 set_status(&ui, actions::UNDO_MERGE_OK.to_string());
                 schedule_reload_burst(&ui);
             }
@@ -2600,12 +2783,22 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
     let ui = ui.clone();
     let btn = btn.clone();
     glib::MainContext::default().spawn_local(async move {
+        let deadline = rx.deadline(Duration::from_secs(MERGE_SUGGESTIONS_TIMEOUT_SECS));
         let cands = loop {
-            match rx.recv().await {
-                Ok(EngineEvent::MergeSuggestions(result)) => {
+            let Ok(event) = rx.recv().await else {
+                if deadline.fired() {
+                    set_status(&ui, "Looking for people to merge took too long. Try again in a moment.".to_owned());
+                    btn.set_sensitive(true);
+                    btn.set_label("Suggest merges");
+                    return;
+                }
+                break Vec::new();
+            };
+            match &*event {
+                EngineEvent::MergeSuggestions(result) => {
                     break result
                         .pairs
-                        .into_iter()
+                        .iter()
                         .map(|pair| Candidate {
                             a: pair.source_person_id,
                             b: pair.destination_person_id,
@@ -2615,11 +2808,12 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                         })
                         .collect();
                 }
-                Ok(EngineEvent::Exited) | Err(_) => break Vec::new(),
-                Ok(EngineEvent::Error { kind, message, .. })
+                EngineEvent::Exited => break Vec::new(),
+                EngineEvent::Error { kind, message, .. }
                     if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" =>
                 {
-                    set_status(&ui, format!("Couldn't find merge suggestions: {message}"));
+                    tracing::debug!(target: "people", "merge suggestions failed: {kind}: {message}");
+                    set_status(&ui, "Couldn't look for people to merge. Try again in a moment.".to_owned());
                     btn.set_sensitive(true);
                     btn.set_label("Suggest merges");
                     return;
@@ -2709,36 +2903,43 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                         set_status(&ui2, "Wait for the current merge to finish.".to_string());
                         return;
                     }
-                    ui2.merge_results_pending.set(1);
-                    ui2.merge_failed.set(false);
-                    button.set_sensitive(false);
-                    different_btn.set_sensitive(false);
-                    button.set_label("Merging…");
-                    set_status(&ui2, "Merging…".to_string());
-                    let faces_rx = actions::read_face_ids(vec![source_id]);
-                    let (ui3, row_weak, button_weak, dialog_weak, different_btn) = (
+                    let (ui2, button, different_btn, row_weak, button_weak, dialog_weak) = (
                         ui2.clone(),
+                        button.clone(),
+                        different_btn.clone(),
                         row_weak.clone(),
                         button_weak.clone(),
                         dialog_weak.clone(),
-                        different_btn.clone(),
                     );
-                    glib::MainContext::default().spawn_local(async move {
-                        let faces = faces_rx.recv().await.unwrap_or_default();
-                        if send_merges(&ui3, target_id, &[source_id], &faces) == 1 {
-                            ui3.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
-                                row: row_weak,
-                                button: button_weak,
-                                dialog: dialog_weak,
-                            });
-                        } else {
-                            ui3.merge_results_pending.set(0);
-                            if let Some(button) = button_weak.upgrade() {
-                                button.set_sensitive(true);
-                                button.set_label("Merge");
-                            }
-                            different_btn.set_sensitive(true);
+                    actions::confirm_merge(&button.clone(), move || {
+                        if ui2.merge_results_pending.get() > 0 {
+                            set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                            return;
                         }
+                        ui2.merge_results_pending.set(1);
+                        ui2.merge_failed.set(false);
+                        button.set_sensitive(false);
+                        different_btn.set_sensitive(false);
+                        button.set_label("Merging…");
+                        set_status(&ui2, "Merging…".to_string());
+                        let faces_rx = actions::read_face_ids(vec![source_id]);
+                        glib::MainContext::default().spawn_local(async move {
+                            let faces = faces_rx.recv().await.unwrap_or_default();
+                            if send_merges(&ui2, target_id, &[source_id], &faces) == 1 {
+                                ui2.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
+                                    row: row_weak,
+                                    button: button_weak,
+                                    dialog: dialog_weak,
+                                });
+                            } else {
+                                ui2.merge_results_pending.set(0);
+                                if let Some(button) = button_weak.upgrade() {
+                                    button.set_sensitive(true);
+                                    button.set_label("Merge");
+                                }
+                                different_btn.set_sensitive(true);
+                            }
+                        });
                     });
                 }
             ));
@@ -3544,6 +3745,8 @@ mod tests {
                 file_id: person_id,
                 ok,
                 message: None,
+                reason: None,
+                operation_id: None,
             }],
         }
     }
@@ -3599,24 +3802,51 @@ mod tests {
     }
 
     #[test]
-    fn people_thumbnail_cache_never_exceeds_capacity() {
-        let mut cache = BoundedLru::new(3);
+    fn people_thumbnail_cache_never_exceeds_its_byte_budget() {
+        let mut cache = BoundedLru::new(300);
         for value in 0..100 {
-            cache.insert(value, value);
-            assert!(cache.len() <= 3);
+            cache.insert(value, value, 100);
+            assert!(cache.held() <= 300);
         }
         assert_eq!(cache.len(), 3);
         assert!(cache.get(&0).is_none());
         assert_eq!(cache.get(&99), Some(99));
+        cache.insert(200, 200, 250);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.held(), 250);
+        cache.insert(201, 201, 301);
+        assert!(cache.get(&201).is_none());
+        assert_eq!(cache.get(&200), Some(200));
+        cache.insert(200, 7, 10);
+        assert_eq!((cache.len(), cache.held(), cache.get(&200)), (1, 10, Some(7)));
+    }
+
+    #[test]
+    fn unchanged_people_cards_are_kept_and_only_changed_ones_rebuilt() {
+        use super::{reuse_plan, CardState, Mode, PersonRow};
+        let card = |id: i64, faces: i64| CardState {
+            person: PersonRow { id, face_count: faces, ..PersonRow::default() },
+            mode: Mode::Normal,
+            checked: false,
+        };
+        let shown = [card(1, 4), card(2, 9), card(3, 1)];
+        assert_eq!(reuse_plan(&shown, &shown), [Some(0), Some(1), Some(2)]);
+        let grown = [card(1, 4), card(2, 10), card(3, 1), card(4, 2)];
+        assert_eq!(reuse_plan(&shown, &grown), [Some(0), None, Some(2), None]);
+        let reordered = [card(3, 1), card(1, 4)];
+        assert_eq!(reuse_plan(&shown, &reordered), [Some(2), Some(0)]);
+        let mut merging = card(1, 4);
+        merging.mode = Mode::Merge;
+        assert_eq!(reuse_plan(&shown, &[merging]), [None]);
     }
 
     #[test]
     fn people_thumbnail_cache_refreshes_recently_used_entry() {
         let mut cache = BoundedLru::new(2);
-        cache.insert("a", 1);
-        cache.insert("b", 2);
+        cache.insert("a", 1, 1);
+        cache.insert("b", 2, 1);
         assert_eq!(cache.get(&"a"), Some(1));
-        cache.insert("c", 3);
+        cache.insert("c", 3, 1);
         assert_eq!(cache.get(&"a"), Some(1));
         assert!(cache.get(&"b").is_none());
         assert_eq!(cache.get(&"c"), Some(3));

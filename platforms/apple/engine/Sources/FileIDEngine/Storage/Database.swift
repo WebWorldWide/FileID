@@ -555,6 +555,12 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v33_face_queues") { db in
             try db.execute(sql: CatalogSchema.v33)
         }
+        m.registerMigration("v34_scan_catchup") { db in
+            try db.execute(sql: CatalogSchema.v34)
+        }
+        m.registerMigration("v35_foreign_key_indexes") { db in
+            try db.execute(sql: CatalogSchema.v35)
+        }
         return m
     }
 

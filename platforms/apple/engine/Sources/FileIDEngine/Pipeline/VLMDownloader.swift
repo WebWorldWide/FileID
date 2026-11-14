@@ -37,11 +37,22 @@ public struct VLMRepoFile: Sendable {
     public let sha256: String?
 }
 
-public enum VLMDownloaderError: Error {
+public enum VLMDownloaderError: Error, LocalizedError {
     case treeListFailed(status: Int)
     case treeDecodeFailed
     case noFilesListed
     case attestationFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .treeListFailed(let status):
+            return StreamingDownloadError.http(status: status).errorDescription
+        case .treeDecodeFailed, .noFilesListed:
+            return "The download site sent back something FileID didn't expect. Try again in a few minutes."
+        case .attestationFailed:
+            return "FileID couldn't confirm the downloaded model is the genuine one, so it wasn't installed. Try again."
+        }
+    }
 }
 
 public actor VLMDownloader {

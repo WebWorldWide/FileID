@@ -194,6 +194,54 @@ struct EngineQueryRepliesTests {
         #expect(replies.waiting == 0)
     }
 
+    @Test func aFrameDecodedOffTheMainActorReachesItsWaiter() async throws {
+        let replies = EngineQueryReplies()
+        let jpeg = try jpegData(width: 512, height: 288)
+        let wanted = Task { await replies.videoThumbnail(path: "/v/a.mov", modifiedAt: 5, maxPixelSize: 512) { true } }
+        let garbled = Task { await replies.videoThumbnail(path: "/v/c.mov", modifiedAt: nil, maxPixelSize: 512) { true } }
+        await waitFor(replies, count: 2)
+        let reply = ThumbnailGenerated(path: "/v/a.mov", modifiedAt: 5, bytes: jpeg.base64EncodedString())
+        let decoded = await Task.detached { EngineQueryReplies.decode(reply) }.value
+        #expect(decoded.longSide == 512)
+        replies.deliver(decoded)
+        replies.deliver(EngineQueryReplies.decode(ThumbnailGenerated(path: "/v/c.mov", modifiedAt: nil, bytes: "%%%")))
+        #expect(await wanted.value == jpeg)
+        #expect(await garbled.value == nil)
+        #expect(replies.waiting == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aCatalogReplyResumesItsWaiterWithoutPolling() async {
+        let engine = EngineClient()
+        let pending = Task { await engine.catalogResponse(for: "r1", timeout: .seconds(30)) }
+        try? await Task.sleep(for: .milliseconds(30))
+        engine.handleEvent(IPCEvent(payload: .catalogResponse(CatalogResponse(requestID: "other", status: "ok"))))
+        engine.handleEvent(IPCEvent(payload: .catalogResponse(CatalogResponse(requestID: "r1", status: "ok", message: "mine"))))
+        #expect(await pending.value?.message == "mine")
+        #expect(await engine.catalogResponse(for: "r1", timeout: .seconds(30))?.message == "mine")
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aCatalogWaitEndsOnTimeoutCancellationOrAnUnsentRequest() async {
+        let engine = EngineClient()
+        #expect(await engine.catalogResponse(for: "never", timeout: .milliseconds(50)) == nil)
+        let cancelled = Task { await engine.catalogResponse(for: "cancelled", timeout: .seconds(30)) }
+        try? await Task.sleep(for: .milliseconds(30))
+        cancelled.cancel()
+        #expect(await cancelled.value == nil)
+        #expect(await engine.catalogReply(to: CatalogRequest(requestID: "unsent", action: "search"), timeout: .seconds(30)) == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aBulkResultWaitTakesTheFirstMatchingResultAfterItsSignal() async {
+        let engine = EngineClient()
+        engine.handleEvent(IPCEvent(payload: .bulkActionResult(BulkActionResult(action: "trashFiles:old", succeeded: 1, failed: 0, messages: []))))
+        let signal = engine.bulkActionResultSignal
+        let pending = Task { await engine.bulkActionResult(after: signal, prefix: "trashFiles", timeout: .seconds(30)) }
+        try? await Task.sleep(for: .milliseconds(30))
+        engine.handleEvent(IPCEvent(payload: .bulkActionResult(BulkActionResult(action: "renameFiles", succeeded: 3, failed: 0, messages: []))))
+        engine.handleEvent(IPCEvent(payload: .bulkActionResult(BulkActionResult(action: "trashFiles:new", succeeded: 2, failed: 0, messages: []))))
+        #expect(await pending.value?.action == "trashFiles:new")
+        #expect(await engine.bulkActionResult(after: engine.bulkActionResultSignal, prefix: "trashFiles", timeout: .milliseconds(50)) == nil)
+    }
+
     @Test(.timeLimit(.minutes(1))) func anEngineClientWithNoEngineAnswersNilAtOnce() async {
         let engine = EngineClient()
         #expect(await engine.findMergeSuggestions() == nil)

@@ -444,7 +444,7 @@ pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
             while let Ok(event) = rx.recv().await {
                 if let (Some(label), Some(value)) = (engine_label(&event), status_value.as_ref()) {
                     value.set_label(&label);
-                    stop.set_sensitive(matches!(event, EngineState::Ready));
+                    stop.set_sensitive(matches!(*event, EngineState::Ready));
                 }
             }
         });

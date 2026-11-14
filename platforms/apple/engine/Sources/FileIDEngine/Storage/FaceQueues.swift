@@ -697,3 +697,152 @@ enum FaceQueues {
         return page(requestID, "undo", "ok", queue: "splits", personID: personID, total: try splitCount(db))
     }
 }
+
+/// Undo journal for ordinary People merges (mergeClusters). Each merge is one
+/// catalog operation of kind person_merge, written in the merge's transaction
+/// and undone through undoFaceReview.
+enum PersonMergeJournal {
+    static let kind = "person_merge"
+    static let queue = "mergeUndo"
+    static let lastToken = "lastPersonMerge"
+    static let window: Double = 86_400
+    static let changedMessage = "This merge can't be undone any more because these people changed since."
+
+    private static let verdictColumns = "person_a, person_b, same_person, confidence, vlm_model, verified_at, face_a, face_b, file_a, bbox_a, file_b, bbox_b"
+
+    /// The verdicts a merge can replace: every "different people" row and the pair's own row.
+    private static func verdicts(_ db: GRDB.Database, _ pair: FaceQueues.Pair) throws -> [String: String] {
+        var found: [String: String] = [:]
+        for row in try Row.fetchAll(db, sql: """
+            SELECT \(verdictColumns) FROM face_verifications WHERE same_person=0 OR (person_a=? AND person_b=?)
+            """, arguments: [pair.a, pair.b]) {
+            func value<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type) -> Any { (row[column] as T?) as Any? ?? NSNull() }
+            let a: Int64 = row["person_a"], b: Int64 = row["person_b"]
+            found["\(a)-\(b)"] = try FaceReview.jsonText([
+                "personA": a, "personB": b, "samePerson": row["same_person"] as Int64, "confidence": row["confidence"] as Double,
+                "model": row["vlm_model"] as String, "verifiedAt": row["verified_at"] as Double,
+                "faceA": value("face_a", Int64.self), "faceB": value("face_b", Int64.self),
+                "fileA": value("file_a", Int64.self), "bboxA": value("bbox_a", String.self),
+                "fileB": value("file_b", Int64.self), "bboxB": value("bbox_b", String.self),
+            ])
+        }
+        return found
+    }
+
+    /// Merges `source` into `target` the way `Database.mergePersons` does and
+    /// journals what undo needs. Returns the operation to undo.
+    static func merge(_ db: GRDB.Database, target: Int64, source: Int64,
+                      now: Double = Date().timeIntervalSince1970) throws -> String {
+        guard target > 0, source > 0, target != source,
+              let keepRow = try FaceQueues.personJSON(db, target), let otherRow = try FaceQueues.personJSON(db, source) else {
+            throw Database.PersonMergeFailure.invalidSelection
+        }
+        let faces = try Int64.fetchAll(db, sql: "SELECT id FROM face_prints WHERE person_id=? ORDER BY id", arguments: [source])
+        let pair = FaceQueues.Pair(target, source)
+        let anchorFile = try FaceQueues.anchor(db, personID: target)?.fileID
+        let verdictsBefore = try verdicts(db, pair)
+        try Database.persistManualMergeConstraint(db, source: source, destination: target)
+        let verdictsAfter = try verdicts(db, pair)
+        let replaced = verdictsBefore.filter { verdictsAfter[$0.key] != $0.value }.keys.sorted()
+            .compactMap { verdictsBefore[$0].flatMap(FaceReview.parse) }
+        let keepNames = FaceQueues.names(keepRow), otherNames = FaceQueues.names(otherRow)
+        if FaceQueues.blank(keepNames), !FaceQueues.blank(otherNames) {
+            try db.execute(sql: "UPDATE persons SET name=?,title=?,first_name=?,middle_name=?,last_name=?,suffix=?,is_unknown=0 WHERE id=?",
+                           arguments: [otherNames[0], otherNames[1], otherNames[2], otherNames[3], otherNames[4], otherNames[5], target])
+        }
+        try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE person_id=?", arguments: [target, source])
+        try db.execute(sql: "DELETE FROM persons WHERE id=?", arguments: [source])
+        try db.execute(sql: """
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+                representative_face_id=COALESCE(
+                    (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL
+                     ORDER BY COALESCE(fp.face_quality,0.0) DESC LIMIT 1),
+                    (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 ORDER BY COALESCE(fp.face_quality,0.0) DESC LIMIT 1),
+                    representative_face_id)
+            WHERE id=?1
+            """, arguments: [target])
+        let before: [String: Any] = [
+            "resolution": "merge", "personID": target, "otherPersonID": source, "other": otherRow,
+            "keepNames": keepNames.map { $0 as Any? ?? NSNull() }, "keepUnknown": keepRow["is_unknown"] ?? 0,
+            "keepRepresentative": keepRow["representative_face_id"] ?? NSNull(), "verifications": replaced,
+        ]
+        let after: [String: Any] = ["resolution": "merge", "personID": target, "otherPersonID": source, "faceIDs": faces]
+        return try FaceQueues.journal(db, kind: kind, fileID: anchorFile, before: before, after: after, now: now)
+    }
+
+    private static func movable(_ db: GRDB.Database, faces: [Int64], keep: Int64) throws -> [Int64] {
+        try Int64.fetchAll(db, sql: "SELECT id FROM face_prints WHERE person_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id",
+                           arguments: [keep, FaceQueues.json(faces)])
+    }
+
+    private static func undoable(_ db: GRDB.Database, after: [String: Any]) throws -> (keep: Int64, other: Int64, faces: [Int64])? {
+        guard let keep = FaceReview.int(after["personID"]), let other = FaceReview.int(after["otherPersonID"]),
+              try !FaceQueues.exists(db, other) else { return nil }
+        let faces = FaceQueues.idList(after["faceIDs"])
+        let back = try movable(db, faces: faces, keep: keep)
+        guard faces.isEmpty || !back.isEmpty else { return nil }
+        return (keep, other, back)
+    }
+
+    /// The newest merge from the last day that can still be undone.
+    static func latest(_ db: GRDB.Database, now: Double = Date().timeIntervalSince1970) throws -> (id: String, keep: Int64, other: Int64)? {
+        for row in try Row.fetchAll(db, sql: """
+            SELECT o.id, c.after_json FROM catalog_operations o JOIN catalog_corrections c ON c.id=o.id
+            WHERE o.state='completed' AND c.kind=? AND o.created_at>=? ORDER BY o.created_at DESC, o.rowid DESC LIMIT 50
+            """, arguments: [kind, now - window]) {
+            guard let after = FaceReview.parse(row["after_json"]), let found = try undoable(db, after: after) else { continue }
+            return (row["id"], found.keep, found.other)
+        }
+        return nil
+    }
+
+    static func list(_ db: GRDB.Database, requestID: String) throws -> FaceReviewPage {
+        let found = try latest(db)
+        return FaceQueues.page(requestID, "list", "ok", queue: queue, operationID: found?.id, personID: found?.keep,
+                               otherPersonID: found?.other, total: found == nil ? 0 : 1)
+    }
+
+    static func undo(_ db: GRDB.Database, requestID: String, before: [String: Any], after: [String: Any], now: Double) throws -> FaceReviewPage {
+        guard let found = try undoable(db, after: after) else {
+            return FaceQueues.page(requestID, "undo", "refused", queue: queue, message: changedMessage, total: try latest(db, now: now) == nil ? 0 : 1)
+        }
+        let keep = found.keep, other = found.other
+        let row = before["other"] as? [String: Any] ?? [:]
+        try db.execute(sql: """
+            INSERT INTO persons(id,name,title,first_name,middle_name,last_name,suffix,is_unknown,created_at,representative_face_id,file_count,anchor_radius,last_clustered_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)
+            """, arguments: [other, row["name"] as? String, row["title"] as? String, row["first_name"] as? String,
+                             row["middle_name"] as? String, row["last_name"] as? String, row["suffix"] as? String,
+                             FaceReview.int(row["is_unknown"]) ?? 0, FaceReview.double(row["created_at"]) ?? now,
+                             FaceReview.int(row["representative_face_id"]), FaceReview.double(row["anchor_radius"]),
+                             FaceReview.double(row["last_clustered_at"])])
+        try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE person_id=? AND id IN (SELECT value FROM json_each(?))",
+                       arguments: [other, keep, FaceQueues.json(found.faces)])
+        let kept = (before["keepNames"] as? [Any] ?? []).map { $0 as? String }
+        if FaceQueues.blank(kept), let current = try FaceQueues.personJSON(db, keep), FaceQueues.names(current) == FaceQueues.names(row) {
+            try db.execute(sql: "UPDATE persons SET name=NULL,title=NULL,first_name=NULL,middle_name=NULL,last_name=NULL,suffix=NULL,is_unknown=? WHERE id=?",
+                           arguments: [FaceReview.int(before["keepUnknown"]) ?? 0, keep])
+        }
+        let pair = FaceQueues.Pair(keep, other)
+        try db.execute(sql: "DELETE FROM face_verifications WHERE person_a=? AND person_b=? AND same_person=1 AND vlm_model='user-merged'",
+                       arguments: [pair.a, pair.b])
+        for verdict in before["verifications"] as? [[String: Any]] ?? [] {
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO face_verifications(\(verdictColumns)) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """, arguments: [FaceReview.int(verdict["personA"]), FaceReview.int(verdict["personB"]), FaceReview.int(verdict["samePerson"]) ?? 0,
+                                 FaceReview.double(verdict["confidence"]) ?? 1, verdict["model"] as? String ?? "",
+                                 FaceReview.double(verdict["verifiedAt"]) ?? 0, FaceReview.int(verdict["faceA"]), FaceReview.int(verdict["faceB"]),
+                                 FaceReview.int(verdict["fileA"]), verdict["bboxA"] as? String, FaceReview.int(verdict["fileB"]),
+                                 verdict["bboxB"] as? String])
+        }
+        if let representative = FaceReview.int(before["keepRepresentative"]) {
+            try db.execute(sql: """
+                UPDATE persons SET representative_face_id=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM face_prints WHERE id=?1 AND person_id=?2)
+                """, arguments: [representative, keep])
+        }
+        try FaceReview.recount(db, personID: keep)
+        try FaceReview.recount(db, personID: other)
+        return FaceQueues.page(requestID, "undo", "ok", queue: queue, personID: keep, otherPersonID: other,
+                               total: try latest(db, now: now) == nil ? 0 : 1)
+    }
+}

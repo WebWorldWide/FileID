@@ -1291,27 +1291,21 @@ fn wire(
     ui.editor.add_controller(escape);
 
     let weak = Rc::downgrade(ui);
-    glib::timeout_add_local(Duration::from_millis(250), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped() && ui.selected.borrow().is_some() {
+    v3::while_on_screen(&ui.root, Duration::from_millis(250), move || {
+        if let Some(ui) = weak.upgrade()
+            && ui.selected.borrow().is_some()
+        {
             ui.tick();
         }
-        glib::ControlFlow::Continue
     });
     let weak = Rc::downgrade(ui);
-    glib::timeout_add_local(Duration::from_secs(2), move || {
-        let Some(ui) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if ui.root.is_mapped()
+    v3::while_on_screen(&ui.root, Duration::from_secs(2), move || {
+        if let Some(ui) = weak.upgrade()
             && ui.engine.borrow().is_ready()
             && !ui.requests.borrow().busy("jobs")
         {
             ui.send("jobs", catalog_request("jobs"));
         }
-        glib::ControlFlow::Continue
     });
     ui.root.connect_unmap({
         let weak = Rc::downgrade(ui);
@@ -1383,7 +1377,7 @@ fn subscribe(ui: &Rc<CatalogUi>) {
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            match event {
+            match &*event {
                 EngineState::CatalogResponse(r) => {
                     let slot = ui.requests.borrow_mut().accept(&r.request_id, true);
                     let Some(slot) = slot else { continue };
@@ -1398,10 +1392,10 @@ fn subscribe(ui: &Rc<CatalogUi>) {
                         ui.set_status(r.message.as_deref().unwrap_or(""));
                     }
                     match slot.as_str() {
-                        "search" => ui.render_hits(r.hits),
+                        "search" => ui.render_hits(r.hits.clone()),
                         "detail" => {
                             v3::clear(&ui.chapters);
-                            ui.render_chapters(r.chapters);
+                            ui.render_chapters(r.chapters.clone());
                         }
                         "mutation" => {
                             let owner = ui.mutation_file_id.borrow_mut().take();
@@ -1410,13 +1404,13 @@ fn subscribe(ui: &Rc<CatalogUi>) {
                                 ui.detail();
                             }
                         }
-                        "jobs" => ui.render_jobs(r.jobs),
+                        "jobs" => ui.render_jobs(r.jobs.clone()),
                         "job-control" | "timeline" => ui.send("jobs", catalog_request("jobs")),
                         _ => {}
                     }
                 }
                 EngineState::ClipTextEmbedding(response) => {
-                    let result = ui.hybrid.borrow_mut().finish(&response);
+                    let result = ui.hybrid.borrow_mut().finish(response);
                     if let Some((request, reason)) = result {
                         ui.search_notice.set_label(reason.as_deref().unwrap_or(
                             "Hybrid search uses a validated local CLIP embedding and the pinned CLIP model identity.",
@@ -1428,7 +1422,7 @@ fn subscribe(ui: &Rc<CatalogUi>) {
                 EngineState::Failed(e) => {
                     ui.requests.borrow_mut().clear();
                     ui.searching.set_visible(false);
-                    ui.set_status(&e);
+                    ui.set_status(e);
                 }
                 EngineState::Exited => {
                     ui.requests.borrow_mut().clear();

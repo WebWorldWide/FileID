@@ -135,7 +135,9 @@ public sealed record BulkActionResult(
 public sealed record BulkActionItem(
     [property: JsonPropertyName("fileID")] long? FileId,
     bool Ok,
-    string? Message = null);
+    string? Message = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason = null,
+    [property: JsonPropertyName("operationID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? OperationId = null);
 
 public sealed record ClipTextEmbedding(
     [property: JsonPropertyName("queryID")] string QueryId,

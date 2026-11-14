@@ -22,9 +22,9 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     assert_eq!(response.status, "ok");
     // The Mac app's engine uses Apple Speech, which needs no model install.
     let speech_note = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        "on-device speech"
+        "any speech"
     } else {
-        "Install a speech model from the model catalog"
+        "install a speech model"
     };
     assert!(response.message.unwrap().contains(speech_note));
     assert_eq!(response.jobs.len(), 1);

@@ -42,6 +42,24 @@ Parity (Best Takes pages, Moments lanes, springs audits and the Models page fold
 
 Models: keep about 10-15 curated defaults (2-3 per hardware tier); the Windows and Linux Describe pickers list the portable catalog filtered by RAM/VRAM, curated first (2026-11-05; Linux filters by RAM only); build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
 
+## After the 2026-11-13 integration
+
+- [ ] **On-screen pass, Mac (owner's session):** nothing from the audit rounds has been seen running, and the app now starts the shared Rust engine by default. Lava lamp at a third resolution / 20 fps and the unblurred Detail pane; tab switching keeps state and hidden pages ignore keys; a scan with RAM++ shows "Tagging photos", Stop during it, scan again finishes; People merge → Undo; Describe Files download prompt, progress, failure card; Settings Download / Remove / "Download the essentials"; rename sheets and Undo; Library "New files · Show", ⌘K; Duplicates tiles with folders; Organize Folders large-plan panel and result banner; Best Takes ⌘⌫; Chat "Put back". Repeat the scan checks with the engine set to Swift in Settings ▸ Advanced.
+- [ ] **On a Linux desktop:** the GSK lava lamp (same look, stops when minimised or unfocused), thumbnail cache, Duplicates "Show more" and no re-hash on tab switch, People cards during a scan, merge dialogs, Settings on first run, error text, pause/cancel reaching the engine during a heavy scan.
+- [ ] **On Windows hardware:** everything in PR #332 (thumbnail quality and speed at 150–200 % scale, the flyout confirmation, Undo against a real helper, helper-ranked search during a scan, the log tail surviving a fast-fail), the resident model stack's VRAM behaviour on DirectML, stdout buffering against the WinUI reader, tag threads at LOWEST priority.
+- [ ] **Measure:** the after-scan tagging pass on the Mac-hosted engine and with the MLX GPU path; the binary search index on a library above 80k images; model-load overlap; a real iCloud dataless file.
+- [ ] **Engine follow-ups:** a "careful read owed" flag from the Apple adapter (`ScanVision.swift`, additive JSON) so the Rust engine can catch up careful reads; Windows OCR engine reuse and directory-listing discovery (not done: no Windows target on the Mac); a request id on `BulkActionResult` so GTK stops matching the merge sentence; failure memory in its own column instead of `scan_catchup.stages = 4`; `files(file_ref)` index for the heal lookup; an MLX VLM load should evict the resident scan stack on the Mac; root-scope clause still parses JSON per row; watch the twin-reuse test flake.
+- [ ] **App follow-ups:** WinUI shimmer animation (likely never runs), `App.xaml.cs` logs unredacted paths (digest-reviewed file), Chat's merge action lacks the confirmation and journal undo on WinUI and GTK; GTK still builds all ten tabs at startup.
+- [ ] **Owner:** Spotlight default (on, with a switch); catalog is now v35, so an older installed app refuses a library this build has opened; release gates in SHIP.md (Windows signing, per-vendor GPU checks, Mac notarization, Linux packaging runs).
+
+## Tagging accuracy and scan speed (2026-11-12)
+
+- [ ] **Windows GPU timing** of the two decode changes: `iterate.ps1` on a camera-JPEG corpus with duplicates, with `FILEID_TWIN_REUSE=0` and `FILEID_JPEG_MPF_PREVIEW=0` as controls; confirm `[STATS] twin_reused` / `mpf_previews` climb and People looks the same.
+- [ ] **People check of the MPF path on the Rust engine:** `people_eval.py --flavor rust` before/after on the 2026 camera events (the Mac engine measured faces 384 → 385 on its own path).
+- [ ] **Mac engine:** port identical-image reuse (`Tagging.swift` hashes in parallel with inference today; hash first, then skip the Vision/CLIP/RAM++ work and copy rows in `DBWriter.swift`).
+- [ ] **Owner's call on recall:** capping RAM++'s per-class thresholds at 0.75 raises held-out subject recall 0.420 → 0.442 and F1 0.548 → 0.558 but costs precision 0.789 → 0.757 (DECISIONS 2026-11-12). Not applied; the owner has asked for cleaner tags twice.
+- [ ] Extend `tag_eval.py` labels beyond the 72 search subjects before tuning thresholds per class; the current set is too small for per-class work.
+
 ## ONNX Runtime telemetry (2026-11-10, release blocker for Windows)
 
 - [x] Both engines set `ORT_DISABLE_TELEMETRY=1` before ORT loads and create every environment with telemetry events off; the privacy gate rejects ORT's 1DS uploader and can load a runtime to prove it writes nothing (`--ort-runtime`).

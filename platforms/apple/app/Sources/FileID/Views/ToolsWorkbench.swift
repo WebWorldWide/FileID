@@ -7,7 +7,7 @@ import FileIDShared
 /// from the view so the request-building rules are testable.
 struct MediaToolChoice: Equatable {
     static let tools: [(id: String, label: String)] = [
-        ("export", "Export"), ("trim", "Trim"), ("remux", "Remux"), ("audio", "Audio"), ("proxy", "Proxy"), ("rotate", "Rotate"),
+        ("export", "Export"), ("trim", "Trim"), ("remux", "Copy without re-compressing"), ("audio", "Audio"), ("proxy", "Small preview copy"), ("rotate", "Rotate"),
     ]
     static let rotations: [(Int, String)] = [(90, "90° right"), (180, "180°"), (270, "90° left")]
 
@@ -37,8 +37,8 @@ struct MediaToolChoice: Equatable {
 
     var formatOptions: [(String, String)] {
         switch tool {
-        case "audio": [("m4a", "M4A · AAC")]
-        case "proxy": [("mp4", "MP4 · H.264")]
+        case "audio": [("m4a", "M4A audio")]
+        case "proxy": [("mp4", "MP4 video (plays everywhere)")]
         default: [("mp4", "MP4"), ("mov", "MOV")]
         }
     }
@@ -99,6 +99,8 @@ struct MediaToolChoice: Equatable {
 final class ToolsSession {
     var query = ""
     var hits: [CatalogHit] = []
+    /// Every search result; `hits` is the part that fits the Photo / Video / Chapters mode.
+    var allHits: [CatalogHit] = []
     var selection = Set<Int64>()
     var kind = "photo"
     var format = "png"
@@ -127,6 +129,16 @@ final class ToolsSession {
     var pendingEngineGeneration = 0
     var media = MediaToolChoice()
 
+    func fitsKind(_ hit: CatalogHit) -> Bool {
+        let ext = URL(fileURLWithPath: hit.path).pathExtension.lowercased()
+        return kind == "photo" ? FileTypes.images.contains(ext) : FileTypes.videos.contains(ext)
+    }
+
+    func applyKindFilter() {
+        hits = allHits.filter(fitsKind)
+        selection.formIntersection(hits.map(\.fileID))
+    }
+
     var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
 
     var recipe: ToolRecipe {
@@ -148,8 +160,8 @@ final class ToolsSession {
         pending = ""
         pendingAction = ""
         message = action == "execute"
-            ? "FileID's engine stopped during the export. Some files may already be saved; press Show last export to check."
-            : "FileID's engine stopped before this finished. Try again."
+            ? "FileID's helper stopped during the export. Some files may already be saved; press Show last export to check."
+            : "FileID's helper stopped before this finished. Try again."
     }
 }
 
@@ -178,6 +190,7 @@ struct ToolsWorkbench: View {
         }
         session.format = format
         session.maxDimension = kind == "video" ? 1920 : 4096
+        session.applyKindFilter()
         invalidate()
     }
 
@@ -227,6 +240,7 @@ struct ToolsWorkbench: View {
         .modifier(RecipeHooks(view: self))
         .task(id: trimSource) { await loadTrimPlayer() }
         .onDisappear { player?.pause() }
+        .onPageVisibility(hidden: { player?.pause() })
         .onChange(of: engine.engineResetSignal) { _, new in session.abandonPendingIfEngineRestarted(generation: new) }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
@@ -271,7 +285,9 @@ struct ToolsWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
             if session.hits.isEmpty {
-                MetaText("Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are.")
+                MetaText(session.allHits.isEmpty
+                         ? "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
+                         : "That search found \(session.allHits.count.formatted()) file\(session.allHits.count == 1 ? "" : "s"), but no \(session.kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again.")
                     .padding(.horizontal, 14).padding(.bottom, 12)
             } else {
                 Hairline()
@@ -322,24 +338,29 @@ struct ToolsWorkbench: View {
                         SegmentedBar(selection: Binding(get: { session.media.tool }, set: { session.media.adopt(tool: $0, sources: session.selectedPaths) }),
                                      options: MediaToolChoice.available(session.capabilities))
                     }
+                    .help("Copy without re-compressing is also called remux. Small preview copy is also called a proxy.")
                 }
                 optionRow("Format") {
                     if session.kind == "photo" {
                         SegmentedBar(selection: $session.format, options: [("png", "PNG"), ("jpeg", "JPEG"), ("tiff", "TIFF")])
                     } else if session.exportsVideo {
-                        SegmentedBar(selection: $session.format, options: [("mp4", "MP4 · H.264")])
+                        SegmentedBar(selection: $session.format, options: [("mp4", "MP4 video (plays everywhere)")])
+                            .help("MP4 with H.264 video")
                     } else if session.kind == "video" {
                         SegmentedBar(selection: Binding(get: { session.media.format }, set: { if ["mp4", "mov"].contains($0) { session.media.container = $0 } }),
                                      options: session.media.formatOptions,
                                      disabled: session.media.disabledContainers(sources: session.selectedPaths))
+                            .help(session.media.tool == "audio" ? "M4A with AAC audio" : (session.media.tool == "proxy" ? "MP4 with H.264 video" : "The kind of video file to save"))
                     } else {
-                        SegmentedBar(selection: $session.format, options: [("vtt", "WebVTT"), ("json", "JSON")])
+                        SegmentedBar(selection: $session.format, options: [("vtt", "Chapter list (web captions)"), ("json", "Chapter list (data file)")])
+                            .help("Web captions is a WebVTT file. Data file is JSON.")
                     }
                 }
                 if session.kind == "photo" {
                     optionRow("Longest side") {
                         DSNumberField(placeholder: "Longest side in pixels", value: $session.maxDimension, format: .number.grouping(.never), width: 90)
-                        MetaText("px, up to 8192", size: 12)
+                        MetaText("pixels wide (up to 8192)", size: 12)
+                            .help("The longer edge of the picture, in pixels (px)")
                     }
                 }
                 if session.kind == "video" && !session.media.isExport {
@@ -399,25 +420,26 @@ struct ToolsWorkbench: View {
             trimRow("Start", value: $session.media.trimStart)
             trimRow("End", value: $session.media.trimEnd)
             optionRow("Cut") {
-                SegmentedBar(selection: $session.media.trimMode, options: [("keyframe", "Keyframe"), ("exact", "Exact")])
+                SegmentedBar(selection: $session.media.trimMode, options: [("keyframe", "Fast cut"), ("exact", "Exact cut")])
+                    .help("Fast cut copies the video and starts at the nearest keyframe. Exact cut re-encodes to H.264.")
             }
             note(session.media.trimMode == "exact"
-                 ? "Re-encodes to an H.264 MP4 so the cut lands on the exact frame. HDR videos are refused."
-                 : "Copies the video without re-encoding. The new file may start a little early, at the keyframe before your start time.")
+                 ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren't supported yet."
+                 : "Copies the video without re-compressing it. The new file may start a little before your start time.")
         case "remux":
-            note("Moves the video and sound into the other container without re-encoding. The container a file already has is greyed out.")
+            note("Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.")
         case "audio":
-            note("Saves the soundtrack as AAC in an M4A file. Videos without sound are refused.")
+            note("Saves the soundtrack as an M4A audio file. Videos without sound can't be used.")
         case "proxy":
             optionRow("Size") {
-                SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 px"), (960, "960 px")])
+                SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 pixels"), (960, "960 pixels")])
             }
-            note("A small H.264 copy for quick previews, linked to its original. Smaller videos aren't enlarged.")
+            note("A small MP4 copy for quick previews, linked to its original. Smaller videos aren't enlarged.")
         default:
             optionRow("Turn") {
                 SegmentedBar(selection: $session.media.rotation, options: MediaToolChoice.rotations)
             }
-            note("Changes which way up the picture is shown, without re-encoding it.")
+            note("Changes which way up the picture is shown, without re-compressing it.")
         }
     }
 
@@ -506,7 +528,7 @@ struct ToolsWorkbench: View {
                         if session.kind == "chapters" {
                             VStack(spacing: 8) {
                                 Image(systemName: "list.bullet.rectangle").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
-                                MetaText(session.format == "vtt" ? "WebVTT chapter track" : "Chapter list as JSON")
+                                MetaText(session.format == "vtt" ? "Chapter list (web captions)" : "Chapter list (data file)")
                             }
                         } else if trimSource != nil, let player {
                             NativeVideoPlayer(player: player).accessibilityLabel("Video player")
@@ -560,7 +582,7 @@ struct ToolsWorkbench: View {
                     }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(!canPreview)
-                    .help(canPreview ? "Show the files this export will create, before writing anything" : session.selection.isEmpty ? "Tick at least one file first" : "Choose a folder to save to first")
+                    .help(previewBlocker ?? "Show the files this export will create, before writing anything")
                     Button("Export") {
                         send(ToolRequest(requestID: UUID().uuidString, action: "execute", destination: session.destination,
                                          operationID: session.operationID, destinationBookmark: session.destinationBookmark))
@@ -568,7 +590,7 @@ struct ToolsWorkbench: View {
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(session.operationID == nil || session.executed || !session.destinationAccessReady || busy)
                     .keyboardShortcut(.defaultAction)
-                    .help(session.operationID == nil ? "Press Preview first to check what will be created" : session.executed ? "Already exported. Change something and preview again to export more." : "Create the new files in the chosen folder")
+                    .help(exportBlocker ?? "Create the new files in the chosen folder")
                     Spacer(minLength: 0)
                     if session.pendingAction == "execute" {
                         Button("Cancel") {
@@ -587,6 +609,10 @@ struct ToolsWorkbench: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 6) {
+                    if !busy, let reason = previewBlocker ?? exportBlocker {
+                        MetaText(reason, size: 11.5)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Button("Show last export") { send(ToolRequest(requestID: UUID().uuidString, action: "history")) }
                         .buttonStyle(.dsGhost)
                         .disabled(busy)
@@ -621,15 +647,15 @@ struct ToolsWorkbench: View {
             switch session.media.tool {
             case "trim":
                 parts.append(String(format: "%.2f–%.2f s", session.media.trimStart, session.media.trimEnd))
-                parts.append(session.media.trimMode == "exact" ? "Exact" : "Keyframe")
-            case "proxy": parts.append("\(session.media.proxySide) px")
+                parts.append(session.media.trimMode == "exact" ? "Exact cut" : "Fast cut")
+            case "proxy": parts.append("\(session.media.proxySide) pixels")
             case "rotate": parts.append(MediaToolChoice.rotations.first { $0.0 == session.media.rotation }?.1 ?? "")
             default: break
             }
             return parts.joined(separator: " · ")
         }
         var parts = ["\(count) file\(count == 1 ? "" : "s")", session.format.uppercased()]
-        if session.kind == "photo" { parts.append("≤ \(session.maxDimension) px") }
+        if session.kind == "photo" { parts.append("up to \(session.maxDimension) pixels") }
         if session.kind == "video" {
             parts.append(session.maxDimension >= 3840 ? "4K" : (session.maxDimension >= 1920 ? "1080p" : "720p"))
             if session.videoAspectRatio != "source" { parts.append(session.videoAspectRatio) }
@@ -641,8 +667,10 @@ struct ToolsWorkbench: View {
         guard !session.searchID.isEmpty, let result = engine.catalogResponses[session.searchID] else { return }
         session.searchID = ""
         var seen = Set<Int64>()
-        session.hits = result.hits.filter { seen.insert($0.fileID).inserted }
-        session.selection.removeAll(); invalidate()
+        session.allHits = result.hits.filter { seen.insert($0.fileID).inserted }
+        session.selection.removeAll()
+        session.applyKindFilter()
+        invalidate()
         if result.status != "ok" { session.message = result.message ?? "Search failed." }
     }
 
@@ -675,11 +703,26 @@ struct ToolsWorkbench: View {
         }
     }
 
+    private var previewBlocker: String? {
+        if session.selection.isEmpty { return "Tick at least one file first." }
+        if session.destination.isEmpty { return "Choose a folder to save to first." }
+        if !session.destinationAccessReady { return "Getting access to that folder…" }
+        if !(1...8192).contains(session.maxDimension) { return "Longest side must be between 1 and 8192 pixels." }
+        return nil
+    }
+
+    private var exportBlocker: String? {
+        if session.operationID == nil { return "Press Preview first. It lists the files Export will create." }
+        if session.executed { return "Already exported. Change something and press Preview again to export more." }
+        if !session.destinationAccessReady { return "Getting access to that folder…" }
+        return nil
+    }
+
     private var plainKindDetail: String {
         if session.kind == "video" && !session.media.isExport {
             switch session.media.tool {
             case "trim": return "Keeps the part between the start and end times as a new file. Your original video stays as it is."
-            case "remux": return "Puts the same video and sound in a different container. Your original video stays as it is."
+            case "remux": return "Saves the same video and sound as a different kind of file. Your original video stays as it is."
             case "audio": return "Saves the soundtrack as a new audio file. Your original video stays as it is."
             case "proxy": return "Makes a small preview copy linked to the original. Your original video stays as it is."
             default: return "Saves a copy that plays the other way up. Your original video stays as it is."

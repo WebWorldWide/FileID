@@ -28,7 +28,7 @@ actor TimelineAnalysis {
             guard !request.requestID.isEmpty, request.requestID.count <= 200, let ids = request.fileIDs, !ids.isEmpty, ids.count <= 1000 else { throw CatalogStore.InvalidRequest() }
             if let mode = request.timelineMode, !["sampled", "moments"].contains(mode) { throw CatalogStore.InvalidRequest() }
             guard case .ready(let model) = await DeepAnalyze.shared.loadState else {
-                return CatalogResponse(requestID: request.requestID, status: "error", message: "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.")
+                return CatalogResponse(requestID: request.requestID, status: "error", message: "Pick and load an AI model in Describe Files first. FileID won't download one by itself.")
             }
             let unique = Array(Set(ids)).sorted()
             let id = UUID().uuidString
@@ -45,10 +45,10 @@ actor TimelineAnalysis {
             await schedule(id, database: database, sink: sink)
             if request.timelineMode == "moments" {
                 return CatalogResponse(requestID: request.requestID, status: "ok",
-                                       message: "Queued significant-moment drafts from overlapping frame sequences and on-device speech. Review every proposal; sampled frames can still miss actions or hidden outcomes.",
+                                       message: "FileID will look through these videos for the moments that matter, using the picture and any speech. Check each suggestion: quick actions can be missed.",
                                        jobs: try await CatalogStore.jobs(database))
             }
-            return CatalogResponse(requestID: request.requestID, status: "ok", message: "Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed. When on-device speech recognition is available, timestamped transcript passages are added.", jobs: try await CatalogStore.jobs(database))
+            return CatalogResponse(requestID: request.requestID, status: "ok", message: "FileID will look at one moment in every ten seconds of these videos, plus the start. Very quick events can be missed. If speech recognition is on, what people say is added too.", jobs: try await CatalogStore.jobs(database))
         } catch {
             return CatalogResponse(requestID: request.requestID, status: "error", message: error.localizedDescription)
         }

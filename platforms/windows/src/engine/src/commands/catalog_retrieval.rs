@@ -147,22 +147,28 @@ fn tag_hits(
     if words.is_empty() {
         return Ok(vec![]);
     }
-    let mut scores: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    // One statement counts the words each file's tags match and keeps the
+    // hundred newest best-matching files, so a word that matches most of the
+    // library never brings every id back.
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone()), Box::new(None::<f64>), Box::new(root.map(str::to_owned))];
+    let mut per_word = Vec::with_capacity(words.len());
     for word in &words {
         let forms = word_forms(word);
-        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", index + 7)).collect::<Vec<_>>().join(" OR ");
-        let sql = format!("SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone()), Box::new(None::<f64>), Box::new(root.map(str::to_owned))];
+        let first = args.len() + 1;
+        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", first + index)).collect::<Vec<_>>().join(" OR ");
+        per_word.push(format!("SELECT DISTINCT f.id AS id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})"));
         args.extend(forms.iter().map(|form| Box::new(format!("% {form}%")) as Box<dyn rusqlite::ToSql>));
-        let mut statement = conn.prepare_cached(&sql)?;
-        for id in statement.query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| row.get::<_, i64>(0))? {
-            *scores.entry(id?).or_default() += 1;
-        }
     }
-    let Some(best) = scores.values().copied().max() else { return Ok(vec![]) };
-    let mut ids: Vec<i64> = scores.into_iter().filter(|(_, score)| *score == best).map(|(id, _)| id).collect();
-    ids.sort_unstable_by(|a, b| b.cmp(a));
-    ids.truncate(100);
+    let sql = format!(
+        "SELECT id, COUNT(*) AS words FROM ({}) GROUP BY id ORDER BY words DESC, id DESC LIMIT 100",
+        per_word.join(" UNION ALL ")
+    );
+    let ranked: Vec<(i64, i64)> = conn
+        .prepare_cached(&sql)?
+        .query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some(best) = ranked.first().map(|(_, words)| *words) else { return Ok(vec![]) };
+    let ids: Vec<i64> = ranked.into_iter().filter(|(_, words)| *words == best).map(|(id, _)| id).collect();
     let sql = "SELECT f.id,f.path_text,f.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL FROM files f WHERE f.id IN (SELECT value FROM json_each(?1)) ORDER BY f.id DESC";
     Ok(conn
         .prepare_cached(sql)?

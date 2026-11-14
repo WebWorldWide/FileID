@@ -82,6 +82,9 @@ struct State {
     roots: Vec<LibraryRoot>,
     current: Option<Rc<LibraryScope>>,
     listeners: Vec<Rc<dyn Fn()>>,
+    /// Bumped whenever the list or the choice changes, so callers on a hot
+    /// path can skip work without copying the list to compare it.
+    revision: u64,
 }
 
 thread_local! {
@@ -98,6 +101,15 @@ pub fn current_id() -> Option<i64> {
 
 pub fn roots() -> Vec<LibraryRoot> {
     STATE.with(|state| state.borrow().roots.clone())
+}
+
+pub fn revision() -> u64 {
+    STATE.with(|state| state.borrow().revision)
+}
+
+/// Reads the location list in place. `read` must not call back into this module's setters.
+pub fn with_roots<T>(read: impl FnOnce(&[LibraryRoot]) -> T) -> T {
+    STATE.with(|state| read(&state.borrow().roots))
 }
 
 /// Runs `listener` on the main loop whenever the location list or the choice changes.
@@ -118,6 +130,9 @@ fn apply() {
         let next = LibraryScope::new(crate::app_settings::library_scope_root_id(), &state.roots).map(Rc::new);
         let changed = next.as_deref() != state.current.as_deref();
         state.current = next;
+        if changed {
+            state.revision = state.revision.wrapping_add(1);
+        }
         changed
     });
     if changed {
@@ -142,6 +157,9 @@ pub fn apply_roots(roots: Vec<LibraryRoot>) {
         let mut state = state.borrow_mut();
         let same = state.roots == roots;
         state.roots = roots;
+        if !same {
+            state.revision = state.revision.wrapping_add(1);
+        }
         !same
     });
     apply();

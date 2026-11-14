@@ -154,17 +154,22 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, payloa
     let request_id = payload.request_id;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<LibraryRoot>> {
         let Some(database) = database else { return Ok(vec![]) };
-        let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
-        match path {
-            Some(path) => Ok(list(&crate::db::open_read(&path)?)?),
+        match crate::db::reader_for(&database)? {
+            Some(reader) => Ok(list(&reader)?),
             None => Ok(list(&database.lock())?),
         }
     })
     .await;
     match result {
         Ok(Ok(roots)) => sink.send(IpcEvent::now(EventPayload::RootsList(Wrap::new(RootsList { request_id, roots })))).await,
-        Ok(Err(error)) => sink.send(EngineError::event("list_roots_failed", error.to_string())).await,
-        Err(error) => sink.send(EngineError::event("list_roots_failed", error.to_string())).await,
+        Ok(Err(error)) => {
+            tracing::warn!(?error, "listRoots failed");
+            sink.send(EngineError::event("list_roots_failed", "FileID couldn't read your list of folders. Try again.")).await;
+        }
+        Err(error) => {
+            tracing::warn!(?error, "listRoots task did not complete");
+            sink.send(EngineError::event("list_roots_failed", "FileID couldn't read your list of folders. Try again.")).await;
+        }
     }
 }
 

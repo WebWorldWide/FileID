@@ -199,6 +199,95 @@ pub fn open_read(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// A few read-only connections kept open between requests, so a read handler
+/// neither waits on the writer nor pays to open the catalog and parse its
+/// schema on every call. Holds connections to one database at a time.
+pub struct ReaderPool {
+    capacity: usize,
+    idle: parking_lot::Mutex<Vec<(std::path::PathBuf, Connection)>>,
+}
+
+/// A pooled read-only connection, returned to its pool on drop.
+pub struct Reader<'a> {
+    pool: &'a ReaderPool,
+    path: std::path::PathBuf,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("held until drop")
+    }
+}
+
+impl std::ops::DerefMut for Reader<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        // A connection left inside a transaction would pin an old snapshot.
+        let Some(conn) = self.conn.take().filter(Connection::is_autocommit) else { return };
+        let mut idle = self.pool.idle.lock();
+        idle.retain(|(path, _)| *path == self.path);
+        if idle.len() < self.pool.capacity {
+            idle.push((std::mem::take(&mut self.path), conn));
+        }
+    }
+}
+
+impl ReaderPool {
+    pub const fn new(capacity: usize) -> Self {
+        Self { capacity, idle: parking_lot::Mutex::new(Vec::new()) }
+    }
+
+    pub fn get(&self, db_path: &Path) -> Result<Reader<'_>> {
+        let cached = {
+            let mut idle = self.idle.lock();
+            idle.retain(|(path, _)| path == db_path);
+            idle.pop()
+        };
+        let conn = match cached {
+            Some((_, conn)) => conn,
+            None => {
+                let conn = open_read(db_path)?;
+                conn.set_prepared_statement_cache_capacity(32);
+                conn
+            }
+        };
+        Ok(Reader { pool: self, path: db_path.to_path_buf(), conn: Some(conn) })
+    }
+
+    /// Closes every idle connection.
+    pub fn clear(&self) {
+        self.idle.lock().clear();
+    }
+
+    #[cfg(test)]
+    fn idle_count(&self) -> usize {
+        self.idle.lock().len()
+    }
+}
+
+// Tests delete their temporary catalogs; an idle handle would block that on
+// Windows, so the shared pool keeps nothing there.
+static READERS: ReaderPool = ReaderPool::new(if cfg!(test) { 0 } else { 4 });
+
+/// A pooled read-only connection to the writer's database, or `None` for an
+/// in-memory database (which only its own connection can see).
+pub fn reader_for(writer: &parking_lot::Mutex<Connection>) -> Result<Option<Reader<'static>>> {
+    let path = writer.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
+    path.map(|path| READERS.get(&path)).transpose()
+}
+
+/// Closes the shared pool's idle connections (shutdown).
+pub fn close_readers() {
+    READERS.clear();
+}
+
 /// Run `PRAGMA quick_check` on the writer connection. Returns `Ok(())` when the
 /// database is structurally sound, or `Err(detail)` carrying the first problem
 /// SQLite reports. quick_check is the fast cousin of `integrity_check` — it
@@ -211,6 +300,74 @@ pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
         Ok(s) if s.eq_ignore_ascii_case("ok") => Ok(()),
         Ok(detail) => Err(detail),
         Err(e) => Err(format!("integrity check could not run: {e}")),
+    }
+}
+
+/// The startup structural check, run on its own read-only connection after
+/// `ready` so a large library does not hold up launch. `cancel` interrupts a
+/// running check: its read transaction would otherwise make the shutdown WAL
+/// checkpoint report busy.
+#[derive(Default)]
+pub struct IntegrityCheck {
+    state: parking_lot::Mutex<IntegrityCheckState>,
+}
+
+#[derive(Default)]
+struct IntegrityCheckState {
+    cancelled: bool,
+    finished: bool,
+    interrupt: Option<rusqlite::InterruptHandle>,
+}
+
+impl IntegrityCheck {
+    /// `Some(detail)` when the database is damaged or the check could not
+    /// run; `None` when it is sound or the check was cancelled.
+    pub fn run(&self, db_path: &Path) -> Option<String> {
+        let verdict = self.check(db_path);
+        let mut state = self.state.lock();
+        state.finished = true;
+        state.interrupt = None;
+        if state.cancelled { None } else { verdict.err() }
+    }
+
+    fn check(&self, db_path: &Path) -> std::result::Result<(), String> {
+        if self.state.lock().cancelled {
+            return Ok(());
+        }
+        let conn = open_read(db_path).map_err(|e| format!("integrity check could not run: {e:#}"))?;
+        {
+            let mut state = self.state.lock();
+            if state.cancelled {
+                return Ok(());
+            }
+            state.interrupt = Some(conn.get_interrupt_handle());
+        }
+        let verdict = quick_check(&conn);
+        self.state.lock().interrupt = None;
+        verdict
+    }
+
+    /// Stop a running check and wait (bounded) until its connection is closed.
+    pub fn cancel(&self) {
+        // An interrupt that lands before the statement starts is dropped by
+        // SQLite, so repeat it until the check reports back.
+        for _ in 0..100 {
+            {
+                let mut state = self.state.lock();
+                state.cancelled = true;
+                match (&state.interrupt, state.finished) {
+                    (_, true) => return,
+                    (Some(handle), false) => handle.interrupt(),
+                    (None, false) => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Marks a check that will never run as finished so `cancel` returns at once.
+    pub fn skip(&self) {
+        self.state.lock().finished = true;
     }
 }
 
@@ -510,6 +667,113 @@ mod tests {
                 let _ = quick_check(&conn);
                 let _ = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0));
             }
+        }
+    }
+
+    #[test]
+    fn the_reader_pool_reuses_connections_and_never_writes() {
+        let (path, _dir) = temp_db("pool");
+        seeded(&path);
+        let pool = ReaderPool::new(2);
+        {
+            let first = pool.get(&path).unwrap();
+            let second = pool.get(&path).unwrap();
+            let third = pool.get(&path).unwrap();
+            assert_eq!(pool.idle_count(), 0);
+            assert!(first.execute("DELETE FROM files", []).is_err(), "pooled connections are read-only");
+            let _ = (second.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0)).unwrap(), third);
+        }
+        assert_eq!(pool.idle_count(), 2, "at most `capacity` connections are kept");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute("UPDATE files SET size_bytes=4242", []).unwrap();
+        let reused = pool.get(&path).unwrap();
+        assert_eq!(pool.idle_count(), 1);
+        let seen: i64 = reused.query_row("SELECT MAX(size_bytes) FROM files", [], |row| row.get(0)).unwrap();
+        assert_eq!(seen, 4242, "a reused connection sees later commits");
+        reused.execute_batch("BEGIN").unwrap();
+        drop(reused);
+        assert_eq!(pool.idle_count(), 1, "a connection left in a transaction is closed, not reused");
+
+        let (other, _other_dir) = temp_db("pool-other");
+        seeded(&other);
+        drop(pool.get(&other).unwrap());
+        assert_eq!(pool.idle_count(), 1, "switching databases drops the old one's connections");
+        assert!(pool.idle.lock().iter().all(|(held, _)| *held == other));
+        pool.clear();
+        assert_eq!(pool.idle_count(), 0);
+
+        let memory = parking_lot::Mutex::new(Connection::open_in_memory().unwrap());
+        assert!(reader_for(&memory).unwrap().is_none());
+        let file = parking_lot::Mutex::new(Connection::open(&path).unwrap());
+        let shared = reader_for(&file).unwrap().expect("file databases get a reader");
+        assert!(shared.execute("DELETE FROM files", []).is_err());
+    }
+
+    fn many_rows(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, body TEXT);").unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        for id in 0..4000 {
+            tx.execute("INSERT INTO t VALUES(?1, ?2)", rusqlite::params![id, "x".repeat(200)]).unwrap();
+        }
+        tx.commit().unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    #[test]
+    fn the_background_check_passes_a_sound_database_and_reports_a_damaged_one() {
+        let (path, _dir) = temp_db("integrity-bg");
+        many_rows(&path);
+        assert_eq!(IntegrityCheck::default().run(&path), None);
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let page = 4096;
+        assert!(bytes.len() > page * 8);
+        let start = bytes.len() / 2 / page * page;
+        bytes[start..start + page].fill(0xA5);
+        std::fs::write(&path, &bytes).unwrap();
+        let detail = IntegrityCheck::default().run(&path).expect("damage is reported");
+        assert!(!detail.is_empty());
+        assert!(quick_check(&Connection::open(&path).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_cancelled_background_check_reports_nothing_and_releases_its_connection() {
+        let (path, _dir) = temp_db("integrity-cancel");
+        many_rows(&path);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let start = bytes.len() / 2 / 4096 * 4096;
+        bytes[start..start + 4096].fill(0xA5);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let check = IntegrityCheck::default();
+        check.cancel();
+        assert_eq!(check.run(&path), None);
+        check.cancel();
+
+        let skipped = IntegrityCheck::default();
+        skipped.skip();
+        let started = std::time::Instant::now();
+        skipped.cancel();
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn cancelling_from_another_thread_ends_a_running_check() {
+        let (path, _dir) = temp_db("integrity-race");
+        many_rows(&path);
+        for _ in 0..20 {
+            let check = std::sync::Arc::new(IntegrityCheck::default());
+            let runner = {
+                let check = check.clone();
+                let path = path.clone();
+                std::thread::spawn(move || check.run(&path))
+            };
+            check.cancel();
+            assert_eq!(runner.join().unwrap(), None);
+            let writer = Connection::open(&path).unwrap();
+            let busy: i64 = writer.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0)).unwrap();
+            assert_eq!(busy, 0);
         }
     }
 

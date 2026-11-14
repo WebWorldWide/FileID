@@ -11,7 +11,7 @@ use parking_lot::{Condvar, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -20,9 +20,21 @@ use std::{
     },
 };
 
+#[path = "catalog_index_snapshot.rs"]
+mod snapshot;
+
 const MAX_FILES: usize = 200_000;
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
-const MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_GRAPH_BYTES: u64 = snapshot::max_graph_bytes(clip_space::DIMENSION, MAX_FILES);
+/// JSON snapshots written before the binary format; read once, then rewritten.
+const LEGACY_MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
+const EF_SEARCH: usize = 1000;
+/// Changes kept beside the graph and searched directly. Past this many (or a
+/// tenth of the graph) the graph is rebuilt instead.
+const MIN_PENDING_BEFORE_REBUILD: usize = 256;
+const MAX_PENDING: usize = MAX_FILES / 10 + MIN_PENDING_BEFORE_REBUILD;
+const MAX_DELTA_BYTES: u64 = snapshot::max_delta_bytes(clip_space::DIMENSION, MAX_PENDING, MAX_PENDING);
+const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Revision {
     instance: String,
@@ -40,11 +52,52 @@ struct Manifest {
     dimension: usize,
     revision: Revision,
     graph_hash: String,
+    /// Absent for the JSON snapshots older engines wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_hash: Option<String>,
 }
 struct Cache {
-    graph: HnswMap<Embedding, Entry>,
+    graph: Arc<HnswMap<Embedding, Entry>>,
+    /// Vectors added or changed since `graph` was built, searched directly.
+    added: Vec<(Vec<f32>, Entry)>,
+    /// Files in `graph` that are gone or superseded by `added`.
+    removed: HashSet<i64>,
     revision: Revision,
     lease: Option<crate::resource_scheduler::Lease>,
+    saved: Mutex<Saved>,
+}
+#[derive(Default)]
+struct Saved {
+    /// The binary graph file on disk that holds `graph`, when there is one.
+    graph_hash: Option<String>,
+    /// Set after a failed save; the next search past it tries again.
+    retry_at: Option<std::time::Instant>,
+}
+impl Cache {
+    fn built(graph: HnswMap<Embedding, Entry>, revision: Revision) -> Self {
+        Self { graph: Arc::new(graph), added: Vec::new(), removed: HashSet::new(), revision, lease: None, saved: Mutex::default() }
+    }
+    fn pending(&self) -> usize {
+        self.added.len() + self.removed.len()
+    }
+    /// Nearest entries across the graph and the changes beside it, closest first.
+    fn nearest(&self, query: &[f32], wanted: usize) -> Vec<(Entry, f32)> {
+        let mut candidates = Searcher::default().top_k(&self.graph, query, wanted);
+        candidates.retain(|(entry, _)| !self.removed.contains(&entry.file_id));
+        candidates.extend(
+            self.added
+                .iter()
+                .map(|(vector, entry)| (entry.clone(), crate::util::vector_math::squared_l2(vector, query))),
+        );
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
+        candidates.truncate(wanted);
+        candidates
+    }
+}
+fn needs_rebuild(graph: usize, pending: usize) -> bool {
+    pending > MIN_PENDING_BEFORE_REBUILD.max(graph / 10)
 }
 #[derive(Default)]
 struct State {
@@ -377,9 +430,9 @@ impl CatalogIndex {
         } else {
             None
         };
+        self.retry_save(&cache);
         let wanted = if root.is_some() { 1000 } else { (limit * 4 + 1).min(1000) };
-        let mut candidates = Searcher::default().top_k(&cache.graph, &query_vector, wanted);
-        candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
+        let candidates = cache.nearest(&query_vector, wanted);
         let mut visual: Vec<(CatalogHit, f32)> = Vec::new();
         let mut stmt = tx.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.id=?1 AND f.failed=0 AND e.model=?2")?;
         for (entry, _) in candidates {
@@ -421,7 +474,7 @@ impl CatalogIndex {
             if mode == "semantic" {
                 "Visual similarity results."
             } else {
-                "Keyword, catalog evidence, and visual similarity results."
+                "Matches by name, text and what's in the picture."
             }
             .into(),
         );
@@ -545,11 +598,13 @@ impl CatalogIndex {
         } else {
             None
         };
+        // Loading holds the validated arrays and the graph at once; a JSON
+        // snapshot is parsed into a value tree many times its size.
         let disk_mb = candidate
             .as_ref()
-            .map(|(_, bytes)| bytes.div_ceil(1_048_576))
+            .map(|(manifest, bytes)| bytes.div_ceil(1_048_576) * if manifest.format.is_some() { 3 } else { 20 })
             .unwrap_or(0);
-        let rebuild_memory_mb = 64 + (count as u64).saturating_mul(32768).div_ceil(1_048_576);
+        let rebuild_memory_mb = 64 + (count as u64).saturating_mul(BUILD_BYTES_PER_POINT).div_ceil(1_048_576);
         let reserve = |memory_mb| {
             self.scheduler.reserve(
                 Demand {
@@ -561,7 +616,7 @@ impl CatalogIndex {
                 || cancel.load(Ordering::Relaxed),
             )
         };
-        let lease = match reserve(rebuild_memory_mb + disk_mb * 20) {
+        let lease = match reserve(rebuild_memory_mb + disk_mb) {
             Ok(lease) => Ok(lease),
             Err(_) if candidate.is_some() => {
                 candidate = None;
@@ -571,59 +626,84 @@ impl CatalogIndex {
         }
         .map_err(|error| anyhow::anyhow!("Resource admission deferred: {error}"))?;
         let disk = candidate.and_then(|(manifest, _)| self.load_graph(manifest).ok());
-        let base = previous.as_deref().or(disk.as_ref());
         if previous.is_none() && disk.as_ref().is_some_and(|cache| cache.revision == latest) {
             let mut cache = disk.expect("verified disk cache");
+            if cache.saved.lock().graph_hash.is_none() {
+                self.save_or_defer(&cache, cancel)?;
+            }
             lease.retain_memory();
             cache.lease = Some(lease);
             return Ok(cache);
         }
-        let mut result = if let Some(cache) =
-            base.filter(|cache| can_advance(&tx, &cache.revision, &latest).unwrap_or(false))
-        {
-            let mut points: BTreeMap<i64, (Vec<f32>, Entry)> = cache
-                .graph
-                .iter()
-                .zip(&cache.graph.values)
-                .map(|((_, point), entry)| (entry.file_id, (point.0.clone(), entry.clone())))
-                .collect();
-            let ids = tx.prepare("SELECT DISTINCT file_id FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1 AND generation<=?2 ORDER BY file_id")?.query_map(params![cache.revision.generation,latest.generation], |row| row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            for (processed, id) in ids.iter().enumerate() {
-                check(cancel)?;
-                if processed % 128 == 0 {
-                    self.checkpoint(&latest, processed, ids.len(), cancel)?;
-                }
-                points.remove(id);
-                let blob: Option<Vec<u8>> = tx.query_row("SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id=?1 AND e.model=?2 AND f.failed=0",params![id,clip_space::model_id()], |row| row.get(0)).optional()?;
-                if let Some(blob) = blob
-                    && let Some(mut vector) = clip_space::decode(&blob) {
-                        normalize(&mut vector);
-                        points.insert(
-                            *id,
-                            (
-                                vector,
-                                Entry {
-                                    file_id: *id,
-                                    fingerprint: clip_space::digest(&blob),
-                                },
-                            ),
-                        );
-                    }
-            }
-            ensure!(points.len() <= MAX_FILES, "Visual index capacity exceeded");
-            Cache {
-                graph: hnsw_index::build_with_search_limit(points.into_values().collect(), 1000),
-                revision: latest,
-                lease: None,
-            }
-        } else {
-            self.rebuild(&tx, latest, cancel)?
+        let base = previous.as_deref().or(disk.as_ref());
+        let mut result = match base.filter(|cache| can_advance(&tx, &cache.revision, &latest).unwrap_or(false)) {
+            Some(cache) => self.advance(&tx, cache, latest, cancel)?,
+            None => self.rebuild(&tx, latest, cancel)?,
         };
         check(cancel)?;
-        self.save(&result, cancel)?;
+        self.save_or_defer(&result, cancel)?;
         lease.retain_memory();
         result.lease = Some(lease);
         Ok(result)
+    }
+    /// Applies the catalog's vector changes since `cache` beside its graph,
+    /// or rebuilds the graph from memory once too many have piled up.
+    fn advance(&self, tx: &Connection, cache: &Cache, latest: Revision, cancel: &AtomicBool) -> Result<Cache> {
+        let in_graph: HashMap<i64, &str> =
+            cache.graph.values.iter().map(|entry| (entry.file_id, entry.fingerprint.as_str())).collect();
+        let mut added: BTreeMap<i64, (Vec<f32>, Entry)> =
+            cache.added.iter().map(|(vector, entry)| (entry.file_id, (vector.clone(), entry.clone()))).collect();
+        let mut removed = cache.removed.clone();
+        let ids = tx.prepare("SELECT DISTINCT file_id FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1 AND generation<=?2 ORDER BY file_id")?.query_map(params![cache.revision.generation,latest.generation], |row| row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut current = tx.prepare("SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id=?1 AND e.model=?2 AND f.failed=0")?;
+        for (processed, id) in ids.iter().enumerate() {
+            check(cancel)?;
+            if processed % 128 == 0 {
+                self.checkpoint(&latest, processed, ids.len(), cancel)?;
+            }
+            added.remove(id);
+            let blob: Option<Vec<u8>> = current.query_row(params![id, clip_space::model_id()], |row| row.get(0)).optional()?;
+            let entry = blob.and_then(|blob| {
+                let mut vector = clip_space::decode(&blob)?;
+                normalize(&mut vector);
+                Some((vector, Entry { file_id: *id, fingerprint: clip_space::digest(&blob) }))
+            });
+            match (in_graph.get(id), entry) {
+                (Some(fingerprint), Some((_, entry))) if *fingerprint == entry.fingerprint => {
+                    removed.remove(id);
+                }
+                (known, entry) => {
+                    if known.is_some() {
+                        removed.insert(*id);
+                    }
+                    if let Some(entry) = entry {
+                        added.insert(*id, entry);
+                    }
+                }
+            }
+        }
+        drop(current);
+        ensure!(in_graph.len() - removed.len() + added.len() <= MAX_FILES, "Visual index capacity exceeded");
+        if !needs_rebuild(in_graph.len(), added.len() + removed.len()) {
+            return Ok(Cache {
+                graph: cache.graph.clone(),
+                added: added.into_values().collect(),
+                removed,
+                revision: latest,
+                lease: None,
+                saved: Mutex::new(Saved { graph_hash: cache.saved.lock().graph_hash.clone(), retry_at: None }),
+            });
+        }
+        let mut points: BTreeMap<i64, (Vec<f32>, Entry)> = cache
+            .graph
+            .iter()
+            .zip(&cache.graph.values)
+            .filter(|(_, entry)| !removed.contains(&entry.file_id))
+            .map(|((_, point), entry)| (entry.file_id, (point.0.clone(), entry.clone())))
+            .collect();
+        points.extend(added);
+        check(cancel)?;
+        Ok(Cache::built(hnsw_index::build_search_index(points.into_values().collect(), EF_SEARCH), latest))
     }
     fn rebuild(&self, conn: &Connection, latest: Revision, cancel: &AtomicBool) -> Result<Cache> {
         let mut stmt = conn.prepare("SELECT e.file_id,e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0 ORDER BY e.file_id")?;
@@ -654,19 +734,62 @@ impl CatalogIndex {
             }
             ensure!(points.len() <= MAX_FILES, "Visual index capacity exceeded");
         }
-        let graph = hnsw_index::build_with_search_limit(points, 1000);
+        let graph = hnsw_index::build_search_index(points, EF_SEARCH);
         check(cancel)?;
-        Ok(Cache {
-            graph,
-            revision: latest,
-            lease: None,
-        })
+        Ok(Cache::built(graph, latest))
     }
     fn manifest_path(&self) -> PathBuf {
         self.directory.join(format!(
             "{}.json",
             clip_space::digest(clip_space::model_id().as_bytes())
         ))
+    }
+    fn shape() -> snapshot::Shape<'static> {
+        snapshot::Shape {
+            model: clip_space::model_id(),
+            dimension: clip_space::DIMENSION,
+            max_points: MAX_FILES,
+            ef_search: EF_SEARCH as u64,
+            valid: &clip_space::valid,
+        }
+    }
+    /// A save that fails for any reason but cancellation leaves the index
+    /// usable from memory; a later search tries again.
+    fn save_or_defer(&self, cache: &Cache, cancel: &AtomicBool) -> Result<()> {
+        match self.save(cache, cancel) {
+            Ok(()) => Ok(()),
+            Err(error) if cancel.load(Ordering::Relaxed) => Err(error),
+            Err(error) => {
+                tracing::warn!(%error, "visual index snapshot was not saved; searching from memory");
+                cache.saved.lock().retry_at = Some(std::time::Instant::now() + SAVE_RETRY);
+                Ok(())
+            }
+        }
+    }
+    fn retry_save(self: &Arc<Self>, cache: &Arc<Cache>) {
+        if cache.saved.lock().retry_at.is_none_or(|at| std::time::Instant::now() < at) {
+            return;
+        }
+        let mut state = self.state.lock();
+        if state.closed || state.worker.is_some() {
+            return;
+        }
+        cache.saved.lock().retry_at = Some(std::time::Instant::now() + SAVE_RETRY);
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.worker = Some(cancel.clone());
+        let (owner, cache) = (self.clone(), cache.clone());
+        let started = std::thread::Builder::new().name("catalog-index-save".into()).spawn(move || {
+            let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.save(&cache, &cancel)));
+            if !matches!(saved, Ok(Ok(()))) {
+                tracing::warn!("visual index snapshot retry did not finish; it will be tried again");
+            }
+            owner.state.lock().worker = None;
+            owner.changed.notify_all();
+        });
+        if started.is_err() {
+            state.worker = None;
+            self.changed.notify_all();
+        }
     }
     fn save(&self, cache: &Cache, cancel: &AtomicBool) -> Result<()> {
         check(cancel)?;
@@ -675,34 +798,69 @@ impl CatalogIndex {
         let old_manifest = bounded_read(&self.manifest_path(), 65536)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok());
-        let graph = serde_json::to_vec(&cache.graph)?;
-        ensure!(
-            graph.len() as u64 <= MAX_GRAPH_BYTES,
-            "Visual graph snapshot capacity exceeded"
-        );
-        let hash = clip_space::digest(&graph);
-        let graph_path = self.directory.join(format!("{hash}.graph"));
-        atomic_write(&graph_path, &graph)?;
+        self.sweep_staging();
+        let stop = || cancel.load(Ordering::Relaxed);
+        let on_disk = cache.saved.lock().graph_hash.clone().filter(|hash| self.directory.join(format!("{hash}.graph")).is_file());
+        let graph_hash = match on_disk {
+            Some(hash) => hash,
+            None => atomic_stream(&self.directory, "graph", MAX_GRAPH_BYTES, |file| {
+                snapshot::write_graph(file, clip_space::model_id(), clip_space::DIMENSION, &cache.graph, &stop)
+            })?,
+        };
+        check(cancel)?;
+        let delta_hash = if cache.pending() == 0 {
+            None
+        } else {
+            ensure!(cache.added.len() <= MAX_PENDING && cache.removed.len() <= MAX_PENDING, "Visual index change capacity exceeded");
+            let mut removed: Vec<i64> = cache.removed.iter().copied().collect();
+            removed.sort_unstable();
+            let delta = snapshot::Delta { added: cache.added.clone(), removed };
+            Some(atomic_stream(&self.directory, "delta", MAX_DELTA_BYTES, |file| {
+                snapshot::write_delta(file, clip_space::DIMENSION, &delta, &stop)
+            })?)
+        };
         check(cancel)?;
         let manifest = Manifest {
             model: clip_space::model_id().into(),
             dimension: clip_space::DIMENSION,
             revision: cache.revision.clone(),
-            graph_hash: hash,
+            graph_hash,
+            format: Some(snapshot::VERSION),
+            delta_hash,
         };
         atomic_write(&self.manifest_path(), &serde_json::to_vec(&manifest)?)?;
-        if let Some(old) =
-            old_manifest.filter(|old| valid_digest(&old.graph_hash) && old.graph_hash != manifest.graph_hash)
         {
-            let old_path = self.directory.join(format!("{}.graph", old.graph_hash));
-            crate::util::read_only::require_writable(&old_path)?;
-            match std::fs::remove_file(old_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            let mut saved = cache.saved.lock();
+            saved.graph_hash = Some(manifest.graph_hash.clone());
+            saved.retry_at = None;
+        }
+        if let Some(old) = old_manifest {
+            let stale = [
+                Some((old.graph_hash, "graph")).filter(|(hash, _)| *hash != manifest.graph_hash),
+                old.delta_hash.map(|hash| (hash, "delta")).filter(|(hash, _)| Some(hash) != manifest.delta_hash.as_ref()),
+            ];
+            for (hash, extension) in stale.into_iter().flatten().filter(|(hash, _)| valid_digest(hash)) {
+                let path = self.directory.join(format!("{hash}.{extension}"));
+                if crate::util::read_only::require_writable(&path).is_ok()
+                    && let Err(error) = std::fs::remove_file(&path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(%error, "an old visual index snapshot could not be removed");
+                }
             }
         }
         Ok(())
+    }
+    /// Removes staging files an interrupted save left behind.
+    fn sweep_staging(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.directory) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains(".tmp-") && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
     fn cache_candidate(&self, conn: &Connection, latest: &Revision) -> Result<(Manifest, u64)> {
         let manifest: Manifest = serde_json::from_slice(&bounded_read(&self.manifest_path(), 65536)?)?;
@@ -710,38 +868,67 @@ impl CatalogIndex {
             manifest.model == clip_space::model_id()
                 && manifest.dimension == clip_space::DIMENSION
                 && can_advance(conn, &manifest.revision, latest)?
-                && valid_digest(&manifest.graph_hash),
+                && valid_digest(&manifest.graph_hash)
+                && manifest.format.is_none_or(|format| format == snapshot::VERSION)
+                && manifest.delta_hash.as_deref().is_none_or(valid_digest),
             "Incompatible visual index snapshot"
         );
+        let limit = if manifest.format.is_some() { MAX_GRAPH_BYTES } else { LEGACY_MAX_GRAPH_BYTES };
         let metadata = std::fs::metadata(self.directory.join(format!("{}.graph", manifest.graph_hash)))?;
         ensure!(
-            metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_GRAPH_BYTES,
+            metadata.is_file() && metadata.len() > 0 && metadata.len() <= limit,
             "Invalid or oversized visual index cache"
         );
-        Ok((manifest, metadata.len()))
+        let mut bytes = metadata.len();
+        if let Some(hash) = &manifest.delta_hash {
+            let metadata = std::fs::metadata(self.directory.join(format!("{hash}.delta")))?;
+            ensure!(
+                metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_DELTA_BYTES,
+                "Invalid or oversized visual index cache"
+            );
+            bytes += metadata.len();
+        }
+        Ok((manifest, bytes))
     }
     #[cfg(test)]
     fn load(&self, conn: &Connection, latest: &Revision) -> Result<Cache> {
         self.load_graph(self.cache_candidate(conn, latest)?.0)
     }
     fn load_graph(&self, manifest: Manifest) -> Result<Cache> {
-        let graph = bounded_read(
-            &self.directory.join(format!("{}.graph", manifest.graph_hash)),
-            MAX_GRAPH_BYTES,
-        )?;
-        ensure!(
-            clip_space::digest(&graph) == manifest.graph_hash,
-            "Visual graph checksum mismatch"
-        );
-        validate_graph(&graph)?;
-        let graph: HnswMap<Embedding, Entry> = serde_json::from_slice(&graph)?;
-        Ok(Cache {
-            graph,
-            revision: manifest.revision,
-            lease: None,
-        })
+        let path = self.directory.join(format!("{}.graph", manifest.graph_hash));
+        if manifest.format.is_none() {
+            let graph = bounded_read(&path, LEGACY_MAX_GRAPH_BYTES)?;
+            ensure!(
+                clip_space::digest(&graph) == manifest.graph_hash,
+                "Visual graph checksum mismatch"
+            );
+            validate_graph(&graph)?;
+            return Ok(Cache::built(serde_json::from_slice(&graph)?, manifest.revision));
+        }
+        let shape = Self::shape();
+        let (file, length) = open_bounded(&path, MAX_GRAPH_BYTES)?;
+        let graph = snapshot::read_graph(file, length, &manifest.graph_hash, &shape)?;
+        let mut cache = Cache::built(graph, manifest.revision);
+        if let Some(hash) = &manifest.delta_hash {
+            let (file, length) = open_bounded(&self.directory.join(format!("{hash}.delta")), MAX_DELTA_BYTES)?;
+            let delta = snapshot::read_delta(file, length, hash, &shape)?;
+            ensure!(delta.added.len() <= MAX_PENDING && delta.removed.len() <= MAX_PENDING, "Invalid visual index change count");
+            let in_graph: HashSet<i64> = cache.graph.values.iter().map(|entry| entry.file_id).collect();
+            ensure!(
+                delta.removed.iter().all(|id| in_graph.contains(id))
+                    && delta.added.iter().all(|(_, entry)| !in_graph.contains(&entry.file_id) || delta.removed.contains(&entry.file_id)),
+                "Visual index change does not match its graph"
+            );
+            cache.added = delta.added;
+            cache.removed = delta.removed.into_iter().collect();
+        }
+        cache.saved.lock().graph_hash = Some(manifest.graph_hash);
+        Ok(cache)
     }
 }
+/// Peak memory while building: the rows read, the graph's own copy of them and
+/// its neighbour lists.
+const BUILD_BYTES_PER_POINT: u64 = 8192;
 fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
@@ -810,6 +997,38 @@ fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     ensure!(data.len() as u64 <= maximum, "Visual index cache exceeds safe size");
     Ok(data)
 }
+fn open_bounded(path: &Path, maximum: u64) -> Result<(std::fs::File, u64)> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() > 0 && metadata.len() <= maximum,
+        "Invalid or oversized visual index cache"
+    );
+    Ok((file, metadata.len()))
+}
+/// Streams a snapshot into a staging file and renames it to `<hash>.<extension>`.
+fn atomic_stream(
+    directory: &Path,
+    extension: &str,
+    maximum: u64,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(String, u64)>,
+) -> Result<String> {
+    let staging = directory.join(format!("{extension}.tmp-{}", uuid::Uuid::new_v4()));
+    crate::util::read_only::require_writable(&staging)?;
+    let result = (|| -> Result<String> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&staging)?;
+        let (hash, bytes) = write(&mut file)?;
+        ensure!(bytes <= maximum, "Visual graph snapshot capacity exceeded");
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staging, directory.join(format!("{hash}.{extension}")))?;
+        Ok(hash)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(staging);
+    }
+    result
+}
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     crate::util::read_only::require_writable(path)?;
     let staging = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
@@ -830,6 +1049,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 // Validate private HNSW topology before the crate's unchecked indexing can observe disk data.
+// JSON snapshots only; binary ones are validated as they are read.
 fn validate_graph(bytes: &[u8]) -> Result<()> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
 

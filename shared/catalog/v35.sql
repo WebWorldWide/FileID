@@ -1,0 +1,11 @@
+CREATE INDEX IF NOT EXISTS catalog_observations_file ON catalog_observations(file_id);
+CREATE INDEX IF NOT EXISTS catalog_embeddings_file ON catalog_embeddings(file_id) WHERE file_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS catalog_coverage_file ON catalog_coverage(file_id);
+CREATE INDEX IF NOT EXISTS catalog_take_scores_file ON catalog_take_scores(file_id);
+CREATE INDEX IF NOT EXISTS catalog_event_files_file ON catalog_event_files(file_id);
+CREATE INDEX IF NOT EXISTS catalog_assets_derived ON catalog_assets(derived_id);
+CREATE INDEX IF NOT EXISTS catalog_corrections_file ON catalog_corrections(file_id) WHERE file_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS face_identity_constraints_anchor ON face_identity_constraints(anchor_file_id);
+CREATE INDEX IF NOT EXISTS face_queue_dismissals_file ON face_queue_dismissals(file_id);
+CREATE INDEX IF NOT EXISTS face_queue_dismissals_other ON face_queue_dismissals(other_file_id) WHERE other_file_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS face_review_candidates_runner_up ON face_review_candidates(runner_up_person_id) WHERE runner_up_person_id IS NOT NULL;

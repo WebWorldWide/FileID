@@ -1152,11 +1152,17 @@ public struct BulkActionItem: Codable, Sendable {
     public let fileID: Int64?
     public let ok: Bool
     public let message: String?
+    /// Schema 1.27.0. trashFiles refusals: "changed", "protected", "missing" or "failed".
+    public let reason: String?
+    /// Schema 1.27.0. mergeClusters: the operation `undoFaceReview` takes to undo this merge.
+    public let operationID: String?
 
-    public init(fileID: Int64? = nil, ok: Bool, message: String? = nil) {
+    public init(fileID: Int64? = nil, ok: Bool, message: String? = nil, reason: String? = nil, operationID: String? = nil) {
         self.fileID = fileID
         self.ok = ok
         self.message = message
+        self.reason = reason
+        self.operationID = operationID
     }
 }
 
