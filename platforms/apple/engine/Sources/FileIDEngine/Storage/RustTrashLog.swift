@@ -119,15 +119,15 @@ enum RustTrashLog {
         enum CodingKeys: String, CodingKey { case batchID = "batch_id", timestamp, items }
     }
 
-    /// The newest signed entry for `batchID` in the Rust log beside `journal`,
-    /// as a Swift batch; nil without the shared key or a valid entry.
-    static func find(_ batchID: String, beside journal: URL) -> TrashJournal.Batch? {
+    /// Every validly signed entry in the Rust log beside `journal`, oldest first, as Swift
+    /// batches; empty without the shared key. The log is never modified.
+    static func verifiedBatches(beside journal: URL) -> [TrashJournal.Batch] {
         let folder = journal.deletingLastPathComponent()
         guard let key = FileManager.default.contents(atPath: folder.appendingPathComponent("log-hmac.key").path),
               !key.isEmpty,
-              let raw = FileManager.default.contents(atPath: url(beside: journal).path) else { return nil }
+              let raw = FileManager.default.contents(atPath: url(beside: journal).path) else { return [] }
         let symmetric = SymmetricKey(data: key)
-        var found: LoggedEntry?
+        var found: [LoggedEntry] = []
         for line in raw.split(separator: 0x0A) {
             guard let tab = line.firstIndex(of: 0x09) else { continue }
             let payload = Data(line[line.startIndex..<tab])
@@ -135,15 +135,21 @@ enum RustTrashLog {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard let macBytes = hexBytes(mac),
                   HMAC<SHA256>.isValidAuthenticationCode(macBytes, authenticating: payload, using: symmetric),
-                  let entry = try? JSONDecoder().decode(LoggedEntry.self, from: payload),
-                  entry.batchID == batchID else { continue }
-            found = entry
+                  let entry = try? JSONDecoder().decode(LoggedEntry.self, from: payload) else { continue }
+            found.append(entry)
         }
-        guard let found else { return nil }
-        return TrashJournal.Batch(id: found.batchID, createdAt: found.timestamp, items: found.items.map {
-            TrashJournal.Item(fileID: $0.fileID, originalPath: $0.originalPath,
-                              trashedPath: $0.trashedPath ?? "", rows: $0.rows ?? [])
-        })
+        return found.map { entry in
+            TrashJournal.Batch(id: entry.batchID, createdAt: entry.timestamp, items: entry.items.map {
+                TrashJournal.Item(fileID: $0.fileID, originalPath: $0.originalPath,
+                                  trashedPath: $0.trashedPath ?? "", rows: $0.rows ?? [])
+            })
+        }
+    }
+
+    /// The newest signed entry for `batchID` in the Rust log beside `journal`;
+    /// nil without the shared key or a valid entry.
+    static func find(_ batchID: String, beside journal: URL) -> TrashJournal.Batch? {
+        verifiedBatches(beside: journal).last { $0.id == batchID }
     }
 
     private static func hexBytes(_ text: String) -> Data? {

@@ -16,6 +16,7 @@ use super::vlm_server::{Timings, VlmServer};
 use crate::ipc::ModelBenchmark;
 use anyhow::{bail, Context, Result};
 use image::{Rgb, RgbImage};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -288,44 +289,129 @@ where
     best.filter(|(_, rate)| *rate > baseline.1 * 1.05)
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct StoredBenchmark {
-    pub model: String,
-    pub hardware: String,
-    pub benchmark: ModelBenchmark,
+/// The Swift engine's store: one `ModelBenchmark` per model id, each carrying
+/// the hardware it was measured on. Only this machine's entries are returned.
+type Store = BTreeMap<String, ModelBenchmark>;
+
+/// Rust's earlier format (`{"results": [{model, hardware, benchmark}]}`).
+#[derive(serde::Deserialize)]
+struct LegacyStore {
+    results: Vec<LegacyEntry>,
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct Store {
-    results: Vec<StoredBenchmark>,
+#[derive(serde::Deserialize)]
+struct LegacyEntry {
+    model: String,
+    hardware: String,
+    benchmark: ModelBenchmark,
 }
+
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn store_path() -> Result<PathBuf> {
     Ok(crate::paths::root()?.join("model-benchmarks.json"))
 }
 
-pub fn load_in(path: &Path) -> Vec<StoredBenchmark> {
-    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Store>(&bytes).ok()).map(|s| s.results).unwrap_or_default()
+/// The hardware string results are filed under. The engine the Mac app hosts
+/// uses the Swift engine's wording so both engines see each other's results.
+pub fn hardware() -> String {
+    #[cfg(target_os = "macos")]
+    if crate::paths::APP_HOSTED {
+        return mac_fingerprint();
+    }
+    launch_tuning::hardware_fingerprint()
 }
 
-pub fn save_in(path: &Path, result: StoredBenchmark) -> Result<()> {
-    let mut results = load_in(path);
-    results.retain(|r| !(r.model == result.model && r.hardware == result.hardware));
-    results.push(result);
+#[cfg(target_os = "macos")]
+fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
+    let mut size = 0usize;
+    // SAFETY: a null buffer asks only for the length.
+    if unsafe { libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 || size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size];
+    // SAFETY: `buffer` holds `size` bytes, which sysctlbyname will not exceed.
+    if unsafe { libc::sysctlbyname(name.as_ptr(), buffer.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    while buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    String::from_utf8(buffer).ok()
+}
+
+/// `ModelBenchmarkRunner.hardwareFingerprint()` in the Swift engine.
+#[cfg(target_os = "macos")]
+fn mac_fingerprint() -> String {
+    let chip = sysctl_string(c"machdep.cpu.brand_string").unwrap_or_else(|| "Mac".to_owned());
+    let memory = crate::platform::physical_memory_gb().round() as u64;
+    let mut active: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: `active`/`size` describe a valid c_int buffer.
+    let read = unsafe { libc::sysctlbyname(c"hw.activecpu".as_ptr(), (&mut active as *mut libc::c_int).cast(), &mut size, std::ptr::null_mut(), 0) };
+    let cores = if read == 0 { active as usize } else { std::thread::available_parallelism().map_or(1, |n| n.get()) };
+    let version = sysctl_string(c"kern.osproductversion").unwrap_or_default();
+    let mut parts = version.split('.');
+    let (major, minor) = (parts.next().unwrap_or("0"), parts.next().unwrap_or("0"));
+    format!("{chip} \u{b7} {memory} GB \u{b7} {cores} cores \u{b7} macOS {major}.{minor}")
+}
+
+fn write_store(path: &Path, store: &Store) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let staged = path.with_extension("json.tmp");
-    std::fs::write(&staged, serde_json::to_vec_pretty(&Store { results })?)?;
+    std::fs::write(&staged, serde_json::to_vec_pretty(store)?)?;
     std::fs::rename(staged, path)?;
     Ok(())
 }
 
+/// One-shot import of Rust's earlier format: the file is rewritten in the
+/// Swift engine's format and the original kept beside it.
+fn import_legacy(path: &Path, bytes: &[u8], hardware: &str) -> Option<Store> {
+    let legacy: LegacyStore = serde_json::from_slice(bytes).ok()?;
+    let mut store = Store::new();
+    for entry in legacy.results {
+        let mut benchmark = entry.benchmark;
+        benchmark.hardware = entry.hardware;
+        if benchmark.hardware == hardware || !store.contains_key(&entry.model) {
+            store.insert(entry.model, benchmark);
+        }
+    }
+    let backup = path.with_extension("json.rust-v1");
+    if !backup.exists() {
+        let _ = std::fs::copy(path, &backup);
+    }
+    if let Err(error) = write_store(path, &store) {
+        tracing::warn!(?error, "could not rewrite the benchmark store in the shared format");
+    }
+    Some(store)
+}
+
+fn load_all(path: &Path, hardware: &str) -> Store {
+    let Ok(bytes) = std::fs::read(path) else { return Store::new() };
+    serde_json::from_slice(&bytes).ok().or_else(|| import_legacy(path, &bytes, hardware)).unwrap_or_default()
+}
+
+/// Benchmarks recorded for `hardware`, keyed by model id.
+pub fn load_in(path: &Path, hardware: &str) -> BTreeMap<String, ModelBenchmark> {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect()
+}
+
+/// Stores `benchmark` for `model`, keeping what was measured on `hardware`
+/// (like the Swift engine, results from other hardware are dropped).
+pub fn save_in(path: &Path, model: &str, benchmark: ModelBenchmark, hardware: &str) -> Result<()> {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store: Store = load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect();
+    store.insert(model.to_owned(), benchmark);
+    write_store(path, &store)
+}
+
 /// Benchmarks recorded on this machine, keyed by model id.
 pub fn local_results() -> std::collections::HashMap<String, ModelBenchmark> {
-    let hardware = launch_tuning::hardware_fingerprint();
-    store_path().map(|p| load_in(&p)).unwrap_or_default().into_iter().filter(|r| r.hardware == hardware).map(|r| (r.model, r.benchmark)).collect()
+    store_path().map(|p| load_in(&p, &hardware())).unwrap_or_default().into_iter().collect()
 }
 
 /// Full benchmark of one installed model: verify, load, measure and
@@ -377,7 +463,7 @@ pub async fn run(model_kind: &str, tuning: bool, cancel: Arc<AtomicBool>, mut pr
             }
         }
         let benchmark = summarize(&measurement, &hardware, tuned);
-        save_in(&store_path()?, StoredBenchmark { model: model_kind.to_owned(), hardware: hardware.clone(), benchmark: benchmark.clone() })?;
+        save_in(&store_path()?, model_kind, benchmark.clone(), &self::hardware())?;
         Ok(benchmark)
     }
     .await;

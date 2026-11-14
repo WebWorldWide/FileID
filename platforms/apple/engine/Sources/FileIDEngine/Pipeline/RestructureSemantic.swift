@@ -226,25 +226,42 @@ public enum RestructureSemantic {
         libraryRoot: String,
         profile: Profile = imageProfile
     ) -> [Move] {
-        let hp = fileHyperparams()
-        // Shared name registry created ONCE here and threaded through every
-        // segment, so segment 1's "Beach" cluster doesn't collide with segment
-        // 2's independent "Beach" cluster into the same folder — names stay
-        // globally unique across the whole reorg. (BL-01)
         var usedGroupNames = Set<String>()
+        var settled = Set<Int64>()
+        return classify(files: files, prototypes: prototypes, libraryRoot: libraryRoot,
+                        profile: profile, usedGroupNames: &usedGroupNames, settled: &settled)
+    }
+
+    /// `usedGroupNames` is the name registry shared across the image, document and
+    /// non-image passes (they target one library root); `settled` collects files the
+    /// pass examined and deliberately left in place, which the rule cascade must not
+    /// re-propose. Mirrors Rust `semantic_classify`.
+    public static func classify(
+        files: [SemanticFile],
+        prototypes: [FolderPrototype],
+        libraryRoot: String,
+        profile: Profile = imageProfile,
+        usedGroupNames: inout Set<String>,
+        settled: inout Set<Int64>
+    ) -> [Move] {
+        let hp = fileHyperparams()
+        // Shared name registry threaded through every segment, so segment 1's
+        // "Beach" cluster doesn't collide with segment 2's independent "Beach"
+        // cluster into the same folder — names stay globally unique across the
+        // whole reorg. (BL-01)
         // Non-default profile (document / non-image pass): skip time segmentation —
         // docs lack reliable timestamps and the passage handles them separately.
         guard profile.wTime == imageProfile.wTime && profile.wClip == imageProfile.wClip else {
             return classifyProfiled(files: files, prototypes: prototypes,
                                     libraryRoot: libraryRoot, profile: profile, hp: hp,
-                                    usedGroupNames: &usedGroupNames)
+                                    usedGroupNames: &usedGroupNames, settled: &settled)
         }
         var moves: [Move] = []
         for segment in timeSegments(files) {
             moves.append(contentsOf: classifyProfiled(
                 files: segment, prototypes: prototypes,
                 libraryRoot: libraryRoot, profile: profile, hp: hp,
-                usedGroupNames: &usedGroupNames))
+                usedGroupNames: &usedGroupNames, settled: &settled))
         }
         return moves
     }
@@ -284,7 +301,8 @@ public enum RestructureSemantic {
         libraryRoot: String,
         profile: Profile,
         hp: IdentityClustering.Hyperparameters,
-        usedGroupNames: inout Set<String>
+        usedGroupNames: inout Set<String>,
+        settled: inout Set<Int64>
     ) -> [Move] {
         guard !files.isEmpty else { return [] }
         let globalFreq = tagFrequencies(files)
@@ -296,6 +314,10 @@ public enum RestructureSemantic {
         for (i, cid) in clusterIDs.enumerated() { clusters[cid, default: []].append(i) }
 
         var moves: [Move] = []
+        // Stay-put guard lookup: a file whose CURRENT folder already fits it at the
+        // routing bar is well-placed, and a butler moves misplaced files — it
+        // doesn't reshuffle good ones.
+        let protoByPath = Dictionary(prototypes.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
         // `usedGroupNames` (an inout param) is the shared registry of names
         // already claimed by a *different* new-group cluster — this run AND
         // every prior time-segment, so two segments that both mint "Beach" get
@@ -322,6 +344,7 @@ public enum RestructureSemantic {
             let category: String
             let confidence: Confidence
             let reason: String
+            var routeSim: Float?
 
             // Containment guard: only an in-root prototype is a valid
             // destination — routing to a folder outside libraryRoot would be
@@ -334,6 +357,7 @@ public enum RestructureSemantic {
                 let name = (proto.path as NSString).lastPathComponent
                 category = name.isEmpty ? "Folder" : name
                 destDir = proto.path
+                routeSim = sim
                 // Name-routing (Dropbox Smart Move): additive — strong filename
                 // agreement upgrades a thin-margin content match to Auto, but never
                 // overrides the content routing decision itself.
@@ -347,7 +371,17 @@ public enum RestructureSemantic {
             } else {
                 // New group named from the cluster's most distinctive tags.
                 let terms = distinctiveTerms(members, files: files, globalFreq: globalFreq)
-                let base = groupName(fromTerms: terms)
+                var base = groupName(fromTerms: terms)
+                // No distinctive tags: name the group by when it happened (median
+                // capture time, so one outlier can't mislabel the event) instead
+                // of minting "Unsorted N" folders. Mirrors Rust.
+                if terms.isEmpty {
+                    let times = members.map { files[$0].timeUnix }.filter { $0 > 0 }.sorted()
+                    if !times.isEmpty {
+                        let (year, month) = Restructure.yearMonth(times[times.count / 2])
+                        base = "\(Restructure.monthName(month)) \(year)"
+                    }
+                }
                 // Disambiguate a name already claimed by another new-group
                 // cluster so distinct clusters get distinct folders (#9). Work in
                 // the SANITIZED namespace (#2): two pretty names that differ only
@@ -392,9 +426,29 @@ public enum RestructureSemantic {
             }
 
             for i in members {
+                let file = files[i]
+                // Already home: a move into the file's current folder is pure
+                // churn. Settle it so the rule cascade can't re-propose a
+                // date-tree move for a file the semantic pass left in place.
+                let parent = (file.source as NSString).deletingLastPathComponent
+                if pathsMatchFolder(parent, destDir) {
+                    settled.insert(file.fileID)
+                    continue
+                }
+                // Only a destination that fits decisively better (clears the
+                // routing margin) may pull a well-placed file out of its folder;
+                // a freshly minted group never outranks a good existing home.
+                if !file.clip.isEmpty, let cur = protoByPath[parent] {
+                    let fit = dot(file.clip, cur.centroid)
+                    let pull = routeSim ?? profile.folderMatchCos
+                    if fit >= profile.folderMatchCos && fit + profile.minMargin >= pull {
+                        settled.insert(file.fileID)
+                        continue
+                    }
+                }
                 moves.append(Move(
-                    fileID: files[i].fileID,
-                    source: files[i].source,
+                    fileID: file.fileID,
+                    source: file.source,
                     destinationDir: destDir,
                     category: category,
                     confidence: confidence,
@@ -419,6 +473,18 @@ public enum RestructureSemantic {
         files: [SemanticFile],
         libraryRoot: String
     ) -> [Move] {
+        var usedGroupNames = Set<String>()
+        var settled = Set<Int64>()
+        return classifyNonImage(files: files, libraryRoot: libraryRoot,
+                                usedGroupNames: &usedGroupNames, settled: &settled)
+    }
+
+    public static func classifyNonImage(
+        files: [SemanticFile],
+        libraryRoot: String,
+        usedGroupNames: inout Set<String>,
+        settled: inout Set<Int64>
+    ) -> [Move] {
         let sigs = nonImageSignatures(files)
         guard sigs.count >= 2 else { return [] }
         // Learn-your-style targets, but NOT generic dumping grounds (Downloads,
@@ -427,10 +493,10 @@ public enum RestructureSemantic {
         // already is. Real user folders ("Taxes", "Invoices") still anchor.
         // (RESTRUCTURE.md R1)
         let protos = folderPrototypes(sigs, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
-        var usedGroupNames = Set<String>()
         return classifyProfiled(files: sigs, prototypes: protos,
                                 libraryRoot: libraryRoot, profile: nonImageProfile,
-                                hp: fileHyperparams(), usedGroupNames: &usedGroupNames)
+                                hp: fileHyperparams(), usedGroupNames: &usedGroupNames,
+                                settled: &settled)
     }
 
     /// Document-content pass — cluster documents by their BGE text embedding (in `clip`),
@@ -442,12 +508,24 @@ public enum RestructureSemantic {
         files: [SemanticFile],
         libraryRoot: String
     ) -> [Move] {
+        var usedGroupNames = Set<String>()
+        var settled = Set<Int64>()
+        return classifyDocuments(files: files, libraryRoot: libraryRoot,
+                                 usedGroupNames: &usedGroupNames, settled: &settled)
+    }
+
+    public static func classifyDocuments(
+        files: [SemanticFile],
+        libraryRoot: String,
+        usedGroupNames: inout Set<String>,
+        settled: inout Set<Int64>
+    ) -> [Move] {
         guard files.count >= 2 else { return [] }
         let protos = folderPrototypes(files, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
-        var usedGroupNames = Set<String>()
         return classifyProfiled(files: files, prototypes: protos,
                                 libraryRoot: libraryRoot, profile: docProfile,
-                                hp: docHyperparams(), usedGroupNames: &usedGroupNames)
+                                hp: docHyperparams(), usedGroupNames: &usedGroupNames,
+                                settled: &settled)
     }
 
     /// Document content-embedding profile (byte-faithful with Rust `doc_profile`). The
@@ -795,6 +873,15 @@ public enum RestructureSemantic {
 
     /// Component-wise containment: is `path` the root itself or a descendant of
     /// it? Mirrors Rust `Path::starts_with` (so `/lib2` doesn't match `/lib`).
+    private static func pathsMatchFolder(_ a: String, _ b: String) -> Bool {
+        let trim = { (s: String) -> String in
+            var t = s
+            while t.count > 1, t.hasSuffix("/") { t.removeLast() }
+            return t
+        }
+        return trim(a) == trim(b)
+    }
+
     static func pathContained(_ path: String, in root: String) -> Bool {
         if path == root { return true }
         let rootPrefix = root.hasSuffix("/") ? root : root + "/"
