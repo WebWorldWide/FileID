@@ -166,10 +166,18 @@ fn file_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
+/// The Recent changes line for a finished card: its result sentence.
+fn chat_change_label(text: &str) -> String {
+    format!("Chat: {}", text.trim().trim_end_matches('.'))
+}
+
 pub(super) struct Runner {
     engine: Engine,
     phases: RefCell<HashMap<String, Phase>>,
     undos: RefCell<HashMap<String, (String, UndoFn)>>,
+    /// Recent changes lines for finished cards that can still be undone, and for undos in flight.
+    entries: RefCell<HashMap<String, u64>>,
+    undoing: RefCell<HashMap<String, u64>>,
     pending: RefCell<Vec<Pending>>,
     plan: RefCell<Option<RestructurePlan>>,
     scan: RefCell<Option<ScanProgress>>,
@@ -190,6 +198,8 @@ impl Runner {
             engine: engine.clone(),
             phases: RefCell::default(),
             undos: RefCell::default(),
+            entries: RefCell::default(),
+            undoing: RefCell::default(),
             pending: RefCell::default(),
             plan: RefCell::default(),
             scan: RefCell::default(),
@@ -249,7 +259,7 @@ impl Runner {
             let id = id.to_owned();
             toast.connect_button_clicked(move |_| {
                 if let Some(runner) = weak.upgrade() {
-                    runner.undo(&id);
+                    let _ = runner.undo(&id);
                 }
             });
         }
@@ -257,9 +267,13 @@ impl Runner {
     }
 
     fn finish(self: &Rc<Self>, id: &str, text: String, undo: Option<(&str, UndoFn)>) {
+        let undone = self.undoing.borrow_mut().remove(id);
+        crate::changes::settle(undone, 0, "change");
+        crate::changes::supersede(self.entries.borrow_mut().remove(id), "Run again from Chat");
         match undo {
             Some((label, run)) => {
                 self.undos.borrow_mut().insert(id.to_owned(), (label.to_owned(), run));
+                self.record_change(id, &text);
             }
             None => {
                 self.undos.borrow_mut().remove(id);
@@ -269,7 +283,21 @@ impl Runner {
         self.toast(id, &text);
     }
 
+    /// Lists a finished card with an undo in Recent changes, so Ctrl+Z runs it.
+    fn record_change(self: &Rc<Self>, id: &str, text: &str) {
+        let weak = Rc::downgrade(self);
+        let card = id.to_owned();
+        let reverse: crate::changes::Reverse = Rc::new(move || weak.upgrade().is_some_and(|runner| runner.undo(&card)));
+        if let Some(entry) = crate::changes::record(1, || chat_change_label(text), Some(reverse)) {
+            self.entries.borrow_mut().insert(id.to_owned(), entry);
+        }
+    }
+
     fn fail(self: &Rc<Self>, id: &str, text: &str) {
+        if let Some(entry) = self.undoing.borrow_mut().remove(id) {
+            crate::changes::set_status(entry, crate::changes::Status::NotUndoable(text.to_owned()));
+        }
+        crate::changes::supersede(self.entries.borrow_mut().remove(id), "Run again from Chat");
         self.undos.borrow_mut().remove(id);
         self.set(id, Phase::Failed(text.to_owned()));
         self.toast(id, text);
@@ -293,13 +321,19 @@ impl Runner {
         self.undos.borrow().get(id).map(|(label, _)| label.clone())
     }
 
-    fn undo(self: &Rc<Self>, id: &str) {
+    /// Starts a card's undo; false when it has none or is not finished.
+    fn undo(self: &Rc<Self>, id: &str) -> bool {
         if !matches!(self.phase(id), Phase::Done(_)) {
-            return;
+            return false;
         }
-        let Some((_, run)) = self.undos.borrow_mut().remove(id) else { return };
+        let Some((_, run)) = self.undos.borrow_mut().remove(id) else { return false };
+        if let Some(entry) = self.entries.borrow_mut().remove(id) {
+            crate::changes::set_status(entry, crate::changes::Status::Undoing);
+            self.undoing.borrow_mut().insert(id.to_owned(), entry);
+        }
         self.set(id, Phase::Running("Undoing…".to_owned()));
         run(self, id);
+        true
     }
 
     fn cancel(&self, action: &ChatAction) {
@@ -1170,7 +1204,7 @@ impl Cards {
                     let id = action.id.clone();
                     undo.connect_clicked(move |_| {
                         if let Some(cards) = weak.upgrade() {
-                            cards.runner.clone().undo(&id);
+                            let _ = cards.runner.clone().undo(&id);
                         }
                     });
                     card.buttons.append(&undo);
@@ -1224,5 +1258,16 @@ fn fill_well(well: &gtk::Box, action: &ChatAction, plan: Option<&PlanSummary>) {
     }
     if let Some(undo) = &facts.undo {
         well.append(&v3::wrapped(undo, &["v3-meta", "tone-text2"]));
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::chat_change_label;
+
+    #[test]
+    fn a_finished_card_is_listed_by_its_result_sentence() {
+        assert_eq!(chat_change_label("Moved 3 files to Trash."), "Chat: Moved 3 files to Trash");
+        assert_eq!(chat_change_label("  Turned on.  "), "Chat: Turned on");
     }
 }
