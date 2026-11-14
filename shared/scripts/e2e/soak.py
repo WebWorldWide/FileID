@@ -423,17 +423,23 @@ class Soak:
         if k != "scanComplete":
             fail(rnd, "scan completes", (k, v))
             return
+        # The Rust engine leaves scanned_at alone for an unchanged file. The Swift engine stamps it on every skipped file
+        # (Discovery.swift bumpScannedAt: the orphan sweep deletes rows with scanned_at < scanStart), so for swift the
+        # check compares every other column, ids included, and requires processedFiles == 0 besides.
+        cols = "id, scanned_at" if self.a.flavor == "rust" else "id, size_bytes, modified_at, kind, content_hash, phash, failed, error_message"
         with ro(eng.db) as c:
-            before = dict(c.execute("SELECT id, scanned_at FROM files WHERE path_text LIKE ?", (self.lib + "/%",)).fetchall())
+            before = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
         k, v = eng.scan(self.lib)
         with ro(eng.db) as c:
-            after = dict(c.execute("SELECT id, scanned_at FROM files WHERE path_text LIKE ?", (self.lib + "/%",)).fetchall())
-        changed = [i for i in after if before.get(i) != after[i]]
+            after = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
+        changed = [i for i in set(after) | set(before) if before.get(i) != after.get(i)]
         with ro(eng.db) as c:
             failed_ids = {r[0] for r in c.execute("SELECT id FROM files WHERE failed=1")}
         retried = [i for i in changed if i in failed_ids]
         self.retried_failed = len(retried)
         changed = [i for i in changed if i not in failed_ids]
+        if self.a.flavor == "swift" and k == "scanComplete" and v.get("processedFiles"):
+            changed.append(f"processedFiles={v.get('processedFiles')}")
         if k != "scanComplete" or changed:
             fail(rnd, "rescan analyses nothing new", f"{k} reprocessed={len(changed)} {v}")
         return round(time.time() - t, 1)
