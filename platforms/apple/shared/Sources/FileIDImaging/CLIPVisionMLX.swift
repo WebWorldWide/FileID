@@ -236,28 +236,53 @@ package final class CLIPGPUBatcher: @unchecked Sendable {
     package func embed(_ tensor: [Float]) -> [Float]? { batcher.submit(tensor) }
 }
 
-/// Runs each model's batches on its own queue and MLX stream, so a long
+/// Runs each model's batches on its own thread and MLX stream, so a long
 /// RAM++ batch does not hold CLIP requests behind it.
+///
+/// The thread is dedicated, not a dispatch queue, on purpose: MLX keeps its
+/// compile cache per thread, and a compiled function's cache entry (which holds
+/// the model weights it captured) can only be erased from the thread that
+/// compiled it. A queue hops between pool threads, so releasing a compiled
+/// model left its weights live. Here the worker owns `run` and drops it, and
+/// with it the model, on its own thread before `deinit` returns.
 package final class GPURequestBatcher: @unchecked Sendable {
     package typealias Run = @Sendable (_ pixels: [Float], _ count: Int) -> [[Float]]
     private final class Slot: @unchecked Sendable {
         package let done = DispatchSemaphore(value: 0)
         package var result: [Float]?
     }
-    private let run: Run
-    private let maxBatch: Int
-    private let gather: DispatchTimeInterval
-    private let lock = NSLock()
-    private var pending: [(tensor: [Float], slot: Slot)] = []
-    private var draining = false
-    private let queue: DispatchQueue
+    private final class State: @unchecked Sendable {
+        let condition = NSCondition()
+        var pending: [(tensor: [Float], slot: Slot)] = []
+        var stopped = false
+        let finished = DispatchSemaphore(value: 0)
+    }
+    private final class RunBox: @unchecked Sendable {
+        var run: Run?
+        init(_ run: @escaping Run) { self.run = run }
+    }
+    private let state = State()
 
     package init(label: String, maxBatch: Int, gather: DispatchTimeInterval, run: @escaping Run) {
-        self.run = run
-        self.maxBatch = maxBatch
-        self.gather = gather
-        queue = DispatchQueue(label: label, qos: .userInitiated)
         Self.capCache()
+        let state = state
+        let box = RunBox(run)
+        let thread = Thread {
+            Self.work(state, maxBatch: maxBatch, gather: gather, run: box.run!)
+            box.run = nil
+            state.finished.signal()
+        }
+        thread.name = label
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+
+    deinit {
+        state.condition.lock()
+        state.stopped = true
+        state.condition.signal()
+        state.condition.unlock()
+        state.finished.wait()
     }
 
     /// Varying batch sizes leave freed buffers MLX cannot reuse; uncapped, a
@@ -274,28 +299,40 @@ package final class GPURequestBatcher: @unchecked Sendable {
 
     package func submit(_ tensor: [Float]) -> [Float]? {
         let slot = Slot()
-        lock.lock()
-        pending.append((tensor, slot))
-        let start = !draining
-        if start { draining = true }
-        lock.unlock()
-        if start { queue.asyncAfter(deadline: .now() + gather) { self.drain() } }
+        state.condition.lock()
+        state.pending.append((tensor, slot))
+        state.condition.signal()
+        state.condition.unlock()
         slot.done.wait()
         return slot.result
     }
 
-    private func drain() {
+    private static func work(_ state: State, maxBatch: Int, gather: DispatchTimeInterval, run: Run) {
+        let gatherSeconds: Double = switch gather {
+        case .seconds(let v): Double(v)
+        case .milliseconds(let v): Double(v) / 1_000
+        case .microseconds(let v): Double(v) / 1_000_000
+        case .nanoseconds(let v): Double(v) / 1_000_000_000
+        default: 0
+        }
         Stream.withNewDefaultStream {
             while true {
-                lock.lock()
-                let batch = Array(pending.prefix(maxBatch))
-                pending.removeFirst(batch.count)
-                if batch.isEmpty { draining = false; lock.unlock(); return }
-                lock.unlock()
-                let outputs = autoreleasepool { run(batch.flatMap(\.tensor), batch.count) }
-                for (index, request) in batch.enumerated() {
-                    request.slot.result = index < outputs.count ? outputs[index] : nil
-                    request.slot.done.signal()
+                state.condition.lock()
+                while state.pending.isEmpty, !state.stopped { state.condition.wait() }
+                if state.pending.isEmpty { state.condition.unlock(); return }
+                state.condition.unlock()
+                if gatherSeconds > 0 { Thread.sleep(forTimeInterval: gatherSeconds) }
+                while true {
+                    state.condition.lock()
+                    let batch = Array(state.pending.prefix(maxBatch))
+                    state.pending.removeFirst(batch.count)
+                    state.condition.unlock()
+                    if batch.isEmpty { break }
+                    let outputs = autoreleasepool { run(batch.flatMap(\.tensor), batch.count) }
+                    for (index, request) in batch.enumerated() {
+                        request.slot.result = index < outputs.count ? outputs[index] : nil
+                        request.slot.done.signal()
+                    }
                 }
             }
         }
