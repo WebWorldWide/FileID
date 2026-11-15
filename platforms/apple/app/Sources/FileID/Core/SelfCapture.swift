@@ -174,6 +174,7 @@ enum SelfShot {
         guard let root = window()?.contentView else { return }
         var best: NSScrollView?
         func visit(_ view: NSView) {
+            if view.isHidden || view.alphaValue == 0 || view.layer?.opacity == 0 { return }
             if let scroll = view as? NSScrollView, let document = scroll.documentView, !scroll.isHiddenOrHasHiddenAncestor,
                document.frame.height > scroll.contentView.bounds.height + 1, scroll.convert(scroll.bounds, to: nil).minX > 200,
                scroll.bounds.width * scroll.bounds.height > (best.map { $0.bounds.width * $0.bounds.height } ?? 0) { best = scroll }
