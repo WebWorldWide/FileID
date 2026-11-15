@@ -185,6 +185,11 @@ struct LibraryView: View {
                 engine.refreshLibraryRoots()
             }
             .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
+            #if DEBUG
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
+                if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
+            }
+            #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
             .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
