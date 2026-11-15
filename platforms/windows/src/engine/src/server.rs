@@ -792,12 +792,32 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     platform::watch_parent(ppid, shutdown).await;
 }
 
-/// Clears the Deep-Analyze single-in-flight flag on drop, so the slot frees even
-/// if the spawned handler panics or early-returns (#10).
-struct DeepActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+/// One job's hold on a single-in-flight flag (Deep Analyze, Organize Folders
+/// moves). Released once: when the job queues its terminal event, or when the
+/// guard drops.
+struct DeepSlot {
+    active: Flag,
+    released: std::sync::atomic::AtomicBool,
+}
+
+impl DeepSlot {
+    fn hold(active: &Flag) -> Arc<Self> {
+        Arc::new(Self { active: active.clone(), released: std::sync::atomic::AtomicBool::new(false) })
+    }
+
+    fn release(&self) {
+        if !self.released.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            self.active.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Frees the slot on drop, so it frees even if the spawned handler panics or
+/// early-returns (#10).
+struct DeepActiveGuard(Arc<DeepSlot>);
 impl Drop for DeepActiveGuard {
     fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
+        self.0.release();
     }
 }
 
@@ -1018,6 +1038,7 @@ async fn spawn_mutation_with_interval<F>(
                             .as_ref()
                             .is_some_and(|coord| coord.is_paused());
                         if scan_paused {
+                            drop(operation);
                             sink.send(EngineError::event(
                                 "library_busy",
                                 "The library scan is paused, so this action can't run yet. \
@@ -1216,9 +1237,11 @@ impl Dispatcher {
             self.sink.send(EngineError::event(kind, message)).await;
             return;
         }
-        let guard = DeepActiveGuard(self.restructure_active.clone());
+        let slot = DeepSlot::hold(&self.restructure_active);
+        let guard = DeepActiveGuard(slot.clone());
         let cancel_guard = self.restructure_cancellations.register();
-        let (sink, db, cancel) = (self.sink.clone(), db.clone(), cancel_guard.token());
+        let sink = self.sink.releasing_before(|payload| matches!(payload, EventPayload::RestructureApplyResult(_)), move || slot.release());
+        let (db, cancel) = (db.clone(), cancel_guard.token());
         let rejection = EngineError::event(kind, format!("{phrase} while the library scan is paused."));
         spawn_mutation_with_rejection(&self.mutation_gate, &self.sink, &self.scan_state, rejection, async move {
             let _guard = guard;
@@ -1252,9 +1275,11 @@ impl Dispatcher {
             return;
         }
         self.deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-        let guard = DeepActiveGuard(self.deep_analyze_active.clone());
+        let slot = DeepSlot::hold(&self.deep_analyze_active);
+        let guard = DeepActiveGuard(slot.clone());
         let track = JobTrackGuard::start(&self.jobs, JobCategory::DeepAnalyze, label);
-        let (sink, db, cancel) = (self.sink.clone(), db.clone(), self.deep_analyze_cancel.clone());
+        let sink = self.sink.releasing_before(|payload| matches!(payload, EventPayload::DeepAnalyzeComplete(_)), move || slot.release());
+        let (db, cancel) = (db.clone(), self.deep_analyze_cancel.clone());
         let rejection = deep_analyze_rejection_event(&model_kind);
         spawn_mutation_with_rejection(&self.mutation_gate, &self.sink, &self.scan_state, rejection, async move {
             let _guard = guard;
@@ -1767,6 +1792,118 @@ mod tests {
             }
         }
         found
+    }
+
+    fn deep_complete() -> IpcEvent {
+        IpcEvent::now(EventPayload::DeepAnalyzeComplete(ipc::Wrap::new(ipc::DeepAnalyzeComplete {
+            processed: 0,
+            failed: 0,
+            total_seconds: 0.0,
+            model_kind: "m".into(),
+            cancelled: false,
+        })))
+    }
+
+    async fn next_event(events: &mut tokio::sync::mpsc::Receiver<IpcEvent>) -> EventPayload {
+        tokio::time::timeout(std::time::Duration::from_secs(20), events.recv())
+            .await
+            .expect("an event arrives")
+            .expect("sink open")
+            .payload
+    }
+
+    #[tokio::test]
+    async fn the_deep_analyze_slot_is_free_when_the_terminal_event_can_be_read() {
+        let dir = std::env::temp_dir().join(format!("fileid-deep-slot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+
+        d.deep_analyze_arm("deepAnalyzeAll", "m".into(), "first", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(deep_complete()).await;
+            let _ = finished.await;
+        })
+        .await;
+        assert!(matches!(next_event(&mut events).await, EventPayload::DeepAnalyzeComplete(_)));
+        assert!(!d.deep_analyze_active.load(std::sync::atomic::Ordering::Acquire), "slot still held after the terminal event");
+
+        d.deep_analyze_arm("deepAnalyzeAll", "m".into(), "second", (), |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(deep_complete()).await;
+        })
+        .await;
+        assert!(d.deep_analyze_active.load(std::sync::atomic::Ordering::Acquire), "the second job took the slot");
+        finish.send(()).unwrap();
+        assert!(
+            matches!(next_event(&mut events).await, EventPayload::DeepAnalyzeComplete(_)),
+            "the second command ran instead of being refused as already running"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_organize_folders_move_frees_its_slot_with_its_result() {
+        let dir = std::env::temp_dir().join(format!("fileid-restructure-slot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let result = || {
+            IpcEvent::now(EventPayload::RestructureApplyResult(ipc::Wrap::new(ipc::RestructureApplyResult {
+                applied: 0,
+                failed: 0,
+                privilege_error: None,
+                cancelled: false,
+                planned: None,
+                remaining: None,
+                shortcut_undo_token: None,
+            })))
+        };
+
+        d.restructure_mutation("applyRestructure", "apply_restructure", "first", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(result()).await;
+            let _ = finished.await;
+        })
+        .await;
+        assert!(matches!(next_event(&mut events).await, EventPayload::RestructureApplyResult(_)));
+        assert!(!d.restructure_active.load(std::sync::atomic::Ordering::Acquire), "slot still held after the result");
+
+        d.restructure_mutation("undoRestructure", "undo_restructure", "second", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(result()).await;
+        })
+        .await;
+        finish.send(()).unwrap();
+        assert!(
+            matches!(next_event(&mut events).await, EventPayload::RestructureApplyResult(_)),
+            "the undo ran instead of being refused as already moving files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_running_deep_analyze_still_refuses_a_second_one() {
+        let dir = std::env::temp_dir().join(format!("fileid-deep-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+
+        d.deep_analyze_arm("deepAnalyzeAll", "m".into(), "first", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+            let _ = finished.await;
+            sink.send(deep_complete()).await;
+        })
+        .await;
+        d.deep_analyze_arm("deepAnalyzeAll", "m".into(), "second", (), |_sink: Sink, _db, _payload: (), _cancel| async move {}).await;
+        match next_event(&mut events).await {
+            EventPayload::Error(error) => assert_eq!(error.inner.kind, "deep_analyze_already_running"),
+            other => panic!("expected the busy refusal, got {other:?}"),
+        }
+        finish.send(()).unwrap();
+        assert!(matches!(next_event(&mut events).await, EventPayload::DeepAnalyzeComplete(_)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn merge_line(id: &str) -> String {

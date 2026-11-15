@@ -134,11 +134,17 @@ jobs:
         run: msbuild src/FileID.App/FileID.App.csproj -t:Build -p:Configuration=Release -p:Platform=${{ matrix.arch }} -p:RuntimeIdentifier=win-${{ matrix.arch }} -m -restore:false
         shell: pwsh
 
+      - name: Restore for publish (Release)
+        # Release adds the ReadyToRun compiler pack, so publish needs its own
+        # restore. The SDK's restore, not `msbuild -restore`: the self-hosted
+        # runner's MSBuild 17.14 carries an older NuGet that does not prune
+        # packages the .NET 10 framework already provides, so it looks for
+        # System.Memory, which the lock file (written by the SDK) leaves out,
+        # and fails with NU1101.
+        run: dotnet restore src/FileID.App/FileID.App.csproj /p:Configuration=Release /p:Platform=${{ matrix.arch }} /p:RuntimeIdentifier=win-${{ matrix.arch }} /p:SelfContained=true
+
       - name: Publish (Release, self-contained)
-        # V15.2 — what users actually run. msbuild Publish target. Restore
-        # is included here (no -restore:false) so per-RID assets are
-        # resolved fresh for the publish output even if a prior build
-        # step cached different assets.
+        # V15.2 — what users actually run. msbuild Publish target.
         run: >
           msbuild src/FileID.App/FileID.App.csproj
           -t:Publish
@@ -147,7 +153,7 @@ jobs:
           -p:RuntimeIdentifier=win-${{ matrix.arch }}
           -p:SelfContained=true
           -p:PublishDir=bin/${{ matrix.arch }}/Release/net10.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
-          -restore
+          -restore:false
           -m
         shell: pwsh
 

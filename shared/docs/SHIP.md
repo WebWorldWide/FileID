@@ -1,8 +1,8 @@
 # FileID — Ship readiness (v1.0)
 
-## 2026-11-14 Where the release stands
+## 2026-11-15 Where the release stands
 
-Not release-ready. The code for all three desktop apps, the CLI and the TUI is integrated on PR #331 with every CI check green, but `main` is red until that PR is merged, nothing since the 2026-11-12 audits has been seen on a screen, and no signed package of the current source exists on any platform. The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)". The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
+Not release-ready. The code for all three desktop apps, the CLI and the TUI is on `main` (PR #331 and PR #337, merged 2026-11-15, each with every CI check green on its last commit). On `main` itself the Windows app workflow has been red since at least 2026-11-07, because pushes to `main` build on the self-hosted runner with an older MSBuild than pull requests see (NEXT, group A). Nothing since the 2026-11-12 audits has been seen on a screen except the Mac app's debug self-captures, and no signed package of the current source exists on any platform. The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)". The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
 
 ## 2026-11-06 Linux llama.cpp runtime packaging
 

@@ -577,7 +577,7 @@ struct FileIDEngineMain {
             // deep-analyze while one is queued/running is rejected, not
             // silently queued (the app disables its buttons in-flight, so
             // this only fires for misbehaving callers).
-            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+            if !(await JobQueue.shared.waitUntilIdle(category: .deepAnalyze)) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
                     message: "Describe Files is already running. Wait for it to finish, or stop it first."
@@ -626,7 +626,7 @@ struct FileIDEngineMain {
             guard await requireLicenseAcceptance(
                 for: kind, sink: sink, emitDeepAnalyzeTerminal: true
             ) else { return }
-            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+            if !(await JobQueue.shared.waitUntilIdle(category: .deepAnalyze)) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
                     message: "Describe Files is already running. Wait for it to finish, or stop it first."
@@ -683,7 +683,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
-            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+            if !(await JobQueue.shared.waitUntilIdle(category: .deepAnalyze)) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
                     message: "Describe Files is already running. Wait for it to finish, or stop it first."
