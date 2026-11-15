@@ -444,5 +444,116 @@
         }
       }
     ]
+  },
+  {
+    "name": "restructure-names-files-from-reviewed-evidence",
+    "description": "Organize Folders names a file from a reviewed chapter title in place of the stored model name (file 1). A draft chapter (file 2) and a stale chapter (file 3) are not reviewed evidence, so the stored model name stays; files 4 and 5 keep their own names.",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "tree": [
+      {
+        "path": "Downloads/DSC00001.JPG",
+        "content": "dsc1",
+        "mtime": 1000000000,
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108000,
+          "vlm_proposed_name": "sunset-over-the-bay"
+        }
+      },
+      {
+        "path": "Downloads/DSC00002.JPG",
+        "content": "dsc2",
+        "mtime": 1000000000,
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1788516000,
+          "vlm_proposed_name": "beach-day"
+        }
+      },
+      {
+        "path": "Downloads/DSC00003.JPG",
+        "content": "dsc3",
+        "mtime": 1000000000,
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1785924000,
+          "vlm_proposed_name": "stale-model-name"
+        }
+      },
+      {
+        "path": "Downloads/DSC00004.JPG",
+        "content": "dsc4",
+        "mtime": 1000000000,
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 1783332000
+        }
+      },
+      {
+        "path": "Downloads/DSC00005.JPG",
+        "content": "dsc5",
+        "mtime": 1000000000,
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 1780740000
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,source_revision,model_version,confidence,user_edited,stale) VALUES('reviewed',1,0,1,'Maya hits a home run','4:4741671816366391296','user',1,1,0),('draft',2,0,1,'Draft Chapter Title','4:4741671816366391296','user',1,0,0),('stale',3,0,1,'Birthday Gift Party','4:4741671816366391296','user',1,1,1)"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 1,
+                "source": "{path:Downloads/DSC00001.JPG}",
+                "destination": "{path:Photos/2026/October/Maya Hits A Home Run.JPG}"
+              },
+              {
+                "fileID": 2,
+                "source": "{path:Downloads/DSC00002.JPG}",
+                "destination": "{path:Photos/2026/September/beach-day.JPG}"
+              },
+              {
+                "fileID": 3,
+                "source": "{path:Downloads/DSC00003.JPG}",
+                "destination": "{path:Photos/2026/August/stale-model-name.JPG}"
+              },
+              {
+                "fileID": 4,
+                "source": "{path:Downloads/DSC00004.JPG}",
+                "destination": "{path:Photos/2026/July/DSC00004.JPG}"
+              },
+              {
+                "fileID": 5,
+                "source": "{path:Downloads/DSC00005.JPG}",
+                "destination": "{path:Photos/2026/June/DSC00005.JPG}"
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]

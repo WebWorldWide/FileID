@@ -388,6 +388,42 @@ mod tests {
     }
 
     #[test]
+    fn organize_folders_prefers_the_reviewed_name_and_keeps_the_stored_one_otherwise() {
+        let f = fixture("restructure");
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        let file = |stored: Option<&str>| crate::pipeline::restructure::FileForClassify {
+            file_id: 1,
+            source: f.source.clone(),
+            kind: crate::pipeline::discovery::FileKind::Image,
+            modified_unix: 0.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+            vlm_proposed: stored.map(str::to_owned),
+            identity: None,
+        };
+        let mut files = [file(Some("sunset-over-the-bay")), file(None)];
+        let reviewed = context(&f, None).unwrap().proposed_name();
+        apply_reviewed_names(&f.conn, &mut files);
+        assert!(reviewed.is_some());
+        assert_eq!(files[0].vlm_proposed, reviewed);
+        assert_eq!(files[1].vlm_proposed, reviewed);
+
+        f.conn.execute("UPDATE catalog_chapters SET user_edited=0", []).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"));
+
+        chapter(&f, "Birthday gift", "other", true, false);
+        std::fs::write(&f.source, [1u8, 2]).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"), "a changed source keeps the stored name");
+    }
+
+    #[test]
     fn a_label_that_only_repeats_the_file_name_abstains() {
         let f = fixture("same-name");
         chapter(&f, "IMG 001", "chapter", true, false);
