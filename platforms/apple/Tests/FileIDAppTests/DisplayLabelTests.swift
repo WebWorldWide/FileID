@@ -29,3 +29,14 @@ struct DisplayLabelTests {
         #expect(PathText.abbreviated(home + "other/x") == home + "other/x", "a sibling sharing the prefix is not home")
     }
 }
+
+@Suite("Folder tails")
+struct PathTailTests {
+    @Test func keepsTheDistinguishingPart() {
+        #expect(PathText.tail("/Users/me/Pictures/Trips/Lisbon 2022/Day 1") == "Lisbon 2022/Day 1")
+        #expect(PathText.tail("/Users/me/Downloads") == "me/Downloads")
+        #expect(PathText.tail("/Downloads") == "Downloads")
+        #expect(PathText.tail("/") == "/")
+        #expect(PathText.tail("/a/b/c", parts: 1) == "c")
+    }
+}
