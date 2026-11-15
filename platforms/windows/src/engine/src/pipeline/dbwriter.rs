@@ -540,7 +540,7 @@ impl DbWriter {
                     _ => None,
                 };
 
-                let file_id: i64 = file_stmt
+                let (file_id, stored_modified): (i64, Option<f64>) = file_stmt
                     .query_row(
                         params![
                             path_text,
@@ -569,9 +569,11 @@ impl DbWriter {
                             f.ocr_stage_ran || f.doc_stage_ran,
                             f.captured_from_exif,
                         ],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .with_context(|| format!("insert+id for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                // What the row now holds is the time every later write for this file uses.
+                let modified_unix = stored_modified.unwrap_or(f.modified_unix);
 
                 if f.text_stage_done {
                     text_stage_stmt
@@ -619,7 +621,7 @@ impl DbWriter {
                         .query_map(params![file_id], |r| r.get::<_, i64>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()
                         .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                    let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                    let source_revision = format!("{}:{}", f.size_bytes, modified_unix.to_bits());
                     // The Mac face pipeline records its own file revision when it
                     // extracts Vision faces; a portable one here would mark them stale.
                     if f.vision_faces.is_none() {
@@ -772,7 +774,7 @@ impl DbWriter {
                         }
                         twin_clip.execute(params![file_id, twin_id]).with_context(|| format!("twin clip copy for {}", redacted()))?;
                         twin_ocr.execute(params![file_id, twin_id]).with_context(|| format!("twin ocr copy for {}", redacted()))?;
-                        let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                        let source_revision = format!("{}:{}", f.size_bytes, modified_unix.to_bits());
                         // The Mac scan (`vision_faces`) stores faces without vectors
                         // and leaves the file revision to the Mac face pipeline; its
                         // copies are stored the same way.
@@ -819,7 +821,7 @@ impl DbWriter {
                         // catch-up pass then tags both. The twin's Year and camera
                         // tags are its own, so the copy's are worked out again.
                         let owes = owed_copy
-                            .execute(params![file_id, twin_id, f.size_bytes as i64, f.modified_unix, f.scanned_unix])
+                            .execute(params![file_id, twin_id, f.size_bytes as i64, modified_unix, f.scanned_unix])
                             .with_context(|| format!("twin catch-up marker for {}", redacted()))?;
                         if owes == 0 {
                             owed_clear.execute(params![file_id]).with_context(|| format!("twin catch-up clear for {}", redacted()))?;
@@ -851,7 +853,7 @@ impl DbWriter {
                             .execute(params![
                                 file_id,
                                 f.size_bytes as i64,
-                                f.modified_unix,
+                                modified_unix,
                                 crate::pipeline::catch_up::failure_context(),
                                 f.scanned_unix,
                             ])
@@ -872,7 +874,7 @@ impl DbWriter {
                             file_id,
                             owed.stages,
                             f.size_bytes as i64,
-                            f.modified_unix,
+                            modified_unix,
                             owed.vision,
                             owed.face_count,
                             f.scanned_unix,
@@ -1032,7 +1034,11 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         path_hash    = excluded.path_hash,
         path_search  = excluded.path_search,
         size_bytes   = excluded.size_bytes,
-        modified_at  = excluded.modified_at,
+        -- A time within a microsecond of the stored one is the same time, stored by an
+        -- engine that rounded its last bit differently: keep the stored number so the
+        -- row's revision strings and the stale-on-change trigger see no change.
+        modified_at  = CASE WHEN abs(modified_at - excluded.modified_at) < 0.000001
+                            THEN modified_at ELSE excluded.modified_at END,
         scanned_at   = excluded.scanned_at,
         kind         = excluded.kind,
         extension    = excluded.extension,
@@ -1060,7 +1066,7 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         -- ?23: created_at came from the photo's EXIF capture time; a file's
         -- birth time never replaces the recorded one.
         created_at   = CASE WHEN ?23 THEN excluded.created_at ELSE created_at END
-    RETURNING id
+    RETURNING id, modified_at
 "#;
 
 // Rename/move heal lookup (v8 identity). Find an existing row whose
@@ -1733,6 +1739,39 @@ mod tests {
             .unwrap();
         assert_eq!(size, 9999);
         assert!((modified - 1_800_000_000.0).abs() < 0.5);
+    }
+
+    /// A time within a microsecond of the stored one is the same instant written by an
+    /// engine that rounded its last bit differently: the stored number stays, so the
+    /// stale-on-change trigger leaves reviewed rows alone; a real change still updates it.
+    #[test]
+    fn a_time_a_bit_apart_keeps_the_stored_number_and_a_real_change_updates_it() {
+        let conn = crate::db::test_support::memory_db();
+        let mut f = fixture(r"C:.jpg");
+        let stored = f64::from_bits(0x41d9_b450_2f75_52cf);
+        f.modified_unix = stored;
+        insert_one(&conn, &f).unwrap();
+        let file_id: i64 = conn.query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        conn.execute(
+            "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) \
+             VALUES('c',?1,0,1,'t','','r','user',1,1,0)",
+            params![file_id],
+        )
+        .unwrap();
+        let read = |conn: &Connection| -> (f64, i64) {
+            conn.query_row(
+                "SELECT f.modified_at, c.stale FROM files f JOIN catalog_chapters c ON c.file_id = f.id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        f.modified_unix = f64::from_bits(stored.to_bits() + 1);
+        insert_one(&conn, &f).unwrap();
+        assert_eq!(read(&conn), (stored, 0));
+        f.modified_unix = stored + 60.0;
+        insert_one(&conn, &f).unwrap();
+        assert_eq!(read(&conn), (stored + 60.0, 1));
     }
 
     proptest::proptest! {

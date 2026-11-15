@@ -7,7 +7,7 @@ enum CatalogCast {
         guard let file = try Row.fetchOne(db, sql: "SELECT path_text,kind,size_bytes,modified_at FROM files WHERE id=? AND failed=0", arguments: [fileID]) else { return [] }
         let path: String = file["path_text"]
         let revision = try CatalogStore.revision(db, fileID: fileID)
-        guard FaceCacheProvenance.currentSourceRevision(path: path) == revision else { return [] }
+        guard FaceCacheProvenance.currentSourceRevision(path: path).map({ SourceRevisionMatch.same($0, revision) }) == true else { return [] }
         let rows = try Row.fetchAll(db, sql: """
             SELECT o.id,o.person_id,o.start_seconds,o.user_edited,o.model_version,
                    p.name,p.title,p.first_name,p.middle_name,p.last_name,p.suffix,

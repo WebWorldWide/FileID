@@ -145,7 +145,9 @@ pub(crate) fn load(
         .optional()?;
     let Some((path, size, modified)) = row else { return Err(SourceChanged.into()) };
     let revision = source_revision(size, modified);
-    let valid_stat = size >= 0 && modified.is_some_and(f64::is_finite) && live_revision(&path).as_deref() == Some(&revision);
+    let valid_stat = size >= 0
+        && modified.is_some_and(f64::is_finite)
+        && live_revision(&path).is_some_and(|live| crate::util::same_source_revision(&live, &revision));
     if !valid_stat {
         return Err(SourceChanged.into());
     }
@@ -477,6 +479,18 @@ mod tests {
             let error = held.validate(&f.conn).unwrap_err();
             assert!(error.is::<EvidenceChanged>(), "{fault}");
         }
+    }
+
+    #[test]
+    fn a_catalog_that_stored_the_other_engines_rounding_of_the_time_still_loads() {
+        let mut f = fixture("rounding");
+        let (size, bits) = f.revision.split_once(':').unwrap();
+        let stored = f64::from_bits(bits.parse::<u64>().unwrap() + 1);
+        f.revision = format!("{size}:{}", stored.to_bits());
+        f.conn.execute("UPDATE files SET modified_at=?1", [stored]).unwrap();
+        f.conn.execute("UPDATE catalog_revisions SET revision=?1", [&f.revision]).unwrap();
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        assert!(context(&f, None).unwrap().proposed_name().is_some());
     }
 
     #[test]

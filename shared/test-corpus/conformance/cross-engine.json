@@ -580,5 +580,403 @@
     ]
   },
   {"name": "cross-trash-rust-trashes-swift-puts-back", "description": "Rollback safety: a Trash batch the app-hosted Rust engine made (test Trash root) is put back by the Swift engine from Rust's signed trash_log.json, file and catalog rows (tags included) restored.", "requires": ["swift", "rust"], "engines": ["rust"], "start": "rust", "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "rust trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": "swift"}, {"label": "swift puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}]},
-  {"name": "cross-trash-swift-trashes-rust-puts-back", "description": "A Trash batch the Swift engine made (test Trash root, -DFILEID_TEST_TRASH_ROOT) is put back by the app-hosted Rust engine, which imports Swift's trash-journal.json: file and catalog rows (tags included) restored.", "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "swift trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": "rust"}, {"label": "rust puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}], "appHosted": true}
+  {"name": "cross-trash-swift-trashes-rust-puts-back", "description": "A Trash batch the Swift engine made (test Trash root, -DFILEID_TEST_TRASH_ROOT) is put back by the app-hosted Rust engine, which imports Swift's trash-journal.json: file and catalog rows (tags included) restored.", "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "swift trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": "rust"}, {"label": "rust puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}], "appHosted": true},
+  {
+    "name": "cross-scan-swift-then-rust-keeps-modified-times-and-reviewed-rows",
+    "description": "One catalog scanned by the swift engine and rescanned by the rust engine: the stored modified time of every file stays the same number (the engines once differed in the last bit for about a quarter of timestamps), a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "swift"
+    ],
+    "start": "swift",
+    "tree": [
+      {
+        "path": "docs/a.txt",
+        "mtimeNs": [
+          1724989629,
+          833179165
+        ],
+        "content": "mtime parity docs/a.txt\n"
+      },
+      {
+        "path": "docs/b.txt",
+        "mtimeNs": [
+          1603520313,
+          785102536
+        ],
+        "content": "mtime parity docs/b.txt\n"
+      },
+      {
+        "path": "docs/c.txt",
+        "mtimeNs": [
+          1704538783,
+          171373719
+        ],
+        "content": "mtime parity docs/c.txt\n"
+      },
+      {
+        "path": "docs/d.txt",
+        "mtimeNs": [
+          1700000000,
+          0
+        ],
+        "content": "mtime parity docs/d.txt\n"
+      },
+      {
+        "path": "images/e.png",
+        "mtimeNs": [
+          1719409671,
+          136042265
+        ],
+        "generate": "png",
+        "dimensions": [
+          16,
+          16
+        ]
+      },
+      {
+        "path": "images/f.png",
+        "mtimeNs": [
+          1635498135,
+          1905740
+        ],
+        "generate": "png",
+        "dimensions": [
+          16,
+          16
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "label": "swift scans",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 6,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "file id",
+        "db": "SELECT id FROM files WHERE path_text='{path:docs/a.txt}'",
+        "save": [
+          {
+            "name": "fid",
+            "path": "0.0"
+          }
+        ]
+      },
+      {
+        "label": "times after the first scan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "save": "first",
+        "expect": {
+          "$tol": "count",
+          "value": 6
+        }
+      },
+      {
+        "label": "swift saves a chapter",
+        "catalog": {
+          "action": "saveChapter",
+          "chapter": {
+            "id": "kept",
+            "fileID": {
+              "$var": "fid"
+            },
+            "startSeconds": 0.0,
+            "endSeconds": 1.0,
+            "title": "Kept chapter",
+            "summary": "",
+            "sourceRevision": "untrusted",
+            "modelVersion": "untrusted",
+            "confidence": 0.0,
+            "userEdited": false,
+            "stale": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "chapters": [
+            {
+              "id": "kept",
+              "stale": false
+            }
+          ]
+        }
+      },
+      {
+        "restart": "rust"
+      },
+      {
+        "label": "rust plain rescan analyses nothing",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "benignErrors": [
+          "rescan_no_changes",
+          "deep_analyze_unavailable"
+        ],
+        "expect": {
+          "processedFiles": 0,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "times unchanged by the plain rescan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": {
+          "$var": "first"
+        }
+      },
+      {
+        "label": "rust forced rescan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}",
+            "rescan": true
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 6,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "times unchanged by the forced rescan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": {
+          "$var": "first"
+        }
+      },
+      {
+        "label": "the reviewed chapter is current",
+        "db": "SELECT id,stale,user_edited FROM catalog_chapters",
+        "expect": [
+          [
+            "kept",
+            0,
+            1
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "cross-scan-rust-then-swift-keeps-modified-times-and-reviewed-rows",
+    "description": "One catalog scanned by the rust engine and rescanned by the swift engine: the stored modified time of every file stays the same number (the engines once differed in the last bit for about a quarter of timestamps), a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
+    "requires": [
+      "swift",
+      "rust"
+    ],
+    "engines": [
+      "rust"
+    ],
+    "start": "rust",
+    "tree": [
+      {
+        "path": "docs/a.txt",
+        "mtimeNs": [
+          1724989629,
+          833179165
+        ],
+        "content": "mtime parity docs/a.txt\n"
+      },
+      {
+        "path": "docs/b.txt",
+        "mtimeNs": [
+          1603520313,
+          785102536
+        ],
+        "content": "mtime parity docs/b.txt\n"
+      },
+      {
+        "path": "docs/c.txt",
+        "mtimeNs": [
+          1704538783,
+          171373719
+        ],
+        "content": "mtime parity docs/c.txt\n"
+      },
+      {
+        "path": "docs/d.txt",
+        "mtimeNs": [
+          1700000000,
+          0
+        ],
+        "content": "mtime parity docs/d.txt\n"
+      },
+      {
+        "path": "images/e.png",
+        "mtimeNs": [
+          1719409671,
+          136042265
+        ],
+        "generate": "png",
+        "dimensions": [
+          16,
+          16
+        ]
+      },
+      {
+        "path": "images/f.png",
+        "mtimeNs": [
+          1635498135,
+          1905740
+        ],
+        "generate": "png",
+        "dimensions": [
+          16,
+          16
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "label": "rust scans",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 6,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "file id",
+        "db": "SELECT id FROM files WHERE path_text='{path:docs/a.txt}'",
+        "save": [
+          {
+            "name": "fid",
+            "path": "0.0"
+          }
+        ]
+      },
+      {
+        "label": "times after the first scan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "save": "first",
+        "expect": {
+          "$tol": "count",
+          "value": 6
+        }
+      },
+      {
+        "label": "rust saves a chapter",
+        "catalog": {
+          "action": "saveChapter",
+          "chapter": {
+            "id": "kept",
+            "fileID": {
+              "$var": "fid"
+            },
+            "startSeconds": 0.0,
+            "endSeconds": 1.0,
+            "title": "Kept chapter",
+            "summary": "",
+            "sourceRevision": "untrusted",
+            "modelVersion": "untrusted",
+            "confidence": 0.0,
+            "userEdited": false,
+            "stale": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "chapters": [
+            {
+              "id": "kept",
+              "stale": false
+            }
+          ]
+        }
+      },
+      {
+        "restart": "swift"
+      },
+      {
+        "label": "swift plain rescan analyses nothing",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "benignErrors": [
+          "rescan_no_changes",
+          "deep_analyze_unavailable"
+        ],
+        "expect": {
+          "processedFiles": 0,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "times unchanged by the plain rescan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": {
+          "$var": "first"
+        }
+      },
+      {
+        "label": "swift forced rescan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}",
+            "rescan": true
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 6,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "times unchanged by the forced rescan",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": {
+          "$var": "first"
+        }
+      },
+      {
+        "label": "the reviewed chapter is current",
+        "db": "SELECT id,stale,user_edited FROM catalog_chapters",
+        "expect": [
+          [
+            "kept",
+            0,
+            1
+          ]
+        ]
+      }
+    ]
+  }
 ]

@@ -31,7 +31,7 @@ fn photo(conn: &Connection, dir: &Path, id: i64, faces: &[i64]) -> PathBuf {
     let path = dir.join(format!("{id}.jpg"));
     std::fs::write(&path, format!("photo {id}")).unwrap();
     let metadata = std::fs::metadata(&path).unwrap();
-    let modified = crate::commands::face_clustering_mac::foundation_mtime(&metadata).unwrap();
+    let modified = crate::commands::face_clustering_mac::catalog_mtime(&metadata).unwrap();
     conn.execute(
         "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,?4,0,'image','jpg')",
         params![id, path.to_string_lossy(), metadata.len() as i64, modified],

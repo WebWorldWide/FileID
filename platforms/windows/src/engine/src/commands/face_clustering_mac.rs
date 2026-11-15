@@ -109,27 +109,10 @@ fn source_revision(size: i64, modified: f64) -> String {
     format!("{size}:{}", modified.to_bits())
 }
 
-/// Foundation's `contentModificationDate.timeIntervalSince1970`: seconds since
-/// 2001 plus nanoseconds, shifted back to 1970. `Duration::as_secs_f64` rounds
-/// differently in about a quarter of files, which would defer them all.
-pub(crate) fn foundation_mtime(metadata: &std::fs::Metadata) -> Option<f64> {
-    #[cfg(unix)]
-    let (seconds, nanos) = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.mtime(), metadata.mtime_nsec())
-    };
-    #[cfg(not(unix))]
-    let (seconds, nanos) = {
-        let duration = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-        (duration.as_secs() as i64, i64::from(duration.subsec_nanos()))
-    };
-    let value = foundation_time(seconds, nanos);
-    value.is_finite().then_some(value)
-}
-
-fn foundation_time(seconds: i64, nanos: i64) -> f64 {
-    const REFERENCE: f64 = 978_307_200.0;
-    ((seconds as f64 - REFERENCE) + nanos as f64 * 1e-9) + REFERENCE
+/// The catalog's modification time of a file (`catalog_unix_seconds`), the number the Swift
+/// engine stores too.
+pub(crate) fn catalog_mtime(metadata: &std::fs::Metadata) -> Option<f64> {
+    metadata.modified().ok().and_then(crate::util::catalog_unix_seconds)
 }
 
 fn current_source_revision(path: &str) -> Option<String> {
@@ -138,7 +121,7 @@ fn current_source_revision(path: &str) -> Option<String> {
         return None;
     }
     let size = i64::try_from(metadata.len()).ok()?;
-    Some(source_revision(size, foundation_mtime(&metadata)?))
+    Some(source_revision(size, catalog_mtime(&metadata)?))
 }
 
 fn normalized_embedding(blob: &[u8]) -> bool {
@@ -249,7 +232,7 @@ fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_qua
             continue;
         };
         let actual = revisions.entry(path.clone()).or_insert_with(|| current_source_revision(&path));
-        if actual.as_deref() != Some(revision.as_str()) {
+        if !actual.as_deref().is_some_and(|actual| crate::util::same_source_revision(actual, &revision)) {
             partition.deferred += 1;
             continue;
         }
