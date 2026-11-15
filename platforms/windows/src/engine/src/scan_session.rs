@@ -288,7 +288,7 @@ impl ScanSession {
             // Images catalogued while CLIP was missing stay in the pipeline once
             // it is installed so a rescan backfills their embeddings (and faces,
             // which run in the same pass) — lockstep with macOS Discovery.
-            let image_clip_gate = if clip_installed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
+            let image_clip_gate = if clip_can_embed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             let video_clip_gate = video_clip_gate();
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
@@ -548,7 +548,7 @@ impl ScanSession {
         let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
         let known_twins = {
             let conn = self.db_conn.lock();
-            crate::pipeline::twin_reuse::known_image_hashes(&conn).unwrap_or_default()
+            crate::pipeline::twin_reuse::known_image_hashes(&conn, clip_can_embed()).unwrap_or_default()
         };
         let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
@@ -1408,13 +1408,20 @@ pub(crate) const SKIP_SET_VIDEO_CLIP_GATE: &str =
 
 fn video_clip_gate() -> &'static str {
     if cfg!(all(not(windows), not(target_os = "linux")))
-        && clip_installed()
+        && clip_can_embed()
         && crate::pipeline::tagging::video_frames_available()
     {
         SKIP_SET_VIDEO_CLIP_GATE
     } else {
         ""
     }
+}
+
+/// Whether this scan can give a picture its vector: the weights are installed and something can run them (the Mac
+/// adapters' own CLIP, or ONNX Runtime). With the weights and no runtime, the missing-vector gates would re-read
+/// every picture on every scan and never embed one.
+fn clip_can_embed() -> bool {
+    clip_installed() && (crate::pipeline::tagging::apple_scan_enabled() || crate::ort_runtime::is_available())
 }
 
 fn clip_installed() -> bool {

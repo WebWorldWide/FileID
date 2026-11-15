@@ -21,9 +21,13 @@ pub const COMPLETE_IMAGE_SQL: &str = "kind = 'image' AND failed = 0 AND content_
      AND (EXISTS (SELECT 1 FROM tags t WHERE t.file_id = files.id AND t.source = 'auto') \
           OR EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id))";
 
-/// Hashes of every image row a copy may take over, for seeding a scan.
-pub fn known_image_hashes(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ContentHash>> {
-    let mut stmt = conn.prepare(&format!("SELECT content_hash FROM files WHERE {COMPLETE_IMAGE_SQL}"))?;
+/// Hashes of every image row a copy may take over, for seeding a scan. When the
+/// scan can embed (`needs_vector`), a row without a vector is not complete: it
+/// was scanned before CLIP was installed or lost its vector, and treating it as
+/// done would skip the decode that gives it one, on this scan and every later one.
+pub fn known_image_hashes(conn: &rusqlite::Connection, needs_vector: bool) -> rusqlite::Result<Vec<ContentHash>> {
+    let vector = if needs_vector { " AND EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id)" } else { "" };
+    let mut stmt = conn.prepare(&format!("SELECT content_hash FROM files WHERE {COMPLETE_IMAGE_SQL}{vector}"))?;
     let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
     Ok(rows
         .filter_map(|row| row.ok().and_then(|bytes| <ContentHash>::try_from(bytes.as_slice()).ok()))

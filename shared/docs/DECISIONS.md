@@ -5002,3 +5002,10 @@ NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since
 - **No `files(file_ref)` index in v36.** It has existed since v8 (`idx_files_file_ref`, partial). The NEXT item asking for it was written without checking; the query plan was measured instead and pinned by a test in each engine.
 - **The careful-read marker needed no schema change.** Stage bit 2 was already in v34; only the hosted engine never set it. The adapter reports it in its JSON reply, so an older engine ignores it and the C interface is unchanged.
 
+## 2026-11-14 — A date change with the same bytes keeps the vector; a row without a vector is not "already analysed"
+
+- **Kept the catalog trigger** that drops a file's vectors when its size or date changes (v23). The soak agent proposed changing it to fire only on a content-hash change. Not done: the trigger is the guard that keeps a vector from outliving its bytes when a scan is interrupted between the row update and the new analysis, both engines share it, and changing it is a catalog version. The Swift engine's answer, carrying the vector across the rescan in the writer, was ported to the Rust engine instead.
+- **Reuse needs a vector when the scan can make one.** "Complete" for copy reuse was "has an automatic tag or a vector", and every scanned photo has a Year tag, so a photo scanned without CLIP counted as analysed and the CLIP backfill after an install could never run for it. Now, when CLIP can run, only rows with a vector are reusable. Rows scanned without CLIP are analysed once more on the first scan after CLIP is installed, which is the backfill the missing-vector gate always intended.
+- **Model gates check that the model can run, not only that its files exist** (text embeddings earlier today, CLIP now). Weights without a runtime made every document or picture be re-read on every scan.
+- **File actions during a scan wait for the scan** (the mutation gate), unchanged. It protects the catalog-equals-disk invariant the soak checks; whether to allow renames between scan batches is an open product question in NEXT.
+

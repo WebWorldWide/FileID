@@ -1158,7 +1158,7 @@ const fn const_format_twin_lookup() -> &'static str {
         "kind = 'image' AND failed = 0 AND content_hash IS NOT NULL AND length(content_hash) = 32 ",
         "AND (EXISTS (SELECT 1 FROM tags t WHERE t.file_id = files.id AND t.source = 'auto') ",
         "OR EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id)) ",
-        "ORDER BY id LIMIT 1"
+        "ORDER BY EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id) DESC, id LIMIT 1"
     )
 }
 
@@ -3019,7 +3019,7 @@ mod twin_reuse_tests {
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let hash = [5u8; 32];
         writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
-        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock()).unwrap();
+        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock(), true).unwrap();
         assert_eq!(known, vec![hash]);
 
         writer.flush(&mut vec![reused("/lib/b.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 1).unwrap();
@@ -3051,6 +3051,42 @@ mod twin_reuse_tests {
             .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/own.jpg'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(vectors, 1, "a date change with the same bytes must not cost the file its vector");
+    }
+
+    fn tags_only(path: &str, hash: [u8; 32]) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.tags = vec![("Year_2020".to_owned(), None)];
+        file.tags_evaluated = true;
+        file
+    }
+
+    #[test]
+    fn a_row_without_a_vector_is_not_reusable_when_the_scan_can_embed() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer
+            .flush(&mut vec![tags_only("/lib/tags-only.jpg", [9u8; 32]), analyzed("/lib/full.jpg", [10u8; 32])], &mut 0, &mut 0, &mut 0, 0)
+            .unwrap();
+        let db = conn.lock();
+        assert_eq!(crate::pipeline::twin_reuse::known_image_hashes(&db, true).unwrap(), vec![[10u8; 32]]);
+        let mut any = crate::pipeline::twin_reuse::known_image_hashes(&db, false).unwrap();
+        any.sort();
+        assert_eq!(any, vec![[9u8; 32], [10u8; 32]]);
+    }
+
+    #[test]
+    fn a_copy_prefers_the_twin_that_has_a_vector() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        writer.flush(&mut vec![tags_only("/lib/older.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        writer.flush(&mut vec![analyzed("/lib/newer.jpg", hash)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        writer.flush(&mut vec![reused("/lib/copy.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let vectors: i64 = conn
+            .lock()
+            .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/copy.jpg'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(vectors, 1);
     }
 
     #[test]
