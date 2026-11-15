@@ -3,7 +3,7 @@
 //! when done. Pre-flight checks that required models are installed and
 //! that no scan is already running.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,6 +237,12 @@ fn ort_runtime_available() -> bool {
     true
 }
 
+/// An absolute path with no NUL, the only kind a scan may start from (the Swift engine's
+/// `isUsableScanRoot`).
+fn is_usable_scan_root(path: &str) -> bool {
+    Path::new(path).is_absolute() && !path.contains('\0')
+}
+
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -247,6 +253,21 @@ pub(crate) async fn handle_start_scan(
     other_heavy_work: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
+
+    // A relative or empty path would be resolved against the engine's own folder, and a NUL
+    // would cut it short: either would scan a folder the person never chose.
+    if !is_usable_scan_root(&payload.root_path) {
+        sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
+        sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
+            session_id: String::new(),
+            total_files: 0,
+            processed_files: 0,
+            failed_files: 0,
+            total_seconds: 0.0,
+        }))))
+        .await;
+        return;
+    }
 
     // Atomic check-and-reserve under one lock: gate + slot reservation must
     // be a single critical section, or two StartScan commands queued back-to-
@@ -508,7 +529,18 @@ pub(crate) async fn handle_start_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_scan_root_must_be_absolute_and_free_of_nul() {
+        assert!(is_usable_scan_root(if cfg!(windows) { r"C:\photos" } else { "/photos" }));
+        assert!(!is_usable_scan_root(""));
+        assert!(!is_usable_scan_root("photos"));
+        assert!(!is_usable_scan_root("./photos"));
+        assert!(!is_usable_scan_root("../photos"));
+        assert!(!is_usable_scan_root(if cfg!(windows) { "C:\\photos\0x" } else { "/photos\0x" }));
+    }
 
     #[test]
     fn scan_state_guard_clears_a_preflight_panic() {

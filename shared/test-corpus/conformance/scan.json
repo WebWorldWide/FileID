@@ -879,5 +879,112 @@
         ]
       }
     ]
+  },
+  {
+    "name": "scan-refuses-a-root-that-is-not-an-absolute-path",
+    "description": "A scan root must be an absolute path with no NUL. A relative one and an empty one are refused with folder_access_denied and an empty scanComplete, on either engine, instead of scanning the folder the engine happens to run in; the same folder given as an absolute path scans.",
+    "tree": [
+      {
+        "path": "docs/a.txt",
+        "content": "first note\n",
+        "mtime": 1789812000
+      }
+    ],
+    "steps": [
+      {
+        "label": "relative path",
+        "command": {
+          "startScan": {
+            "rootPath": "docs"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 60,
+        "expect": {
+          "sessionID": "",
+          "totalFiles": 0,
+          "processedFiles": 0
+        },
+        "collect": {
+          "error": {
+            "$tol": "contains",
+            "value": [
+              {
+                "kind": "folder_access_denied",
+                "message": "FileID couldn't access that folder. Choose it again."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "dot path",
+        "command": {
+          "startScan": {
+            "rootPath": "."
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 60,
+        "expect": {
+          "sessionID": "",
+          "totalFiles": 0,
+          "processedFiles": 0
+        },
+        "collect": {
+          "error": {
+            "$tol": "contains",
+            "value": [
+              {
+                "kind": "folder_access_denied",
+                "message": "FileID couldn't access that folder. Choose it again."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "empty path",
+        "command": {
+          "startScan": {
+            "rootPath": ""
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 60,
+        "expect": {
+          "sessionID": "",
+          "totalFiles": 0,
+          "processedFiles": 0
+        },
+        "collect": {
+          "error": {
+            "$tol": "contains",
+            "value": [
+              {
+                "kind": "folder_access_denied",
+                "message": "FileID couldn't access that folder. Choose it again."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "the absolute path scans",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 1,
+          "processedFiles": 1,
+          "failedFiles": 0
+        }
+      }
+    ]
   }
 ]
