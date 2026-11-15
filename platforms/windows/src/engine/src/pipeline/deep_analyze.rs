@@ -1285,7 +1285,7 @@ mod tests {
     #[test]
     fn evidence_that_changed_before_commit_writes_nothing() {
         for fault in ["label", "source"] {
-            let source = source(fault);
+            let source = source(&format!("late-{fault}"));
             reviewed_chapter(&source, "Maya hits a home run");
             let context = context(&source);
             if fault == "label" {
