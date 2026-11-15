@@ -8,7 +8,7 @@
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
-//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>];...   extra captures after the pages
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>];...   extra captures after the pages
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -22,6 +22,7 @@ struct SelfShotView: Equatable {
     var query: String?
     var scrollToBottom = false
     var scrollOffset: Double?
+    var preview: String?
 
     /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
     static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
@@ -40,6 +41,7 @@ struct SelfShotView: Equatable {
                     switch kv[0] {
                     case "kind": view.kind = value
                     case "query": view.query = value.isEmpty ? nil : value
+                    case "preview": view.preview = value.isEmpty ? nil : value
                     case "scroll": view.scrollToBottom = value == "bottom"; view.scrollOffset = Double(value)
                     default: break
                     }
@@ -101,6 +103,10 @@ struct SelfShotPlan: Equatable {
     }
 }
 
+extension Notification.Name {
+    static let selfShotOpenPreview = Notification.Name("FileID.selfShotOpenPreview")
+}
+
 @MainActor
 enum SelfShot {
     static let plan: SelfShotPlan? = SelfShotPlan.from(
@@ -147,9 +153,19 @@ enum SelfShot {
                 navigate(view.page)
                 try? await Task.sleep(for: .seconds(plan.settle))
                 if view.scrollToBottom || view.scrollOffset != nil { scrollContent(to: view.scrollOffset); try? await Task.sleep(for: .seconds(0.6)) }
-                write(name: view.name, plan: plan)
+                if let name = view.preview {
+                    NotificationCenter.default.post(name: .selfShotOpenPreview, object: name)
+                    try? await Task.sleep(for: .seconds(plan.settle))
+                    write(name: view.name, plan: plan, sheet: true)
+                    if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
+                    try? await Task.sleep(for: .seconds(0.5))
+                } else {
+                    write(name: view.name, plan: plan)
+                }
             }
             NSApp.terminate(nil)
+            try? await Task.sleep(for: .seconds(3))
+            exit(0)
         }
     }
 
@@ -158,6 +174,7 @@ enum SelfShot {
         guard let root = window()?.contentView else { return }
         var best: NSScrollView?
         func visit(_ view: NSView) {
+            if view.isHidden || view.alphaValue == 0 || view.layer?.opacity == 0 { return }
             if let scroll = view as? NSScrollView, let document = scroll.documentView, !scroll.isHiddenOrHasHiddenAncestor,
                document.frame.height > scroll.contentView.bounds.height + 1, scroll.convert(scroll.bounds, to: nil).minX > 200,
                scroll.bounds.width * scroll.bounds.height > (best.map { $0.bounds.width * $0.bounds.height } ?? 0) { best = scroll }
@@ -184,9 +201,9 @@ enum SelfShot {
             .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
     }
 
-    private static func write(name: String, plan: SelfShotPlan) {
+    private static func write(name: String, plan: SelfShotPlan, sheet: Bool = false) {
         let url = plan.dir.appendingPathComponent("\(name).png")
-        guard let window = window(), let view = window.contentView?.superview ?? window.contentView else {
+        guard let window = (sheet ? window()?.attachedSheet : nil) ?? window(), let view = window.contentView?.superview ?? window.contentView else {
             FileHandle.standardError.write(Data("self-shot: no window for \(name)\n".utf8)); return
         }
         view.layoutSubtreeIfNeeded()
