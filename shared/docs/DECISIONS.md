@@ -5039,3 +5039,9 @@ With the respect stage off the plans differed in three rules. In each the Rust e
 ## 2026-11-15 — A folder that is not there is an error on both engines
 
 The 2026-11-10 entry kept one difference: the Rust engine refuses an Organize Folders plan for a root that does not exist (`plan_restructure_root`), the Swift engine returned an empty plan. An empty plan reads as "nothing to organize" when the truth is an unplugged drive, and the Mac app already had the right sentence for the error. The Swift engine now answers the same way, and GTK and WinUI show the same sentence, so the difference is gone. Only the plan command changed; apply and undo with a missing root already gave the same result on both engines.
+
+## 2026-11-15 — One tag set for non-image files; audio genre and year tags dropped from the plain Rust engine
+
+The plain Rust engine tagged audio with artist, album, title, genre and year, and put a file-date Year tag on every kind of file; the Swift engine and the Mac-hosted Rust engine store the kind tag and, for audio, artist, album and title. A catalog must read the same whichever engine wrote it, and plans differ when tags differ, so the plain engine now stores what the other two do. The cost is visible on Windows and Linux: genre and year chips on audio are gone. Genre is worth having; it should come back as a feature in every engine at once, not as a difference between them. A Year tag means the year a picture was taken, so it stays on images only.
+
+Not adopted from the same change: counting a video as analysed when no tagger ran. That would store the `Video` tag on a scan without models, at the price of replacing a video's stored scene tags on such a rescan; keeping tags a person already has outweighs one kind tag.

@@ -3272,7 +3272,7 @@ async fn process_file_predecoded(
     tagged.tags_evaluated = !coord.is_gpu_dead()
         && !tagged.failed
         && !file.online_only
-        && (file.kind != FileKind::Image || visual_tagger_ran);
+        && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
     if defer_ram && !tagged.failed && !coord.is_gpu_dead() {
         // RAM++ will supply the tags, so the set stored now (scene labels, or
         // only the Year and camera tags) stands in for it and is authoritative.
