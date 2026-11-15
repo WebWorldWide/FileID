@@ -695,7 +695,7 @@ fn merge_in(conn: &Connection, request: &str, resolution: &str, keep: i64, other
             )?;
             conn.execute("DELETE FROM persons WHERE id=?1", [other])?;
             conn.execute(
-                "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), representative_face_id=COALESCE( \
+                "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), representative_face_id=COALESCE( \
                  (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp.face_quality,0) DESC, fp.id LIMIT 1), \
                  (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 ORDER BY COALESCE(fp.face_quality,0) DESC, fp.id LIMIT 1), representative_face_id) WHERE id=?1",
                 [keep],

@@ -515,7 +515,7 @@ enum FaceQueues {
                 """, arguments: [keep, other])
             try db.execute(sql: "DELETE FROM persons WHERE id=?", arguments: [other])
             try db.execute(sql: """
-                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), representative_face_id=COALESCE(
+                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), representative_face_id=COALESCE(
                     (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp.face_quality,0) DESC, fp.id LIMIT 1),
                     (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 ORDER BY COALESCE(fp.face_quality,0) DESC, fp.id LIMIT 1), representative_face_id)
                 WHERE id=?1
@@ -753,7 +753,7 @@ enum PersonMergeJournal {
         try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE person_id=?", arguments: [target, source])
         try db.execute(sql: "DELETE FROM persons WHERE id=?", arguments: [source])
         try db.execute(sql: """
-            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0),
                 representative_face_id=COALESCE(
                     (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL
                      ORDER BY COALESCE(fp.face_quality,0.0) DESC LIMIT 1),

@@ -50,18 +50,11 @@ struct ScanCancellationTests {
         func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
-    // Skipped on the GitHub macOS runner: this process-spawning integration test
-    // reliably hangs the swift-testing harness there — the spawned engine child
-    // rides to the job's 12-min SIGALRM and even an out-of-band GCD watchdog +
-    // stdout drain couldn't make it deterministic (the failure mode does not
-    // reproduce on a developer Mac, where it passes in <2 s). The cancellation
-    // WIRING is covered deterministically by `operationSpecificCancellation`
-    // and the engine's C1 cancel-deadlock fix is exercised here on every local
-    // `swift test`. Re-enable once it can run reliably on a CI-class runner (or
-    // after a rewrite that drives the pipeline in-process rather than via Process).
-    @Test("Cancel mid-scan still yields scanComplete; engine stays responsive",
-          .enabled(if: ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == nil,
-                   "process-spawning test hangs the harness on the GitHub macOS runner"))
+    // Waits on events, not on the clock: every step ends when its event arrives or when
+    // the engine process has exited, and one overall deadline (below the 180 s watchdog)
+    // is only the safety net against a wedged engine. A busy machine makes this slower,
+    // never wrong.
+    @Test("Cancel mid-scan still yields scanComplete; engine stays responsive")
     func cancelMidScanCompletes() async throws {
         let binary = Self.engineBinary
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
@@ -75,7 +68,9 @@ struct ScanCancellationTests {
             .appendingPathComponent("FileIDCancelTest-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for i in 0..<2000 {
+        // Enough files that discovery is still producing when the cancel lands (the C1
+        // deadlock needed a producer parked on the rendezvous channel), no more.
+        for i in 0..<600 {
             FileManager.default.createFile(
                 atPath: root.appendingPathComponent("f\(i).jpg").path,
                 contents: Data([0xFF, 0xD8, 0xFF, 0xE0]))
@@ -106,18 +101,11 @@ struct ScanCancellationTests {
         try proc.run()
         // A leaked engine child holds the test harness's output pipe open and
         // turns "suite finished" into a hang that only the job's 12-min SIGALRM
-        // breaks (observed on CI: the engine rode 11 min as an orphan). Two
-        // guarantees: (1) an out-of-band watchdog SIGKILLs the engine after a
-        // hard ceiling REGARDLESS of where the test body is blocked — so a wedged
-        // engine can never hang the harness; (2) the defer closes stdin and
-        // force-kills on the normal path. The watchdog uses the raw pid (valid
-        // after run()) so it needs no access to `proc`'s state.
+        // breaks. An out-of-band watchdog SIGKILLs the engine after a hard ceiling
+        // REGARDLESS of where the test body is blocked; the defer closes stdin and
+        // force-kills on the normal path. GCD, NOT Task.detached: it has its own
+        // threads, independent of the Swift concurrency pool.
         let enginePID = proc.processIdentifier
-        // GCD watchdog, NOT Task.detached: a prior detached-task watchdog never
-        // fired on CI because the test wedged the Swift cooperative thread pool
-        // (its post-sleep continuation could not be scheduled), so the engine
-        // rode to the 12-min SIGALRM. GCD has its own threads, independent of the
-        // Swift concurrency pool, so this kill fires even when the pool is wedged.
         let killItem = DispatchWorkItem { kill(enginePID, SIGKILL) }
         DispatchQueue.global().asyncAfter(deadline: .now() + 180, execute: killItem)
         defer {
@@ -128,22 +116,23 @@ struct ScanCancellationTests {
             wire.fileHandleForReading.readabilityHandler = nil
             stdout.fileHandleForReading.readabilityHandler = nil
         }
+        let overall = Date().addingTimeInterval(150)
 
         func send(_ json: String) throws {
             try stdin.fileHandleForWriting.write(contentsOf: Data((json + "\n").utf8))
         }
-        func waitFor(_ needle: String, timeout: TimeInterval) async -> Bool {
-            let deadline = Date().addingTimeInterval(timeout)
-            while Date() < deadline {
-                if collector.snapshot().contains(where: { $0.contains(needle) }) {
-                    return true
-                }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+        // Ends on the first needle seen, the engine exiting, or the overall deadline.
+        func waitFor(_ needles: String...) async -> Bool {
+            while Date() < overall {
+                let lines = collector.snapshot()
+                if lines.contains(where: { line in needles.contains { line.contains($0) } }) { return true }
+                if !proc.isRunning { return false }
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             return false
         }
 
-        guard await waitFor("\"ready\"", timeout: 15) else {
+        guard await waitFor("\"ready\"") else {
             Issue.record("engine must emit ready")
             return
         }
@@ -153,28 +142,22 @@ struct ScanCancellationTests {
         try send(#"{"id":"s","payload":{"startScan":{"rootPath":""# + escapedRoot
             + #"","rootDisplay":null,"rescan":false}}}"#)
 
-        // Cancel as soon as the scan is visibly under way.
-        var underway = await waitFor("\"phaseChanged\"", timeout: 20)
-        if !underway { underway = await waitFor("\"progress\"", timeout: 5) }
-        #expect(underway, "scan must start emitting before we cancel")
+        // Cancel once the scan is visibly under way: its first phase or progress event.
+        #expect(await waitFor("\"phaseChanged\"", "\"progress\""),
+                "scan must start emitting before we cancel")
         try send(#"{"id":"c","payload":{"cancelScan":{}}}"#)
 
         // The C1 deadlock manifested here: no terminal event, ever.
-        #expect(await waitFor("\"scanComplete\"", timeout: 60),
+        #expect(await waitFor("\"scanComplete\""),
                 "cancelled scan must still emit the terminal scanComplete")
 
         // The other C1 symptom was shutdown wedging behind the uncancelled
-        // producer — a clean exit IS the responsiveness probe. Poll
-        // isRunning instead of waitUntilExit(): a blocking wait inside a
-        // task group can NEVER be cancelled, so the old "timeout" wrapper
-        // deadlocked the whole suite whenever exit took >15 s (task groups
-        // drain all children before returning). 30 s budget for slow CI
-        // runners — a cancelled 2000-file scan still checkpoints the WAL
-        // on the way out.
+        // producer — a clean exit IS the responsiveness probe. Poll isRunning
+        // instead of waitUntilExit(): a blocking wait inside a task group can
+        // NEVER be cancelled.
         try send(#"{"id":"x","payload":{"shutdown":{}}}"#)
-        let exitDeadline = Date().addingTimeInterval(30)
-        while proc.isRunning && Date() < exitDeadline {
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        while proc.isRunning && Date() < overall {
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(!proc.isRunning, "engine must exit cleanly on shutdown after a cancelled scan")
 
@@ -183,6 +166,15 @@ struct ScanCancellationTests {
         for line in collector.snapshot() {
             #expect(line.hasPrefix("{"), "non-JSON line on the IPC wire: \(line.prefix(120))")
         }
+    }
+
+    @Test("a scan root with a NUL, or one that is not absolute, is refused instead of scanning the working directory")
+    func scanRootMustBeAbsoluteWithoutNUL() {
+        #expect(FileIDEngineMain.isUsableScanRoot("/Users/example/Pictures"))
+        #expect(!FileIDEngineMain.isUsableScanRoot("\u{0}"))
+        #expect(!FileIDEngineMain.isUsableScanRoot("/Users/example\u{0}/Pictures"))
+        #expect(!FileIDEngineMain.isUsableScanRoot(""))
+        #expect(!FileIDEngineMain.isUsableScanRoot("Pictures"))
     }
 
     @Test("scan and restructure cancellation stay isolated across later jobs")

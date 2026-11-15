@@ -319,6 +319,20 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // `URL(fileURLWithPath:)` cuts a path at its first NUL and resolves an empty or
+            // relative one against the engine's working directory, so such a command would
+            // scan whatever folder the engine was launched from.
+            guard Self.isUsableScanRoot(rootPath) else {
+                await sink.emit(.error(EngineError(
+                    kind: "folder_access_denied",
+                    message: "FileID couldn't access that folder. Choose it again."
+                )))
+                await sink.emit(.scanComplete(ScanComplete(
+                    sessionID: "", totalFiles: 0, processedFiles: 0,
+                    failedFiles: 0, totalSeconds: 0
+                )))
+                return
+            }
             // Reject a start-scan while one is already queued or running. Mirrors
             // the Windows engine's scan_session.rs guard. Prevents unbounded job
             // queue growth from a misbehaving or rapidly-clicking app client.
@@ -1645,7 +1659,7 @@ struct FileIDEngineMain {
                 for person in Set([destination, newPerson].compactMap { $0 }) {
                     try db.execute(sql: """
                         UPDATE persons
-                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                             representative_face_id = COALESCE(
                                 (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
@@ -1700,7 +1714,7 @@ struct FileIDEngineMain {
                 for personID in Set([previous, destination].compactMap { $0 }) {
                     try db.execute(sql: """
                         UPDATE persons
-                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                             representative_face_id = COALESCE(
                                 (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
@@ -2568,6 +2582,11 @@ struct FileIDEngineMain {
         return s + String(next)
     }
 
+    /// An absolute path with no NUL, the only kind a scan may start from.
+    static func isUsableScanRoot(_ path: String) -> Bool {
+        path.hasPrefix("/") && !path.utf8.contains(0)
+    }
+
     /// Recompute persons.file_count and repair a dangling
     /// representative_face_id for the given persons, after their faces may
     /// have been removed (cascade delete). Must run inside the caller's write
@@ -2577,7 +2596,7 @@ struct FileIDEngineMain {
             try db.execute(sql: """
                 UPDATE persons
                 SET file_count = (SELECT COUNT(DISTINCT file_id)
-                                  FROM face_prints WHERE person_id = ?)
+                                  FROM face_prints WHERE person_id = ? AND COALESCE(excluded,0)=0)
                 WHERE id = ?
                 """, arguments: [pid, pid])
             // If the representative face was deleted (or never set), point it at

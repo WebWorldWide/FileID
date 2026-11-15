@@ -1567,7 +1567,7 @@ pub(crate) fn purge_expired_hidden_rows(
             tx.execute(&format!("DELETE FROM files WHERE id IN ({list}) AND failed = 1 AND error_message = ?1"), [HIDDEN_ROW_MESSAGE])?;
             for pid in persons {
                 tx.execute(
-                    "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                    "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
                     [pid],
                 )?;
                 tx.execute(

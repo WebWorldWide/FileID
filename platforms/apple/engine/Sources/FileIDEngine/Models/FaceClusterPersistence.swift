@@ -56,7 +56,7 @@ enum FaceClusterPersistence {
             try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE id IN (SELECT value FROM json_each(?))", arguments: [personID,try json(Set(cluster.faceIDs))])
         }
         try db.execute(sql: """
-            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id)
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id AND COALESCE(excluded,0)=0)
             """)
         try FaceClustering.repairDanglingRepresentativeFaces(db)
         return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM persons") ?? 0

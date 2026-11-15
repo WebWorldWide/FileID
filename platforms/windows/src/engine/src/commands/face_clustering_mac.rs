@@ -903,7 +903,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
             params![person, face_review::json_ids(&cluster.faces)],
         )?;
     }
-    tx.execute("UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id)", [])?;
+    tx.execute("UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id AND COALESCE(excluded,0)=0)", [])?;
     tx.execute(
         "UPDATE persons SET representative_face_id=(SELECT id FROM face_prints WHERE person_id=persons.id ORDER BY id LIMIT 1) \
          WHERE representative_face_id IS NULL OR representative_face_id NOT IN (SELECT id FROM face_prints WHERE person_id=persons.id)",
@@ -1452,7 +1452,7 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     }
     let ids: Vec<i64> = targets.iter().map(|(target, _)| *target).collect();
     tx.execute(
-        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE face_prints.person_id=persons.id) \
+        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE face_prints.person_id=persons.id AND COALESCE(excluded,0)=0) \
          WHERE id IN (SELECT value FROM json_each(?1))",
         [face_review::json_ids(&ids)],
     )?;
@@ -1732,7 +1732,7 @@ fn assess(conn: &Connection, held_ids: &HashSet<i64>, space: &Space, now: f64) -
     }
     for person in received {
         conn.execute(
-            "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1) WHERE id=?1",
+            "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0) WHERE id=?1",
             [person],
         )?;
     }

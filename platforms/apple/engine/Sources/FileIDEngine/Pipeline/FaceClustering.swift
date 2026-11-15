@@ -1468,6 +1468,7 @@ public enum FaceClustering {
                             SELECT COUNT(DISTINCT file_id)
                             FROM face_prints
                             WHERE face_prints.person_id = persons.id
+                              AND COALESCE(face_prints.excluded, 0) = 0
                         )
                         WHERE id IN (\(placeholders))
                         """, arguments: StatementArguments(chunk.map { Int($0) }))

@@ -1182,7 +1182,7 @@ fn apply_revert_merge(
     for pid in affected_people {
         tx.execute(
             "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-             FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+             FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
             [pid],
         )?;
     }
@@ -1255,7 +1255,8 @@ mod tests {
              CREATE TABLE face_prints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_id INTEGER NOT NULL,
-                person_id INTEGER
+                person_id INTEGER,
+                excluded INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE face_verifications (
                 person_a INTEGER NOT NULL,

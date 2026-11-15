@@ -1768,7 +1768,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
         // the People card + suggestion anchor reflect the combined membership.
         anyhow::ensure!(
             tx.execute(
-                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
                 rusqlite::params![dst],
             )? == 1,
             "destination person disappeared during merge"
@@ -2102,7 +2102,7 @@ pub(crate) async fn handle_reassign_face(
             tx.execute(
                 "UPDATE persons
                  SET file_count = (SELECT COUNT(DISTINCT file_id)
-                                   FROM face_prints WHERE person_id = ?1),
+                                   FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                      representative_face_id = COALESCE(
                          (SELECT fp.id FROM face_prints fp
                           WHERE fp.person_id = ?1
@@ -4030,7 +4030,7 @@ mod tests {
                  CREATE TABLE face_prints (
                     id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, person_id INTEGER,
                     arcface_embedding BLOB, face_quality REAL, bbox TEXT NOT NULL DEFAULT '',
-                    embedding_model TEXT, processing_version TEXT
+                    embedding_model TEXT, processing_version TEXT, excluded INTEGER NOT NULL DEFAULT 0
                  );
                  CREATE TABLE face_verifications (
                     person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,
