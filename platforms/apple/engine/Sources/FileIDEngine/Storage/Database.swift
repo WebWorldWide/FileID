@@ -561,6 +561,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v35_foreign_key_indexes") { db in
             try db.execute(sql: CatalogSchema.v35)
         }
+        m.registerMigration("v36_scan_failures") { db in
+            try db.execute(sql: CatalogSchema.v36)
+        }
         return m
     }
 

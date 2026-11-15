@@ -1801,25 +1801,25 @@ mod tests {
         let sep = std::path::MAIN_SEPARATOR;
         let path = |name: &str| format!("{sep}lib{sep}{name}");
         let context = crate::pipeline::catch_up::failure_context();
-        let add = |id: i64, name: &str, failed: i64, stages: i64, attempts: i64, vision: &str| {
+        let add = |id: i64, name: &str, failed: i64, owes: bool, attempts: i64, build: &str| {
             crate::db::test_support::insert_file(&conn, id, &path(name), "image");
             conn.execute("UPDATE files SET failed = ?2 WHERE id = ?1", rusqlite::params![id, failed]).unwrap();
-            conn.execute(
-                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
-                 VALUES (?1, ?2, 100, 10, ?3, 0, ?4, 0)",
-                rusqlite::params![id, stages, vision, attempts],
-            )
-            .unwrap();
+            let sql = if owes {
+                "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) VALUES (?1, 1, 100, 10, ?3, 0, ?2, 0)"
+            } else {
+                "INSERT INTO scan_failures (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) VALUES (?1, 100, 10, ?3, ?2, 0)"
+            };
+            conn.execute(sql, rusqlite::params![id, attempts, build]).unwrap();
         };
-        add(1, "given-up.jpg", 1, 4, 3, context);
-        add(2, "two-tries.jpg", 1, 4, 2, context);
-        add(3, "other-build.jpg", 1, 4, 5, "{\"failedBy\":\"fileid-engine 0.0.0 portable\"}");
-        add(4, "owes-tags.jpg", 0, 1, 3, "{}");
-        add(5, "fine-now.jpg", 0, 4, 3, context);
+        add(1, "given-up.jpg", 1, false, 3, context);
+        add(2, "two-tries.jpg", 1, false, 2, context);
+        add(3, "other-build.jpg", 1, false, 5, "fileid-engine 0.0.0 portable");
+        add(4, "owes-tags.jpg", 0, true, 3, "{}");
+        add(5, "fine-now.jpg", 0, false, 3, context);
         crate::db::test_support::insert_file(&conn, 6, &format!("{sep}elsewhere{sep}given-up.jpg"), "image");
         conn.execute("UPDATE files SET failed = 1 WHERE id = 6", []).unwrap();
         conn.execute(
-            "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) VALUES (6, 4, 100, 10, ?1, 0, 3, 0)",
+            "INSERT INTO scan_failures (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) VALUES (6, 100, 10, ?1, 3, 0)",
             [context],
         )
         .unwrap();

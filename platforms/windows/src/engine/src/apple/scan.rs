@@ -136,6 +136,10 @@ pub struct TextRead {
     pub fast_ms: f64,
     #[serde(default)]
     pub careful_ms: f64,
+    /// A careful read was called for and the reader was not available (still
+    /// compiling, or paused by its breaker); an older adapter never sets it.
+    #[serde(default)]
+    pub careful_owed: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -146,6 +150,8 @@ pub struct PdfRead {
     pub text: Option<String>,
     #[serde(default)]
     pub handwritten: bool,
+    #[serde(default)]
+    pub careful_owed: bool,
 }
 
 impl Image {

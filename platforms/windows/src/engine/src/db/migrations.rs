@@ -64,6 +64,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v33_face_queues", include_str!("../../../../../../shared/catalog/v33.sql")),
         ("v34_scan_catchup", include_str!("../../../../../../shared/catalog/v34.sql")),
         ("v35_foreign_key_indexes", include_str!("../../../../../../shared/catalog/v35.sql")),
+        ("v36_scan_failures", include_str!("../../../../../../shared/catalog/v36.sql")),
     ]
 }
 
@@ -522,7 +523,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 35, "expected 35 applied migrations");
+        assert_eq!(n, 36, "expected 36 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -601,7 +602,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 35);
+        assert_eq!(n, 36);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -695,7 +696,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 35] = [
+        const CANONICAL: [&str; 36] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -731,6 +732,7 @@ mod tests {
             "v33_face_queues",
             "v34_scan_catchup",
             "v35_foreign_key_indexes",
+            "v36_scan_failures",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
@@ -1065,5 +1067,84 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM catalog_embeddings"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM face_identity_constraints"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM face_queue_dismissals"), 0);
+    }
+
+    /// A v35 catalog holding failure-memory rows (`stages = 4`), owed rows and
+    /// a row of each kind is migrated by v36 into `scan_failures`.
+    #[test]
+    fn v36_moves_failure_memory_out_of_scan_catchup() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let mut v36 = "";
+        for (id, sql) in registry() {
+            if id == "v36_scan_failures" {
+                v36 = sql;
+                break;
+            }
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO files (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES
+              (1,'/a.jpg',1,100,0,'image','jpg',1),(2,'/b.jpg',2,200,0,'image','jpg',0),
+              (3,'/c.jpg',3,300,0,'image','jpg',1),(4,'/d.jpg',4,400,0,'image','jpg',0);
+             INSERT INTO scan_catchup(file_id,stages,size_bytes,modified_at,vision,face_count,attempts,created_at) VALUES
+              (1,4,100,10.5,'{\"failedBy\":\"fileid-engine 1.2.3 apple\"}',0,3,77.0),
+              (2,1,200,20.0,'{\"k\":[],\"c\":[],\"u\":false}',2,1,5.0),
+              (3,4,300,NULL,'not json',0,2,78.0),
+              (4,6,400,40.0,NULL,0,0,6.0);",
+        )
+        .unwrap();
+        conn.execute_batch(v36).unwrap();
+        let failures: Vec<(i64, i64, Option<f64>, String, i64, f64)> = conn
+            .prepare("SELECT file_id,size_bytes,modified_at,engine_build,attempts,failed_at FROM scan_failures ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            failures,
+            vec![
+                (1, 100, Some(10.5), "fileid-engine 1.2.3 apple".to_string(), 3, 77.0),
+                (3, 300, None, "not json".to_string(), 2, 78.0),
+            ]
+        );
+        let owed: Vec<(i64, i64)> = conn
+            .prepare("SELECT file_id,stages FROM scan_catchup ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(owed, vec![(2, 1), (4, 6)], "owed rows stay exactly as they were");
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM scan_failures", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    /// The heal lookup searches `files` by index (`file_ref`/size and
+    /// `content_hash`), never by scanning it.
+    #[test]
+    fn heal_lookup_uses_the_file_ref_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 20000)
+             INSERT INTO files (path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref,content_hash)
+             SELECT '/p/'||i||'.jpg', i, i, 0, 'image', 'jpg', CASE WHEN i % 10 = 0 THEN NULL ELSE i END, randomblob(32) FROM n;
+             ANALYZE;",
+        )
+        .unwrap();
+        let sql = "EXPLAIN QUERY PLAN SELECT id, path_text, (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5) AS by_ref \
+            FROM files WHERE path_text != ?3 AND ((file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5) \
+            OR (content_hash IS NOT NULL AND content_hash IN (?2, ?4, ?6))) ORDER BY by_ref DESC LIMIT 32";
+        let plan: Vec<String> = conn
+            .prepare(sql)
+            .unwrap()
+            .query_map(rusqlite::params![5i64, vec![0u8; 32], "/x", vec![1u8; 32], 5i64, Option::<Vec<u8>>::None], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let plan = plan.join(" | ");
+        assert!(plan.contains("USING INDEX") && !plan.contains("SCAN files"), "{plan}");
     }
 }

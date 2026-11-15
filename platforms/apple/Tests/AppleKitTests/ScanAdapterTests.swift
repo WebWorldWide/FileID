@@ -95,6 +95,7 @@ struct ScanAdapterTests {
         let read = try json(request.withCString { fileid_apple_text_read(image, $0) })
         #expect(read["ran"] as? Bool == true)
         #expect((read["text"] as? String)?.contains("OCR 12345") == true)
+        #expect((read["carefulOwed"] as? Bool ?? false) == !fileid_apple_ocr_ready(), "a careful read the cold reader could not run is reported as owed")
         let skipped = try json(#"{"classifyTags":[],"tags":[],"hasCamera":true}"#.withCString { fileid_apple_text_read(image, $0) })
         #expect(skipped["ran"] as? Bool == false)
         #expect(fileid_apple_vision_primary(0) == nil)
@@ -105,6 +106,7 @@ struct ScanAdapterTests {
         let read = try json(pdf.path.withCString { fileid_apple_pdf_ocr($0) })
         #expect(read["opened"] as? Bool == true)
         #expect((read["text"] as? String)?.contains("OCR 12345") == true)
+        #expect((read["carefulOwed"] as? Bool ?? false) == !fileid_apple_ocr_ready())
         let missing = try json("/nonexistent/scan.pdf".withCString { fileid_apple_pdf_ocr($0) })
         #expect(missing["opened"] as? Bool == false)
     }

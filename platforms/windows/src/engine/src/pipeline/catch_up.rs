@@ -29,46 +29,40 @@ pub struct Marker {
 /// asks for a full rescan.
 pub const FAILURE_RETRY_LIMIT: i64 = 3;
 
-/// `scan_catchup.stages` of a failure-memory row. The value owes nothing
-/// (no bit of `OWED_MASK`), so neither engine's catch-up pass selects it, and
-/// neither engine writes it for an analysed file (a marker that owes nothing
-/// is deleted). `attempts` counts the failures, `size_bytes`/`modified_at`
-/// hold the file as it was, and `vision` names the engine build that failed.
-pub const FAILURE_STAGE: i64 = TEXT_READ_AT_SCAN;
-
 /// Names the engine and decoder set whose failures are remembered: a new
 /// build, or a switch between the Mac adapters and the portable decoders,
-/// retries every file.
+/// retries every file. Stored in `scan_failures.engine_build`.
 pub fn failure_context() -> &'static str {
     static CONTEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CONTEXT.get_or_init(|| {
         let decoders = if crate::pipeline::tagging::apple_scan_enabled() { "apple" } else { "portable" };
-        format!("{{\"failedBy\":\"fileid-engine {} {decoders}\"}}", env!("CARGO_PKG_VERSION"))
+        format!("fileid-engine {} {decoders}", env!("CARGO_PKG_VERSION"))
     })
 }
 
-/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now.
-pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_catchup \
-     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
-     VALUES (?1, 4, ?2, ?3, ?4, 0, 1, ?5) \
+/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now. The count
+/// continues only while the file and the engine build are the ones that failed.
+pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
+     (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) \
+     VALUES (?1, ?2, ?3, ?4, 1, ?5) \
      ON CONFLICT(file_id) DO UPDATE SET \
-       attempts = CASE WHEN scan_catchup.stages = 4 AND scan_catchup.size_bytes = excluded.size_bytes \
-                        AND scan_catchup.modified_at IS excluded.modified_at \
-                        AND scan_catchup.vision IS excluded.vision \
-                   THEN scan_catchup.attempts + 1 ELSE 1 END, \
-       stages = 4, size_bytes = excluded.size_bytes, modified_at = excluded.modified_at, \
-       vision = excluded.vision, face_count = 0, created_at = excluded.created_at";
+       attempts = CASE WHEN scan_failures.size_bytes = excluded.size_bytes \
+                        AND scan_failures.modified_at IS excluded.modified_at \
+                        AND scan_failures.engine_build = excluded.engine_build \
+                   THEN scan_failures.attempts + 1 ELSE 1 END, \
+       size_bytes = excluded.size_bytes, modified_at = excluded.modified_at, \
+       engine_build = excluded.engine_build, failed_at = excluded.failed_at";
 
-pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_catchup WHERE file_id = ?1 AND stages = 4";
+pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_failures WHERE file_id = ?1";
 
 /// Failed rows that have used up their retries and still describe the file
 /// on record. ?1 `failure_context()`; callers append a path-range clause.
 pub const GIVEN_UP_SQL: &str = "SELECT f.path_text, f.size_bytes, f.modified_at \
-     FROM scan_catchup c JOIN files f ON f.id = c.file_id \
-     WHERE c.stages = 4 AND c.attempts >= 3 AND f.failed = 1 \
-       AND c.size_bytes = f.size_bytes AND c.modified_at IS f.modified_at AND c.vision = ?1";
+     FROM scan_failures c JOIN files f ON f.id = c.file_id \
+     WHERE c.attempts >= 3 AND f.failed = 1 \
+       AND c.size_bytes = f.size_bytes AND c.modified_at IS f.modified_at AND c.engine_build = ?1";
 
-const _: () = assert!(FAILURE_STAGE == 4 && FAILURE_RETRY_LIMIT == 3 && FAILURE_STAGE & OWED_MASK == 0);
+const _: () = assert!(FAILURE_RETRY_LIMIT == 3);
 
 /// Whether a failure says something about the file. A file that cannot even
 /// be opened right now (drive offline, permission, deleted) is not counted:
@@ -218,6 +212,9 @@ pub struct TextRead {
     pub ran: bool,
     pub text: Option<String>,
     pub handwritten: bool,
+    /// The careful read was wanted and its reader was not available
+    /// (`ScanCatchUp.TextOutcome.carefulOwed`).
+    pub careful_owed: bool,
 }
 
 /// The portable rules (Windows, Linux) once RAM++ has answered for an owed
@@ -262,8 +259,9 @@ pub fn classifier_update(
     if file.stages & TEXT_READ_AT_SCAN == 0 || file.stages & CAREFUL_TEXT_OWED != 0 || !ram.is_empty() {
         let read = read_text(&text_tags);
         if read.ran {
+            let owed = read.careful_owed;
             text = Some(TextUpdate { handwritten: read.handwritten && read.text.is_some(), text: read.text });
-            stages = (stages & !CAREFUL_TEXT_OWED) | TEXT_READ_AT_SCAN;
+            stages = if owed { stages | CAREFUL_TEXT_OWED } else { stages & !CAREFUL_TEXT_OWED } | TEXT_READ_AT_SCAN;
         }
     }
     let fallback = context.k.iter().map(|tag| (tag.clone(), None)).collect();
@@ -273,12 +271,16 @@ pub fn classifier_update(
 }
 
 /// The careful-read phase for an image: read with the tags the tag phase
-/// left (or the classifier's), and the read is no longer owed.
-pub fn careful_update(file: &Pending, context: &Context, read_text: impl FnOnce(&[String]) -> TextRead) -> Update {
+/// left (or the classifier's), and the read is no longer owed. A reader that
+/// went away again blocks the pass and the read stays owed.
+pub fn careful_update(file: &Pending, context: &Context, read_text: impl FnOnce(&[String]) -> TextRead) -> Outcome {
     let text_tags = context.t.clone().unwrap_or_else(|| context.k.clone());
     let read = read_text(&text_tags);
+    if read.careful_owed {
+        return Outcome::Blocked;
+    }
     let text = read.ran.then(|| TextUpdate { handwritten: read.handwritten && read.text.is_some(), text: read.text });
-    Update { tags: None, text, stages: file.stages & !CAREFUL_TEXT_OWED, vision: file.vision.clone() }
+    Outcome::Done(Update { tags: None, text, stages: file.stages & !CAREFUL_TEXT_OWED, vision: file.vision.clone() })
 }
 
 /// One file the pass has to visit.
@@ -350,6 +352,11 @@ pub trait Analyzer: Sync {
     /// Files analysed at once.
     fn parallelism(&self) -> usize;
     fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome;
+    /// How long to wait for a phase's reader to become ready before giving up
+    /// on it for this pass (`Readers.carefulWaitSeconds`).
+    fn ready_wait(&self, _phase: Phase) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -558,6 +565,10 @@ pub fn run(
     let careful = owed(&conn.lock(), root).1;
     if careful > 0 && !summary.cancelled && !is_cancelled() {
         progress(Progress::Total(visited + careful));
+        let deadline = std::time::Instant::now() + analyzer.ready_wait(Phase::CarefulText);
+        while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         if analyzer.ready(Phase::CarefulText) {
             pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, is_paused, progress, &mut summary);
         } else {
@@ -978,6 +989,7 @@ mod tests {
             ran,
             text: ran.then(|| format!("{name} read with {}", text_tags.join("+"))),
             handwritten: text_tags.iter().any(|tag| tag == "handwriting"),
+            careful_owed: false,
         }
     }
 
@@ -1002,12 +1014,16 @@ mod tests {
         fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome {
             let context = context.unwrap();
             let name = name_of(file);
-            Outcome::Done(match phase {
-                Phase::Tags => classifier_update(file, context, mac_ram(&name), context.x.clone().unwrap_or_default(), |tags| {
-                    mac_reader(&name, tags)
-                }),
+            match phase {
+                Phase::Tags => Outcome::Done(classifier_update(
+                    file,
+                    context,
+                    mac_ram(&name),
+                    context.x.clone().unwrap_or_default(),
+                    |tags| mac_reader(&name, tags),
+                )),
                 Phase::CarefulText => careful_update(file, context, |tags| mac_reader(&name, tags)),
-            })
+            }
         }
     }
 
@@ -1085,6 +1101,114 @@ mod tests {
         assert_eq!(text.as_deref(), Some("letter.heic read with document+handwriting"));
         assert!(handwritten && has_text);
         assert_eq!(owed, None);
+    }
+
+    /// A Mac reader whose careful tier is still compiling until `warm` is set.
+    struct ColdReader {
+        warm: std::sync::atomic::AtomicBool,
+    }
+
+    impl ColdReader {
+        fn read(&self, name: &str, _tags: &[String]) -> TextRead {
+            let warm = self.warm.load(Ordering::SeqCst);
+            TextRead { ran: true, text: Some(format!("{name} {}", if warm { "careful" } else { "fast" })), handwritten: false, careful_owed: !warm }
+        }
+    }
+
+    impl Analyzer for ColdReader {
+        fn ready(&self, phase: Phase) -> bool {
+            phase == Phase::Tags || self.warm.load(Ordering::SeqCst)
+        }
+        fn parallelism(&self) -> usize {
+            2
+        }
+        fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome {
+            let (context, name) = (context.unwrap(), name_of(file));
+            match phase {
+                Phase::Tags => Outcome::Done(classifier_update(file, context, Vec::new(), Vec::new(), |tags| self.read(&name, tags))),
+                Phase::CarefulText => careful_update(file, context, |tags| self.read(&name, tags)),
+            }
+        }
+    }
+
+    /// Photos scanned while the careful reader is cold owe their careful read,
+    /// the pass leaves them owed while it stays cold (a reader that stops
+    /// answering mid-pass blocks it), and a later pass with a warm reader
+    /// settles them, whichever engine wrote the marker.
+    #[tokio::test]
+    async fn careful_reads_owed_by_a_cold_reader_are_kept_until_the_reader_is_warm() {
+        let library = Library::new("cold");
+        let rows: Vec<TaggedFile> = ["a.heic", "b.heic", "c.heic"]
+            .iter()
+            .map(|name| {
+                let mut row = library.image(name);
+                row.tags = vec![("document".to_string(), None)];
+                row.ocr_stage_ran = true;
+                row.ocr_text = Some("fast".to_string());
+                row.has_text = true;
+                let context = Context { t: Some(vec!["document".to_string()]), ..Context::from_classifier(&["document".to_string()], []) };
+                row.catch_up = marker(CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, context, 0);
+                row
+            })
+            .collect();
+        library.write(rows).await;
+        assert_eq!(library.stored("a.heic").4, Some(CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN));
+
+        let reader = ColdReader { warm: std::sync::atomic::AtomicBool::new(false) };
+        let summary = library.run(&reader);
+        assert_eq!((summary.owed_careful, summary.text_read), (3, 0), "a cold reader is skipped, nothing is lost");
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 3));
+
+        // The reader answers for the pass but goes away again: Blocked keeps the rows owed.
+        struct Flaky(ColdReader);
+        impl Analyzer for Flaky {
+            fn ready(&self, _phase: Phase) -> bool {
+                true
+            }
+            fn parallelism(&self) -> usize {
+                2
+            }
+            fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome {
+                self.0.analyse(file, phase, context)
+            }
+        }
+        let summary = library.run(&Flaky(ColdReader { warm: std::sync::atomic::AtomicBool::new(false) }));
+        assert_eq!((summary.text_read, summary.left), (0, 2));
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 3));
+
+        reader.warm.store(true, Ordering::SeqCst);
+        let summary = library.run(&reader);
+        assert_eq!((summary.owed_careful, summary.text_read), (3, 3));
+        assert_eq!(owed(&library.conn.lock(), None), (0, 0));
+        assert_eq!(library.stored("b.heic").1.as_deref(), Some("b.heic careful"));
+        assert_eq!(library.stored("b.heic").4, None);
+    }
+
+    /// The tag phase reads the text with RAM++'s tags; a cold reader there
+    /// leaves the careful read owed with the read marked done at scan time.
+    #[test]
+    fn a_tag_phase_read_that_needs_a_cold_reader_sets_the_careful_bit() {
+        let file = Pending {
+            file_id: 1,
+            path: "/lib/a.heic".into(),
+            kind: "image".into(),
+            size_bytes: 1,
+            modified_at: None,
+            created_at: None,
+            camera_model: None,
+            stages: TAGS_OWED,
+            vision: None,
+            face_count: 0,
+            mark_size: 1,
+            mark_modified: None,
+        };
+        let context = Context::from_classifier(&["document".to_string()], []);
+        let cold = |_: &[String]| TextRead { ran: true, text: Some("fast".into()), handwritten: false, careful_owed: true };
+        let update = classifier_update(&file, &context, Vec::new(), Vec::new(), cold);
+        assert_eq!(update.stages, CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN);
+        let warm = |_: &[String]| TextRead { ran: true, text: Some("careful".into()), handwritten: false, careful_owed: false };
+        let update = classifier_update(&Pending { stages: TAGS_OWED | CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, ..file }, &context, Vec::new(), Vec::new(), warm);
+        assert_eq!(update.stages, TEXT_READ_AT_SCAN);
     }
 
     struct Counting {
@@ -1214,10 +1338,8 @@ mod tests {
     }
 
     #[test]
-    fn failure_context_is_json_naming_this_build() {
-        let parsed: serde_json::Value = serde_json::from_str(failure_context()).unwrap();
-        let name = parsed["failedBy"].as_str().unwrap();
-        assert!(name.starts_with("fileid-engine ") && name.contains(env!("CARGO_PKG_VERSION")));
+    fn failure_context_names_this_build() {
+        assert!(failure_context().starts_with("fileid-engine ") && failure_context().contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

@@ -766,6 +766,7 @@ public actor DBWriter {
                 try db.cachedStatement(sql: "DELETE FROM scan_catchup WHERE file_id = ?")
                     .execute(arguments: [fileID])
             }
+            try db.cachedStatement(sql: "DELETE FROM scan_failures WHERE file_id = ?").execute(arguments: [fileID])
         }
 
         // 3. OCR text. The ocr_fts external-content index is maintained by the

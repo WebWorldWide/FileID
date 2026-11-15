@@ -838,6 +838,9 @@ impl DbWriter {
                                 f.scanned_unix,
                             ])
                             .with_context(|| format!("failure memory for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                        owed_clear
+                            .execute(params![file_id])
+                            .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     }
                 } else if let Some(owed) = f
                     .catch_up
@@ -862,7 +865,8 @@ impl DbWriter {
                     owed_clear
                         .execute(params![file_id])
                         .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                } else {
+                }
+                if !f.failed {
                     failure_clear
                         .execute(params![file_id])
                         .with_context(|| format!("failure memory clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -3148,7 +3152,7 @@ mod failure_memory_tests {
     fn memory(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, String)> {
         conn.lock()
             .query_row(
-                "SELECT c.stages, c.attempts, c.vision FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                "SELECT 4, c.attempts, c.engine_build FROM scan_failures c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
                 [path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -3199,7 +3203,7 @@ mod failure_memory_tests {
         assert!(given_up(&conn).is_empty());
 
         // Failures recorded by another engine build do not count for this one.
-        conn.lock().execute("UPDATE scan_catchup SET attempts = 3, vision = '{\"failedBy\":\"fileid-engine 0.0.1 portable\"}'", []).unwrap();
+        conn.lock().execute("UPDATE scan_failures SET attempts = 3, engine_build = 'fileid-engine 0.0.1 portable'", []).unwrap();
         assert!(given_up(&conn).is_empty());
         let mut again = file("/lib/a.jpg", true);
         again.modified_unix += 60.0;
@@ -3207,7 +3211,7 @@ mod failure_memory_tests {
         assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
 
         // The stored row changed without a scan (size differs): not given up.
-        conn.lock().execute("UPDATE scan_catchup SET attempts = 3", []).unwrap();
+        conn.lock().execute("UPDATE scan_failures SET attempts = 3", []).unwrap();
         assert_eq!(given_up(&conn).len(), 1);
         conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
         assert!(given_up(&conn).is_empty());
