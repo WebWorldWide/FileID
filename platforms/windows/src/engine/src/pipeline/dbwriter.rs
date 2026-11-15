@@ -1741,6 +1741,39 @@ mod tests {
         assert!((modified - 1_800_000_000.0).abs() < 0.5);
     }
 
+    /// A time within a microsecond of the stored one is the same instant written by an
+    /// engine that rounded its last bit differently: the stored number stays, so the
+    /// stale-on-change trigger leaves reviewed rows alone; a real change still updates it.
+    #[test]
+    fn a_time_a_bit_apart_keeps_the_stored_number_and_a_real_change_updates_it() {
+        let conn = crate::db::test_support::memory_db();
+        let mut f = fixture(r"C:.jpg");
+        let stored = f64::from_bits(0x41d9_b450_2f75_52cf);
+        f.modified_unix = stored;
+        insert_one(&conn, &f).unwrap();
+        let file_id: i64 = conn.query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        conn.execute(
+            "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) \
+             VALUES('c',?1,0,1,'t','','r','user',1,1,0)",
+            params![file_id],
+        )
+        .unwrap();
+        let read = |conn: &Connection| -> (f64, i64) {
+            conn.query_row(
+                "SELECT f.modified_at, c.stale FROM files f JOIN catalog_chapters c ON c.file_id = f.id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        f.modified_unix = f64::from_bits(stored.to_bits() + 1);
+        insert_one(&conn, &f).unwrap();
+        assert_eq!(read(&conn), (stored, 0));
+        f.modified_unix = stored + 60.0;
+        insert_one(&conn, &f).unwrap();
+        assert_eq!(read(&conn), (stored + 60.0, 1));
+    }
+
     proptest::proptest! {
         /// Arbitrary insert mix (with intentional duplicates) → row count
         /// must equal the number of distinct paths. Both the scan resume

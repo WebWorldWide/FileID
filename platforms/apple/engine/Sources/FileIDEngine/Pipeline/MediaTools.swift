@@ -239,7 +239,7 @@ public actor MediaTools {
                 receipts[receipts.count - 1].output.state = "completed"
                 receipts[receipts.count - 1].output.message = "Original preserved. " + framingSummary
                 let outputSize = (try destination.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
-                let modified = (try destination.resourceValues(forKeys: [.contentModificationDateKey])).contentModificationDate?.timeIntervalSince1970
+                let modified = FileModificationTime.unixSeconds(path: destination.path)
                 let recipeJSON = String(decoding: try JSONEncoder().encode(plan.recipe), as: UTF8.self)
                 let published = receipts
                 let outputKind = plan.recipe.kind == "photo" ? "image" : (plan.recipe.kind == "video" ? "video" : (CommonMediaTools.kinds.contains(plan.recipe.kind) ? CommonMediaTools.outputKind(plan.recipe) : "doc"))

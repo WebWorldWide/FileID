@@ -30,6 +30,9 @@ public struct DiscoveredFile: Sendable {
     public let sizeBytes: Int64
     public let creationDate: Date?
     public let modificationDate: Date?
+    /// The modification time as the catalog stores it (`FileModificationTime`). `modificationDate`
+    /// rounds the last bit of times before 2001, so the stored number is never read back from it.
+    public var modifiedUnix: Double? = nil
     public let kind: Kind
     /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
     /// the Windows NTFS MFT file_ref. Propagated to TaggedFile so DBWriter's
@@ -355,6 +358,7 @@ public actor Discovery {
                 sizeBytes: size,
                 creationDate: values?.creationDate,
                 modificationDate: identity.modified.map { Date(timeIntervalSince1970: $0) },
+                modifiedUnix: identity.modified,
                 kind: fileKind,
                 fileRef: identity.inode
             )

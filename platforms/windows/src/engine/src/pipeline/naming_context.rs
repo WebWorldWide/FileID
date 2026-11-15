@@ -411,6 +411,18 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_that_stored_the_other_engines_rounding_of_the_time_still_loads() {
+        let mut f = fixture("rounding");
+        let (size, bits) = f.revision.split_once(':').unwrap();
+        let stored = f64::from_bits(bits.parse::<u64>().unwrap() + 1);
+        f.revision = format!("{size}:{}", stored.to_bits());
+        f.conn.execute("UPDATE files SET modified_at=?1", [stored]).unwrap();
+        f.conn.execute("UPDATE catalog_revisions SET revision=?1", [&f.revision]).unwrap();
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        assert!(context(&f, None).unwrap().proposed_name().is_some());
+    }
+
+    #[test]
     fn a_changed_or_missing_source_fails_the_load() {
         let f = fixture("source");
         std::fs::write(&f.source, [1u8, 2]).unwrap();

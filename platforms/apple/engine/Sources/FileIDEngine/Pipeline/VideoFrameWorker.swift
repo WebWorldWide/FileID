@@ -352,9 +352,9 @@ enum VideoFrameWorker {
 
     private struct Attributes: Equatable { let size: Int64; let modified: Double }
     private static func attributes(_ source: URL) throws -> Attributes {
-        let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        guard let size = values.fileSize, let modified = values.contentModificationDate else { throw WorkerFailure() }
-        return Attributes(size: Int64(size), modified: modified.timeIntervalSince1970)
+        let values = try source.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize, let modified = FileModificationTime.unixSeconds(path: source.path) else { throw WorkerFailure() }
+        return Attributes(size: Int64(size), modified: modified)
     }
     struct WorkerFailure: LocalizedError { var errorDescription: String? { "The video worker could not decode a stable source frame." } }
     struct SourceRevisionChanged: LocalizedError { var errorDescription: String? { "The video changed while visual activity was being sampled." } }
