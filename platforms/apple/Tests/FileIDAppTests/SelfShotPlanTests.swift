@@ -49,5 +49,10 @@ struct SelfShotPlanTests {
         #expect(views[2].page == "Settings" && views[2].scrollToBottom)
         #expect(SelfShotView.parse(nil, available: all).isEmpty)
     }
+
+    @Test func views_parse_preview_file() {
+        let views = SelfShotView.parse("big=Library?query=huge&preview=huge%206500.jpg", available: all)
+        #expect(views.first?.preview == "huge 6500.jpg" && views.first?.query == "huge")
+    }
 }
 #endif
