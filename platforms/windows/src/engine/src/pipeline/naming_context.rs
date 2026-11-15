@@ -243,6 +243,18 @@ impl NamingContext {
     }
 }
 
+/// Organize Folders: a file whose reviewed label gives a name uses it in place of
+/// the stored model name; any load failure or abstention keeps the stored name
+/// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
+pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
+    let (model, processing) = selected_space();
+    for file in files {
+        if let Some(name) = load(conn, file.file_id, model.as_deref(), processing).ok().and_then(|c| c.proposed_name()) {
+            file.vlm_proposed = Some(name);
+        }
+    }
+}
+
 /// The selected face space: the installed weights' identity and this
 /// engine's processing namespace.
 pub(crate) fn selected_space() -> (Option<String>, &'static str) {
@@ -373,6 +385,42 @@ mod tests {
             }
             assert_eq!(context(&f, None).unwrap().proposed_name(), None, "{fault}");
         }
+    }
+
+    #[test]
+    fn organize_folders_prefers_the_reviewed_name_and_keeps_the_stored_one_otherwise() {
+        let f = fixture("restructure");
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        let file = |stored: Option<&str>| crate::pipeline::restructure::FileForClassify {
+            file_id: 1,
+            source: f.source.clone(),
+            kind: crate::pipeline::discovery::FileKind::Image,
+            modified_unix: 0.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+            vlm_proposed: stored.map(str::to_owned),
+            identity: None,
+        };
+        let mut files = [file(Some("sunset-over-the-bay")), file(None)];
+        let reviewed = context(&f, None).unwrap().proposed_name();
+        apply_reviewed_names(&f.conn, &mut files);
+        assert!(reviewed.is_some());
+        assert_eq!(files[0].vlm_proposed, reviewed);
+        assert_eq!(files[1].vlm_proposed, reviewed);
+
+        f.conn.execute("UPDATE catalog_chapters SET user_edited=0", []).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"));
+
+        chapter(&f, "Birthday gift", "other", true, false);
+        std::fs::write(&f.source, [1u8, 2]).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"), "a changed source keeps the stored name");
     }
 
     #[test]
