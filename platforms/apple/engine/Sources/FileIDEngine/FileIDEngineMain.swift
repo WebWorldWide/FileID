@@ -163,7 +163,9 @@ struct FileIDEngineMain {
         }
 
         // Periodic progress emitter — 1 Hz until the program exits.
-        let progressTicker = Task.detached(priority: .background) {
+        // User-initiated, like the scan work it reports on: at background
+        // priority it starved under machine load and the bar froze.
+        let progressTicker = Task.detached(priority: .userInitiated) {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if let snap = await coordinator.periodicSnapshot() {

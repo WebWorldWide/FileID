@@ -12,6 +12,7 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "count", "value": N}   a list of N elements
   {"$tol": "prefix", "value": [..]}  a list that starts with these elements
   {"$tol": "contains", "value": [..]}  a list holding a match for each element
+  {"$tol": "last", "value": V}    a non-empty list whose last element matches V
   {"$tol": "present"}             any non-null value
   {"$tol": "hamming", "value": N, "bits": B}  an integer hash within B differing bits (default 4)
   {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
@@ -520,6 +521,11 @@ def match(expected, actual, ctx, where="$"):
                 raise Failure(f"{where}: expected a list starting with {canonical(value)}, got {canonical(actual)}")
             for index, item in enumerate(value):
                 match(item, actual[index], ctx, f"{where}[{index}]")
+            return
+        if tolerance == "last":
+            if not isinstance(actual, list) or not actual:
+                raise Failure(f"{where}: expected a non-empty list, got {canonical(actual)}")
+            match(value, actual[-1], ctx, f"{where}[-1]")
             return
         if tolerance == "contains":
             if not isinstance(actual, list):
