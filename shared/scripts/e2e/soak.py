@@ -1183,8 +1183,9 @@ class Soak:
         v = mk()
         try:
             k, res = v.scan(hl)
+            v.drain()
             v.send("startScan", {"rootPath": hl, "rescan": True})
-            time.sleep(1.5)
+            v.wait(lambda e: kind(e) == "phaseChanged", 30)
             v.kill()
         finally:
             v.raw.close()
