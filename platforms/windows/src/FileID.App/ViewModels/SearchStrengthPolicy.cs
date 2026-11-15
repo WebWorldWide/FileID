@@ -1,4 +1,6 @@
-﻿using System.Text.RegularExpressions;
+﻿using System;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 namespace FileID.ViewModels;
 
@@ -52,7 +54,28 @@ internal static partial class SearchStrengthPolicy
     /// <summary>How a typed search is shown. <see cref="KeywordOnly"/> keeps the
     /// name, tag and text matches and holds the weaker look-alikes back behind
     /// "Show N weaker matches" (<see cref="HiddenWeaker"/>).</summary>
-    public readonly record struct Decision(bool KeywordOnly, string? Label, int HiddenWeaker);
+    public readonly record struct Decision(bool KeywordOnly, string? Label, int HiddenWeaker)
+    {
+        /// <summary>The Mac's addKeywordRows: whenever the helper's list is shown,
+        /// the name, tag and text matches it lacks follow its rows.</summary>
+        public bool AddKeywordRows => !KeywordOnly;
+    }
+
+    /// <summary>The helper's rows in its order, then the keyword rows it lacks in
+    /// theirs, de-duplicated by file id with no extra cap.</summary>
+    public static IReadOnlyList<T> AppendKeywordRows<T>(IReadOnlyList<T> engineRows, IReadOnlyList<T> keywordRows, Func<T, long> id)
+    {
+        if (keywordRows.Count == 0) return engineRows;
+        var known = new HashSet<long>(engineRows.Count);
+        foreach (var row in engineRows) known.Add(id(row));
+        var combined = new List<T>(engineRows.Count + keywordRows.Count);
+        combined.AddRange(engineRows);
+        foreach (var row in keywordRows)
+        {
+            if (known.Add(id(row))) combined.Add(row);
+        }
+        return combined;
+    }
 
     /// <summary>The Mac's rule (LibrarySearchOutcome.decide). No summary, or a
     /// search shorter than <see cref="MinQueryLength"/>: today's behaviour

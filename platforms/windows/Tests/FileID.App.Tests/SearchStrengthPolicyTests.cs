@@ -152,4 +152,33 @@ public sealed class SearchStrengthPolicyTests
             "No matches for \u201Czzzqqq\u201D. Nothing has that in its name, tags or text, and no picture matches it. Try other words.",
             SearchStrengthPolicy.NoMatchesText("zzzqqq", 0));
     }
+
+    [Fact]
+    public void KeywordRowsFollowTheHelpersRowsWithoutRepeats()
+    {
+        var combined = SearchStrengthPolicy.AppendKeywordRows(new long[] { 5, 2 }, new long[] { 2, 9, 5, 7 }, id => id);
+        Assert.Equal(new long[] { 5, 2, 9, 7 }, combined);
+        Assert.Equal(new long[] { 3, 1 }, SearchStrengthPolicy.AppendKeywordRows(System.Array.Empty<long>(), new long[] { 3, 1 }, id => id));
+        Assert.Equal(new long[] { 4 }, SearchStrengthPolicy.AppendKeywordRows(new long[] { 4 }, System.Array.Empty<long>(), id => id));
+    }
+
+    [Fact]
+    public void KeywordRowsAreNotCapped()
+    {
+        var keyword = new long[300];
+        for (var i = 0; i < keyword.Length; i++) keyword[i] = 100 + i;
+        Assert.Equal(302, SearchStrengthPolicy.AppendKeywordRows(new long[] { 1, 2 }, keyword, id => id).Count);
+    }
+
+    [Theory]
+    [InlineData("4 good matches, 20 weaker.", 2, false, true)]
+    [InlineData("No good matches, 60 weaker.", 0, true, true)]
+    [InlineData("Matches by name, text and what's in the picture.", 0, false, true)]
+    [InlineData(null, 0, false, true)]
+    [InlineData("No good matches, 60 weaker.", 3, false, false)]
+    [InlineData("No matches.", 0, false, false)]
+    public void OnlyTheHelpersListDecisionsAddKeywordRows(string? message, int keywordCount, bool showWeaker, bool expected)
+    {
+        Assert.Equal(expected, SearchStrengthPolicy.Decide("sunset", message, keywordCount, showWeaker).AddKeywordRows);
+    }
 }
