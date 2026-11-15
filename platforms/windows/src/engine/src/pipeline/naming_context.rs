@@ -247,12 +247,35 @@ impl NamingContext {
 /// the stored model name; any load failure or abstention keeps the stored name
 /// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
 pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
+    let labelled = match labelled_files(conn, files) {
+        Ok(ids) if !ids.is_empty() => ids,
+        _ => return,
+    };
     let (model, processing) = selected_space();
-    for file in files {
+    for file in files.iter_mut().filter(|file| labelled.contains(&file.file_id)) {
         if let Some(name) = load(conn, file.file_id, model.as_deref(), processing).ok().and_then(|c| c.proposed_name()) {
             file.vlm_proposed = Some(name);
         }
     }
+}
+
+/// Files in `files`' id range that can have a reviewed label at all. `load`
+/// reads the file from disk and runs several queries, so a plan over a large
+/// library asks it only about these; the set is wider than `load` accepts.
+fn labelled_files(
+    conn: &Connection,
+    files: &[crate::pipeline::restructure::FileForClassify],
+) -> rusqlite::Result<std::collections::HashSet<i64>> {
+    let ids = || files.iter().map(|file| file.file_id);
+    let (Some(first), Some(last)) = (ids().min(), ids().max()) else { return Ok(std::collections::HashSet::new()) };
+    conn.prepare_cached(
+        "SELECT file_id FROM catalog_chapters WHERE user_edited=1 AND file_id BETWEEN ?1 AND ?2
+         UNION
+         SELECT ef.file_id FROM catalog_event_files ef JOIN catalog_events e ON e.id=ef.event_id
+         WHERE e.user_edited=1 AND ef.file_id BETWEEN ?1 AND ?2",
+    )?
+    .query_map(params![first, last], |row| row.get(0))?
+    .collect()
 }
 
 /// The selected face space: the installed weights' identity and this
