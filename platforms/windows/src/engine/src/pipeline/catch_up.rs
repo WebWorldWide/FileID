@@ -29,46 +29,40 @@ pub struct Marker {
 /// asks for a full rescan.
 pub const FAILURE_RETRY_LIMIT: i64 = 3;
 
-/// `scan_catchup.stages` of a failure-memory row. The value owes nothing
-/// (no bit of `OWED_MASK`), so neither engine's catch-up pass selects it, and
-/// neither engine writes it for an analysed file (a marker that owes nothing
-/// is deleted). `attempts` counts the failures, `size_bytes`/`modified_at`
-/// hold the file as it was, and `vision` names the engine build that failed.
-pub const FAILURE_STAGE: i64 = TEXT_READ_AT_SCAN;
-
 /// Names the engine and decoder set whose failures are remembered: a new
 /// build, or a switch between the Mac adapters and the portable decoders,
-/// retries every file.
+/// retries every file. Stored in `scan_failures.engine_build`.
 pub fn failure_context() -> &'static str {
     static CONTEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CONTEXT.get_or_init(|| {
         let decoders = if crate::pipeline::tagging::apple_scan_enabled() { "apple" } else { "portable" };
-        format!("{{\"failedBy\":\"fileid-engine {} {decoders}\"}}", env!("CARGO_PKG_VERSION"))
+        format!("fileid-engine {} {decoders}", env!("CARGO_PKG_VERSION"))
     })
 }
 
-/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now.
-pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_catchup \
-     (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
-     VALUES (?1, 4, ?2, ?3, ?4, 0, 1, ?5) \
+/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now. The count
+/// continues only while the file and the engine build are the ones that failed.
+pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
+     (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) \
+     VALUES (?1, ?2, ?3, ?4, 1, ?5) \
      ON CONFLICT(file_id) DO UPDATE SET \
-       attempts = CASE WHEN scan_catchup.stages = 4 AND scan_catchup.size_bytes = excluded.size_bytes \
-                        AND scan_catchup.modified_at IS excluded.modified_at \
-                        AND scan_catchup.vision IS excluded.vision \
-                   THEN scan_catchup.attempts + 1 ELSE 1 END, \
-       stages = 4, size_bytes = excluded.size_bytes, modified_at = excluded.modified_at, \
-       vision = excluded.vision, face_count = 0, created_at = excluded.created_at";
+       attempts = CASE WHEN scan_failures.size_bytes = excluded.size_bytes \
+                        AND scan_failures.modified_at IS excluded.modified_at \
+                        AND scan_failures.engine_build = excluded.engine_build \
+                   THEN scan_failures.attempts + 1 ELSE 1 END, \
+       size_bytes = excluded.size_bytes, modified_at = excluded.modified_at, \
+       engine_build = excluded.engine_build, failed_at = excluded.failed_at";
 
-pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_catchup WHERE file_id = ?1 AND stages = 4";
+pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_failures WHERE file_id = ?1";
 
 /// Failed rows that have used up their retries and still describe the file
 /// on record. ?1 `failure_context()`; callers append a path-range clause.
 pub const GIVEN_UP_SQL: &str = "SELECT f.path_text, f.size_bytes, f.modified_at \
-     FROM scan_catchup c JOIN files f ON f.id = c.file_id \
-     WHERE c.stages = 4 AND c.attempts >= 3 AND f.failed = 1 \
-       AND c.size_bytes = f.size_bytes AND c.modified_at IS f.modified_at AND c.vision = ?1";
+     FROM scan_failures c JOIN files f ON f.id = c.file_id \
+     WHERE c.attempts >= 3 AND f.failed = 1 \
+       AND c.size_bytes = f.size_bytes AND c.modified_at IS f.modified_at AND c.engine_build = ?1";
 
-const _: () = assert!(FAILURE_STAGE == 4 && FAILURE_RETRY_LIMIT == 3 && FAILURE_STAGE & OWED_MASK == 0);
+const _: () = assert!(FAILURE_RETRY_LIMIT == 3);
 
 /// Whether a failure says something about the file. A file that cannot even
 /// be opened right now (drive offline, permission, deleted) is not counted:
@@ -1214,10 +1208,8 @@ mod tests {
     }
 
     #[test]
-    fn failure_context_is_json_naming_this_build() {
-        let parsed: serde_json::Value = serde_json::from_str(failure_context()).unwrap();
-        let name = parsed["failedBy"].as_str().unwrap();
-        assert!(name.starts_with("fileid-engine ") && name.contains(env!("CARGO_PKG_VERSION")));
+    fn failure_context_names_this_build() {
+        assert!(failure_context().starts_with("fileid-engine ") && failure_context().contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

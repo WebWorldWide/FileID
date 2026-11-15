@@ -52,6 +52,7 @@ struct MigrationParityTests {
         "v33_face_queues",
         "v34_scan_catchup",
         "v35_foreign_key_indexes",
+        "v36_scan_failures",
     ]
 
     @Test("Registered migration identifiers match the canonical cross-platform list")
@@ -116,7 +117,7 @@ struct MigrationParityTests {
         }
         let state = try #require(observed)
 
-        #expect(state.migrationCount == 35)
+        #expect(state.migrationCount == 36)
         #expect(state.provenance == "qwen3-vl-4b")
         #expect(state.fullModel == nil)
         #expect(state.declaredType.uppercased() == "TEXT")
