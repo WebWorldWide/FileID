@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::deep_analyze::{append_caption_chunk, batch_eta_seconds, emit_scope_failure, fetch_face_names, same_people, scoped_catalog_path, ScopeFailure};
+use super::deep_analyze::{append_caption_chunk, batch_eta_seconds, emit_scope_failure, fetch_naming, same_people, SOURCE_CHANGED, scoped_catalog_path, ScopeFailure};
 use super::deep_scope::{DeepScope, ScopeError};
 use crate::apple::vlm::{self, Event, MlxLease, Resident};
 use crate::ipc::{
@@ -251,10 +251,9 @@ pub(crate) async fn run_batch(
         if let Some((from_id, from_faces, base_name)) = group.and_then(|g| shared.get(&g)).cloned() {
             let inherited = {
                 let conn = db.lock();
-                let faces = fetch_face_names(&conn, file_id);
-                (from_id != file_id && same_people(&faces, &from_faces)).then(|| {
+                fetch_naming(&conn, file_id).ok().filter(|context| from_id != file_id && same_people(&context.subjects, &from_faces)).map(|context| {
                     let name = base_name.as_deref().map(|name| crate::pipeline::near_duplicate_grouping::appending_sequence(name, &suffix));
-                    crate::pipeline::deep_analyze::inherit_vlm_results(&conn, file_id, from_id, model_kind, mode, name.as_deref())
+                    crate::pipeline::deep_analyze::inherit_vlm_results(&conn, file_id, from_id, model_kind, mode, name.as_deref(), &context)
                 })
             };
             match inherited {
@@ -317,10 +316,19 @@ pub(crate) async fn run_batch(
         }
 
         let file_started = Instant::now();
-        let face_names = fetch_face_names(&db.lock(), file_id);
+        let loaded = fetch_naming(&db.lock(), file_id);
+        let context = match loaded {
+            Ok(context) => context,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(%error, file_id, "naming evidence unavailable");
+                sink.send(EngineError::new("deep_source_changed", SOURCE_CHANGED).into_event()).await;
+                continue;
+            }
+        };
         let on_token = caption_stream(&sink, model_kind, index as u64, total, eta, current_path);
         let outcome =
-            analyze_file_via_mlx(db.clone(), &mut lease, file_id, model_kind, mode, cancel.clone(), &face_names, on_token, scope.as_ref()).await;
+            analyze_file_via_mlx(db.clone(), &mut lease, file_id, model_kind, mode, cancel.clone(), &context, on_token, scope.as_ref()).await;
         let seconds = file_started.elapsed().as_secs_f64();
         if seconds > 0.0 {
             rolling_fps = if rolling_fps <= 0.0 { 1.0 / seconds } else { 0.7 * rolling_fps + 0.3 / seconds };
@@ -338,7 +346,7 @@ pub(crate) async fn run_batch(
                         out.proposed_name = Some(named);
                     }
                 }
-                shared.insert(g, (file_id, face_names.clone(), base_name));
+                shared.insert(g, (file_id, context.subjects.clone(), base_name));
                 Ok(out)
             }
             (other, _) => other,
