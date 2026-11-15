@@ -470,9 +470,9 @@ enum ScanCatchUp {
     private static func process(_ file: Pending, phase: Phase, readers: Readers, cache: TagCache) -> Outcome {
         guard file.markSize == file.sizeBytes, sameTime(file.markModified, file.modifiedAt) else { return .stale }
         let url = URL(fileURLWithPath: file.path)
-        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey]),
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey]),
               Int64(values.fileSize ?? 0) == file.sizeBytes,
-              sameTime(values.contentModificationDate?.timeIntervalSince1970, file.modifiedAt) else { return .leave }
+              sameTime(FileModificationTime.unixSeconds(path: file.path), file.modifiedAt) else { return .leave }
 
         if file.kind == "pdf" {
             guard phase == .careful else { return .stale }

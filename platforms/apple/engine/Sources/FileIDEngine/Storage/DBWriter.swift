@@ -578,7 +578,15 @@ public actor DBWriter {
             return
         }
 
-        let newModified = file.modifiedAt?.timeIntervalSince1970
+        // A time within a microsecond of the stored one is the same time, stored by an engine
+        // that rounded its last bit differently: keep the stored number, so the row's revision
+        // strings and the catalog's stale-on-change trigger see no change.
+        let oldStoredModified: Double? = existing?["modified_at"]
+        let newModified: Double? = {
+            let current = file.modifiedAt?.timeIntervalSince1970
+            if let oldStoredModified, let current, abs(oldStoredModified - current) < 0.000_001 { return oldStoredModified }
+            return current
+        }()
         // "Unchanged" only when this isn't a forced rescan, the prior scan
         // succeeded, this scan succeeded, and both size and mtime match. A
         // previously-failed file is always reprocessed.

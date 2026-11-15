@@ -613,5 +613,168 @@
   },
   {"name": "cross-scan-swift-then-rust-same-image-hashes", "description": "On one Mac the swift engine and the rust engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: swift scans, rust rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "swift scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "swift hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "rust"}, {"label": "rust rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]},
   {"name": "cross-scan-rust-then-swift-same-image-hashes", "description": "On one Mac the rust engine and the swift engine store the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot: rust scans, swift rescans the same catalog. Exact, unlike the fixed values in scan-mac-adapters-store-what-the-swift-scan-stores, which may move a bit between macOS releases.", "appHosted": true, "os": ["darwin"], "requires": ["swift", "rust"], "engines": ["rust"], "start": "rust", "tree": [{"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}, {"path": "photos/text.heic", "copy": "shared/test-corpus/conformance-media/text.heic", "mtime": 1789812060}, {"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}], "steps": [{"label": "rust scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "rust hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "save": "hashes", "expect": {"$tol": "count", "value": 3}}, {"restart": "swift"}, {"label": "swift rescans", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"processedFiles": 3, "failedFiles": 0}}, {"label": "same hashes", "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text", "expect": {"$var": "hashes"}}]},
-  {"name": "scan-cold-careful-reader-owes-the-careful-read", "description": "On the Mac a photo or image-only PDF whose text needed the careful read while its reader was still compiling (FILEID_OCR_WARMUP=0 keeps it cold) keeps the fast read and is recorded as owing the careful one in scan_catchup (stages 6: careful text owed plus the fast read done at scan time), in the Swift engine and in the Rust engine the app hosts, so either engine's catch-up finishes the other's work. A photo with no text, and a rescan, change nothing.", "appHosted": true, "os": ["darwin"], "tree": [{"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}, {"path": "docs/scanned.pdf", "copy": "shared/test-corpus/conformance-media/scanned.pdf", "mtime": 1789812180}, {"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}], "steps": [{"label": "scan", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "owed", "db": "SELECT f.path_text,c.stages FROM scan_catchup c JOIN files f ON f.id=c.file_id ORDER BY f.path_text", "expect": {"$tol": "set", "value": [["{path:docs/scanned.pdf}", 6], ["{path:screens/known-text.png}", 6]]}}, {"label": "fast text kept", "db": "SELECT f.path_text,o.text FROM ocr_text o JOIN files f ON f.id=o.file_id ORDER BY f.path_text", "expect": {"$tol": "count", "value": 2}}, {"label": "rescan", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true}, {"label": "still owed", "db": "SELECT f.path_text,c.stages FROM scan_catchup c JOIN files f ON f.id=c.file_id ORDER BY f.path_text", "expect": {"$tol": "set", "value": [["{path:docs/scanned.pdf}", 6], ["{path:screens/known-text.png}", 6]]}}], "env": {"FILEID_OCR_WARMUP": "0"}}
+  {"name": "scan-cold-careful-reader-owes-the-careful-read", "description": "On the Mac a photo or image-only PDF whose text needed the careful read while its reader was still compiling (FILEID_OCR_WARMUP=0 keeps it cold) keeps the fast read and is recorded as owing the careful one in scan_catchup (stages 6: careful text owed plus the fast read done at scan time), in the Swift engine and in the Rust engine the app hosts, so either engine's catch-up finishes the other's work. A photo with no text, and a rescan, change nothing.", "appHosted": true, "os": ["darwin"], "tree": [{"path": "screens/known-text.png", "copy": "shared/test-corpus/ocr/known-text.png", "mtime": 1789812120}, {"path": "docs/scanned.pdf", "copy": "shared/test-corpus/conformance-media/scanned.pdf", "mtime": 1789812180}, {"path": "photos/camera.jpg", "copy": "shared/test-corpus/conformance-media/camera.jpg", "mtime": 1789812000}], "steps": [{"label": "scan", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 240, "abortOnError": true, "expect": {"totalFiles": 3, "processedFiles": 3, "failedFiles": 0}}, {"label": "owed", "db": "SELECT f.path_text,c.stages FROM scan_catchup c JOIN files f ON f.id=c.file_id ORDER BY f.path_text", "expect": {"$tol": "set", "value": [["{path:docs/scanned.pdf}", 6], ["{path:screens/known-text.png}", 6]]}}, {"label": "fast text kept", "db": "SELECT f.path_text,o.text FROM ocr_text o JOIN files f ON f.id=o.file_id ORDER BY f.path_text", "expect": {"$tol": "count", "value": 2}}, {"label": "rescan", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 240, "abortOnError": true}, {"label": "still owed", "db": "SELECT f.path_text,c.stages FROM scan_catchup c JOIN files f ON f.id=c.file_id ORDER BY f.path_text", "expect": {"$tol": "set", "value": [["{path:docs/scanned.pdf}", 6], ["{path:screens/known-text.png}", 6]]}}], "env": {"FILEID_OCR_WARMUP": "0"}},
+  {
+    "name": "scan-keeps-the-modified-times-and-reviewed-rows-of-a-catalog-the-swift-engine-wrote-before",
+    "description": "A catalog written before the engines stored one modification time holds the Swift engine's rounding of each file's time (its last bit differs from the seconds-plus-nanoseconds number for about a quarter of timestamps) with a reviewed chapter whose revision names that number. A plain rescan analyses nothing and a forced rescan keeps every stored time and leaves the chapter current, on either engine. Needs no model.",
+    "tree": [
+      {
+        "path": "docs/a.txt",
+        "content": "legacy docs/a.txt\n",
+        "mtimeNs": [
+          1724989629,
+          833179165
+        ]
+      },
+      {
+        "path": "docs/b.txt",
+        "content": "legacy docs/b.txt\n",
+        "mtimeNs": [
+          1603520313,
+          785102536
+        ]
+      },
+      {
+        "path": "docs/c.txt",
+        "content": "legacy docs/c.txt\n",
+        "mtimeNs": [
+          1704538783,
+          171373719
+        ]
+      },
+      {
+        "path": "docs/d.txt",
+        "content": "legacy docs/d.txt\n",
+        "mtimeNs": [
+          1700000000,
+          0
+        ]
+      }
+    ],
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,content_hash,failed) VALUES(1,'{path:docs/a.txt}',101,18,1724989629.833179,0,'doc','txt',X'{sha256:docs/a.txt}',0)",
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('kept1',1,0,1,'Kept','','18:4745021938898129614','user',1,1,0)",
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,content_hash,failed) VALUES(2,'{path:docs/b.txt}',102,18,1603520313.7851024,0,'doc','txt',X'{sha256:docs/b.txt}',0)",
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('kept2',2,0,1,'Kept','','18:4744512459659951902','user',1,1,0)",
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,content_hash,failed) VALUES(3,'{path:docs/c.txt}',103,18,1704538783.1713738,0,'doc','txt',X'{sha256:docs/c.txt}',0)",
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('kept3',3,0,1,'Kept','','18:4744936161830172618','user',1,1,0)",
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,content_hash,failed) VALUES(4,'{path:docs/d.txt}',104,18,1700000000.0,0,'doc','txt',X'{sha256:docs/d.txt}',0)",
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('kept4',4,0,1,'Kept','','18:4744917124793761792','user',1,1,0)"
+    ],
+    "steps": [
+      {
+        "label": "seeded rows",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": [
+          [
+            "{path:docs/a.txt}",
+            18,
+            1724989629.833179
+          ],
+          [
+            "{path:docs/b.txt}",
+            18,
+            1603520313.7851024
+          ],
+          [
+            "{path:docs/c.txt}",
+            18,
+            1704538783.1713738
+          ],
+          [
+            "{path:docs/d.txt}",
+            18,
+            1700000000.0
+          ]
+        ]
+      },
+      {
+        "label": "plain rescan analyses nothing",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "benignErrors": [
+          "rescan_no_changes",
+          "deep_analyze_unavailable"
+        ],
+        "expect": {
+          "processedFiles": 0,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "forced rescan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}",
+            "rescan": true
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 4,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "times kept",
+        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+        "expect": [
+          [
+            "{path:docs/a.txt}",
+            18,
+            1724989629.833179
+          ],
+          [
+            "{path:docs/b.txt}",
+            18,
+            1603520313.7851024
+          ],
+          [
+            "{path:docs/c.txt}",
+            18,
+            1704538783.1713738
+          ],
+          [
+            "{path:docs/d.txt}",
+            18,
+            1700000000.0
+          ]
+        ]
+      },
+      {
+        "label": "chapters current with the same revision",
+        "db": "SELECT id,stale,source_revision FROM catalog_chapters ORDER BY id",
+        "expect": [
+          [
+            "kept1",
+            0,
+            "18:4745021938898129614"
+          ],
+          [
+            "kept2",
+            0,
+            "18:4744512459659951902"
+          ],
+          [
+            "kept3",
+            0,
+            "18:4744936161830172618"
+          ],
+          [
+            "kept4",
+            0,
+            "18:4744917124793761792"
+          ]
+        ]
+      }
+    ]
+  }
 ]

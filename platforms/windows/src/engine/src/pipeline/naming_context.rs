@@ -145,7 +145,9 @@ pub(crate) fn load(
         .optional()?;
     let Some((path, size, modified)) = row else { return Err(SourceChanged.into()) };
     let revision = source_revision(size, modified);
-    let valid_stat = size >= 0 && modified.is_some_and(f64::is_finite) && live_revision(&path).as_deref() == Some(&revision);
+    let valid_stat = size >= 0
+        && modified.is_some_and(f64::is_finite)
+        && live_revision(&path).is_some_and(|live| crate::util::same_source_revision(&live, &revision));
     if !valid_stat {
         return Err(SourceChanged.into());
     }

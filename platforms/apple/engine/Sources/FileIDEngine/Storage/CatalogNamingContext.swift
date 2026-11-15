@@ -24,7 +24,7 @@ struct CatalogNamingContext: Sendable, Equatable {
         let modified: Double? = file["modified_at"]
         let revision = try CatalogStore.revision(db, fileID: fileID)
         let validStat = size >= 0 && modified?.isFinite == true
-            && FaceCacheProvenance.currentSourceRevision(path: path) == revision
+            && FaceCacheProvenance.currentSourceRevision(path: path).map({ SourceRevisionMatch.same($0, revision) }) == true
         guard validStat else { throw CatalogStore.InvalidRequest() }
         let chapterLabels = try String.fetchAll(db, sql: "SELECT title FROM catalog_chapters WHERE file_id=? AND user_edited=1 AND stale=0 AND source_revision=? ORDER BY id", arguments: [fileID,revision])
         let eventLabels = try String.fetchAll(db, sql: """
