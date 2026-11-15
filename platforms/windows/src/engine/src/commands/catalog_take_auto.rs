@@ -744,18 +744,33 @@ pub(crate) fn crop_rgb(rgb: &[u8], width: usize, tile: &take_scoring::Tile) -> V
 fn video_signals(path: &Path) -> Option<Signals> {
     use std::sync::atomic::AtomicBool;
     let cancelled = AtomicBool::new(false);
-    let probe = super::video_export::analysis_probe(path, &cancelled).ok()?;
+    let probe = super::timeline_media::probe(path, &cancelled).ok()?;
     let (w, h) = super::video_export::fitted_size(probe.width, probe.height, take_scoring::VIDEO_LONG_SIDE);
     let frame = |seconds: f64| {
-        super::video_export::frame_rgb(path, seconds, w, h, &cancelled)
-            .ok()
-            .map(|rgb| Luma::from_rgb(&rgb, w as usize, h as usize))
+        take_frame(path, seconds, (w, h), &cancelled).map(|rgb| Luma::from_rgb(&rgb, w as usize, h as usize))
     };
     let pairs: Vec<(f64, Luma, Luma)> = take_scoring::anchor_times(probe.duration, 6, 0.2)
         .into_iter()
         .filter_map(|t| Some((t, frame(t)?, frame(t + 0.2)?)))
         .collect();
     take_scoring::video_signals(&pairs, probe.duration)
+}
+
+/// The Mac app's engine has no FFmpeg runtime; it takes frames from AVFoundation, as the Swift engine does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn take_frame(path: &Path, seconds: f64, size: (u32, u32), cancelled: &std::sync::atomic::AtomicBool) -> Option<Vec<u8>> {
+    let output = std::env::temp_dir().join(format!("fileid-take-frame-{}.jpg", uuid::Uuid::new_v4()));
+    let decoded = super::timeline_media::frame_jpeg(path, seconds, size, &output, cancelled)
+        .ok()
+        .and_then(|()| image::open(&output).ok());
+    let _ = std::fs::remove_file(&output);
+    let rgb = decoded?.to_rgb8();
+    (rgb.dimensions() == size).then(|| rgb.into_raw())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+fn take_frame(path: &Path, seconds: f64, size: (u32, u32), cancelled: &std::sync::atomic::AtomicBool) -> Option<Vec<u8>> {
+    super::video_export::frame_rgb(path, seconds, size.0, size.1, cancelled).ok()
 }
 
 fn quality(q: take_scoring::Quality) -> CatalogTakeQuality {
@@ -790,6 +805,14 @@ fn quality(q: take_scoring::Quality) -> CatalogTakeQuality {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn a_video_is_scored_from_avfoundation_frames() {
+        let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../shared/test-corpus/conformance-media/clip-rotated.mov");
+        assert!(super::video_signals(&clip).is_some(), "the Mac engine has no FFmpeg runtime; frames come from AVFoundation");
+    }
+
     use super::*;
 
     struct Scripted {
