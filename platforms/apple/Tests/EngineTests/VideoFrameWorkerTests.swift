@@ -93,7 +93,8 @@ struct VideoFrameWorkerTests {
     }
 
     /// A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and 518318480 ns.
-    /// Foundation's Date gives ...256674; the Rust engine and Python store ...256673.
+    /// Foundation's Date gives ...256674; the Rust engine, Python and now this engine store ...256673,
+    /// and a revision written with the old Date rounding still matches.
     @Test func sourceRevisionToleratesTheOtherEnginesRoundingOfTheSameModifiedTime() throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDRevision-\(UUID().uuidString).bin")
         try Data("clip".utf8).write(to: file)
@@ -102,12 +103,12 @@ struct VideoFrameWorkerTests {
         var times = [stamp, stamp]
         #expect(utimensat(AT_FDCWD, file.path, &times, 0) == 0)
         let onDisk = try VideoFrameWorker.currentRevision(file)
-        let swiftRevision = "4:4745314456662256674"
+        let oldSwiftRevision = "4:4745314456662256674"
         let rustRevision = "4:4745314456662256673"
-        #expect(onDisk == swiftRevision)
-        #expect(onDisk != rustRevision)
-        #expect(VideoFrameMetadata.sameSource(onDisk, rustRevision))
-        #expect(VideoFrameMetadata.sameSource(rustRevision, onDisk))
+        #expect(onDisk == rustRevision)
+        #expect(onDisk != oldSwiftRevision)
+        #expect(VideoFrameMetadata.sameSource(onDisk, oldSwiftRevision))
+        #expect(VideoFrameMetadata.sameSource(oldSwiftRevision, onDisk))
         #expect(VideoFrameMetadata.sameSource(onDisk, onDisk))
     }
 
