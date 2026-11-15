@@ -272,7 +272,12 @@ public sealed partial class RestructureView : UserControl
     // ---- Plan rendering -------------------------------------------------
 
     internal static bool IsPlanRestructureErrorKind(string? kind)
-        => kind is "plan_restructure_failed" or "plan_restructure_db" or "plan_restructure_store";
+        => kind is "plan_restructure_failed" or "plan_restructure_db" or "plan_restructure_store" or "plan_restructure_root";
+
+    internal static string PlanErrorStatusText(string? kind)
+        => kind == "plan_restructure_root"
+            ? $"{EngineErrorText.Title(kind)}. {EngineErrorText.Text(kind, null)}"
+            : "FileID couldn't work out a plan. Try again.";
 
     internal static bool ShouldReleaseApplyGuardOnPlanArrival(
         bool requestInFlight, object? arrivingPlan, object? applyingPlan)
@@ -1321,9 +1326,11 @@ public sealed partial class RestructureView : UserControl
         }
         if (IsPlanRestructureErrorKind(err.Kind))
         {
-            PlanStatusText.Text = "FileID couldn't work out a plan. Try again.";
+            PlanStatusText.Text = PlanErrorStatusText(err.Kind);
             _ = ShowAlertAsync("Couldn't suggest a layout",
-                EngineErrorText.Plain(err.Message, "FileID couldn't work out a plan. Try again, or rescan the folder first."));
+                err.Kind == "plan_restructure_root"
+                    ? PlanErrorStatusText(err.Kind)
+                    : EngineErrorText.Plain(err.Message, "FileID couldn't work out a plan. Try again, or rescan the folder first."));
         }
         else if (err.Kind == "undo_restructure")
         {

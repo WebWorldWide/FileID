@@ -17,8 +17,18 @@ public class RestructurePagedPlanGuardTests
     [InlineData("plan_restructure_failed")]
     [InlineData("plan_restructure_db")]
     [InlineData("plan_restructure_store")]
+    [InlineData("plan_restructure_root")]
     public void EnginePlanErrorKinds_AreRecognized(string kind)
         => Assert.True(RestructureView.IsPlanRestructureErrorKind(kind));
+
+    [Fact] // same sentence as the Mac and GTK apps
+    public void AMissingFolderReadsLikeTheMac()
+    {
+        Assert.Equal("This folder isn't available. Reconnect it, then try again.",
+            RestructureView.PlanErrorStatusText("plan_restructure_root"));
+        Assert.Equal("FileID couldn't work out a plan. Try again.",
+            RestructureView.PlanErrorStatusText("plan_restructure_failed"));
+    }
 
     [Theory]
     [InlineData("apply_restructure")]
