@@ -187,10 +187,23 @@ struct ScanCatchUpTests {
         try q.read { db in
             let failures = try Row.fetchAll(db, sql: "SELECT * FROM scan_failures ORDER BY file_id")
             #expect(failures.count == 2)
-            #expect(failures[0]["file_id"] == 1 && failures[0]["size_bytes"] == 100 && failures[0]["modified_at"] == 10.5)
-            #expect(failures[0]["engine_build"] == "fileid-engine 1.2.3 apple" && failures[0]["attempts"] == 3)
-            #expect(failures[0]["failed_at"] == 77.0)
-            #expect(failures[1]["file_id"] == 3 && failures[1]["engine_build"] == "not json" && failures[1]["attempts"] == 2)
+            // One typed value per check: a chain of untyped row subscripts in one
+            // #expect is more than the CI compiler type-checks in its time limit.
+            let first = failures[0], second = failures[1]
+            let firstID: Int64 = first["file_id"], firstSize: Int64 = first["size_bytes"]
+            let firstModified: Double = first["modified_at"], firstFailedAt: Double = first["failed_at"]
+            let firstBuild: String = first["engine_build"], firstAttempts: Int = first["attempts"]
+            #expect(firstID == 1)
+            #expect(firstSize == 100)
+            #expect(firstModified == 10.5)
+            #expect(firstBuild == "fileid-engine 1.2.3 apple")
+            #expect(firstAttempts == 3)
+            #expect(firstFailedAt == 77.0)
+            let secondID: Int64 = second["file_id"], secondBuild: String = second["engine_build"]
+            let secondAttempts: Int = second["attempts"]
+            #expect(secondID == 3)
+            #expect(secondBuild == "not json")
+            #expect(secondAttempts == 2)
             let owed = try Row.fetchAll(db, sql: "SELECT file_id, stages FROM scan_catchup ORDER BY file_id")
             #expect(owed.map { [$0["file_id"] as Int, $0["stages"] as Int] } == [[2, 1], [4, 6]])
         }
