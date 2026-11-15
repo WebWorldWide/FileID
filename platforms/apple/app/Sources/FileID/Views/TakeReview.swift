@@ -468,7 +468,8 @@ struct TakeReview: View {
             trashProblem = "FileID is still getting ready. Try again in a moment."
             return
         }
-        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", timeout: 120) else {
+        let commandID = engine.lastSentCommandID
+        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID, timeout: 120) else {
             trashProblem = "Moving to Trash took too long, so FileID can't tell how many moved. Check the Trash before trying again."
             return
         }
@@ -490,7 +491,7 @@ struct TakeReview: View {
                 Task {
                     let before = engine.bulkActionResultSignal
                     guard engine.send(.restoreFromTrash(batchID: batch)) else { return }
-                    let restored = await TakeRequests.bulkResult(engine, after: before, prefix: "restoreFromTrash", timeout: 120)
+                    let restored = await TakeRequests.bulkResult(engine, after: before, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 120)
                     if keepAllShots {
                         _ = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
                                                                             takeDecision: CatalogTakeDecision(groupKey: group.groupKey, decision: "reopen", fileIDs: keptIDs)), timeout: 30)
@@ -536,8 +537,8 @@ enum TakeRequests {
         await engine.catalogReply(to: request, timeout: .seconds(timeout))
     }
 
-    static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, timeout: Double) async -> BulkActionResult? {
-        await engine.bulkActionResult(after: signal, prefix: prefix, timeout: .seconds(timeout))
+    static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, commandID: String? = nil, timeout: Double) async -> BulkActionResult? {
+        await engine.bulkActionResult(after: signal, prefix: prefix, commandID: commandID, timeout: .seconds(timeout))
     }
 }
 
