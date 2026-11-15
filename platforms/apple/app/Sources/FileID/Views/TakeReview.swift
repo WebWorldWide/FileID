@@ -623,6 +623,7 @@ private struct ZoomedTake: View {
     let url: URL
     let box: CatalogTakeBox?
     @State private var image: NSImage?
+    @State private var failed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -639,13 +640,20 @@ private struct ZoomedTake: View {
                     Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
+            } else if failed {
+                Image(systemName: "photo").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                    .frame(width: geo.size.width, height: geo.size.height)
             } else {
                 IndeterminateBar().frame(width: 60).frame(width: geo.size.width, height: geo.size.height)
             }
         }
         .clipped()
         .animation(Theme.springStandard, value: box)
-        .task(id: url) { image = await ThumbnailService.shared.thumbnail(for: url, size: 1600) }
+        .task(id: url) {
+            failed = false
+            image = await ThumbnailService.shared.thumbnail(for: url, size: 1600)
+            failed = image == nil
+        }
         .accessibilityHidden(true)
     }
 }

@@ -257,10 +257,11 @@ public final class ThumbnailService {
     /// `generateRepresentations(for:)` calls back per representation type
     /// and double-resumes the continuation.
     nonisolated static func quickLookJPEG(url: URL, size: CGFloat, scale: CGFloat) async -> Data? {
-        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+        let side = quickLookSide(size: size, scale: scale)
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             let req = QLThumbnailGenerator.Request(
                 fileAt: url,
-                size: CGSize(width: size, height: size),
+                size: CGSize(width: side, height: side),
                 scale: scale,
                 representationTypes: .thumbnail
             )
@@ -271,6 +272,12 @@ public final class ThumbnailService {
                 cont.resume(returning: jpegData(rep.cgImage))
             }
         }
+    }
+
+    /// Quick Look refuses a request above about 4000 px on a side ("Could not generate a thumbnail"),
+    /// which left large previews of big photos loading forever.
+    nonisolated static func quickLookSide(size: CGFloat, scale: CGFloat) -> CGFloat {
+        min(size, 3072 / max(scale, 1))
     }
 
     nonisolated static func jpegData(_ image: CGImage) -> Data? {

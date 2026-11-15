@@ -31,3 +31,12 @@ import CoreGraphics
         #expect(!PageThumbnail.isBlank(page(width: 314, height: 512, markTop: true), crop: crop))
     }
 }
+
+@Suite struct QuickLookRequestTests {
+    @Test func requestsStayUnderQuickLooksLimit() {
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 2) == 1536)
+        #expect(ThumbnailService.quickLookSide(size: 512, scale: 2) == 512)
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 1) == 2048)
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 0) == 2048)
+    }
+}
