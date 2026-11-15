@@ -1348,9 +1348,11 @@ pub(crate) async fn handle_trash_files(
         bind_macos_trash_receipts(&mut outcomes, &mut entry);
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
+        let mut trashed_persons: Vec<i64> = Vec::new();
         for (candidate, outcome) in candidates.iter().zip(outcomes) {
             match outcome {
                 CheckedTrashOutcome::Trashed => {
+                    trashed_persons.extend(crate::db::person_counts::persons_of_files(&tx, &[candidate.file_id])?);
                     let changed = tx.execute(
                         "DELETE FROM files \
                          WHERE id=?1 AND path_text=?2 AND size_bytes=?3 \
@@ -1440,6 +1442,9 @@ pub(crate) async fn handle_trash_files(
                 }
             }
         }
+        trashed_persons.sort_unstable();
+        trashed_persons.dedup();
+        crate::db::person_counts::reconcile(&tx, &trashed_persons)?;
         if let Err(error) = tx.commit() {
             tracing::error!(
                 error = %error,

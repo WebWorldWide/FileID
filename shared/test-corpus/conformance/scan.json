@@ -776,5 +776,6 @@
         ]
       }
     ]
-  }
+  },
+  {"name": "scan-corrects-stale-person-file-counts", "description": "A completed scan recounts every person whose stored file_count differs from the files holding a counted face: a count that is too high, a person whose only face is excluded, a person with no face left, and a count that was already right. Both engines store the same numbers, and a person's two faces on one file count once.", "tree": [{"path": "notes.txt", "content": "count check\n", "mtime": 1789812000}], "sql": ["INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(901,'/outside/1.jpg',901,1,0,'image','jpg'),(902,'/outside/2.jpg',902,1,0,'image','jpg'),(903,'/outside/3.jpg',903,1,0,'image','jpg')", "INSERT INTO persons(id,created_at,file_count) VALUES(1,0,99),(2,0,5),(3,0,7),(4,0,1)", "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,excluded) VALUES(1,901,1,X'00','[0,0,1,1]',0),(2,901,1,X'00','[0,0,1,1]',0),(3,902,1,X'00','[0,0,1,1]',0),(4,903,1,X'00','[0,0,1,1]',1),(5,903,2,X'00','[0,0,1,1]',1),(6,903,4,X'00','[0,0,1,1]',0)"], "steps": [{"label": "scan", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 180, "abortOnError": true, "expect": {"totalFiles": 1, "processedFiles": 1, "failedFiles": 0}}, {"label": "counts", "db": "SELECT id,file_count FROM persons ORDER BY id", "expect": [[1, 2], [2, 0], [3, 0], [4, 1]]}]}
 ]

@@ -676,9 +676,11 @@ fn remove_victim_groups(
     }
 
     let tx = conn.transaction()?;
+    let persons = fileid_engine::db::person_counts::persons_of_files(&tx, &removed_ids)?;
     for id in removed_ids {
         tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
     }
+    fileid_engine::db::person_counts::reconcile(&tx, &persons)?;
     tx.commit()?;
     Ok(result)
 }

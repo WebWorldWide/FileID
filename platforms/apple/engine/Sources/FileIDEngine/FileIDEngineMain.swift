@@ -1571,10 +1571,12 @@ struct FileIDEngineMain {
                 }
                 dirty = true
                 try await database.pool.write { db in
+                    let persons = try PersonCounts.persons(ofFiles: [id], db)
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
                     guard db.changesCount == 1 else {
                         throw CocoaError(.fileWriteUnknown)
                     }
+                    try Self.reconcilePersons(persons, db: db)
                 }
                 messages.append(item(id, ok: true))
             } catch {
@@ -2214,6 +2216,7 @@ struct FileIDEngineMain {
             await sink.emit(.phaseChanged(.postScan))
             await sweepOrphans(database: database, scanRootPath: url.path,
                                 scanStart: sweepStart, sink: sink, sessionID: session.id)
+            await recountStalePersons(database: database, sessionID: session.id)
             if datesCurrent { CaptureDateBackfill.markDone(root: url) } else {
                 await CaptureDateBackfill.runIfNeeded(database: database, root: url,
                                                        isCancelled: { ScanCoordinator.isCancelledSync() })
@@ -2726,6 +2729,17 @@ struct FileIDEngineMain {
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.
+    /// A count stored by an older build, or left by a path that forgot the recount,
+    /// corrects itself at the end of every completed scan.
+    private static func recountStalePersons(database: Database, sessionID: String) async {
+        do {
+            let fixed = try await database.pool.write { db in try PersonCounts.recountStale(db) }
+            if fixed > 0 { JSONLog.shared.info(ev: "person_counts_corrected", sess: sessionID, extra: ["fixed": AnyCodable(fixed)]) }
+        } catch {
+            JSONLog.shared.warn(ev: "person_counts_recount_failed", sess: sessionID, error: "\(error)")
+        }
+    }
+
     private static func markSessionFinal(
         database: Database,
         session: ScanCoordinator.Session,
