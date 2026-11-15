@@ -156,6 +156,7 @@ fn commit_batch(
             .context("transition observed zero-byte files")?;
     let mut indexed = 0;
     let mut text_indexed = 0;
+    let mut dropped_face_persons: Vec<i64> = Vec::new();
     {
         let mut mark_seen = tx
             .prepare(
@@ -259,6 +260,9 @@ fn commit_batch(
                         delete_auto_tags
                             .execute(params![file_id])
                             .context("clear stale automatic tags")?;
+                        dropped_face_persons.extend(
+                            fileid_engine::db::person_counts::persons_of_files(&tx, &[file_id])?,
+                        );
                         delete_faces.execute(params![file_id])?;
                         delete_ocr.execute(params![file_id])?;
                         delete_clip.execute(params![file_id])?;
@@ -280,6 +284,9 @@ fn commit_batch(
             }
         }
     }
+    dropped_face_persons.sort_unstable();
+    dropped_face_persons.dedup();
+    fileid_engine::db::person_counts::reconcile(&tx, &dropped_face_persons)?;
     tx.commit().context("commit scan batch")?;
     finish_zero_byte_mutation(zero_byte_mutation);
     Ok((indexed, text_indexed, rejected_zero_bytes))

@@ -453,11 +453,16 @@ pub(crate) fn reconcile_trashed_rows(
                 item.trashed_path = Some(found);
                 found_new = true;
             }
-            if let Ok(1) = db.lock().execute(
+            let conn = db.lock();
+            let persons = crate::db::person_counts::persons_of_files(&conn, &[item.file_id]).unwrap_or_default();
+            if let Ok(1) = conn.execute(
                 "DELETE FROM files WHERE id = ?1 AND path_text = ?2",
                 rusqlite::params![item.file_id, item.original_path],
             ) {
                 dropped += 1;
+                if let Err(error) = crate::db::person_counts::reconcile(&conn, &persons) {
+                    tracing::warn!(?error, "person recount after dropping a trashed row failed");
+                }
             }
         }
         if found_new && let Err(error) = append_at(&path, &key, &entry) {

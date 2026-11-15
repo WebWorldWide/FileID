@@ -7,6 +7,7 @@
 //! reads use ephemeral read-only connections opened on demand.
 
 pub mod migrations;
+pub mod person_counts;
 #[path = "../read/mod.rs"]
 pub mod read;
 pub mod zero_byte;

@@ -810,6 +810,14 @@ impl ScanSession {
             tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
         }
 
+        if !self.coordinator.is_cancelled() {
+            match crate::db::person_counts::recount_stale(&self.db_conn.lock()) {
+                Ok(0) => {}
+                Ok(fixed) => tracing::info!(fixed, "[SCAN] corrected stale person file counts"),
+                Err(err) => tracing::warn!(?err, "[SCAN] person file recount failed"),
+            }
+        }
+
         // What the main pass left owed (RAM++ tags in deferred mode, careful
         // text reads), and what an earlier cancelled or interrupted scan of
         // this folder still owes. A cancel here ends the scan as cancelled; the
@@ -1666,12 +1674,25 @@ pub(crate) fn purge_excluded_rows(
                     .map(|rows| rows.filter_map(Result::ok).collect())
             })
             .unwrap_or_default();
+        let persons: Vec<i64> = conn
+            .prepare(
+                "SELECT DISTINCT person_id FROM face_prints WHERE person_id IS NOT NULL AND file_id IN \
+                 (SELECT id FROM files WHERE path_text >= ?1 AND path_text < ?2)",
+            )
+            .and_then(|mut st| {
+                st.query_map(rusqlite::params![lo, hi], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default();
         match conn.execute(
             "DELETE FROM files WHERE path_text >= ?1 AND path_text < ?2",
             rusqlite::params![lo, hi],
         ) {
             Ok(n) => {
                 purged += n as u64;
+                if let Err(err) = crate::db::person_counts::reconcile(conn, &persons) {
+                    tracing::warn!(?err, "person recount after the excluded-rows purge failed");
+                }
                 for id in crop_ids {
                     crate::pipeline::dbwriter::remove_face_crop(id);
                 }
@@ -2282,9 +2303,10 @@ mod tests {
             rusqlite::params![in_a],
         )
         .unwrap();
+        conn.execute("INSERT INTO persons (id, created_at, file_count) VALUES (5, 0, 2)", []).unwrap();
         conn.execute(
-            "INSERT INTO face_prints (file_id, print_data, bbox) VALUES (?1, X'00', '[]')",
-            rusqlite::params![in_b],
+            "INSERT INTO face_prints (file_id, print_data, bbox, person_id) VALUES (?1, X'00', '[]', 5), (?2, X'00', '[]', 5)",
+            rusqlite::params![in_b, keeper],
         )
         .unwrap();
 
@@ -2309,7 +2331,9 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
         let face_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM face_prints", [], |r| r.get(0)).unwrap();
-        assert_eq!((tag_count, face_count), (0, 0), "cascade must clear child rows");
+        assert_eq!((tag_count, face_count), (0, 1), "cascade must clear child rows");
+        let person_files: i64 = conn.query_row("SELECT file_count FROM persons WHERE id = 5", [], |r| r.get(0)).unwrap();
+        assert_eq!(person_files, 1, "the purge recounts the person whose face went");
     }
 
     /// Two emits closer than MIN_RATE_DT must not re-divide and spike the rate.
