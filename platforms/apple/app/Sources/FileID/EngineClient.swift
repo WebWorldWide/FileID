@@ -632,8 +632,6 @@ public final class EngineClient {
         return nil
     }
 
-    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
-    /// (an engine that exits at once is the Rust-to-Swift fallback case).
     /// Error kinds that are a notice, not a failure: the user's own Cancel, a repeated Scan click (Swift sends
     /// `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
     nonisolated static func isQuietNotice(_ kind: String) -> Bool {
@@ -644,6 +642,8 @@ public final class EngineClient {
         }
     }
 
+    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
+    /// (an engine that exits at once is the Rust-to-Swift fallback case).
     nonisolated static func refuseSigpipe(on pipe: Pipe) {
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
