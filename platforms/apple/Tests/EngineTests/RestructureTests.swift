@@ -133,6 +133,34 @@ struct RestructureCascadeTests {
     }
 }
 
+@Suite("Restructure parity with the Rust engine")
+struct RestructureEngineParityTests {
+    @Test("A file belongs to a person only when every face is named and all are one person")
+    func personOwnershipNeedsOneNamedPerson() {
+        func owner(_ names: String?, _ faces: Int, _ named: Int, _ people: Int) -> String? {
+            Restructure.unambiguousPersonName(
+                names: names, faceCount: faces, namedFaceCount: named, namedPersonCount: people)
+        }
+        #expect(owner("Alice", 1, 1, 1) == "Alice")
+        #expect(owner("Alice", 2, 2, 1) == "Alice", "two faces of one person")
+        #expect(owner("Alice\u{1F}Bob", 2, 2, 2) == nil, "two named people")
+        #expect(owner("Alice", 2, 1, 1) == nil, "a named face beside an unnamed one")
+        #expect(owner(nil, 1, 0, 0) == nil)
+        #expect(owner("\u{1F}  ", 1, 0, 0) == nil)
+        #expect(owner("Alice", 0, 0, 0) == nil)
+    }
+
+    @Test("All-digit export folders are never learn-your-style targets; years are")
+    func digitFoldersAreJunkPrototypesExceptYears() {
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/20190412"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/332699"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/12345"))
+        #expect(!RestructureSemantic.isJunkPrototypeFolder("/lib/2019"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/1850"))
+        #expect(!RestructureSemantic.isJunkPrototypeFolder("/lib/2019 Trip"))
+    }
+}
+
 @Suite("Restructure apply guards")
 struct RestructureApplyTests {
 
