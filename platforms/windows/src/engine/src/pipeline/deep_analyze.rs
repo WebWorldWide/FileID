@@ -644,7 +644,6 @@ pub(crate) async fn analyze_file_via_server(
     mut on_token: impl FnMut(&str),
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
-    use crate::models::vlm;
     let face_names = &context.subjects[..];
     let asked = mode.asked_of_model(context);
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1351,9 +1350,9 @@ mod tests {
     }
 
     impl VisualAsker for Recorder<'_> {
-        async fn ask(&self, prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
+        fn ask(&self, prompt: &str, max_tokens: u32) -> impl std::future::Future<Output = anyhow::Result<String>> + Send {
             self.sent.lock().push((prompt.to_owned(), max_tokens));
-            Ok(self.reply.to_owned())
+            std::future::ready(Ok(self.reply.to_owned()))
         }
     }
 
