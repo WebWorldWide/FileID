@@ -734,6 +734,7 @@ public final class Database: @unchecked Sendable {
                     SELECT COUNT(DISTINCT file_id)
                     FROM face_prints
                     WHERE person_id = ?
+                      AND COALESCE(excluded, 0) = 0
                 )
                 WHERE id = ?
                 """, arguments: [target, target])

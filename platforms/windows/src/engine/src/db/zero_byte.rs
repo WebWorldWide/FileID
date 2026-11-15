@@ -117,7 +117,7 @@ pub fn apply_validated_zero_byte_files(
     let mut refresh_person = conn
         .prepare_cached(
             "UPDATE persons SET \
-             file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1), \
+             file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0), \
              representative_face_id = (SELECT id FROM face_prints \
                  WHERE person_id = ?1 ORDER BY COALESCE(face_quality, 0) DESC, id LIMIT 1) \
              WHERE id = ?1",
@@ -336,6 +336,39 @@ mod tests {
             })
             .unwrap();
         assert_eq!(person, (0, None));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn person_file_count_ignores_excluded_faces_after_a_zero_byte_transition() {
+        let (root, path, conn) = fixture("excluded-count");
+        let path_text = path.to_string_lossy().into_owned();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) \
+             VALUES (7, ?1, 1, 99, 1, 'doc', 'txt', 0), (8, '/other/8.jpg', 2, 9, 1, 'image', 'jpg', 0), \
+             (9, '/other/9.jpg', 3, 9, 1, 'image', 'jpg', 0)",
+            params![path_text],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO persons(id, name, file_count, created_at) VALUES (3, 'Person', 3, 1)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO face_prints(id, file_id, person_id, print_data, bbox, face_quality, excluded) VALUES \
+             (11, 7, 3, x'00', '0,0,1,1', 0.5, 0), (12, 8, 3, x'00', '0,0,1,1', 0.5, 0), \
+             (13, 9, 3, x'00', '0,0,1,1', 0.5, 1)",
+            [],
+        )
+        .unwrap();
+        deactivate_zero_byte_files(
+            &conn,
+            &[ZeroByteObservation {
+                path: path.clone(),
+                file_ref: crate::platform::file_ref(&path),
+            }],
+        )
+        .unwrap();
+        let count: i64 = conn.query_row("SELECT file_count FROM persons WHERE id = 3", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1, "the excluded face's file is not counted");
         std::fs::remove_dir_all(root).unwrap();
     }
 

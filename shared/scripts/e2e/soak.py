@@ -715,25 +715,23 @@ class Soak:
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         eng.send("startScan", {"rootPath": self.lib, "rescan": False})
         eng.send("renameFiles", {"renames": [{"fileID": i1, "newName": f"during-scan-{rnd}" + os.path.splitext(p1)[1]}]})
+        # The first scan holds the engine's scan slot until its scanComplete, and a scan of this library can run
+        # longer than any fixed per-event wait on a loaded machine; the next startScan below is only valid once
+        # that scanComplete is in, so wait for both events against one overall deadline.
         deadline = time.time() + 600
-        got_bulk, completes = False, 0
+        got_bulk, got_complete = False, False
         newp = os.path.join(os.path.dirname(p1), f"during-scan-{rnd}" + os.path.splitext(p1)[1])
-        quiet = 0
-        while time.time() < deadline:
+        while time.time() < deadline and not (got_bulk and got_complete):
             try:
                 ev = eng.wait(lambda e: kind(e) in ("scanComplete", "bulkActionResult") or (kind(e) == "phaseChanged" and inner(e) in ("cancelled", "failed")), 60)
             except TimeoutError:
-                break
+                continue
             if kind(ev) == "bulkActionResult":
                 got_bulk = True
             else:
-                completes += 1
-            if got_bulk and completes >= 1:
-                try:
-                    eng.wait(lambda e: kind(e) in ("scanComplete",), 5)
-                except TimeoutError:
-                    pass
-                break
+                got_complete = True
+        if not got_complete:
+            fail(rnd, "scan during overlapping commands ends", "")
         if not got_bulk:
             fail(rnd, "rename during a scan gets its reply", "")
         # whichever way it landed, put the name back and rescan

@@ -289,6 +289,28 @@ struct FaceQueuesTests {
         #expect(result?.groups[0] != result?.groups[2])
         #expect(FaceQueues.twoGroups([a, a]) == nil)
     }
+
+    @Test func personFileCountIgnoresExcludedFaces() async throws {
+        let db = try makeDB()
+        try await db.pool.write { d in
+            for id: Int64 in 1...3 { try file(d, id) }
+            try person(d, 1, name: "Alex")
+            try face(d, 1, file: 1, person: 1, vector(1, 0))
+            try face(d, 2, file: 2, person: 1, vector(1, 0), excluded: true)
+            try face(d, 3, file: 3, person: 1, vector(1, 0))
+            try face(d, 4, file: 3, person: 1, vector(1, 0), excluded: true)
+            try FileIDEngineMain.reconcilePersons([1], db: d)
+        }
+        func count() async throws -> Int64? {
+            try await db.pool.read { try Int64.fetchOne($0, sql: "SELECT file_count FROM persons WHERE id=1") }
+        }
+        #expect(try await count() == 2)
+        try await db.pool.write { d in
+            try d.execute(sql: "UPDATE face_prints SET excluded=0 WHERE id=2")
+            try FileIDEngineMain.reconcilePersons([1], db: d)
+        }
+        #expect(try await count() == 3)
+    }
 }
 
 @Suite("Face refresh backlog", .serialized)
