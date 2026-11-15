@@ -66,6 +66,28 @@ if grep -aqF 'FILEID_TEST_TRASH_ROOT' "$BUILD_DIR/FileIDEngine"; then
     echo "❌ $BUILD_DIR/FileIDEngine is a test build (FILEID_TEST_TRASH_ROOT)"; exit 1
 fi
 
+# Run-path entries that point outside the bundle (the Xcode toolchain, a Metal
+# toolchain) resolve nothing in a shipped app; drop every absolute one except
+# /usr/lib and /System, and fail if one remains.
+foreign_rpaths() {
+    otool -l "$1" 2>/dev/null | awk '$1=="cmd"{c=$2} c=="LC_RPATH" && $1=="path"{print $2}' \
+        | grep -E '^/' | grep -vE '^(/usr/lib|/System)(/|$)' || true
+}
+strip_foreign_rpaths() {
+    local rpath
+    while IFS= read -r rpath; do
+        [ -n "$rpath" ] && install_name_tool -delete_rpath "$rpath" "$1"
+    done < <(foreign_rpaths "$1")
+    return 0
+}
+bundle_macho_files() {
+    local file
+    while IFS= read -r file; do
+        file "$file" | grep -q 'Mach-O' && echo "$file"
+    done < <(find "$CONTENTS/MacOS" "$CONTENTS/Frameworks" -type f 2>/dev/null)
+    return 0
+}
+
 rm -rf "$APP_BUNDLE"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
@@ -89,6 +111,9 @@ for executable in "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"; do
     if ! otool -l "$executable" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
         install_name_tool -add_rpath '@executable_path/../Frameworks' "$executable"
     fi
+done
+for executable in "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"; do
+    strip_foreign_rpaths "$executable"
 done
 
 
@@ -133,6 +158,8 @@ if [ "$WITH_RUST_ENGINE" = "1" ]; then
     cp "$RUST_ENGINE" "$CONTENTS/MacOS/fileidd"
     chmod +x "$CONTENTS/MacOS/fileidd"
     cp "$APPLE_KIT" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"
+    strip_foreign_rpaths "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"
+    strip_foreign_rpaths "$CONTENTS/MacOS/fileidd"
     # MLX looks for mlx.metallib beside the binary that contains it, which for
     # fileidd is libFileIDAppleKit.dylib (Stage 7 VLM sessions).
     if [ -f "$METALLIB_CACHE" ]; then
@@ -174,6 +201,13 @@ if [ "$WITH_RUST_ENGINE" = "1" ]; then
     done
     echo "🦀 Bundled the Rust engine as Contents/MacOS/fileidd, the default (back to Swift: defaults write com.fileid.app engine.backend swift)"
 fi
+
+while IFS= read -r macho; do
+    leftover="$(foreign_rpaths "$macho")"
+    if [ -n "$leftover" ]; then
+        echo "❌ $macho keeps run-path entries outside the bundle: $leftover"; exit 1
+    fi
+done < <(bundle_macho_files)
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

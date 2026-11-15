@@ -2300,8 +2300,20 @@ pub mod video {
         /// Tightly packed RGB8.
         pub rgb: Vec<u8>,
     }
-    /// Keyframe at ~25% of duration through FileID's vetted FFmpeg runtime
-    /// (`FILEID_FFMPEG_DIR`, or `media/` beside the engine), as on Linux.
+    /// Keyframe at ~25% of duration. The Mac app's engine takes it from
+    /// AVFoundation through FileIDAppleKit (there is no FFmpeg runtime on the
+    /// Mac), as the Swift engine does; elsewhere it is FileID's vetted FFmpeg
+    /// runtime (`FILEID_FFMPEG_DIR`, or `media/` beside the engine), as on Linux.
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
+        use anyhow::Context;
+        let image = crate::apple::scan::video_keyframe(path, 1280, std::time::Duration::from_secs(20))
+            .context("The video has no frame AVFoundation can decode")?;
+        let (rgb, width, height) = image.rgb().context("The video frame could not be read")?;
+        Ok(VideoFrame { width, height, rgb })
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         use anyhow::Context;
         let never = std::sync::atomic::AtomicBool::new(false);
@@ -2321,6 +2333,23 @@ pub mod video {
 
     #[cfg(test)]
     mod tests {
+        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+        #[test]
+        fn avfoundation_gives_the_keyframe_of_the_fixture_clip() {
+            let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../shared/test-corpus/conformance-media/clip-rotated.mov");
+            let frame = super::keyframe_25pct(&clip).expect("keyframe");
+            assert!(frame.width > 0 && frame.height > 0);
+            assert_eq!(frame.rgb.len(), frame.width as usize * frame.height as usize * 3);
+            assert!(frame.rgb.iter().any(|byte| *byte != frame.rgb[0]), "a flat frame is a failed decode");
+            let broken = std::env::temp_dir().join(format!("fileid-broken-{}.mov", std::process::id()));
+            std::fs::write(&broken, vec![0u8; 2048]).unwrap();
+            let error = super::keyframe_25pct(&broken).unwrap_err();
+            let _ = std::fs::remove_file(&broken);
+            assert!(!format!("{error:#}").contains("FFmpeg"), "{error:#}");
+        }
+
+        #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
         #[test]
         fn missing_runtime_is_a_clear_error() {
             if std::env::var_os("FILEID_FFMPEG_DIR").is_some() {

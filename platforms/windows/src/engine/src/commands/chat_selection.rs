@@ -592,6 +592,7 @@ pub(crate) trait FrameSource: Send + Sync {
 }
 
 struct Vetted;
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 impl FrameSource for Vetted {
     fn available(&self) -> bool {
         super::video_export::available()
@@ -601,6 +602,26 @@ impl FrameSource for Vetted {
     }
     fn frame(&self, path: &Path, seconds: f64, size: (u32, u32), cancel: &AtomicBool) -> Result<Vec<u8>> {
         super::video_export::frame_rgb(path, seconds, size.0, size.1, cancel)
+    }
+}
+
+/// The Mac app's engine looks at a video through AVFoundation, as the Swift engine does.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl FrameSource for Vetted {
+    fn available(&self) -> bool {
+        super::timeline_media::available()
+    }
+    fn probe(&self, path: &Path, cancel: &AtomicBool) -> Result<super::video_export::AnalysisProbe> {
+        super::timeline_media::probe(path, cancel)
+    }
+    fn frame(&self, path: &Path, seconds: f64, size: (u32, u32), cancel: &AtomicBool) -> Result<Vec<u8>> {
+        let output = std::env::temp_dir().join(format!("fileid-selection-frame-{}.jpg", uuid::Uuid::new_v4()));
+        let result = super::timeline_media::frame_jpeg(path, seconds, size, &output, cancel)
+            .and_then(|()| Ok(image::open(&output)?.to_rgb8()));
+        let _ = std::fs::remove_file(&output);
+        let image = result?;
+        anyhow::ensure!(image.dimensions() == size, "The decoded frame has the wrong size");
+        Ok(image.into_raw())
     }
 }
 

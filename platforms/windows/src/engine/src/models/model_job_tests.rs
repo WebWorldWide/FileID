@@ -11,6 +11,7 @@ fn root() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir(&p).unwrap();
     println!("Generated model job state retained: {}", p.display());
     p

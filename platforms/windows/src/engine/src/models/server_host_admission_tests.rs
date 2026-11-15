@@ -10,6 +10,7 @@ fn root() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("image.png"), [0x89, b'P', b'N', b'G']).unwrap();
     println!("Generated host admission state retained: {}", root.display());

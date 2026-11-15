@@ -12,6 +12,7 @@ fn root() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir(&path).unwrap();
     std::fs::write(path.join("image.png"), [0x89, b'P', b'N', b'G']).unwrap();
     println!("Generated request lifetime state retained: {}", path.display());

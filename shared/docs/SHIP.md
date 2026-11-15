@@ -2,7 +2,15 @@
 
 ## 2026-11-15 Where the release stands
 
-Not release-ready. The code for all three desktop apps, the CLI and the TUI is on `main` (PR #331 and PR #337, merged 2026-11-15, each with every CI check green on its last commit). On `main` itself the Windows app workflow has been red since at least 2026-11-07, because pushes to `main` build on the self-hosted runner with an older MSBuild than pull requests see (NEXT, group A). Nothing since the 2026-11-12 audits has been seen on a screen except the Mac app's debug self-captures, and no signed package of the current source exists on any platform. The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)". The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
+Not release-ready, and closer than it has been. What is true today:
+
+- **Code.** All three desktop apps, the CLI and the TUI are on `main`, and every workflow is green on `main` itself, including `Windows app (.NET)` on the self-hosted runner, which had failed on every push since at least 2026-11-07.
+- **Mac, engine.** A Developer ID build starts the shared Rust engine first and keeps the Swift engine as the fallback. The app has now been seen running on the Rust engine, with the pinned ONNX Runtime 1.22.0 bundled (faces and search by meaning work); that run found and fixed a scan that never ended in the app, an app killed by an engine that exits at once, and five smaller gaps against the Swift engine. App Store builds still run the Swift engine only; the Rust engine passed a local App Sandbox check, and the gate stays shut until a TestFlight build confirms it.
+- **Mac, package.** A Developer ID signed release candidate of the current source exists (`v0.2.0-rc1`, not notarized) and passes every signature, privacy and layout check. Notarization needs the owner's notary credentials; the TestFlight build needs the App Store Connect key and the provisioning profile.
+- **Not seen.** Nothing on Windows or on a Linux desktop has been seen on a screen since the 2026-11-12 audits; the WinUI app is only compiled by CI. On the Mac, sheets, hover states, playback and drag and drop have not been seen, and nothing has been seen on the signed build.
+- **Not signed.** No signed package exists for Windows.
+
+The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)"; the Mac's move to one engine is its Stage 10 checklist. The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
 
 ## 2026-11-06 Linux llama.cpp runtime packaging
 
