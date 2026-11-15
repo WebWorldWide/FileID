@@ -128,7 +128,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/client.rs": "7fd2ec8192f167c89322230f17a3e304802a7133f445c5b8bc2ec0985e8a08f4",
   "platforms/windows/src/engine/src/shell/thumbnail.rs": "b45ae1e8953defb4d2dbc73687f61fb942d77758666824f3493cc5c7fcff6b4f",
   "platforms/windows/src/engine/src/models/native_process.rs": "3ad2cf599df1884712dd6630c53347ce219ecad0c6c68fe5636d472cc2f7e98d",
-  "platforms/windows/src/engine/src/commands/deep_scope.rs": "a97815ccbeadd4f638cfb07ed11e2334210531904265384c1022f961b006f0bf",
+  "platforms/windows/src/engine/src/commands/deep_scope.rs": "49ab265bda91f9c72bdff23211af0fa190a2fa6ffefb92a3807a37b43e067785",
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "61224908a917f143a8113c1fe8c1b6ac127e5d752737105d4cf69bc3b28d16a3",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "72aeec016f19e946f998b7d9dbf35cfb663c89a3565c4405240c1dc514055759",
