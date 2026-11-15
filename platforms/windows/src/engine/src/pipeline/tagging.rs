@@ -2589,11 +2589,12 @@ fn decode_image_sync_imagecrate(
     }
 }
 
-/// macOS takes video frames only from FileID's optional FFmpeg runtime; Windows
-/// (Media Foundation) and Linux (system ffmpeg fallback) always have a decoder.
+/// macOS takes video frames from AVFoundation in the Mac app's engine and
+/// otherwise only from FileID's optional FFmpeg runtime; Windows (Media
+/// Foundation) and Linux (system ffmpeg fallback) always have a decoder.
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn video_frames_available() -> bool {
-    crate::commands::ffmpeg_runtime_available()
+    cfg!(all(target_os = "macos", feature = "apple-adapters")) || crate::commands::ffmpeg_runtime_available()
 }
 #[cfg(any(windows, target_os = "linux"))]
 pub(crate) fn video_frames_available() -> bool {
