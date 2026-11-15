@@ -74,6 +74,12 @@ def kind(p):
     return next(iter(p))
 
 
+# The driver holds the careful text reader cold (FILEID_OCR_WARMUP=0) so runs do not wait on its first compile. A cold
+# reader leaves careful reads owed by design (scan_catchup stage bit 2), so "nothing is still owed" means the tagging
+# bit only. --warm-reader lets the reader warm and checks both bits.
+OWED_MASK = 1
+
+
 class Engine:
     """One engine process with an event pump over both stdout and stderr (the Mac-hosted build writes events to
     stderr). Lines that are not JSON events go to <logfile> and are scanned for panics."""
@@ -89,7 +95,11 @@ class Engine:
         env = {k: v for k, v in os.environ.items() if k != "ORT_DYLIB_PATH"}
         env.update({"HOME": home, "CFFIXED_USER_HOME": home, "XDG_DATA_HOME": state, "LOCALAPPDATA": state,
                     "FILEID_MODELS_DIR": models, "FILEID_HF_CACHE_ROOT": os.path.join(state, "hf"),
-                    "ORT_DISABLE_TELEMETRY": "1", "FILEID_OCR_WARMUP": "0", "TZ": "UTC"})
+                    "ORT_DISABLE_TELEMETRY": "1", "TZ": "UTC"})
+        if OWED_MASK == 1:
+            env["FILEID_OCR_WARMUP"] = "0"
+        else:
+            env.pop("FILEID_OCR_WARMUP", None)
         env["FILEID_DB" if flavor != "swift" else "FILEID_DATABASE_PATH"] = db
         env["FILEID_DATABASE_PATH" if flavor != "swift" else "FILEID_DB"] = db
         if not no_trash:
@@ -919,7 +929,7 @@ class Soak:
 
     def owed(self, eng):
         with ro(eng.db) as c:
-            return c.execute("SELECT count(*) FROM scan_catchup WHERE (stages & 3) != 0 AND file_id IN (SELECT id FROM files WHERE path_text LIKE ?)",
+            return c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0 AND file_id IN (SELECT id FROM files WHERE path_text LIKE ?)",
                              (self.lib + "/%",)).fetchone()[0]
 
     def step_real_first(self, eng):
@@ -1156,7 +1166,7 @@ class Soak:
             if stale or uncovered:
                 fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
             with ro(v.db) as c:
-                owed = c.execute("SELECT count(*) FROM scan_catchup WHERE (stages & 3) != 0").fetchone()[0]
+                owed = c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0").fetchone()[0]
                 noemb = c.execute("SELECT count(*) FROM files f WHERE kind='image' AND failed=0 AND size_bytes>0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings e WHERE e.file_id=f.id)").fetchone()[0]
             if owed:
                 fail(rnd, f"nothing is still owed after the {phase} kill and two scans", owed)
@@ -1405,9 +1415,13 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--models-dir")
     ap.add_argument("--no-trash", action="store_true")
+    ap.add_argument("--warm-reader", action="store_true", help="let the careful text reader warm up and require careful reads to be caught up too")
     ap.add_argument("--cycle-every", type=int, default=2, help="hosted: every Nth round, wait for the idle unload of the scan models and scan again")
     ap.add_argument("--real-dir", default="Real", help="hosted: library subfolder of real camera files; scanned alone first and timed")
     a = ap.parse_args()
+    if a.warm_reader:
+        global OWED_MASK
+        OWED_MASK = 3
     work = os.path.abspath(a.work)
     if not (a.no_trash or os.path.isabs(os.path.join(work, "Trash"))):
         sys.exit("bad work dir")
