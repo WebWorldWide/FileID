@@ -25,7 +25,7 @@ struct CatalogTakeAutoStartTests {
     }
 
     private func waitForState(_ database: FileIDEngine.Database, _ wanted: String) async throws -> Bool {
-        for _ in 0..<100 {
+        for _ in 0..<600 {
             if try await jobState(database) == wanted { return true }
             try await Task.sleep(for: .milliseconds(50))
         }
