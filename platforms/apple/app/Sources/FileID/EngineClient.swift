@@ -1301,7 +1301,7 @@ public final class EngineClient {
         }
     }
 
-    /// Deletes the SQLite library + WAL/SHM siblings + scan log.
+    /// Deletes the SQLite library + WAL/SHM siblings + the engine and app logs.
     /// Safe to call only when the engine isn't running — SQLite
     /// holds the lock otherwise.
     private static func deleteLibraryFiles() {
@@ -1310,10 +1310,8 @@ public final class EngineClient {
         let candidates = [
             "fileid.sqlite",
             "fileid.sqlite-wal",
-            "fileid.sqlite-shm",
-            "logs/scan.jsonl",
-            "logs/app.log"
-        ]
+            "fileid.sqlite-shm"
+        ] + EngineLogFiles.removableNames(in: root.appendingPathComponent("logs", isDirectory: true)).map { "logs/" + $0 }
         for name in candidates {
             let url = root.appendingPathComponent(name)
             if (try? ReadOnlyLocations.requireWritable(url)) != nil {
