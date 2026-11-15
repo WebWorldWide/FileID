@@ -390,6 +390,8 @@ impl DbWriter {
                     "SELECT EXISTS (SELECT 1 FROM tags WHERE file_id = ?1 AND source = 'auto')                      OR EXISTS (SELECT 1 FROM clip_embeddings WHERE file_id = ?1)",
                 )
                 .context("preparing twin children check")?;
+            let mut own_clip = tx.prepare_cached(OWN_CLIP_SQL).context("preparing own clip read")?;
+            let mut own_clip_restore = tx.prepare_cached(OWN_CLIP_RESTORE_SQL).context("preparing own clip restore")?;
             let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
             let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
             let mut twin_clip = tx.prepare_cached(TWIN_CLIP_SQL).context("preparing twin clip copy")?;
@@ -526,6 +528,17 @@ impl DbWriter {
                     }
                     continue;
                 }
+
+                // A file whose date changed with the same bytes: the catalog drops a
+                // row's vector when its size or date changes, so it is read before the
+                // upsert and put back below when no other row has these bytes.
+                let kept_clip: Option<(Vec<u8>, Option<String>)> = match f.content_hash.as_ref() {
+                    Some(hash) if f.reuse_twin => own_clip
+                        .query_row(params![path_text, hash.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()
+                        .with_context(|| format!("own clip read for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                    _ => None,
+                };
 
                 let file_id: i64 = file_stmt
                     .query_row(
@@ -813,6 +826,11 @@ impl DbWriter {
                         }
                         reused_twins += 1;
                     } else {
+                        if let Some((embedding, model)) = &kept_clip {
+                            own_clip_restore
+                                .execute(params![file_id, embedding, model])
+                                .with_context(|| format!("own clip restore for {}", redacted()))?;
+                        }
                         let has_results: bool = twin_children
                             .query_row(params![file_id], |r| r.get(0))
                             .with_context(|| format!("twin children check for {}", redacted()))?;
@@ -1143,6 +1161,16 @@ const fn const_format_twin_lookup() -> &'static str {
         "ORDER BY id LIMIT 1"
     )
 }
+
+const OWN_CLIP_SQL: &str = r#"
+    SELECT c.embedding, c.model FROM clip_embeddings c JOIN files f ON f.id = c.file_id
+    WHERE f.path_text = ?1 AND f.content_hash = ?2
+"#;
+
+const OWN_CLIP_RESTORE_SQL: &str = r#"
+    INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?1, ?2, ?3)
+    ON CONFLICT(file_id) DO NOTHING
+"#;
 
 const TWIN_FILES_SQL: &str = r#"
     UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text,
@@ -3019,6 +3047,22 @@ mod twin_reuse_tests {
             .query_row("SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((failed, tags), (0, 3));
+        let vectors: i64 = db
+            .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/own.jpg'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(vectors, 1, "a date change with the same bytes must not cost the file its vector");
+    }
+
+    #[test]
+    fn a_path_whose_bytes_changed_does_not_keep_the_old_vector() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer.flush(&mut vec![analyzed("/lib/own.jpg", [7u8; 32])], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let mut replaced = reused("/lib/own.jpg", [8u8; 32], "Year_2020");
+        replaced.modified_unix += 10.0;
+        writer.flush(&mut vec![replaced], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let vectors: i64 = conn.lock().query_row("SELECT count(*) FROM clip_embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(vectors, 0, "the vector of the old bytes must not be attached to new bytes");
     }
 }
 
