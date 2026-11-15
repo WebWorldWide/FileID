@@ -184,7 +184,7 @@ struct ScanAdapterTests {
 
     private static func probedBatcher(_ probe: ModelProbe) -> GPURequestBatcher {
         let model = ProbedModel(probe)
-        return GPURequestBatcher(label: "test.batcher", maxBatch: 4, gather: .milliseconds(2)) { pixels, count in
+        return GPURequestBatcher(label: "test.batcher", maxBatch: 4, gather: .milliseconds(2), usesMLX: false) { pixels, count in
             model.probe.ran()
             return (0..<count).map { [pixels[$0]] }
         }

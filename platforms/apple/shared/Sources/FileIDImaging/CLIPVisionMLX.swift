@@ -263,12 +263,13 @@ package final class GPURequestBatcher: @unchecked Sendable {
     }
     private let state = State()
 
-    package init(label: String, maxBatch: Int, gather: DispatchTimeInterval, run: @escaping Run) {
-        Self.capCache()
+    /// `usesMLX: false` is for tests of the batching itself, which run without a Metal library.
+    package init(label: String, maxBatch: Int, gather: DispatchTimeInterval, usesMLX: Bool = true, run: @escaping Run) {
+        if usesMLX { Self.capCache() }
         let state = state
         let box = RunBox(run)
         let thread = Thread {
-            Self.work(state, maxBatch: maxBatch, gather: gather, run: box.run!)
+            Self.work(state, maxBatch: maxBatch, gather: gather, usesMLX: usesMLX, run: box.run!)
             box.run = nil
             state.finished.signal()
         }
@@ -307,7 +308,7 @@ package final class GPURequestBatcher: @unchecked Sendable {
         return slot.result
     }
 
-    private static func work(_ state: State, maxBatch: Int, gather: DispatchTimeInterval, run: Run) {
+    private static func work(_ state: State, maxBatch: Int, gather: DispatchTimeInterval, usesMLX: Bool, run: @escaping Run) {
         let gatherSeconds: Double = switch gather {
         case .seconds(let v): Double(v)
         case .milliseconds(let v): Double(v) / 1_000
@@ -315,7 +316,7 @@ package final class GPURequestBatcher: @unchecked Sendable {
         case .nanoseconds(let v): Double(v) / 1_000_000_000
         default: 0
         }
-        Stream.withNewDefaultStream {
+        let serve = {
             while true {
                 state.condition.lock()
                 while state.pending.isEmpty, !state.stopped { state.condition.wait() }
@@ -336,5 +337,6 @@ package final class GPURequestBatcher: @unchecked Sendable {
                 }
             }
         }
+        if usesMLX { Stream.withNewDefaultStream(serve) } else { serve() }
     }
 }
