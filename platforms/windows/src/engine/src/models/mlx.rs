@@ -281,17 +281,22 @@ fn home() -> Option<PathBuf> {
 /// inside the App Store sandbox `Application Support/FileID/Models/huggingface`;
 /// otherwise `~/Documents/huggingface`; then `models`.
 pub fn models_root() -> Option<PathBuf> {
+    Some(cache_root()?.join("models"))
+}
+
+/// The folder `models` lives in. One rule for every reader, so an engine given
+/// a home for a test or a sandbox never looks in another home's models.
+pub fn cache_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").filter(|root| Path::new(root).is_absolute()) {
-        return Some(PathBuf::from(root).join("models"));
+        return Some(PathBuf::from(root));
     }
     let home = home()?;
     let sandboxed = std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some_and(|id| !id.is_empty());
-    let root = if sandboxed {
+    Some(if sandboxed {
         home.join("Library/Application Support/FileID/Models/huggingface")
     } else {
         home.join("Documents/huggingface")
-    };
-    Some(root.join("models"))
+    })
 }
 
 pub fn model_dir(repo: &Repo) -> Option<PathBuf> {

@@ -146,8 +146,9 @@ const MODELS: &[(&str, &str, f64)] = &[
     ("paligemma_3b", "PaliGemma 3B (8-bit)", 4.0),
 ];
 
-/// The Swift engine's Hugging Face root: `FILEID_HF_CACHE_ROOT` when absolute,
-/// else `~/Documents/huggingface` (Developer ID builds).
+/// The Swift engine's Hugging Face root (`models::mlx::cache_root`: the
+/// override, the sandbox container, or `~/Documents/huggingface` under the
+/// home CoreFoundation resolves, `CFFIXED_USER_HOME` first).
 pub fn huggingface_root() -> PathBuf {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").map(PathBuf::from).filter(|path| path.is_absolute()) {
         return root;
@@ -157,8 +158,7 @@ pub fn huggingface_root() -> PathBuf {
     if cfg!(test) {
         return std::env::temp_dir().join(format!("fileid-test-no-hf-root-{}", std::process::id()));
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join("Documents").join("huggingface")
+    crate::models::mlx::cache_root().unwrap_or_else(|| std::env::temp_dir().join("fileid-no-home").join("huggingface"))
 }
 
 fn repo(kind: &str) -> Option<&'static crate::models::manifest::VlmRepo> {

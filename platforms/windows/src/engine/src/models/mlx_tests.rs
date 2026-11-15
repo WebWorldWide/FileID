@@ -203,6 +203,7 @@ fn models_root_follows_model_cache_paths() {
     assert_eq!(models_root(), Some(scratch.dir.join("home/Documents/huggingface/models")));
     unsafe { std::env::set_var("CFFIXED_USER_HOME", scratch.dir.join("cf")) };
     assert_eq!(models_root(), Some(scratch.dir.join("cf/Documents/huggingface/models")));
+    assert_eq!(cache_root(), Some(scratch.dir.join("cf/Documents/huggingface")), "the adapters' root follows the same home");
     unsafe { std::env::set_var("APP_SANDBOX_CONTAINER_ID", "com.fileid.app") };
     assert_eq!(models_root(), Some(scratch.dir.join("cf/Library/Application Support/FileID/Models/huggingface/models")));
     let repo = lookup("qwen3_vl_4b").unwrap();
