@@ -943,3 +943,27 @@ fn moment_plan_falls_back_to_overlapping_windows_without_a_grid() {
     assert_eq!(windows, analysis::windows(8.0, &[]));
     assert_eq!(still, Vec::new());
 }
+
+#[test]
+fn on_disk_check_accepts_either_engines_rounding_of_the_same_modified_time() {
+    // A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and
+    // 518318480 ns; one engine stores ...256673 bits, Foundation's Date gives ...256674.
+    let nanos = std::time::Duration::new(1_794_731_299, 518_318_480);
+    let plain = nanos.as_secs_f64();
+    let foundation = f64::from_bits(4_745_314_456_662_256_674);
+    assert_eq!(plain.to_bits(), 4_745_314_456_662_256_673);
+    assert_ne!(plain.to_bits(), foundation.to_bits());
+    let path = std::env::temp_dir().join(format!("fileid-timeline-mtime-{}.bin", std::process::id()));
+    std::fs::write(&path, b"clip").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + nanos)
+        .unwrap();
+    let accepted = (on_disk_matches(&path, 4, Some(plain)), on_disk_matches(&path, 4, Some(foundation)));
+    let moved = on_disk_matches(&path, 4, Some(plain + 0.001));
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(accepted, (true, true));
+    assert!(!moved);
+}
