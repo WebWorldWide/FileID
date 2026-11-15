@@ -98,6 +98,7 @@ class Engine:
         self.p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                   bufsize=0)
         self.q = queue.Queue()
+        self.arrivals = []
         self.lock = threading.Lock()
         self.raw = open(logfile, "ab")
         for stream in (self.p.stdout, self.p.stderr):
@@ -115,6 +116,9 @@ class Engine:
                     ev = json.loads(text)
                     if isinstance(ev, dict) and isinstance(ev.get("payload"), dict) and ev["payload"]:
                         payload = ev["payload"]
+                        if kind(payload) in ("bulkActionResult", "scanComplete", "phaseChanged"):
+                            ib = inner(payload)
+                            self.arrivals.append((time.time(), kind(payload), ib.get("commandID") if isinstance(ib, dict) else ib))
                         if kind(payload) == "log" or BAD_LOG.search(text):
                             self._note(text)
                         self.q.put(payload)
@@ -131,8 +135,11 @@ class Engine:
             LOGBAD.append((self.label, text[:300]))
 
     def send(self, name, body=None):
-        line = json.dumps({"id": str(uuid.uuid4()), "payload": {name: body if body is not None else {}}}) + "\n"
+        cid = str(uuid.uuid4())
+        line = json.dumps({"id": cid, "payload": {name: body if body is not None else {}}}) + "\n"
         self.write_raw(line.encode())
+        self.last_sent = (time.time(), name, cid)
+        return cid
 
     def write_raw(self, data):
         self.p.stdin.write(data)
@@ -319,7 +326,7 @@ class Soak:
         self.uncatalogued = {}
         self.counter = 0
         self.notes = {}
-        self.cycles, self.catchups, self.kills = [], [], []
+        self.cycles, self.catchups, self.kills, self.overlap_log, self.heals = [], [], [], [], []
 
     # ---------- model of the library on disk
     def p(self, rel):
@@ -714,7 +721,10 @@ class Soak:
         (p1, i1), = self.rng.sample(cand, 1)
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         eng.send("startScan", {"rootPath": self.lib, "rescan": False})
+        t_scan = time.time()
         eng.send("renameFiles", {"renames": [{"fileID": i1, "newName": f"during-scan-{rnd}" + os.path.splitext(p1)[1]}]})
+        t_rename, _, rename_id = eng.last_sent
+        mark_arr = len(eng.arrivals)
         deadline = time.time() + 600
         got_bulk, completes = False, 0
         newp = os.path.join(os.path.dirname(p1), f"during-scan-{rnd}" + os.path.splitext(p1)[1])
@@ -734,8 +744,16 @@ class Soak:
                 except TimeoutError:
                     pass
                 break
+        time.sleep(1)
+        arr = eng.arrivals[mark_arr:]
+        reply = [a for a in arr if a[1] == "bulkActionResult" and a[2] == rename_id]
+        completes_t = [a[0] for a in arr if a[1] == "scanComplete"]
+        rec = dict(round=rnd, rename_sent=0.0, reply_after_s=round(reply[0][0] - t_rename, 2) if reply else None,
+                   scan_completes_after_s=[round(t - t_rename, 2) for t in completes_t], scan_started_before_rename_s=round(t_rename - t_scan, 3))
+        self.overlap_log.append(rec)
+        log("overlap timing:", json.dumps(rec))
         if not got_bulk:
-            fail(rnd, "rename during a scan gets its reply", "")
+            fail(rnd, "rename during a scan gets its reply", json.dumps(rec))
         # whichever way it landed, put the name back and rescan
         cur = self.p1_current(eng, p1, newp)
         rel_old = os.path.relpath(p1, self.lib)
@@ -1116,6 +1134,58 @@ class Soak:
         finally:
             v.close()
 
+    def step_heal(self, rnd, cancel_first):
+        """After a SIGKILL during a scan, the first full scan of the folder heals (reprocesses the face-bearing files whose
+        crops are missing) and the next scan reprocesses nothing. With cancel_first, the first scan is cancelled and the heal
+        must still happen on the following full scan."""
+        state = os.path.join(self.work, "heal")
+        shutil.rmtree(state, ignore_errors=True)
+        hl = os.path.join(self.work, "heal-lib")
+        shutil.rmtree(hl, ignore_errors=True)
+        os.makedirs(hl)
+        reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")][:: 4][:30]
+        for i, r in enumerate(reals):
+            shutil.copy2(self.p(r), os.path.join(hl, f"{i}.jpg"))
+        mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "heal-engine.log"), self.trash, self.models, self.a.no_trash, "heal")
+        v = mk()
+        try:
+            k, res = v.scan(hl)
+            v.send("startScan", {"rootPath": hl, "rescan": True})
+            time.sleep(1.5)
+            v.kill()
+        finally:
+            v.raw.close()
+        v = mk()
+        try:
+            with ro(v.db) as c:
+                faces = c.execute("SELECT count(DISTINCT file_id) FROM face_prints").fetchone()[0]
+            rec = dict(round=rnd, cancel_first=cancel_first, face_files=faces)
+            if cancel_first:
+                v.send("startScan", {"rootPath": hl, "rescan": False})
+                time.sleep(0.05)
+                v.send("cancelScan")
+                k, res = v.wait_scan_end(120)
+                rec["first"] = [k, res.get("processedFiles")]
+            k, res = v.scan(hl)
+            rec["full"] = [k, res.get("processedFiles")]
+            k, res = v.scan(hl)
+            rec["next"] = [k, res.get("processedFiles")]
+            k3, res3 = v.scan(hl)
+            rec["next2"] = [k3, res3.get("processedFiles")]
+            self.heals.append(rec)
+            log("heal check:", json.dumps(rec))
+            with ro(v.db) as c:
+                failed_rows = c.execute("SELECT count(*) FROM files WHERE failed=1").fetchone()[0]
+            if (rec["next"][1] or 0) > failed_rows or (rec["next2"][1] or 0) > failed_rows:
+                fail(rnd, "the scans after the healing scan reprocess nothing", rec)
+            if faces and not cancel_first and (rec["full"][1] or 0) == 0:
+                fail(rnd, "the first scan after a crash heals", rec)
+            if faces and cancel_first and (rec["full"][1] or 0) == 0:
+                fail(rnd, "a cancelled first scan after a crash does not lose the heal", rec)
+            self.check_db(rnd, v.db, "heal")
+        finally:
+            v.close()
+
     def step_victim(self, rnd):
         if self.a.flavor == "hosted":
             return self.step_victim_phase(rnd)
@@ -1212,6 +1282,8 @@ class Soak:
                 ("victim-kill", lambda: self.step_victim(rnd)),
             ]
             if a.flavor == "hosted":
+                if rnd <= 2:
+                    steps.append(("crash-heal", lambda: self.step_heal(rnd, cancel_first=(rnd == 2))))
                 steps.insert(3, ("catchup-stop", lambda: self.step_catchup_stop(rnd, eng)))
                 if rnd % a.cycle_every == 0 or rnd == 1:
                     steps.insert(4, ("model-cycle", lambda: self.step_model_cycle(rnd, eng)))
@@ -1273,6 +1345,8 @@ class Soak:
             fl = [c["fp_unloaded"] for c in self.cycles if c.get("fp_unloaded")]
             if len(fl) >= 3 and fl[-1] > fl[0] * 1.10 and fl[-1] >= max(fl[:-1]):
                 fail(rounds, "footprint after the unload does not climb from cycle to cycle", fl)
+        log("overlap timings:", json.dumps(self.overlap_log))
+        log("heal checks:", json.dumps(self.heals))
         log("kills:", json.dumps(self.kills))
         log("catch-up stops:", json.dumps(self.catchups))
         log("error kinds seen:", json.dumps(ERROR_KINDS))
@@ -1281,7 +1355,7 @@ class Soak:
         log(f"failures: {len(FAILURES)}")
         for f in FAILURES:
             log("  ", f)
-        json.dump({"cycles": self.cycles, "catchups": self.catchups, "kills": self.kills, "rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "error_samples": ERROR_SAMPLES, "failures": FAILURES, "series": s},
+        json.dump({"overlap": self.overlap_log, "heals": self.heals, "cycles": self.cycles, "catchups": self.catchups, "kills": self.kills, "rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "error_samples": ERROR_SAMPLES, "failures": FAILURES, "series": s},
                   open(os.path.join(self.work, "soak-summary.json"), "w"), indent=1)
 
 
