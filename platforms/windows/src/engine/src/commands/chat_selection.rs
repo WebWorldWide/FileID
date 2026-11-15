@@ -583,9 +583,49 @@ fn bounded_copy(path: &Path) -> Result<Removing> {
     Ok(Removing(out))
 }
 
+/// Where a selected video's frame comes from: the vetted FFmpeg runtime the
+/// user installs. A trait so tests can stand in for it without FFmpeg.
+pub(crate) trait FrameSource: Send + Sync {
+    fn available(&self) -> bool;
+    fn probe(&self, path: &Path, cancel: &AtomicBool) -> Result<super::video_export::AnalysisProbe>;
+    fn frame(&self, path: &Path, seconds: f64, size: (u32, u32), cancel: &AtomicBool) -> Result<Vec<u8>>;
+}
+
+struct Vetted;
+impl FrameSource for Vetted {
+    fn available(&self) -> bool {
+        super::video_export::available()
+    }
+    fn probe(&self, path: &Path, cancel: &AtomicBool) -> Result<super::video_export::AnalysisProbe> {
+        super::video_export::analysis_probe(path, cancel)
+    }
+    fn frame(&self, path: &Path, seconds: f64, size: (u32, u32), cancel: &AtomicBool) -> Result<Vec<u8>> {
+        super::video_export::frame_rgb(path, seconds, size.0, size.1, cancel)
+    }
+}
+
+const NO_VIDEO_RUNTIME: &str = "Videos aren't checked frame by frame on this computer yet.";
+
+/// The middle frame of a video, bounded to `CHECK_SIDE`, as the Swift engine looks at it.
+fn middle_frame(source: &dyn FrameSource, path: &Path, cancel: &AtomicBool) -> Result<Removing> {
+    let probe = source.probe(path, cancel)?;
+    if !probe.duration.is_finite() || probe.duration <= 0.0 {
+        bail!("The video has no duration")
+    }
+    let size = super::video_export::fitted_size(probe.width, probe.height, CHECK_SIDE);
+    let rgb = source.frame(path, probe.duration / 2.0, size, cancel)?;
+    if cancel.load(Ordering::Acquire) {
+        bail!("Cancelled")
+    }
+    let Some(image) = image::RgbImage::from_raw(size.0, size.1, rgb) else { bail!("Invalid decoded frame") };
+    let out = std::env::temp_dir().join(format!("fileid-selection-{}.png", uuid::Uuid::new_v4()));
+    image.save(&out)?;
+    Ok(Removing(out))
+}
+
 /// Checks the likely files with the resident vision model, emitting results as
 /// they arrive. Returns the verdicts and whether the model started.
-pub(crate) async fn check<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, mut progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
+pub(crate) async fn check<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
 where
     F: FnMut(Vec<(Ranked, Verdict, String)>, usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -603,45 +643,83 @@ where
     };
     let prompt = check_prompt(&prepared.criteria);
     let confirm = confirm_prompts(&prepared.criteria, is_small(model));
+    let model_cancel = cancel.clone();
+    let lease_ref = &lease;
+    let ask = move |image: PathBuf, question: String| {
+        let cancel = model_cancel.clone();
+        async move { lease_ref.complete_with_cancel(&image, &question, CHECK_TOKENS, cancel).await }
+    };
+    let (results, ok) = run_checks(prepared, &cancel, progress, &(Arc::new(Vetted) as Arc<dyn FrameSource>), &prompt, &confirm, ask).await;
+    if let Err(error) = lease.finish(ok).await {
+        tracing::warn!(?error, "releasing the selection check model failed");
+    }
+    (results, true)
+}
+
+/// The per-file loop of `check`, with the model (`ask`) and the video decoder injected.
+async fn run_checks<F, Fut, A, AFut>(
+    prepared: &Prepared,
+    cancel: &Arc<AtomicBool>,
+    mut progress: F,
+    frames: &Arc<dyn FrameSource>,
+    prompt: &str,
+    confirm: &[String],
+    ask: A,
+) -> (Vec<(Ranked, Verdict, String)>, bool)
+where
+    F: FnMut(Vec<(Ranked, Verdict, String)>, usize) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    A: Fn(PathBuf, String) -> AFut,
+    AFut: std::future::Future<Output = Result<String>>,
+{
     let mut results = Vec::new();
     let mut ok = true;
+    let mut runtime: Option<bool> = None;
     for ranked in prepared.ranked.iter().take(VERIFY_LIMIT) {
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        let (verdict, reason) = if ranked.kind == "video" {
-            (Verdict::Unsure, "Videos aren't checked frame by frame on this computer yet.".to_owned())
-        } else {
-            let path = PathBuf::from(&ranked.path);
-            match tokio::task::spawn_blocking(move || bounded_copy(&path)).await {
-                Ok(Ok(copy)) => match lease.complete_with_cancel(&copy.0, &prompt, CHECK_TOKENS, cancel.clone()).await {
-                    Ok(reply) => {
-                        let first = parse_verdict(&reply);
-                        let mut confirmations = Vec::new();
-                        for item in &confirm {
-                            if combine(first.clone(), &confirmations).0 != Verdict::Yes || cancel.load(Ordering::Acquire) {
-                                break;
-                            }
-                            let answer = match lease.complete_with_cancel(&copy.0, item, CHECK_TOKENS, cancel.clone()).await {
-                                Ok(reply) => parse_verdict(&reply).0,
-                                Err(error) => {
-                                    tracing::warn!(?error, "selection confirmation failed");
-                                    ok = false;
-                                    Verdict::Unsure
-                                }
-                            };
-                            confirmations.push(answer);
-                        }
-                        combine(first, &confirmations)
-                    }
-                    Err(error) => {
-                        tracing::warn!(?error, "selection check failed");
-                        ok = false;
-                        (Verdict::Unsure, "The model couldn't check this one.".to_owned())
-                    }
-                },
-                _ => (Verdict::Unsure, "This file couldn't be read.".to_owned()),
+        let path = PathBuf::from(&ranked.path);
+        let copy = if ranked.kind == "video" {
+            if *runtime.get_or_insert_with(|| frames.available()) {
+                let (frames, cancel) = (frames.clone(), cancel.clone());
+                tokio::task::spawn_blocking(move || middle_frame(frames.as_ref(), &path, &cancel)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("The video decoder failed")))
+            } else {
+                results.push((ranked.clone(), Verdict::Unsure, NO_VIDEO_RUNTIME.to_owned()));
+                progress(results.clone(), results.len()).await;
+                continue;
             }
+        } else {
+            tokio::task::spawn_blocking(move || bounded_copy(&path)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("The photo decoder failed")))
+        };
+        let (verdict, reason) = match copy {
+            Ok(copy) => match ask(copy.0.clone(), prompt.to_owned()).await {
+                Ok(reply) => {
+                    let first = parse_verdict(&reply);
+                    let mut confirmations = Vec::new();
+                    for item in confirm {
+                        if combine(first.clone(), &confirmations).0 != Verdict::Yes || cancel.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let answer = match ask(copy.0.clone(), item.clone()).await {
+                            Ok(reply) => parse_verdict(&reply).0,
+                            Err(error) => {
+                                tracing::warn!(?error, "selection confirmation failed");
+                                ok = false;
+                                Verdict::Unsure
+                            }
+                        };
+                        confirmations.push(answer);
+                    }
+                    combine(first, &confirmations)
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "selection check failed");
+                    ok = false;
+                    (Verdict::Unsure, "The model couldn't check this one.".to_owned())
+                }
+            },
+            Err(_) => (Verdict::Unsure, "This file couldn't be read.".to_owned()),
         };
         if cancel.load(Ordering::Acquire) {
             break;
@@ -649,10 +727,7 @@ where
         results.push((ranked.clone(), verdict, reason));
         progress(results.clone(), results.len()).await;
     }
-    if let Err(error) = lease.finish(ok).await {
-        tracing::warn!(?error, "releasing the selection check model failed");
-    }
-    (results, true)
+    (results, ok)
 }
 
 /// `check` on the Swift engine's MLX model: the original file is decoded the
@@ -1051,5 +1126,134 @@ mod tests {
         let results = vec![(ranked(1), Verdict::Unsure, "?".to_owned()), (ranked(2), Verdict::No, String::new()), (ranked(3), Verdict::Yes, "ok".to_owned())];
         let hits = ordered(&results);
         assert_eq!(hits.iter().map(|h| (h.file_id, h.selection_match.clone().unwrap())).collect::<Vec<_>>(), vec![(3, "yes".into()), (1, "unsure".into())]);
+    }
+
+    use std::sync::atomic::AtomicUsize;
+
+    struct Stub {
+        available: bool,
+        probe: Option<super::super::video_export::AnalysisProbe>,
+        frame_ok: bool,
+        cancel_on_frame: Option<Arc<AtomicBool>>,
+        frames: AtomicUsize,
+        probes: AtomicUsize,
+    }
+    impl Stub {
+        fn clip(width: u32, height: u32, duration: f64) -> Stub {
+            Stub {
+                available: true,
+                probe: Some(super::super::video_export::AnalysisProbe { duration, width, height, has_audio: true }),
+                frame_ok: true,
+                cancel_on_frame: None,
+                frames: AtomicUsize::new(0),
+                probes: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl FrameSource for Stub {
+        fn available(&self) -> bool {
+            self.available
+        }
+        fn probe(&self, _: &Path, _: &AtomicBool) -> Result<super::super::video_export::AnalysisProbe> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            self.probe.ok_or_else(|| anyhow::anyhow!("The file has no video stream"))
+        }
+        fn frame(&self, _: &Path, seconds: f64, size: (u32, u32), _: &AtomicBool) -> Result<Vec<u8>> {
+            self.frames.fetch_add(1, Ordering::SeqCst);
+            if let Some(flag) = &self.cancel_on_frame {
+                flag.store(true, Ordering::Release);
+            }
+            assert!((seconds - self.probe.unwrap().duration / 2.0).abs() < 1e-9);
+            if self.frame_ok { Ok(vec![200; (size.0 * size.1 * 3) as usize]) } else { bail!("The video worker timed out") }
+        }
+    }
+
+    fn video(id: i64) -> Ranked {
+        Ranked { id, path: format!("/fixture/{id}.mp4"), kind: "video".into(), score: 0.0, matched: vec![], clip: false, people: false }
+    }
+
+    /// Runs the loop over `ranked`; returns the verdicts and the (width, height) of every image the model saw.
+    fn run(ranked: Vec<Ranked>, stub: Stub, cancel: Arc<AtomicBool>) -> (Vec<(i64, Verdict, String)>, Vec<(u32, u32)>, Arc<Stub>) {
+        let prepared = Prepared { criteria: "a dog".into(), ranked };
+        let stub = Arc::new(stub);
+        let source: Arc<dyn FrameSource> = stub.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let ask = move |image: PathBuf, _: String| {
+            let log = log.clone();
+            async move {
+                let decoded = image::open(&image).unwrap();
+                log.lock().push((decoded.width(), decoded.height()));
+                Ok("{\"answer\": \"yes\", \"reason\": \"a dog\"}".to_owned())
+            }
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (results, _) = runtime.block_on(run_checks(&prepared, &cancel, |_, _| async {}, &source, "check", &[], ask));
+        let results = results.into_iter().map(|(ranked, verdict, reason)| (ranked.id, verdict, reason)).collect();
+        let seen = seen.lock().clone();
+        (results, seen, stub)
+    }
+
+    #[test]
+    fn a_video_with_a_frame_gets_a_real_check_of_its_middle_frame() {
+        let (results, seen, stub) = run(vec![video(1)], Stub::clip(1920, 1080, 10.0), Arc::new(AtomicBool::new(false)));
+        assert_eq!(results.iter().map(|(_, verdict, _)| *verdict).collect::<Vec<_>>(), vec![Verdict::Yes]);
+        assert_eq!(seen, vec![(CHECK_SIDE, 378)], "bounded to the check side, aspect kept");
+        assert_eq!(stub.frames.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn no_runtime_leaves_a_video_unsure_without_decoding() {
+        let mut stub = Stub::clip(64, 36, 4.0);
+        stub.available = false;
+        let (results, seen, stub) = run(vec![video(1), video(2)], stub, Arc::new(AtomicBool::new(false)));
+        assert_eq!(results.iter().map(|(id, verdict, reason)| (*id, *verdict, reason.clone())).collect::<Vec<_>>(),
+            vec![(1, Verdict::Unsure, NO_VIDEO_RUNTIME.to_owned()), (2, Verdict::Unsure, NO_VIDEO_RUNTIME.to_owned())]);
+        assert!(seen.is_empty());
+        assert_eq!((stub.probes.load(Ordering::SeqCst), stub.frames.load(Ordering::SeqCst)), (0, 0));
+    }
+
+    #[test]
+    fn a_failed_or_timed_out_decode_is_unsure_not_an_error() {
+        let mut stub = Stub::clip(64, 36, 4.0);
+        stub.frame_ok = false;
+        let (results, seen, _) = run(vec![video(1)], stub, Arc::new(AtomicBool::new(false)));
+        assert_eq!(results, vec![(1, Verdict::Unsure, "This file couldn't be read.".to_owned())]);
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn audio_only_and_zero_duration_files_are_unsure() {
+        let mut audio_only = Stub::clip(64, 36, 4.0);
+        audio_only.probe = None;
+        let (results, seen, _) = run(vec![video(1)], audio_only, Arc::new(AtomicBool::new(false)));
+        assert_eq!(results, vec![(1, Verdict::Unsure, "This file couldn't be read.".to_owned())]);
+        for duration in [0.0, -1.0, f64::NAN] {
+            let (results, seen2, stub) = run(vec![video(2)], Stub::clip(64, 36, duration), Arc::new(AtomicBool::new(false)));
+            assert_eq!(results, vec![(2, Verdict::Unsure, "This file couldn't be read.".to_owned())]);
+            assert!(seen2.is_empty() && seen.is_empty());
+            assert_eq!(stub.frames.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn cancelling_during_a_decode_stops_before_the_model_and_the_next_file() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut stub = Stub::clip(64, 36, 4.0);
+        stub.cancel_on_frame = Some(cancel.clone());
+        let (results, seen, stub) = run(vec![video(1), video(2)], stub, cancel);
+        assert!(results.is_empty() && seen.is_empty());
+        assert_eq!(stub.frames.load(Ordering::SeqCst), 1);
+        let stopped = Arc::new(AtomicBool::new(true));
+        let (results, _, stub) = run(vec![video(1)], Stub::clip(64, 36, 4.0), stopped);
+        assert!(results.is_empty());
+        assert_eq!(stub.probes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_file_count_limit_applies_to_videos_too() {
+        let ranked: Vec<Ranked> = (1..=(VERIFY_LIMIT as i64 + 5)).map(video).collect();
+        let (results, seen, _) = run(ranked, Stub::clip(64, 36, 4.0), Arc::new(AtomicBool::new(false)));
+        assert_eq!((results.len(), seen.len()), (VERIFY_LIMIT, VERIFY_LIMIT));
     }
 }
