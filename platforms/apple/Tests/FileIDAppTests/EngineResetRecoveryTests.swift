@@ -22,6 +22,22 @@ struct EngineResetRecoveryTests {
         }
     }
 
+    @Test func aTerminalPhaseEventSettlesARunningSnapshotAndNothingElse() {
+        for running in [ScanPhase.discovering, .tagging, .postScan] {
+            for ended in [ScanPhase.completed, .cancelled, .failed] {
+                let settled = progress(running).settled(by: ended)
+                #expect(settled?.phase == ended)
+                #expect(settled?.processed == 120 && settled?.total == 400 && settled?.etaSeconds == nil)
+            }
+            for notEnded in [ScanPhase.idle, .discovering, .tagging, .postScan] {
+                #expect(progress(running).settled(by: notEnded) == nil)
+            }
+        }
+        for done in [ScanPhase.idle, .completed, .cancelled, .failed] {
+            #expect(progress(done).settled(by: .completed) == nil)
+        }
+    }
+
     @MainActor
     @Test func toolsSessionReleasesARequestTheDeadEngineCannotAnswer() {
         let session = ToolsSession()
