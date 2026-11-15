@@ -1217,6 +1217,16 @@ class Soak:
                 while time.time() < end and v.alive():
                     time.sleep(0.05)
                 killed_at = "after %.1fs" % (time.time() - t)
+            elif phase == "tagging" and self.a.flavor == "swift":
+                # The Swift engine sends its periodic progress from a background-priority timer once a second, and a scan that
+                # keeps every core busy (or a loaded Mac) can finish without one, so waiting for a progress event killed the
+                # engine after the scan was over. The tagging phase change is always sent; kill a moment after it.
+                try:
+                    v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "tagging", 300)
+                    time.sleep(0.3 + self.rng.random() * 2.2)
+                    killed_at = "tagging phase + delay"
+                except TimeoutError:
+                    killed_at = "no tagging phase seen"
             elif phase == "tagging":
                 try:
                     v.wait(lambda e: kind(e) == "progress" and (inner(e).get("processed") or 0) >= 1 and inner(e).get("phase") == "tagging", 120)
@@ -1226,7 +1236,8 @@ class Soak:
             else:
                 try:
                     v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 300)
-                    time.sleep(self.rng.random() * 2)
+                    # the Swift engine's after-scan phase (orphan sweep, catch-up) is much shorter than the hosted one
+                    time.sleep(self.rng.random() * (0.6 if self.a.flavor == "swift" else 2))
                     killed_at = "postScan"
                 except TimeoutError:
                     killed_at = "no postScan seen"
