@@ -142,6 +142,7 @@ struct EngineFallbackTests {
         #expect(engine.runningBackend == .swift)
         #expect(engine.fallback.demoted == [.rust])
         #expect(engine.lastError?.kind == "engine_fallback")
+        #expect(engine.lastError.map { !Sidebar.showsErrorCard($0.kind) } == true)
         engine.start()
         #expect(engine.runningBackend == .swift, "a restart in the same session stays on Swift")
         _ = await waitForReady(engine)

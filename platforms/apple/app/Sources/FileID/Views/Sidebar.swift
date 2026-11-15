@@ -30,7 +30,7 @@ struct Sidebar: View {
             if shouldShowEngineSection {
                 VStack(alignment: .leading, spacing: 8) {
                     EngineStatusRow(state: engine.state, onRestart: { engine.start() })
-                    if let err = engine.lastError { engineErrorRow(err) }
+                    if let err = engine.lastError, Self.showsErrorCard(err.kind) { engineErrorRow(err) }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 10)
             }
@@ -78,7 +78,7 @@ struct Sidebar: View {
     private var areaSwitcher: some View {
         HStack(spacing: 2) {
             ForEach(MainWindow.Area.allCases) { area in
-                let on = shownArea == area
+                let on = Self.highlightedArea(activeTab: activeTab) == area
                 Button {
                     withAnimation(Theme.spring) { shownArea = area }
                     activeTab = area.remembered(current: activeTab)
@@ -108,8 +108,15 @@ struct Sidebar: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
+    /// The area whose pill is lit: the one holding the open page, none on Settings.
+    static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
+
+    /// A fall back to the Swift engine explains itself in Settings; the sidebar
+    /// keeps its card for errors nothing else explains.
+    static func showsErrorCard(_ kind: String) -> Bool { kind != "engine_fallback" }
+
     private var shouldShowEngineSection: Bool {
-        if engine.lastError != nil { return true }
+        if let err = engine.lastError, Self.showsErrorCard(err.kind) { return true }
         switch engine.state {
         case .starting, .crashed: return true
         case .ready:              return false

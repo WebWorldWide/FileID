@@ -110,6 +110,13 @@ struct MainWindow: View {
     }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .library }
 
+    /// A job list taken from a search reply goes stale (the pill kept saying
+    /// "Moments 0%"), so any page asks again each second while a job runs.
+    static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
+        jobs.contains { $0.state == "queued" || $0.state == "running" }
+    }
+    static let jobRefreshLimit = 900
+
     private var aiActive: Bool {
         engine.deepAnalyzeInFlight || engine.faceClusteringInFlight || engine.catalogJobs.contains { $0.state == "running" }
     }
@@ -210,6 +217,13 @@ struct MainWindow: View {
             .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
+            .task(id: Self.jobsNeedRefresh(engine.catalogJobs)) {
+                guard Self.jobsNeedRefresh(engine.catalogJobs) else { return }
+                for _ in 0..<Self.jobRefreshLimit {
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))
+                }
+            }
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0 else { return }
                 toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
