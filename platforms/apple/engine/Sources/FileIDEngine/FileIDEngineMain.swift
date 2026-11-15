@@ -751,6 +751,9 @@ struct FileIDEngineMain {
                     try await catchingMLX {
                         try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
                             Task {
+                                // A client acts on the finished fraction at once, so the
+                                // installed marker is on disk before it is sent.
+                                if frac >= 1.0 { await DeepAnalyze.shared.markInstalledSentinel(kind: kind) }
                                 await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
                                     modelKind: kind.rawValue, fraction: frac, message: msg,
                                     bytesDone: done > 0 ? done : nil,
