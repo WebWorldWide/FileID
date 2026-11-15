@@ -1112,7 +1112,9 @@ class Soak:
         if owed_end:
             fail(rnd, "the next scan finishes what the after-scan pass owed", owed_end)
         st2 = self.new_file_state(eng, added)
-        if st2[1] != st2[0] - st2[3]:
+        # The Swift engine computes CLIP embeddings with the ONNX Runtime, which this Mac does not have, so there is nothing
+        # to check on Swift: its owed work is the RAM++ tags (also ONNX, so never owed here) and the careful text reads.
+        if self.a.flavor == "hosted" and st2[1] != st2[0] - st2[3]:
             fail(rnd, "files of a stopped scan get their CLIP embeddings by the next scan", st2)
         rec = dict(round=rnd, saw_postscan=seen_post, stop_result=k, owed_after_stop=owed_after_stop, owed_end=owed_end, new_state=st2)
         self.catchups.append(rec)
@@ -1133,7 +1135,8 @@ class Soak:
             v.send("startScan", {"rootPath": self.victim_lib, "rescan": True})
             t = time.time()
             if phase == "load":
-                # the first progress event comes after the stack has loaded; kill while the load is running
+                # the first progress event comes after the stack has loaded; kill while the load is running (the Swift
+                # engine loads nothing for a scan on this Mac, so there this is a kill in discovery and the first batch)
                 end = t + 0.05 + self.rng.random() * 0.65
                 while time.time() < end and v.alive():
                     time.sleep(0.05)
@@ -1169,7 +1172,7 @@ class Soak:
             rows = self.db_rows(v.db, self.victim_lib)
             disk = {os.path.join(self.victim_lib, r) for r in self.victim_model}
             stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
             if stale or uncovered:
                 fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
             with ro(v.db) as c:
@@ -1183,6 +1186,11 @@ class Soak:
             v.close()
 
     def step_heal(self, rnd, cancel_first):
+        if self.a.flavor == "swift":
+            return self.step_crash_recovery_swift(rnd, cancel_first)
+        return self.step_heal_faces(rnd, cancel_first)
+
+    def step_heal_faces(self, rnd, cancel_first):
         """After a SIGKILL during a scan, the first full scan of the folder heals (reprocesses the face-bearing files whose
         crops are missing) and the next scan reprocesses nothing. With cancel_first, the first scan is cancelled and the heal
         must still happen on the following full scan."""
@@ -1273,8 +1281,113 @@ class Soak:
         finally:
             v.close()
 
+    def step_crash_recovery_swift(self, rnd, cancel_first):
+        """The Swift version of the crash-repair check. The Rust engine heals face rows whose crop file a crash never wrote
+        (crash_self_heal_due). The Swift engine promises less, by design: its People tab cuts each face from the source image
+        by its bounding box (PeopleView FaceCropCache), and the crop JPEG it writes after a batch's commit (FaceClustering
+        saveFaceCrop) is only for the describe model, so nothing reprocesses a file for a missing crop. What it promises
+        after a kill is (FileIDEngineMain detectCrashedSessions): the next start turns every 'running' scan session into
+        'crashed' and logs crash_recovery_detected; a batch is committed whole, so the catalog holds complete rows; the next
+        full scan of the folder (also when the first scan after the crash is cancelled) covers every file, and the scans
+        after it reprocess nothing. This checks exactly that on a folder with new files, killed while its scan session was
+        'running'."""
+        state = os.path.join(self.work, "heal")
+        shutil.rmtree(state, ignore_errors=True)
+        hl = os.path.join(self.work, "heal-lib")
+        shutil.rmtree(hl, ignore_errors=True)
+        os.makedirs(hl)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("soak_library", os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_library.py"))
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+
+        def add(count, tag):
+            for i in range(count):
+                with open(os.path.join(hl, f"{tag}-{i}-{uuid.uuid4().hex[:6]}.png"), "wb") as f:
+                    f.write(gen.png(self.rng.choice((96, 160, 240)), self.rng.choice((64, 120, 180)), self.rng, tweak=self.rng.randrange(1, 1000)))
+
+        mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "heal-engine.log"), self.trash, self.models, self.a.no_trash, "heal")
+        add(10, "old")
+        v = mk()
+        try:
+            k, res = v.scan(hl)
+            if k != "scanComplete":
+                fail(rnd, "crash recovery: the first scan completes", (k, res))
+        finally:
+            v.close()
+        # new files give the killed scan real work; the kill waits for the scan's own 'running' row
+        add(60, "new")
+        crash_seen = False
+        for attempt in range(6):
+            v = mk()
+            try:
+                v.drain()
+                v.send("startScan", {"rootPath": hl, "rescan": False})
+                end = time.time() + 30
+                while time.time() < end and v.alive():
+                    with ro(v.db) as c:
+                        if c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]:
+                            break
+                    time.sleep(0.005)
+                time.sleep(self.rng.uniform(0.0, 0.4))
+                v.kill()
+            finally:
+                v.raw.close()
+            with ro(v.db) as c:
+                crash_seen = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0] > 0
+            if crash_seen:
+                break
+            add(20, f"again{attempt}")
+        v = mk()
+        try:
+            with ro(v.db) as c:
+                running = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]
+                crashed = c.execute("SELECT count(*) FROM scan_sessions WHERE status='crashed' AND completed_at IS NOT NULL").fetchone()[0]
+            logged = self.log_count(v, '"crash_recovery_detected"')
+            rec = dict(round=rnd, cancel_first=cancel_first, crash_row_seen=crash_seen, kill_attempts=attempt + 1, running_after_start=running,
+                       crashed_sessions=crashed, crash_logged=logged)
+            if cancel_first:
+                v.send("startScan", {"rootPath": hl, "rescan": False})
+                time.sleep(0.05)
+                v.send("cancelScan")
+                k, res = v.wait_scan_end(120)
+                rec["first"] = [k, res.get("processedFiles")]
+            k, res = v.scan(hl)
+            rec["full"] = [k, res.get("processedFiles")]
+            k, res = v.scan(hl)
+            rec["next"] = [k, res.get("processedFiles")]
+            k3, res3 = v.scan(hl)
+            rec["next2"] = [k3, res3.get("processedFiles")]
+            self.heals.append(rec)
+            log("crash recovery check:", json.dumps(rec))
+            if not crash_seen:
+                fail(rnd, "the crash check's kill left a running scan session", rec)
+            if running or crashed < 1:
+                fail(rnd, "the next start marks the killed scan session crashed", rec)
+            if crash_seen and not logged:
+                fail(rnd, "the next start logs crash_recovery_detected", rec)
+            if rec["full"][0] != "scanComplete":
+                fail(rnd, "the first full scan after a crash completes", rec)
+            with ro(v.db) as c:
+                failed_rows = c.execute("SELECT count(*) FROM files WHERE failed=1").fetchone()[0]
+                still_running = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]
+                roots = c.execute("SELECT last_status FROM library_roots WHERE path=?", (hl,)).fetchall()
+            if (rec["next"][1] or 0) > failed_rows or (rec["next2"][1] or 0) > failed_rows:
+                fail(rnd, "the scans after the first full scan reprocess nothing", rec)
+            if still_running or roots != [("completed",)]:
+                fail(rnd, "after the full scan no session is running and the folder reads completed", dict(rec, roots=roots, running=still_running))
+            rows = self.db_rows(v.db, hl)
+            disk = {os.path.join(hl, fn) for fn in os.listdir(hl)}
+            stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
+            if stale or uncovered:
+                fail(rnd, "after a crash the catalog equals the folder's files", (len(stale), len(uncovered)))
+            self.check_db(rnd, v.db, "crash recovery")
+        finally:
+            v.close()
+
     def step_victim(self, rnd):
-        if self.a.flavor == "hosted":
+        if self.a.flavor in ("hosted", "swift"):
             return self.step_victim_phase(rnd)
         return self.step_victim_plain(rnd)
 
@@ -1371,10 +1484,11 @@ class Soak:
                 ("malformed", lambda: self.step_malformed(rnd, eng)),
                 ("victim-kill", lambda: self.step_victim(rnd)),
             ]
-            if a.flavor == "hosted":
+            if a.flavor in ("hosted", "swift"):
                 if rnd <= 2:
                     steps.append(("crash-heal", lambda: self.step_heal(rnd, cancel_first=(rnd == 2))))
                 steps.insert(3, ("catchup-stop", lambda: self.step_catchup_stop(rnd, eng)))
+            if a.flavor == "hosted":
                 if rnd % a.cycle_every == 0 or rnd == 1:
                     steps.insert(4, ("model-cycle", lambda: self.step_model_cycle(rnd, eng)))
             try:
