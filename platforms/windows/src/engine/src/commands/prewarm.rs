@@ -25,6 +25,17 @@ use crate::models::registry::{self, LookupResult, ModelFile};
 use crate::platform;
 use crate::util;
 
+static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn in_flight_downloads() -> &'static Mutex<HashSet<String>> {
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// True while any model download or warm-up is running.
+pub(crate) fn any_download_in_flight() -> bool {
+    !in_flight_downloads().lock().is_empty()
+}
+
 /// RAII guard that removes a model_kind from the in-flight set when the
 /// prewarm function returns or unwinds.
 struct ReleaseOnDrop {
@@ -277,8 +288,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
     tracing::info!(model_kind = %model_kind, "[PREWARM] entered handler");
 
     // Per-model-kind in-flight dedupe.
-    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let in_flight = IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    let in_flight = in_flight_downloads();
     // Check + insert under a short-lived guard. parking_lot's MutexGuard is
     // !Send, so we MUST drop it before the first .await below.
     let already_in_flight = {

@@ -924,5 +924,111 @@
         }
       }
     ]
+  },
+  {
+    "name": "takes-grouping-starts-after-a-scan-with-new-pictures",
+    "description": "A scan that stores new pictures queues the library-wide takeGrouping job by itself, once, and it completes without any model (nothing has a stored CLIP embedding yet, so it proposes nothing). A second scan that changes nothing leaves the finished job untouched.",
+    "tree": [
+      {
+        "path": "shoot/a1.png",
+        "generate": "png",
+        "dimensions": [
+          32,
+          32
+        ],
+        "mtime": 1789812000
+      },
+      {
+        "path": "shoot/a2.png",
+        "generate": "png",
+        "dimensions": [
+          24,
+          16
+        ],
+        "mtime": 1789812030
+      }
+    ],
+    "steps": [
+      {
+        "label": "nothing before the scan",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": [],
+          "jobs": []
+        }
+      },
+      {
+        "label": "scan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180,
+        "abortOnError": true,
+        "expect": {
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "the job started by itself and finished",
+        "catalog": {
+          "action": "takeGroupProposals"
+        },
+        "until": 30,
+        "expect": {
+          "status": "ok",
+          "takeGroups": [],
+          "jobs": [
+            {
+              "id": "take-grouping",
+              "kind": "takeGrouping",
+              "state": "completed",
+              "progress": 1
+            }
+          ]
+        }
+      },
+      {
+        "label": "remember when it ran",
+        "db": "SELECT updated_at FROM catalog_jobs WHERE id='take-grouping'",
+        "save": [
+          {
+            "name": "ranAt",
+            "path": "0.0"
+          }
+        ]
+      },
+      {
+        "label": "scan again, nothing changed",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180,
+        "abortOnError": true,
+        "benignErrors": [
+          "rescan_no_changes"
+        ]
+      },
+      {
+        "label": "the finished job was left alone",
+        "db": "SELECT updated_at,state FROM catalog_jobs WHERE id='take-grouping'",
+        "expect": [
+          [
+            {
+              "$var": "ranAt"
+            },
+            "completed"
+          ]
+        ]
+      }
+    ]
   }
 ]

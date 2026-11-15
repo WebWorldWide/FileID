@@ -81,13 +81,14 @@ public final class EngineClient {
         catalogWaiters.removeValue(forKey: id)?.resume(returning: response)
     }
 
-    private var bulkResultWaiters: [UUID: (prefix: String, continuation: CheckedContinuation<BulkActionResult?, Never>)] = [:]
+    private var bulkResultWaiters: [UUID: (matcher: BulkResultMatcher, continuation: CheckedContinuation<BulkActionResult?, Never>)] = [:]
 
     /// The first bulk result after `signal` whose action starts with `prefix`;
     /// nil on timeout or engine exit. A cancelled caller still gets the result:
     /// the files were already moved, and the undo needs the batch it names.
-    func bulkActionResult(after signal: Int, prefix: String, timeout: Duration) async -> BulkActionResult? {
-        if bulkActionResultSignal != signal, let result = bulkActionResult, result.action.hasPrefix(prefix) {
+    func bulkActionResult(after signal: Int, prefix: String, commandID: String? = nil, timeout: Duration) async -> BulkActionResult? {
+        let matcher = BulkResultMatcher(actionPrefix: prefix, sentID: commandID)
+        if bulkActionResultSignal != signal, let result = bulkActionResult, matcher.accepts(result) {
             return result
         }
         let token = UUID()
@@ -98,12 +99,12 @@ public final class EngineClient {
         }
         defer { timer.cancel() }
         return await withCheckedContinuation { continuation in
-            bulkResultWaiters[token] = (prefix, continuation)
+            bulkResultWaiters[token] = (matcher, continuation)
         }
     }
 
     private func resumeBulkResultWaiters(with result: BulkActionResult?) {
-        for (token, waiter) in bulkResultWaiters where result.map({ $0.action.hasPrefix(waiter.prefix) }) ?? true {
+        for (token, waiter) in bulkResultWaiters where result.map({ waiter.matcher.accepts($0) }) ?? true {
             bulkResultWaiters.removeValue(forKey: token)
             waiter.continuation.resume(returning: result)
         }
@@ -189,6 +190,8 @@ public final class EngineClient {
     public private(set) var restructureApplyResultSignal: Int = 0
     public private(set) var bulkActionResult: BulkActionResult?
     public private(set) var bulkActionResultSignal: Int = 0
+    /// The id of the command the last successful `send` queued.
+    public private(set) var lastSentCommandID: String?
     /// True once an applyRestructure has moved files and they haven't been undone
     /// yet — drives the "Undo last run" affordance.
     public private(set) var canUndoRestructure = false
@@ -1075,6 +1078,7 @@ public final class EngineClient {
     public func send(_ payload: IPCCommand.Payload) -> Bool {
         guard let pipe = stdinPipe else { return false }
         let cmd = IPCCommand(payload: payload)
+        lastSentCommandID = cmd.id
         let data: Data
         do {
             data = try IPCCoder.encodeLine(cmd)

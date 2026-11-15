@@ -68,6 +68,8 @@ public actor ScanCoordinator {
         public var discovered: Int
         public var processed: Int
         public var failed: Int
+        /// New or changed images and videos this scan analysed and stored.
+        public var mediaAnalyzed = 0
     }
 
     private(set) var current: Session?
@@ -182,6 +184,14 @@ public actor ScanCoordinator {
         s.processed += n
         current = s
     }
+
+    public func bumpMediaAnalyzed(by n: Int) {
+        guard n > 0, var s = current else { return }
+        s.mediaAnalyzed += n
+        current = s
+    }
+
+    var mediaAnalyzed: Int { current?.mediaAnalyzed ?? 0 }
 
     public func bumpFailed(by n: Int) {
         guard n > 0, var s = current else { return }

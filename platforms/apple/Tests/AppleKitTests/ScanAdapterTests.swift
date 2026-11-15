@@ -168,6 +168,49 @@ struct ScanAdapterTests {
         #expect("{}".withCString { fileid_apple_ramplus_tag(image, $0, 0) } == nil)
     }
 
+    private final class ModelProbe: @unchecked Sendable {
+        let lock = NSLock()
+        private(set) var releasedOn: Thread?
+        private(set) var ranOn: Thread?
+        func ran() { lock.lock(); ranOn = Thread.current; lock.unlock() }
+        func released() { lock.lock(); releasedOn = Thread.current; lock.unlock() }
+    }
+
+    private final class ProbedModel: @unchecked Sendable {
+        let probe: ModelProbe
+        init(_ probe: ModelProbe) { self.probe = probe }
+        deinit { probe.released() }
+    }
+
+    private static func probedBatcher(_ probe: ModelProbe) -> GPURequestBatcher {
+        let model = ProbedModel(probe)
+        return GPURequestBatcher(label: "test.batcher", maxBatch: 4, gather: .milliseconds(2), usesMLX: false) { pixels, count in
+            model.probe.ran()
+            return (0..<count).map { [pixels[$0]] }
+        }
+    }
+
+    /// MLX keeps its compile cache per thread, so a compiled model's weights are
+    /// freed only if the model is dropped on the thread that ran it.
+    @Test func requestBatcherAnswersEveryRequestAndDropsItsModelOnItsOwnThread() {
+        let probe = ModelProbe()
+        var answers: [Float?] = []
+        do {
+            let batcher = Self.probedBatcher(probe)
+            let lock = NSLock()
+            var collected = [Float?](repeating: nil, count: 12)
+            DispatchQueue.concurrentPerform(iterations: 12) { i in
+                let answer = batcher.submit([Float(i)])?.first
+                lock.lock(); collected[i] = answer; lock.unlock()
+            }
+            answers = collected
+        }
+        #expect(answers == (0..<12).map { Float($0) })
+        #expect(probe.releasedOn != nil)
+        #expect(probe.releasedOn == probe.ranOn)
+        #expect(probe.releasedOn != Thread.current)
+    }
+
     @Test func ramPlusRefineMatchesTheEngine() {
         let refined = ScanRamPlus.refine([("baseball bat", 0.9), ("bat", 0.8), ("man", 0.75), ("woman", 0.7), ("goggles", 0.69), ("sunglasses", 0.65)])
         #expect(refined.map(\.tag) == ["baseball bat", "man", "sunglasses"])

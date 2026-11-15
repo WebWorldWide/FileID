@@ -290,7 +290,8 @@ extension ExactDuplicateVerifier {
             outcome.engineUnavailable = true
             return outcome
         }
-        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles",
+        let commandID = engine.lastSentCommandID
+        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID,
                                                          timeout: 300 + Double(accepted.count) / 5) else {
             outcome.timedOut = true
             return outcome
@@ -326,7 +327,7 @@ extension ExactDuplicateVerifier {
     static func undoTrash(batchID: String, engine: EngineClient) async -> (restored: Int, message: String?) {
         let signal = engine.bulkActionResultSignal
         guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
-        let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", timeout: 300)
+        let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 300)
         return (result?.succeeded ?? 0, result == nil ? "Putting files back didn't finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }
 }

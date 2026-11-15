@@ -8,7 +8,7 @@
 // `request_pause` / `request_resume` / `request_cancel` are idempotent and
 // safe from any thread; the workers poll the flags between batches.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Notify;
 
@@ -56,6 +56,8 @@ pub struct ScanCoordinator {
 struct Inner {
     paused: AtomicBool,
     cancelled: AtomicBool,
+    /// New or changed images and videos this scan analysed and stored.
+    media_analyzed: AtomicU64,
     gpu_failure_latch: Arc<GpuFailureLatch>,
     gpu_dead_observed: AtomicBool,
     /// Workers that hit the pause flag await on this notifier. Resume
@@ -74,6 +76,7 @@ impl ScanCoordinator {
             inner: Arc::new(Inner {
                 paused: AtomicBool::new(false),
                 cancelled: AtomicBool::new(false),
+                media_analyzed: AtomicU64::new(0),
                 gpu_failure_latch,
                 gpu_dead_observed: AtomicBool::new(false),
                 resume_notify: Notify::new(),
@@ -117,6 +120,14 @@ impl ScanCoordinator {
     }
 
     /// Cheap, can be polled inside hot loops on the worker thread.
+    pub(crate) fn note_media_analyzed(&self, count: u64) {
+        self.inner.media_analyzed.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn media_analyzed(&self) -> u64 {
+        self.inner.media_analyzed.load(Ordering::Relaxed)
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::Relaxed) || self.is_gpu_dead()
     }

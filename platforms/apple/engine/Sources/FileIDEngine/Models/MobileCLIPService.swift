@@ -113,7 +113,7 @@ public final class MobileCLIPService: @unchecked Sendable {
     /// An image encoder is loaded on either backend (after `preWarm`).
     public var canEmbed: Bool {
         lock.lock(); defer { lock.unlock() }
-        return (isImageLoaded && session != nil) || gpuEncoder != nil
+        return (isImageLoaded && session != nil) || gpuEncoder != nil || gpuParked
     }
 
     // MARK: - Inference
@@ -122,6 +122,7 @@ public final class MobileCLIPService: @unchecked Sendable {
     /// isn't loaded / inference failed.
     public func embedImage(_ cgImage: CGImage) -> [Float]? {
         if Self.useGPU, let batcher = gpuBatcher() {
+            ScanModelResidency.shared.touch()
             guard let tensor = makeNCHWTensor(cgImage), let raw = batcher.embed(tensor), raw.count == Self.embeddingDim else { return nil }
             return normalize(raw)
         }
@@ -133,6 +134,25 @@ public final class MobileCLIPService: @unchecked Sendable {
     static let useGPU = ProcessInfo.processInfo.environment["FILEID_CLIP_BACKEND"] != "onnx"
         && DeepAnalyzeCapability.metallibPresent()
     private var batcher: CLIPGPUBatcher?
+    /// The MLX encoder was freed after an idle period; the next embed reloads it.
+    private var gpuParked = false
+    private var residencyRegistered = false
+
+    /// Frees the MLX encoder and its batcher, then returns MLX's cached buffers.
+    func unloadGPU() {
+        lock.lock()
+        let held = batcher != nil || gpuEncoder != nil
+        var old: (CLIPGPUBatcher?, CLIPVisionMLX?) = (batcher, gpuEncoder)
+        batcher = nil
+        gpuEncoder = nil
+        if held { gpuParked = true }
+        lock.unlock()
+        old = (nil, nil)
+        if held {
+            JSONLog.shared.info(ev: "clip_model_parked")
+            GPURequestBatcher.releaseCache()
+        }
+    }
 
     private func gpuBatcher() -> CLIPGPUBatcher? {
         lock.lock()
@@ -204,6 +224,13 @@ public final class MobileCLIPService: @unchecked Sendable {
         }) { try CLIPVisionMLX(onnxURL: url) }) ?? nil
         lock.lock(); defer { lock.unlock() }
         if gpuEncoder == nil { gpuEncoder = built; gpuEncoderFailed = built == nil }
+        if built != nil {
+            gpuParked = false
+            if !residencyRegistered {
+                residencyRegistered = true
+                ScanModelResidency.shared.register { MobileCLIPService.shared.unloadGPU() }
+            }
+        }
         if built == nil {
             JSONLog.shared.warn(ev: "clip_gpu_encoder_unavailable")
         } else {

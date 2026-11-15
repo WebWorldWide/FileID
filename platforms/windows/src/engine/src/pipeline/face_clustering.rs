@@ -131,14 +131,9 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         }
     }
     let k = super::identity_clustering::Hyperparameters::default().k_nn;
-    let hnsw_idx = (embeddings.len() >= HNSW_MIN).then(|| {
-        let points: Vec<(Vec<f32>, usize)> = embeddings
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.to_vec(), i))
-            .collect();
-        crate::util::hnsw_index::build(points)
-    });
+    // Faces of byte-identical photos have identical embeddings; the index keeps one node per distinct vector.
+    let owned: Vec<Vec<f32>> = if embeddings.len() >= HNSW_MIN { embeddings.iter().map(|e| e.to_vec()).collect() } else { Vec::new() };
+    let hnsw_idx = (embeddings.len() >= HNSW_MIN).then(|| crate::util::hnsw_index::DedupIndex::build(&owned));
     let mut knn_search = crate::util::hnsw_index::Searcher::default();
     let result = super::identity_clustering::cluster_with_cannot_links(
         &embeddings,
@@ -148,10 +143,8 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
                 // cosine (vectors are unit-norm: d = 2(1 − cos)). Reuse one
                 // Search scratch across the whole sweep — a fresh one re-zeros an
                 // n-byte visited set per query, an O(n²) term over the pass.
-                knn_search
-                    .top_k(idx, &embeddings[i], k + 1)
+                idx.neighbours(&mut knn_search, &owned, i, k)
                     .into_iter()
-                    .filter(|(j, _)| *j != i)
                     .map(|(j, d)| super::identity_clustering::Neighbor {
                         idx: j,
                         similarity: 1.0 - d / 2.0,
@@ -2271,6 +2264,22 @@ mod tests {
     fn unit(coords: &[f32]) -> Vec<f32> {
         let n: f32 = coords.iter().map(|x| x * x).sum::<f32>().sqrt();
         coords.iter().map(|&x| x / n).collect()
+    }
+
+    /// Past the HNSW threshold the faces of copied photos (identical embeddings) still land in one cluster.
+    #[test]
+    fn identical_faces_past_the_hnsw_threshold_share_a_cluster() {
+        let mut state = 5u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+        };
+        let people: Vec<Vec<f32>> = (0..60).map(|_| unit(&(0..32).map(|_| next()).collect::<Vec<_>>())).collect();
+        let faces: Vec<FaceRow> = (0..5_100).map(|i| row(i as i64, i as i64, people[i % 60].clone(), 0.9)).collect();
+        let (assignments, _) = cluster(&faces);
+        let of = |i: usize| assignments.iter().find(|a| a.face_id == i as i64).map(|a| a.cluster_id).unwrap();
+        assert!((60..5_100).all(|i| of(i) == of(i % 60)), "copies of one face share its cluster");
+        assert!((1..60).any(|i| of(i) != of(0)), "different people do not all collapse into one cluster");
     }
 
     fn row(id: i64, file_id: i64, e: Vec<f32>, q: f32) -> FaceRow {

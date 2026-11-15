@@ -870,6 +870,11 @@ impl DbWriter {
 
                 if f.failed {
                     *failed += 1;
+                } else if matches!(
+                    f.kind,
+                    crate::pipeline::discovery::FileKind::Image | crate::pipeline::discovery::FileKind::Video
+                ) {
+                    self.coordinator.note_media_analyzed(1);
                 }
                 *total += 1;
                 if matches!(
@@ -1769,6 +1774,25 @@ mod tests {
     }
 
     // ---- rename-heal data-loss regression -----------------------------------
+
+    #[test]
+    fn only_new_or_changed_images_and_videos_count_as_analysed_media() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let coordinator = ScanCoordinator::new();
+        let writer = DbWriter::new(conn, coordinator.clone());
+        let mut document = fixture("/lib/notes.pdf");
+        document.kind = FileKind::Pdf;
+        let mut broken = fixture("/lib/broken.jpg");
+        broken.failed = true;
+        let mut buffer = vec![document, broken];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert_eq!(coordinator.media_analyzed(), 0);
+        let mut video = fixture("/lib/clip.mov");
+        video.kind = FileKind::Video;
+        let mut buffer = vec![fixture("/lib/a.jpg"), video];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(coordinator.media_analyzed(), 2);
+    }
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

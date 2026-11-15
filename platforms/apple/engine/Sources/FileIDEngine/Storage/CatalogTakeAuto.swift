@@ -53,6 +53,15 @@ enum CatalogTakeAuto {
 
     struct Content: Hashable { let hash: Data; let size: Int64 }
 
+    /// The one rule for "the same file" in every take path: stored hash and
+    /// size, only for files small enough to be hashed in full (larger files
+    /// store a sampled hash that two different files can share). Mirrors the
+    /// Rust `content_identity`.
+    static func contentIdentity(hash: Data?, size: Int64?) -> Content? {
+        guard let hash, let size, (0...Int64(ContentHash.fullHashMaxBytes)).contains(size) else { return nil }
+        return Content(hash: hash, size: size)
+    }
+
     /// Copies of one file are one try: keep the lowest file id of each content
     /// (stored hash and size, only for files small enough to be hashed in full,
     /// the identity Duplicates verifies). Mirrors the Rust `distinct_contents`.
@@ -77,7 +86,7 @@ enum CatalogTakeAuto {
                 let phash: Int64? = row["phash"]
                 let hash: Data? = row["content_hash"]
                 let size: Int64? = row["size_bytes"]
-                let content = hash.flatMap { hash in size.flatMap { size in (0...Int64(ContentHash.fullHashMaxBytes)).contains(size) ? Content(hash: hash, size: size) : nil } }
+                let content = contentIdentity(hash: hash, size: size)
                 return Row1(id: row["id"], path: row["path_text"], time: row["created_at"], phash: phash.map { UInt64(bitPattern: $0) }, kind: row["kind"], content: content)
             }
         let contents = Dictionary(uniqueKeysWithValues: rows.compactMap { row in row.content.map { (row.id, $0) } })
