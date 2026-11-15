@@ -35,6 +35,10 @@ const MIN_PENDING_BEFORE_REBUILD: usize = 256;
 const MAX_PENDING: usize = MAX_FILES / 10 + MIN_PENDING_BEFORE_REBUILD;
 const MAX_DELTA_BYTES: u64 = snapshot::max_delta_bytes(clip_space::DIMENSION, MAX_PENDING, MAX_PENDING);
 const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+/// A catalog with at most this many vectors answers a search that finds no
+/// graph yet by comparing every vector (the graph is built in the background),
+/// so the first search after a scan is ranked like the Swift engine's.
+const EXACT_SEARCH_MAX: usize = 50_000;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Revision {
     instance: String,
@@ -154,6 +158,9 @@ pub struct CatalogIndex {
     state: Mutex<State>,
     changed: Condvar,
     scheduler: Arc<ResourceScheduler>,
+    /// Largest catalog searched exactly while the graph is not built; the
+    /// unit tests set it to 0 where they exercise the cold-graph reply.
+    exact_max: std::sync::atomic::AtomicUsize,
 }
 impl CatalogIndex {
     pub fn new(writer: Arc<Mutex<Connection>>, database: PathBuf, directory: PathBuf) -> Arc<Self> {
@@ -179,6 +186,7 @@ impl CatalogIndex {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
             scheduler,
+            exact_max: std::sync::atomic::AtomicUsize::new(if cfg!(test) { 0 } else { EXACT_SEARCH_MAX }),
         })
     }
     pub fn job_id() -> String {
@@ -400,39 +408,43 @@ impl CatalogIndex {
         }
         let latest = revision(&tx)?;
         let cached = self.state.lock().cache.clone().filter(|cache| cache.revision == latest);
-        let Some(cache) = cached else {
-            drop(tx);
-            drop(retrieval_lease);
-            self.prepare()?;
-            response.status = if mode == "semantic" { "error" } else { "ok" }.into();
-            response.message = Some(
-                if mode == "semantic" {
-                    "Preparing the local visual search index. Similarity results are not available yet."
-                } else {
-                    "Keyword results only. Preparing the local visual search index."
-                }
-                .into(),
-            );
-            response.jobs = crate::commands::catalog::jobs(&conn)?;
-            response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-            return Ok(Judged { response, weak: None });
-        };
-        let _visual_lease = if mode == "semantic" {
-            Some(self.scheduler.reserve(
-                Demand {
-                    memory_mb: 32,
-                    cpu: 1,
-                    io: 1,
-                },
-                Priority::Interactive,
-                || false,
-            )?)
-        } else {
-            None
-        };
-        self.retry_save(&cache);
         let wanted = if root.is_some() { 1000 } else { (limit * 4 + 1).min(1000) };
-        let candidates = cache.nearest(&query_vector, wanted);
+        let mut _visual_lease = None;
+        let candidates = match cached {
+            Some(cache) => {
+                if mode == "semantic" {
+                    _visual_lease = Some(self.scheduler.reserve(Demand { memory_mb: 32, cpu: 1, io: 1 }, Priority::Interactive, || false)?);
+                }
+                self.retry_save(&cache);
+                cache.nearest(&query_vector, wanted)
+            }
+            None => {
+                let Some(exact) = self.exact_nearest(&tx, &query_vector, wanted)? else {
+                    drop(tx);
+                    drop(retrieval_lease);
+                    self.prepare()?;
+                    response.status = if mode == "semantic" { "error" } else { "ok" }.into();
+                    response.message = Some(
+                        if mode == "semantic" {
+                            "Preparing the local visual search index. Similarity results are not available yet."
+                        } else {
+                            "Keyword results only. Preparing the local visual search index."
+                        }
+                        .into(),
+                    );
+                    response.jobs = crate::commands::catalog::jobs(&conn)?;
+                    response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
+                    return Ok(Judged { response, weak: None });
+                };
+                // The graph is built in the background for the next search. The
+                // search's own lease goes first: a background build is not
+                // admitted beside it. A paused or failed index job does not
+                // stop this answer.
+                drop(retrieval_lease);
+                let _ = self.prepare();
+                exact
+            }
+        };
         let mut visual: Vec<(CatalogHit, f32)> = Vec::new();
         let mut stmt = tx.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.id=?1 AND f.failed=0 AND e.model=?2")?;
         for (entry, _) in candidates {
@@ -494,6 +506,41 @@ impl CatalogIndex {
         let (good, weaker): (Vec<_>, Vec<_>) = merged.into_iter().partition(|hit| !weak.contains(&hit.file_id));
         response.hits = crate::commands::catalog_search::select(good.into_iter().chain(weaker).collect(), limit, files_only);
         Ok(Judged { response, weak: Some(weak) })
+    }
+    /// The nearest vectors by comparing every one, or `None` when the catalog
+    /// is past what is fast to compare (the graph answers those).
+    fn exact_nearest(&self, tx: &Connection, query: &[f32], wanted: usize) -> Result<Option<Vec<(Entry, f32)>>> {
+        let maximum = self.exact_max.load(Ordering::Relaxed);
+        if maximum == 0 {
+            return Ok(None);
+        }
+        let count: usize = tx.query_row(
+            "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0",
+            [clip_space::model_id()],
+            |row| row.get(0),
+        )?;
+        if count > maximum {
+            return Ok(None);
+        }
+        let mut stmt = tx.prepare("SELECT e.file_id,e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0")?;
+        let mut rows = stmt.query([clip_space::model_id()])?;
+        let mut scored: Vec<(f32, i64)> = Vec::with_capacity(count);
+        while let Some(row) = rows.next()? {
+            let blob: Vec<u8> = row.get(1)?;
+            if let Some(mut vector) = clip_space::decode(&blob) {
+                normalize(&mut vector);
+                scored.push((crate::util::vector_math::squared_l2(&vector, query), row.get(0)?));
+            }
+        }
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored.truncate(wanted);
+        let mut stmt = tx.prepare("SELECT embedding FROM clip_embeddings WHERE file_id=?1 AND model=?2")?;
+        let mut nearest = Vec::with_capacity(scored.len());
+        for (distance, file_id) in scored {
+            let blob: Vec<u8> = stmt.query_row(params![file_id, clip_space::model_id()], |row| row.get(0))?;
+            nearest.push((Entry { file_id, fingerprint: clip_space::digest(&blob) }, distance));
+        }
+        Ok(Some(nearest))
     }
     fn prepare(self: &Arc<Self>) -> Result<()> {
         let mut state = self.state.lock();
