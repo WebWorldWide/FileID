@@ -178,9 +178,16 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          # Restore with the SDK, build with MSBuild: the self-hosted runner's
+          # MSBuild 17.14 restore looks for packages the .NET 10 SDK prunes
+          # (NU1101 System.Reflection.Metadata), as in the publish step.
+          dotnet restore FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /p:Configuration=Debug /p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
+          msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet restore FileID.App.Tests/FileID.App.Tests.csproj /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           [xml]$packageProps = Get-Content ../Directory.Packages.props
           $coverageVersion = $packageProps.Project.PropertyGroup.MicrosoftCodeCoverageVersion
