@@ -1478,8 +1478,11 @@ const HIDDEN_PURGE_BATCH: usize = 200;
 const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
 
 pub(crate) fn hidden_retention_days() -> f64 {
-    std::env::var("FILEID_HIDDEN_RETENTION_DAYS")
-        .ok()
+    parse_retention_days(std::env::var("FILEID_HIDDEN_RETENTION_DAYS").ok().as_deref())
+}
+
+fn parse_retention_days(value: Option<&str>) -> f64 {
+    value
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|d| d.is_finite() && *d >= 0.0)
         .unwrap_or(HIDDEN_ROW_RETENTION_DAYS)
@@ -2147,14 +2150,12 @@ mod tests {
     }
 
     #[test]
-    fn the_retention_override_accepts_zero() {
-        // SAFETY of env use: tests in this module do not read this variable concurrently.
-        unsafe { std::env::set_var("FILEID_HIDDEN_RETENTION_DAYS", "0") };
-        assert_eq!(hidden_retention_days(), 0.0);
-        unsafe { std::env::set_var("FILEID_HIDDEN_RETENTION_DAYS", "junk") };
-        assert_eq!(hidden_retention_days(), HIDDEN_ROW_RETENTION_DAYS);
-        unsafe { std::env::remove_var("FILEID_HIDDEN_RETENTION_DAYS") };
-        assert_eq!(hidden_retention_days(), HIDDEN_ROW_RETENTION_DAYS);
+    fn the_retention_override_accepts_zero_and_ignores_junk() {
+        assert!(parse_retention_days(Some("0")).abs() < f64::EPSILON);
+        assert!((parse_retention_days(Some(" 2.5 ")) - 2.5).abs() < f64::EPSILON);
+        for bad in [Some("junk"), Some("-1"), Some("NaN"), None] {
+            assert!((parse_retention_days(bad) - HIDDEN_ROW_RETENTION_DAYS).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
