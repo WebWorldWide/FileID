@@ -448,7 +448,7 @@ fn confirmed_people(conn: &Connection, id: i64, revision: &str, failed: bool) ->
     Ok(tokens)
 }
 
-fn normalized(blob: &[u8]) -> bool {
+pub(crate) fn normalized(blob: &[u8]) -> bool {
     if blob.len() != 512 {
         return false;
     }
