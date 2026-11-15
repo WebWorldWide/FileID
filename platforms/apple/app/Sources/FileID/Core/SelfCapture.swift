@@ -8,7 +8,7 @@
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
-//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>];...   extra captures after the pages
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -23,6 +23,7 @@ struct SelfShotView: Equatable {
     var scrollToBottom = false
     var scrollOffset: Double?
     var preview: String?
+    var focusSteps = 0
 
     /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
     static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
@@ -41,6 +42,7 @@ struct SelfShotView: Equatable {
                     switch kv[0] {
                     case "kind": view.kind = value
                     case "query": view.query = value.isEmpty ? nil : value
+                    case "focus": view.focusSteps = max(0, min(20, Int(value) ?? 0))
                     case "preview": view.preview = value.isEmpty ? nil : value
                     case "scroll": view.scrollToBottom = value == "bottom"; view.scrollOffset = Double(value)
                     default: break
@@ -156,10 +158,12 @@ enum SelfShot {
                 if let name = view.preview {
                     NotificationCenter.default.post(name: .selfShotOpenPreview, object: name)
                     try? await Task.sleep(for: .seconds(plan.settle))
+                    if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()?.attachedSheet ?? window()); try? await Task.sleep(for: .seconds(0.6)) }
                     write(name: view.name, plan: plan, sheet: true)
                     if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
                     try? await Task.sleep(for: .seconds(0.5))
                 } else {
+                    if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()); try? await Task.sleep(for: .seconds(0.6)) }
                     write(name: view.name, plan: plan)
                 }
             }
@@ -189,6 +193,15 @@ enum SelfShot {
         let y = document.isFlipped ? min(end, offset ?? end) : max(0, end - (offset ?? end))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// Moves AppKit's key view loop forward `steps` times, the way Tab would, without sending an event.
+    private static func focusControl(steps: Int, in window: NSWindow?) {
+        guard let window else { return }
+        window.makeFirstResponder(nil)
+        for _ in 0..<steps { window.selectNextKeyView(nil) }
+        let name = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        FileHandle.standardError.write(Data("self-shot: first responder after focus steps: \(name)\n".utf8))
     }
 
     private static func waitUntil(timeout: Double, _ condition: @MainActor () -> Bool) async {
