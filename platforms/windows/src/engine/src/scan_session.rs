@@ -775,6 +775,17 @@ impl ScanSession {
                     }
                 }
             }
+            let purged = purge_expired_hidden_rows(&self.db_conn, root, unix_now(), hidden_retention_days(), &|| {
+                self.coordinator.is_cancelled()
+            });
+            if purged.removed > 0 || purged.skipped_for_clock {
+                tracing::info!(
+                    removed = purged.removed,
+                    batches = purged.batches,
+                    skipped_for_clock = purged.skipped_for_clock,
+                    "[STATS] hidden rows of long-gone files removed"
+                );
+            }
             match crate::paths::root() {
                 Ok(state_dir) if capture_dates_current => {
                     crate::pipeline::capture_date_backfill::mark_done(&state_dir, root);
@@ -1437,18 +1448,151 @@ fn soft_hide_missing_rows(
     let marked = tx.execute(
         "UPDATE files
          SET failed = 1,
-             error_message = 'File is no longer present under the completed scan root.'
+             error_message = 'File is no longer present under the completed scan root.',
+             scanned_at = ?3
          WHERE path_text >= ?1 AND path_text < ?2
            AND failed = 0
            AND NOT EXISTS (
                SELECT 1 FROM fileid_seen_path_hashes seen
                WHERE seen.path_hash = files.path_hash
            )",
-        rusqlite::params![lo, hi],
+        rusqlite::params![lo, hi, unix_now()],
     )?;
     tx.execute("DELETE FROM fileid_seen_path_hashes", [])?;
     tx.commit()?;
     Ok(marked)
+}
+
+/// Days a row hidden by [`soft_hide_missing_rows`] is kept before a later clean
+/// scan of its location removes it. A file that comes back before then (same path,
+/// or found again by rename-heal) re-binds to its row and keeps its tags and people.
+/// A rescan does not touch the `scanned_at` of an unchanged file, so it means "last
+/// analysed", not "last seen"; hiding therefore stamps `scanned_at` with the hide time
+/// (the file was there at the scan before), and that is what the retention counts from.
+/// Rows hidden by builds before this one keep their old `scanned_at` and are removed by
+/// the first clean scan of their location after the upgrade.
+/// `FILEID_HIDDEN_RETENTION_DAYS` overrides it (tests and the soak; 0 removes at the
+/// end of the scan that hid the row, as the Swift engine does).
+pub(crate) const HIDDEN_ROW_RETENTION_DAYS: f64 = 30.0;
+const HIDDEN_PURGE_BATCH: usize = 200;
+const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
+
+pub(crate) fn hidden_retention_days() -> f64 {
+    std::env::var("FILEID_HIDDEN_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d >= 0.0)
+        .unwrap_or(HIDDEN_ROW_RETENTION_DAYS)
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct HiddenPurge {
+    pub removed: u64,
+    pub batches: u32,
+    pub skipped_for_clock: bool,
+}
+
+/// Remove rows under `root` hidden as "no longer present" whose file was last seen
+/// (`scanned_at`) more than `retention_days` before `now`. Call only after a walk of
+/// `root` that was complete and clean. Nothing is removed when any row under `root`
+/// was last seen in the future (a wrong clock). Batches of `HIDDEN_PURGE_BATCH`
+/// rows, each in its own transaction with the writer lock released between them.
+/// Tags, text, embeddings, faces and the other child rows go through the
+/// foreign-key cascades (as in `purge_excluded_rows` and Trash); face crop files are
+/// deleted after the commit and each affected person's count and representative are
+/// recomputed in the same transaction, as the Swift engine's missing-file sweep does.
+pub(crate) fn purge_expired_hidden_rows(
+    db: &Mutex<Connection>,
+    root: &Path,
+    now: f64,
+    retention_days: f64,
+    cancelled: &dyn Fn() -> bool,
+) -> HiddenPurge {
+    let mut out = HiddenPurge::default();
+    let lo = root_descendant_prefix(root);
+    let Some(hi) = prefix_upper_bound(&lo) else { return out };
+    let cutoff = now - retention_days * 86_400.0;
+    {
+        let conn = db.lock();
+        let future: rusqlite::Result<bool> = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE path_text >= ?1 AND path_text < ?2 AND scanned_at > ?3)",
+            rusqlite::params![lo, hi, now + 300.0],
+            |r| r.get(0),
+        );
+        match future {
+            Ok(false) => {}
+            Ok(true) => {
+                out.skipped_for_clock = true;
+                return out;
+            }
+            Err(err) => {
+                tracing::warn!(?err, "hidden-row retention check failed; keeping rows");
+                return out;
+            }
+        }
+    }
+    while !cancelled() {
+        let mut conn = db.lock();
+        let batch = (|| -> rusqlite::Result<usize> {
+            let ids: Vec<i64> = conn
+                .prepare_cached(
+                    "SELECT id FROM files WHERE path_text >= ?1 AND path_text < ?2 \
+                     AND failed = 1 AND error_message = ?3 AND scanned_at <= ?4 ORDER BY id LIMIT ?5",
+                )?
+                .query_map(rusqlite::params![lo, hi, HIDDEN_ROW_MESSAGE, cutoff, HIDDEN_PURGE_BATCH as i64], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if ids.is_empty() {
+                return Ok(0);
+            }
+            let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+            let tx = conn.transaction()?;
+            let persons: Vec<i64> = tx
+                .prepare(&format!("SELECT DISTINCT person_id FROM face_prints WHERE person_id IS NOT NULL AND file_id IN ({list})"))?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let crops: Vec<i64> = tx
+                .prepare(&format!("SELECT id FROM face_prints WHERE file_id IN ({list})"))?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            tx.execute(&format!("DELETE FROM files WHERE id IN ({list}) AND failed = 1 AND error_message = ?1"), [HIDDEN_ROW_MESSAGE])?;
+            for pid in persons {
+                tx.execute(
+                    "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                    [pid],
+                )?;
+                tx.execute(
+                    "UPDATE persons SET representative_face_id = (SELECT id FROM face_prints WHERE person_id = ?1 ORDER BY id LIMIT 1) \
+                     WHERE id = ?1 AND (representative_face_id IS NULL OR representative_face_id NOT IN (SELECT id FROM face_prints WHERE person_id = ?1))",
+                    [pid],
+                )?;
+            }
+            tx.commit()?;
+            for id in crops {
+                crate::pipeline::dbwriter::remove_face_crop(id);
+            }
+            Ok(ids.len())
+        })();
+        drop(conn);
+        match batch {
+            Ok(0) => break,
+            Ok(n) => {
+                out.removed += n as u64;
+                out.batches += 1;
+            }
+            Err(err) => {
+                tracing::warn!(?err, "hidden-row retention batch failed; keeping the rest");
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Delete cataloged rows under each excluded folder. Child rows
@@ -1844,6 +1988,173 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tags WHERE file_id = ?1", [missing_id], |row| row.get(0))
             .unwrap();
         assert_eq!(tag_count, 1, "soft hide must preserve user tags for recovery");
+    }
+
+    fn retention_db() -> Arc<Mutex<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        for pragma in crate::db::SETUP_PRAGMAS {
+            let _ = conn.execute_batch(pragma);
+        }
+        crate::db::migrations::apply(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    const NOW: f64 = 2_000_000_000.0;
+    const DAY: f64 = 86_400.0;
+
+    fn hidden_row(db: &Arc<Mutex<Connection>>, name: &str, seen_days_ago: f64, hidden: bool, message: Option<&str>) -> i64 {
+        let root = if cfg!(windows) { r"C:\lib" } else { "/lib" };
+        let path = format!("{root}{}{name}", std::path::MAIN_SEPARATOR);
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, error_message) \
+             VALUES (?1, ?2, 10, ?3, 'image', 'jpg', ?4, ?5)",
+            rusqlite::params![path, crate::util::path_safety::stable_path_hash(&path), NOW - seen_days_ago * DAY, hidden as i64, message],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn row_exists(db: &Arc<Mutex<Connection>>, id: i64) -> bool {
+        db.lock().query_row("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1)", [id], |r| r.get(0)).unwrap()
+    }
+
+    fn lib_root() -> &'static Path {
+        Path::new(if cfg!(windows) { r"C:\lib" } else { "/lib" })
+    }
+
+    #[test]
+    fn a_hidden_row_last_seen_31_days_ago_is_removed_with_what_hangs_off_it_and_its_person_is_reconciled() {
+        let db = retention_db();
+        let old = hidden_row(&db, "old.jpg", 31.0, true, Some(HIDDEN_ROW_MESSAGE));
+        let keep = hidden_row(&db, "keep.jpg", 1.0, false, None);
+        {
+            let conn = db.lock();
+            conn.execute("INSERT INTO persons (id, name, file_count, created_at) VALUES (7, 'Pat', 2, 0)", []).unwrap();
+            conn.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'beach', 'user')", [old]).unwrap();
+            conn.execute("INSERT INTO doc_text (file_id, text) VALUES (?1, 'hello')", [old]).unwrap();
+            conn.execute("INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?1, X'00', 'm')", [old]).unwrap();
+            conn.execute("INSERT INTO face_prints (id, file_id, print_data, bbox, person_id) VALUES (50, ?1, X'00', '[]', 7)", [old]).unwrap();
+            conn.execute("INSERT INTO face_prints (id, file_id, print_data, bbox, person_id) VALUES (51, ?1, X'00', '[]', 7)", [keep]).unwrap();
+            conn.execute("UPDATE persons SET representative_face_id = 50 WHERE id = 7", []).unwrap();
+        }
+        let out = purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false);
+        assert_eq!(out.removed, 1);
+        assert!(!row_exists(&db, old) && row_exists(&db, keep));
+        let conn = db.lock();
+        for table in ["tags", "doc_text", "clip_embeddings"] {
+            let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE file_id = ?1"), [old], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "{table} rows go with the file");
+        }
+        let faces: i64 = conn.query_row("SELECT COUNT(*) FROM face_prints WHERE file_id = ?1", [old], |r| r.get(0)).unwrap();
+        assert_eq!(faces, 0);
+        let person: (i64, Option<i64>) = conn.query_row("SELECT file_count, representative_face_id FROM persons WHERE id = 7", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(person, (1, Some(51)), "count recomputed and the representative moved to a surviving face");
+    }
+
+    #[test]
+    fn a_person_left_with_no_faces_has_a_zero_count_and_no_representative() {
+        let db = retention_db();
+        let old = hidden_row(&db, "old.jpg", 40.0, true, Some(HIDDEN_ROW_MESSAGE));
+        {
+            let conn = db.lock();
+            conn.execute("INSERT INTO persons (id, name, file_count, created_at) VALUES (7, 'Pat', 1, 0)", []).unwrap();
+            conn.execute("INSERT INTO face_prints (id, file_id, print_data, bbox, person_id) VALUES (50, ?1, X'00', '[]', 7)", [old]).unwrap();
+            conn.execute("UPDATE persons SET representative_face_id = 50 WHERE id = 7", []).unwrap();
+        }
+        purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false);
+        let person: (i64, Option<i64>) = db.lock().query_row("SELECT file_count, representative_face_id FROM persons WHERE id = 7", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(person, (0, None));
+    }
+
+    #[test]
+    fn a_hidden_row_last_seen_29_days_ago_stays() {
+        let db = retention_db();
+        let id = hidden_row(&db, "recent.jpg", 29.0, true, Some(HIDDEN_ROW_MESSAGE));
+        assert_eq!(purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false).removed, 0);
+        assert!(row_exists(&db, id));
+    }
+
+    #[test]
+    fn a_row_that_failed_for_another_reason_stays_however_old() {
+        let db = retention_db();
+        let id = hidden_row(&db, "corrupt.jpg", 400.0, true, Some("Could not decode image"));
+        assert_eq!(purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false).removed, 0);
+        assert!(row_exists(&db, id));
+    }
+
+    #[test]
+    fn nothing_outside_the_walked_location_is_removed() {
+        let db = retention_db();
+        let id = hidden_row(&db, "old.jpg", 90.0, true, Some(HIDDEN_ROW_MESSAGE));
+        let other = Path::new(if cfg!(windows) { r"C:\elsewhere" } else { "/elsewhere" });
+        assert_eq!(purge_expired_hidden_rows(&db, other, NOW, 30.0, &|| false).removed, 0);
+        assert!(row_exists(&db, id));
+    }
+
+    #[test]
+    fn a_cancelled_scan_removes_nothing() {
+        let db = retention_db();
+        let id = hidden_row(&db, "old.jpg", 90.0, true, Some(HIDDEN_ROW_MESSAGE));
+        assert_eq!(purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| true).removed, 0);
+        assert!(row_exists(&db, id));
+    }
+
+    #[test]
+    fn a_last_seen_time_in_the_future_removes_nothing_at_all() {
+        let db = retention_db();
+        let old = hidden_row(&db, "old.jpg", 90.0, true, Some(HIDDEN_ROW_MESSAGE));
+        hidden_row(&db, "future.jpg", -2.0, false, None);
+        let out = purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false);
+        assert!(out.skipped_for_clock && out.removed == 0);
+        assert!(row_exists(&db, old));
+    }
+
+    #[test]
+    fn a_large_purge_runs_in_bounded_batches() {
+        let db = retention_db();
+        for i in 0..(HIDDEN_PURGE_BATCH * 2 + 5) {
+            hidden_row(&db, &format!("f{i}.jpg"), 60.0, true, Some(HIDDEN_ROW_MESSAGE));
+        }
+        let out = purge_expired_hidden_rows(&db, lib_root(), NOW, 30.0, &|| false);
+        assert_eq!((out.removed, out.batches), ((HIDDEN_PURGE_BATCH * 2 + 5) as u64, 3));
+    }
+
+    #[test]
+    fn a_file_that_returns_within_the_period_rebinds_to_its_hidden_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for pragma in crate::db::SETUP_PRAGMAS {
+            let _ = conn.execute_batch(pragma);
+        }
+        crate::db::migrations::apply(&conn).unwrap();
+        let root = lib_root();
+        let path = format!("{}{}back.jpg", root.display(), std::path::MAIN_SEPARATOR);
+        conn.execute(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (?1, ?2, 10, ?3, 'image', 'jpg')",
+            rusqlite::params![path, crate::util::path_safety::stable_path_hash(&path), unix_now() - 5.0 * DAY],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'family', 'user')", [id]).unwrap();
+        let marked = soft_hide_missing_rows(&mut conn, root, &mut Vec::new()).unwrap();
+        assert_eq!(marked, 1);
+        let db = Arc::new(Mutex::new(conn));
+        assert_eq!(purge_expired_hidden_rows(&db, root, unix_now(), 30.0, &|| false).removed, 0, "hiding restarts the clock");
+        assert!(row_exists(&db, id));
+        let tags: i64 = db.lock().query_row("SELECT COUNT(*) FROM tags WHERE file_id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 1);
+        assert_eq!(purge_expired_hidden_rows(&db, root, unix_now() + 31.0 * DAY, 30.0, &|| false).removed, 1, "and 31 days on it goes");
+    }
+
+    #[test]
+    fn the_retention_override_accepts_zero() {
+        // SAFETY of env use: tests in this module do not read this variable concurrently.
+        unsafe { std::env::set_var("FILEID_HIDDEN_RETENTION_DAYS", "0") };
+        assert_eq!(hidden_retention_days(), 0.0);
+        unsafe { std::env::set_var("FILEID_HIDDEN_RETENTION_DAYS", "junk") };
+        assert_eq!(hidden_retention_days(), HIDDEN_ROW_RETENTION_DAYS);
+        unsafe { std::env::remove_var("FILEID_HIDDEN_RETENTION_DAYS") };
+        assert_eq!(hidden_retention_days(), HIDDEN_ROW_RETENTION_DAYS);
     }
 
     #[test]
