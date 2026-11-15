@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 /// Library grid on NSCollectionView: cells are reused as they scroll, so a
 /// library of tens of thousands of files costs only the visible tiles.
@@ -519,7 +520,7 @@ final class LibraryTileItem: NSCollectionViewItem {
             chip.isHidden = index >= tags.count
             if index < tags.count { chip.text = tags[index] }
         }
-        size.text = ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file)
+        size.text = row.sizeBytes == 0 ? "0 bytes" : ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file)
         date.text = row.displayDate?.formatted(date: .numeric, time: .omitted) ?? ""
         check.isHidden = !selectMode
         check.image = NSImage(systemSymbolName: checked ? "checkmark.circle.fill" : "circle", accessibilityDescription: nil)
@@ -550,11 +551,11 @@ final class LibraryTileItem: NSCollectionViewItem {
             let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
             let isPage = row.kind == "doc" || row.kind == "pdf"
             let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) } : nil
-            let blank = isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true
+            let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
             CATransaction.begin(); CATransaction.setDisableActions(true)
             self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
             self.thumbLayer.contents = blank ? nil : cgImage
-            self.kindGlyph.image = blank ? NSImage(systemSymbolName: row.kind == "pdf" ? "doc.richtext" : "doc.text", accessibilityDescription: nil)?
+            self.kindGlyph.image = blank ? NSImage(systemSymbolName: FileKind.symbolName(forKind: row.kind), accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 34, weight: .light)) : nil
             self.kindGlyph.isHidden = !blank
             CATransaction.commit()

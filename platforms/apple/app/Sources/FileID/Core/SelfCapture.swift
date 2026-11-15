@@ -157,12 +157,16 @@ enum SelfShot {
         guard let root = window()?.contentView else { return }
         var best: NSScrollView?
         func visit(_ view: NSView) {
-            if let scroll = view as? NSScrollView, scroll.documentView != nil, scroll.convert(scroll.bounds, to: nil).minX > 200,
-               (best?.documentView?.frame.height ?? 0) < scroll.documentView!.frame.height { best = scroll }
+            if let scroll = view as? NSScrollView, let document = scroll.documentView, !scroll.isHiddenOrHasHiddenAncestor,
+               document.frame.height > scroll.contentView.bounds.height + 1, scroll.convert(scroll.bounds, to: nil).minX > 200,
+               scroll.bounds.width * scroll.bounds.height > (best.map { $0.bounds.width * $0.bounds.height } ?? 0) { best = scroll }
             view.subviews.forEach(visit)
         }
         visit(root)
-        guard let scroll = best, let document = scroll.documentView else { return }
+        guard let scroll = best, let document = scroll.documentView else {
+            FileHandle.standardError.write(Data("self-shot: no scroll view to scroll\n".utf8)); return
+        }
+        FileHandle.standardError.write(Data("self-shot: scrolling \(Int(document.frame.height)) tall document in \(Int(scroll.bounds.height)) pt view\n".utf8))
         let y = document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
