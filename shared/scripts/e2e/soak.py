@@ -908,6 +908,7 @@ class Soak:
         if k != "scanComplete":
             fail(rnd, "scan before the idle wait completes", (k, v))
             return rec
+        self.wait_jobs(eng)
         parks0 = self.log_count(eng, "idle model parked")
         loads0 = self.log_count(eng, "Mac scan adapters (MLX)")
         rec["fp_loaded"] = self.fp(eng)
@@ -947,6 +948,21 @@ class Soak:
         log("model cycle:", json.dumps(rec))
         return rec
 
+    def wait_jobs(self, eng, timeout=240):
+        """Background jobs a scan starts by itself (catalogIndex, takeGrouping) run to a terminal state before the idle wait,
+        so the models' idle period is not extended by them and their effect is part of what the round measures."""
+        end = time.time() + timeout
+        seen = set()
+        while time.time() < end:
+            jobs = [j for j in (eng.catalog("jobs", limit=50).get("jobs") or []) if j.get("kind") in ("catalogIndex", "takeGrouping")]
+            seen |= {j.get("kind") for j in jobs}
+            if all(j.get("state") in ("completed", "failed", "cancelled") for j in jobs):
+                for k in seen:
+                    self.notes.setdefault("jobs_seen", {})[k] = self.notes.get("jobs_seen", {}).get(k, 0) + 1
+                return
+            time.sleep(2)
+        self.notes["job_wait_timeouts"] = self.notes.get("job_wait_timeouts", 0) + 1
+
     def step_embedding_search(self, rnd, eng, rec):
         """The engine takes the query vector from its client (the text tower runs in the app and needs ONNX Runtime, which
         this Mac does not have), so the vector here is a stored image embedding: searching with a file's own vector must
@@ -955,7 +971,7 @@ class Soak:
         # the visual index is built by a background job after a scan; similarity answers "preparing" until it is done
         end = time.time() + 180
         while time.time() < end:
-            jobs = [j for j in (eng.catalog("jobs", limit=50).get("jobs") or []) if j.get("kind") == "catalogIndex"]
+            jobs = [j for j in (eng.catalog("jobs", limit=50).get("jobs") or []) if j.get("kind") in ("catalogIndex", "takeGrouping")]
             if jobs and all(j.get("state") in ("completed", "failed") for j in jobs):
                 break
             time.sleep(2)
