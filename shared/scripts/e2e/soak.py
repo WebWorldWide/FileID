@@ -84,6 +84,8 @@ class Engine:
     """One engine process with an event pump over both stdout and stderr (the Mac-hosted build writes events to
     stderr). Lines that are not JSON events go to <logfile> and are scanned for panics."""
 
+    env_logged = False
+
     def __init__(self, binary, flavor, state, logfile, trash_root, models, no_trash=False, label="engine"):
         self.label, self.state, self.logfile = label, state, logfile
         os.makedirs(state, exist_ok=True)
@@ -105,6 +107,9 @@ class Engine:
         if not no_trash:
             env["FILEID_TEST_TRASH_ROOT"] = trash_root
         assert db.startswith(os.path.abspath(state)), "database must be inside scratch"
+        if not Engine.env_logged:
+            Engine.env_logged = True
+            log("engine environment:", json.dumps({k: env[k] for k in sorted(env) if k.startswith(("FILEID", "ORT", "XDG", "HOME", "CFFIXED", "LOCALAPPDATA", "TZ"))}))
         self.p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                   bufsize=0)
         self.q = queue.Queue()
@@ -1184,24 +1189,50 @@ class Soak:
         hl = os.path.join(self.work, "heal-lib")
         shutil.rmtree(hl, ignore_errors=True)
         os.makedirs(hl)
-        reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")][:: 4][:30]
+        reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")][:: 2][:30]
         for i, r in enumerate(reals):
             shutil.copy2(self.p(r), os.path.join(hl, f"{i}.jpg"))
         mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "heal-engine.log"), self.trash, self.models, self.a.no_trash, "heal")
         v = mk()
+        crash_seen = False
         try:
             k, res = v.scan(hl)
             v.drain()
             v.send("startScan", {"rootPath": hl, "rescan": True})
-            v.wait(lambda e: kind(e) == "phaseChanged", 30)
+            # The crash must leave a 'running' scan_sessions row: that row is what makes the next start an unclean one.
+            # Killing at the first phaseChanged raced the row's insert (it was absent in some runs), so poll for it.
+            end = time.time() + 30
+            while time.time() < end and v.alive() and not crash_seen:
+                with ro(v.db) as c:
+                    crash_seen = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0] > 0
+                time.sleep(0.01)
             v.kill()
         finally:
             v.raw.close()
+        # What a kill leaves behind when it falls between a face batch's commit and its crop writes: face rows with no crop
+        # file. The rescan above reprocesses nothing on an already scanned folder, and the Mac path writes crops after the
+        # commit, so a real kill rarely lands in that window and the generated library has no faces; make the state explicit.
+        crops_dir = os.path.join(state, "FileID", "face_crops")
+        db = sqlite3.connect(v.db)
+        try:
+            have = {r[0] for r in db.execute("SELECT DISTINCT file_id FROM face_prints")}
+            images = [r[0] for r in db.execute("SELECT id FROM files WHERE kind='image' AND failed=0 ORDER BY id") if r[0] not in have][:12]
+            for fid in images:
+                db.execute("INSERT INTO face_prints (file_id, print_data, bbox) VALUES (?, ?, ?)", (fid, b"\0" * 8, "[0,0,1,1]"))
+            db.commit()
+            owed_files = {r[0] for r in db.execute("SELECT file_id, id FROM face_prints")}
+            for _, face_id in db.execute("SELECT file_id, id FROM face_prints"):
+                try:
+                    os.remove(os.path.join(crops_dir, f"{face_id}.jpg"))
+                except FileNotFoundError:
+                    pass
+        finally:
+            db.close()
         v = mk()
         try:
             with ro(v.db) as c:
                 faces = c.execute("SELECT count(DISTINCT file_id) FROM face_prints").fetchone()[0]
-            rec = dict(round=rnd, cancel_first=cancel_first, face_files=faces)
+            rec = dict(round=rnd, cancel_first=cancel_first, face_files=faces, injected_face_files=len(images), crash_row_seen=crash_seen)
             if cancel_first:
                 v.send("startScan", {"rootPath": hl, "rescan": False})
                 time.sleep(0.05)
@@ -1220,10 +1251,11 @@ class Soak:
                 failed_rows = c.execute("SELECT count(*) FROM files WHERE failed=1").fetchone()[0]
             if (rec["next"][1] or 0) > failed_rows or (rec["next2"][1] or 0) > failed_rows:
                 fail(rnd, "the scans after the healing scan reprocess nothing", rec)
-            if faces and not cancel_first and (rec["full"][1] or 0) == 0:
-                fail(rnd, "the first scan after a crash heals", rec)
-            if faces and cancel_first and (rec["full"][1] or 0) == 0:
-                fail(rnd, "a cancelled first scan after a crash does not lose the heal", rec)
+            if not crash_seen:
+                fail(rnd, "the heal check's kill left a running scan session", rec)
+            if (rec["full"][1] or 0) != len(owed_files):
+                fail(rnd, "the first scan after a crash heals exactly the files with face rows and no crop" if not cancel_first
+                     else "a cancelled first scan after a crash does not lose the heal", dict(rec, expected=len(owed_files)))
             self.check_db(rnd, v.db, "heal")
         finally:
             v.close()
