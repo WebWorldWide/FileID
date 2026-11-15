@@ -927,6 +927,52 @@ async fn emit_scan_busy(sink: &Sink) {
     .await;
 }
 
+/// What the Mac-hosted engine does once a scan has ended normally. The Swift engine starts
+/// "Group faces" itself (`autoEnqueueFaceClusteringIfNeeded`) and the Mac app has no trigger
+/// of its own; the Windows app sends the command after `scanComplete`.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+struct AfterScan {
+    sink: Sink,
+    db: Writer,
+    jobs: job_queue::JobQueue,
+    gate: Arc<tokio::sync::Mutex<()>>,
+    scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
+    active: Flag,
+}
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+impl AfterScan {
+    /// The same job, flag and events as the Group faces button. It queues behind the scan, which
+    /// still holds the mutation gate, and is skipped when a pass is already running or faces
+    /// have nothing new to be grouped by.
+    async fn group_faces(self) {
+        let db = self.db.clone();
+        if !tokio::task::spawn_blocking(move || commands::face_clustering::needed_after_scan(&db)).await.unwrap_or(false) {
+            return;
+        }
+        if self.active.compare_exchange(false, true, std::sync::atomic::Ordering::Acquire, std::sync::atomic::Ordering::Relaxed).is_err() {
+            return;
+        }
+        let guard = FaceClusterActiveGuard(self.active.clone());
+        let terminal_active = self.active.clone();
+        let track = JobTrackGuard::start(&self.jobs, JobCategory::FaceCluster, "Group faces");
+        tracing::info!("[CLUSTER] grouping faces after the scan");
+        let (sink, db) = (self.sink.clone(), self.db.clone());
+        spawn_mutation_with_rejection(
+            &self.gate,
+            &self.sink,
+            &self.scan_state,
+            face_clustering_rejection_event("FileID can't group faces while the scan is paused. Resume or stop the scan, then try again."),
+            async move {
+                let _guard = guard;
+                let _track = track;
+                commands::face_clustering::handle_run_face_clustering(sink, db, terminal_active).await;
+            },
+        )
+        .await;
+    }
+}
+
 async fn emit_face_clustering_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "face_clustering_busy",
@@ -1507,9 +1553,18 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                         || commands::prewarm::any_download_in_flight()
                 })
             };
+            #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+            let after_scan = AfterScan {
+                sink: sink.clone(),
+                db: db.clone(),
+                jobs: jobs.clone(),
+                gate: mutation_gate.clone(),
+                scan_state: scan_state.clone(),
+                active: face_cluster_active.clone(),
+            };
             spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _track = track;
-                commands::scan::handle_start_scan(
+                let completed = commands::scan::handle_start_scan(
                     sink_c,
                     db_c,
                     state_c,
@@ -1519,6 +1574,12 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     Some(other_heavy_work),
                 )
                 .await;
+                #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+                if completed {
+                    after_scan.group_faces().await;
+                }
+                #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+                let _ = completed;
             })
             .await;
         }

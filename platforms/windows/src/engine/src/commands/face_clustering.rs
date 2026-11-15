@@ -1398,6 +1398,51 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
         })
 }
 
+/// Whether a pass should start by itself after a completed scan: faces wait for a person
+/// (the Swift engine's `autoEnqueueFaceClusteringIfNeeded`) and the catalog is not exactly as
+/// the last finished pass left it, so a rescan that found nothing new starts nothing.
+#[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
+pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -> bool {
+    skip::with_reader(db, |conn| {
+        let waiting: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM face_prints WHERE person_id IS NULL)", [], |row| row.get(0))
+            .unwrap_or(false);
+        waiting && skip::unchanged(conn).is_none()
+    })
+}
+
+/// The Swift engine's answer to a pass that cannot embed faces: the model is not installed
+/// (the app shows the message as it stands) or is installed but does not start. Only said while
+/// some face still has no vector: a catalog whose faces were all embedded earlier clusters
+/// without the model.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn embedder_problem(db: &parking_lot::Mutex<rusqlite::Connection>) -> Option<(&'static str, String)> {
+    let unembedded: bool = db
+        .lock()
+        .query_row("SELECT EXISTS(SELECT 1 FROM face_prints WHERE arcface_embedding IS NULL AND COALESCE(excluded,0)=0)", [], |row| row.get(0))
+        .unwrap_or(false);
+    if !unembedded {
+        return None;
+    }
+    match crate::apple::faces::shared_sface() {
+        Some(Ok(_)) => None,
+        Some(Err(error)) => {
+            tracing::warn!(?error, "face_cluster_embedder_load_failed");
+            Some((
+                "face_cluster_embedder_load_failed",
+                "The face recognition model couldn't start. Quit and reopen FileID. If it keeps happening, download the model again in Settings.".to_string(),
+            ))
+        }
+        None => {
+            let bytes = crate::models::manifest::artifact("sface_embedder").map_or(0, |artifact| artifact.approx_bytes);
+            Some((
+                "face_cluster_no_model",
+                format!("The face recognition model isn't installed. Open Settings to download it ({} MB).", bytes.div_ceil(1_000_000)),
+            ))
+        }
+    }
+}
+
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1406,6 +1451,10 @@ pub(crate) async fn handle_run_face_clustering(
     let _sleep = SleepGuard::acquire();
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
+        let problem_db = db.clone();
+        if let Ok(Some((kind, message))) = tokio::task::spawn_blocking(move || embedder_problem(&problem_db)).await {
+            sink.send(EngineError::event(kind, message)).await;
+        }
         let extract_db = db.clone();
         let _ = tokio::task::spawn_blocking(move || crate::apple::faces::extract_before_clustering(&extract_db)).await;
     }
@@ -1491,6 +1540,34 @@ pub(crate) async fn handle_run_face_clustering(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pass_starts_after_a_scan_only_while_faces_wait_for_a_person_and_the_catalog_moved() {
+        let directory = std::env::temp_dir().join(format!("fileid-after-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let db = parking_lot::Mutex::new(crate::db::open_writer(&directory.join("catalog.sqlite")).unwrap());
+        assert!(!needed_after_scan(&db), "no faces");
+        db.lock()
+            .execute_batch(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES (1,'/a.jpg',1,100,10,0,'image','jpg');
+                 INSERT INTO persons(id,name,created_at) VALUES(1,'Ann',1);
+                 INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES (10,1,1,x'00','0.1,0.1,0.2,0.2');",
+            )
+            .unwrap();
+        assert!(!needed_after_scan(&db), "every face has a person");
+        db.lock()
+            .execute("INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES (20,1,NULL,x'00','0.3,0.3,0.2,0.2')", [])
+            .unwrap();
+        assert!(needed_after_scan(&db), "a face waits for a person and no pass has run");
+        let result = FaceClusteringResult { person_count: 1, face_count: 2, unmatched_faces: 1, duration_seconds: 1.0, deferred_faces: None, review_queued: Some(0) };
+        skip::remember(&db.lock(), &result);
+        assert!(!needed_after_scan(&db), "a rescan that changed nothing starts nothing");
+        db.lock()
+            .execute("INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES (30,1,NULL,x'00','0.5,0.5,0.1,0.1')", [])
+            .unwrap();
+        assert!(needed_after_scan(&db), "a new face starts a pass");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn terminal_publication_releases_single_flight_first() {
