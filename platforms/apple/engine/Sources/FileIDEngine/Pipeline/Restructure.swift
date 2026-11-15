@@ -149,13 +149,7 @@ public enum Restructure {
                     SELECT
                       f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                       f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                      (SELECT GROUP_CONCAT(name, char(31))
-                         FROM (SELECT DISTINCT p.name
-                                 FROM persons p
-                                 JOIN face_prints fp ON fp.person_id = p.id
-                                WHERE fp.file_id = f.id
-                                  AND p.name IS NOT NULL AND p.name <> ''
-                                ORDER BY p.name)) AS names
+                      \(personColumnsSQL)
                     FROM files f
                     WHERE f.failed=0
                       AND (?='' OR f.path_text=? OR (f.path_text>=? AND f.path_text<?))
@@ -166,14 +160,13 @@ public enum Restructure {
                         bounds.root, bounds.root, bounds.prefix, bounds.upper,
                         cursorID, largePlanChunk])
                 return rows.map { row in
-                    let names: String? = row["names"]
                     return FileForClassify(
                         fileID: row["id"] ?? 0,
                         source: row["path_text"] ?? "",
                         kind: row["kind"] ?? "other",
                         modifiedUnix: row["modified_at"] ?? 0,
                         createdUnix: row["created_at"],
-                        personName: firstPersonName(names),
+                        personName: unambiguousPersonName(row),
                         lat: row["location_lat"], lon: row["location_lon"],
                         hasText: (row["has_text"] ?? 0) != 0,
                         vlmProposed: (try? CatalogNamingContext.load(sourceDB, fileID: row["id"], faceModel: ArcFaceService.shared.modelVersion))?.proposedName ?? row["vlm_proposed_name"])
@@ -362,7 +355,7 @@ public enum Restructure {
             let lon: Double?
             let hasText: Int
             let vlmProposed: String?
-            let personNames: String?     // comma-joined
+            let personName: String?
         }
         let loaded = try await database.pool.read {
             db -> (rows: [Source], embeddings: [Int64: [Float]], tags: [Int64: [String]], docEmbeddings: [Int64: [Float]]) in
@@ -383,13 +376,7 @@ public enum Restructure {
                 SELECT
                   f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                   f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                  (SELECT GROUP_CONCAT(name, char(31))
-                     FROM (SELECT DISTINCT p.name
-                             FROM persons p
-                             JOIN face_prints fp ON fp.person_id = p.id
-                            WHERE fp.file_id = f.id
-                              AND p.name IS NOT NULL AND p.name <> ''
-                            ORDER BY p.name)) AS names
+                  \(personColumnsSQL)
                 FROM files f
                 WHERE f.failed = 0
                   AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
@@ -406,7 +393,7 @@ public enum Restructure {
                     lon: row["location_lon"],
                     hasText: row["has_text"] ?? 0,
                     vlmProposed: (try? CatalogNamingContext.load(db, fileID: row["id"], faceModel: ArcFaceService.shared.modelVersion))?.proposedName ?? row["vlm_proposed_name"],
-                    personNames: row["names"]
+                    personName: unambiguousPersonName(row)
                 )
             }
             // CLIP image embeddings (512-d f32 LE) drive the semantic clusterer.
@@ -577,7 +564,7 @@ public enum Restructure {
             return FileForClassify(
                 fileID: s.id, source: s.path, kind: s.kind,
                 modifiedUnix: s.modifiedAt ?? 0, createdUnix: s.createdAt,
-                personName: Self.firstPersonName(s.personNames),
+                personName: s.personName,
                 lat: s.lat, lon: s.lon, hasText: s.hasText != 0, vlmProposed: s.vlmProposed)
         }
         proposals.append(contentsOf: ruleClassify(ruleFiles, libraryRoot: libraryRoot))
@@ -669,7 +656,7 @@ public enum Restructure {
             tiers.anchor += 1
         }
         let stripped = respectOn ? proposals : stripAnchorFolderMovesExcept(
-            proposals, classified: folderClass, exempt: semanticSourceFolders)
+            proposals, classified: folderClass, exemptFileIDs: movedIDs)
         let actionable = stripped.filter { !pathsEqual($0.oldPath, $0.newPath) }
         return PlanResult(
             proposals: actionable, tierByFolder: tiers.tierByFolder,
@@ -885,14 +872,47 @@ public enum Restructure {
         return out
     }
 
-    /// First named person from the `\u{1F}`-joined names string, or nil when
-    /// there's no named person (Windows filters empty → None → next branch).
-    static func firstPersonName(_ names: String?) -> String? {
-        guard let names, !names.isEmpty else { return nil }
-        let first = names.split(separator: "\u{1F}").first
-            .map { String($0).trimmingCharacters(in: .whitespaces) }
-        guard let f = first, !f.isEmpty else { return nil }
-        return f
+    /// The plan query's person columns, identical to the Rust engine's
+    /// `PLAN_FILES_SQL`: the distinct names, plus the counts that decide whether a
+    /// file belongs to exactly one named person.
+    static let personColumnsSQL = """
+        (SELECT GROUP_CONCAT(name, char(31))
+           FROM (SELECT DISTINCT p.name
+                   FROM persons p
+                   JOIN face_prints fp ON fp.person_id = p.id
+                  WHERE fp.file_id = f.id
+                    AND p.name IS NOT NULL AND TRIM(p.name) <> ''
+                  ORDER BY p.name)) AS names,
+         (SELECT COUNT(*) FROM face_prints fp
+           WHERE fp.file_id = f.id AND COALESCE(fp.excluded, 0) = 0) AS face_count,
+         (SELECT COUNT(*) FROM face_prints fp
+            JOIN persons p ON p.id = fp.person_id
+           WHERE fp.file_id = f.id
+             AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_face_count,
+         (SELECT COUNT(DISTINCT fp.person_id) FROM face_prints fp
+            JOIN persons p ON p.id = fp.person_id
+           WHERE fp.file_id = f.id
+             AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_person_count
+        """
+
+    static func unambiguousPersonName(_ row: GRDB.Row) -> String? {
+        unambiguousPersonName(
+            names: row["names"], faceCount: row["face_count"] ?? 0,
+            namedFaceCount: row["named_face_count"] ?? 0, namedPersonCount: row["named_person_count"] ?? 0)
+    }
+
+    /// A file is filed under a person only when every face in it is named and they
+    /// are all one person; a photo of two people, or of a named person and a
+    /// stranger, has no single owner (Rust `unambiguous_person_name`).
+    static func unambiguousPersonName(
+        names: String?, faceCount: Int, namedFaceCount: Int, namedPersonCount: Int
+    ) -> String? {
+        guard faceCount > 0, faceCount == namedFaceCount, namedPersonCount == 1,
+              let names else { return nil }
+        let parts = names.split(separator: "\u{1F}", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return parts.count == 1 ? parts[0] : nil
     }
 
     // MARK: - Folder classification (Windows restructure::classify_folders)
@@ -949,18 +969,19 @@ public enum Restructure {
     }
 
     /// Drop every move whose source folder classified Anchor — those files stay
-    /// put — except folders in `exempt` (the semantic butler's real
-    /// relocations). (Windows strip_anchor_folder_moves_except)
+    /// put — except the files in `exemptFileIDs` (the semantic butler's real
+    /// relocations). Only the claimed files are exempt, not their whole folder:
+    /// an unrelated rule-cascade sibling in the same Anchor folder stays put.
+    /// (Windows strip_anchor_folder_moves_except)
     static func stripAnchorFolderMovesExcept(
         _ moves: [RestructureProposal],
         classified: [ClassifiedFolder],
-        exempt: Set<String>
+        exemptFileIDs: Set<Int64>
     ) -> [RestructureProposal] {
         let anchorFolders = Set(
-            classified
-                .filter { $0.classification == .anchor && !exempt.contains($0.sourceFolder) }
-                .map { $0.sourceFolder })
+            classified.filter { $0.classification == .anchor }.map { $0.sourceFolder })
         return moves.filter { m in
+            if exemptFileIDs.contains(m.fileID) { return true }
             let parent = (m.oldPath as NSString).deletingLastPathComponent
             return !anchorFolders.contains(parent)
         }

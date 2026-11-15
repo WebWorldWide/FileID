@@ -107,12 +107,12 @@ struct RestructureCascadeTests {
         let classified = Restructure.classifyFolders(moves)
         #expect(classified.contains { $0.classification == .anchor })
         let kept = Restructure.stripAnchorFolderMovesExcept(
-            moves, classified: classified, exempt: [])
+            moves, classified: classified, exemptFileIDs: [])
         #expect(kept.isEmpty, "anchor-folder moves must drop: \(kept)")
-        // Exempting the source folder (a semantic-claimed relocation) keeps them.
+        // Exempting a file (a semantic-claimed relocation) keeps only that file.
         let keptExempt = Restructure.stripAnchorFolderMovesExcept(
-            moves, classified: classified, exempt: ["/Library/Vacation2019"])
-        #expect(keptExempt.count == 3)
+            moves, classified: classified, exemptFileIDs: [1])
+        #expect(keptExempt.map(\.fileID) == [1])
     }
 
     @Test("Mixed-tier homogeneity is measured against the dominant person")
