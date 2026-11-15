@@ -25,6 +25,7 @@ async fn wait_for(scheduler: &ResourceScheduler, active: usize, waiting: usize) 
 fn generated_catalog() -> Arc<Mutex<rusqlite::Connection>> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!("fileid-scope-admission-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
     let path = root.join("generated.png");
     std::fs::write(&path, b"generated scope planning only; not decoded").unwrap();

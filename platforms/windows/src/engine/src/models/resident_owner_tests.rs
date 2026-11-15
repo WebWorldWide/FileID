@@ -30,6 +30,7 @@ fn fixture() -> Fixture {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
     let root = crate::util::path_safety::strip_extended_length(&std::fs::canonicalize(&root).unwrap());
     for name in ["weights.fixture", "projector.fixture"] {

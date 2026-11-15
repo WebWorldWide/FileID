@@ -20,6 +20,7 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("fileid-deep-handler-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir(&root).unwrap();
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE files(id INTEGER PRIMARY KEY, path_text TEXT NOT NULL, kind TEXT NOT NULL, failed INTEGER NOT NULL DEFAULT 0);").unwrap();

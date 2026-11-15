@@ -11,6 +11,7 @@ fn root() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir(&p).unwrap();
     std::fs::write(p.join("image.png"), [0x89, b'P', b'N', b'G']).unwrap();
     println!("Generated independent request state retained: {}", p.display());

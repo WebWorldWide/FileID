@@ -39,6 +39,7 @@ fn root() -> std::path::PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir(&path).unwrap();
     println!("Generated batch cleanup state retained: {}", path.display());
     path

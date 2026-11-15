@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicU64;
 fn root() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!("fileid-preflight-typing-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir(&path).unwrap();
     println!("Generated preflight state retained: {}",path.display());
     path

@@ -9,6 +9,7 @@ fn root() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
     println!("Generated CLI ownership state retained: {}", root.display());
     root

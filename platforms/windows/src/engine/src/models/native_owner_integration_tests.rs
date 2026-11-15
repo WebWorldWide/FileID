@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 fn root() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!("fileid-native-owner-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
     println!("Generated native ownership state retained: {}", root.display());
     root
