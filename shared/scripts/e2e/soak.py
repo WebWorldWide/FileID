@@ -856,11 +856,14 @@ class Soak:
             fail(rnd, "engine answers healthCheck with its pid", h)
         self.bad_log_since(rnd, marks)
         m = proc_metrics(eng.p.pid, os.path.join(self.work, "main"))
+        with ro(eng.db) as c:
+            m["hidden_rows"] = c.execute("SELECT count(*) FROM files WHERE failed=1 AND error_message LIKE '%no longer present%'").fetchone()[0]
+            m["file_rows"] = c.execute("SELECT count(*) FROM files").fetchone()[0]
         m.update(round=rnd, notes=dict(self.notes), retried_failed=getattr(self, "retried_failed", None), steps=timing, check_s=round(time.time() - t0, 1), errors=dict(ERROR_KINDS), load=os.getloadavg()[0])
         self.series.append(m)
         self.report.write(json.dumps(m) + "\n")
         self.report.flush()
-        log(f"round {rnd} done: footprint={m.get('footprint_mb')}MB fds={m.get('fds')} threads={m.get('threads')} db={m['db_mb']}MB wal={m['wal_mb']}MB steps={timing}")
+        log(f"round {rnd} done: footprint={m.get('footprint_mb')}MB fds={m.get('fds')} threads={m.get('threads')} db={m['db_mb']}MB wal={m['wal_mb']}MB hidden={m['hidden_rows']} rows={m['file_rows']} steps={timing}")
 
     def run(self):
         a = self.a
@@ -919,7 +922,7 @@ class Soak:
         log(f"== {rounds} rounds in {seconds / 60:.1f} min")
         def col(key):
             return [x[key] for x in s if key in x]
-        for key in ("footprint_mb", "rss_mb", "fds", "threads", "db_mb", "wal_mb"):
+        for key in ("footprint_mb", "rss_mb", "fds", "threads", "db_mb", "wal_mb", "hidden_rows", "file_rows"):
             c = col(key)
             if c:
                 log(f"{key}: first={c[0]} median={statistics.median(c)} last={c[-1]} (round 3={c[2] if len(c) > 2 else '-'})")
