@@ -269,7 +269,8 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             Environment.TickCount64 + (long)EngineSimilarity.RetryAfterMiss.TotalMilliseconds);
 
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct, string? kind = null, Action<string?>? onSummary = null)
+        string query, int limit, CancellationToken ct, string? kind = null, Action<string?>? onSummary = null,
+        bool showWeaker = false, Action<int>? onHiddenWeaker = null)
     {
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
@@ -280,6 +281,19 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
                 && EngineSimilarity.QueryRequest(query, embed, _store.Scope?.Root.Id, limit) is { } request
                 && await EngineRankedAsync(request, ct).ConfigureAwait(false) is { } ranking)
             {
+                // No good match: only the name, tag and text matches show, and
+                // the helper's weaker look-alikes wait behind a button.
+                if (!showWeaker && SearchStrengthPolicy.Counts(ranking.Message) is { Good: 0 })
+                {
+                    var keyword = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+                    var decision = SearchStrengthPolicy.Decide(query, ranking.Message, keyword.Count, showWeaker);
+                    if (decision.KeywordOnly)
+                    {
+                        onSummary?.Invoke(decision.Label);
+                        onHiddenWeaker?.Invoke(decision.HiddenWeaker);
+                        return keyword;
+                    }
+                }
                 var engineRows = await _store.RowsByIdsAsync(ranking.Ids, ct).ConfigureAwait(false);
                 if (engineRows.Count > 0)
                 {

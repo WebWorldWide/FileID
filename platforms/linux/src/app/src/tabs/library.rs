@@ -478,6 +478,39 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
+    // Dev-only: `FILEID_SELF_SEARCH=<text>` types a search after launch (for
+    // FILEID_SELF_SHOT captures); `FILEID_SELF_SEARCH_REVEAL_MS=<ms>` then
+    // activates the "Show N weaker matches" button, as a click would.
+    if let Ok(text) = std::env::var("FILEID_SELF_SEARCH") {
+        let delay = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|ms| ms.trim().parse::<u64>().ok()).unwrap_or(default)
+        };
+        let typed_at = delay("FILEID_SELF_SEARCH_DELAY_MS", 1500);
+        // The engine builds its visual index on the first search: a throwaway
+        // first search lets the real one run against a ready index.
+        let warm = delay("FILEID_SELF_SEARCH_WARM_MS", 0);
+        let typed_at = if warm > 0 {
+            let search = search.clone();
+            glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text("warm up"));
+            typed_at + warm
+        } else {
+            typed_at
+        };
+        let search = search.clone();
+        glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text(&text));
+        if std::env::var("FILEID_SELF_SEARCH_REVEAL_MS").is_ok() {
+            let reveal_at = typed_at + delay("FILEID_SELF_SEARCH_REVEAL_MS", 3000);
+            let (empty_page, weaker_button) = (empty_page.clone(), weaker_button.clone());
+            glib::timeout_add_local_once(Duration::from_millis(reveal_at), move || {
+                if let Some(button) = empty_page.child().and_downcast::<gtk::Button>() {
+                    button.emit_clicked();
+                } else if weaker_button.is_visible() {
+                    weaker_button.emit_clicked();
+                }
+            });
+        }
+    }
+
     let refresh_offline: Rc<dyn Fn()> = {
         let generation = Rc::new(Cell::new(0u64));
         let offline = offline.clone();
@@ -924,6 +957,9 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     }
     let keyword_count = ctx.model.n_items() as usize;
     let decision = decide_search(response.message.as_deref(), keyword_count, ctx.show_weaker.get());
+    if std::env::var_os("FILEID_SELF_SEARCH").is_some() {
+        eprintln!("self-search: query={query:?} hits={} keyword={keyword_count} message={:?} decision={decision:?}", response.hits.len(), response.message);
+    }
     if decision.source == SearchSource::Keyword {
         show_keyword_only(ctx, &query, &decision, keyword_count);
         return;

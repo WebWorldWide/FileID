@@ -68,4 +68,88 @@ public sealed class SearchStrengthPolicyTests
         Assert.Equal("12 results", SearchStrengthPolicy.AccessibleName("12 results", null));
         Assert.Equal(string.Empty, SearchStrengthPolicy.AccessibleName(string.Empty, null));
     }
+
+    [Theory]
+    [InlineData("3 good matches, 1 weaker.", 3, 1)]
+    [InlineData("1 good match.", 1, 0)]
+    [InlineData("No good matches, 60 weaker.", 0, 60)]
+    [InlineData("No matches.", 0, 0)]
+    public void CountsReadTheHelpersSentences(string message, int good, int weaker)
+    {
+        Assert.Equal((good, weaker), SearchStrengthPolicy.Counts(message));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Matches by name, text and what's in the picture.")]
+    [InlineData("Visual similarity results.")]
+    [InlineData("3 good matches")]
+    public void CountsIgnoreAnyOtherNote(string? message)
+    {
+        Assert.Null(SearchStrengthPolicy.Counts(message));
+    }
+
+    [Fact]
+    public void GoodMatchesShowTheHelpersListAndSummary()
+    {
+        var d = SearchStrengthPolicy.Decide("sunset", "4 good matches, 20 weaker.", 2, showWeaker: false);
+        Assert.False(d.KeywordOnly);
+        Assert.Equal("4 good matches, 20 weaker.", d.Label);
+        Assert.Equal(0, d.HiddenWeaker);
+    }
+
+    [Fact]
+    public void KeywordMatchesOnlyKeepWeakerBehindTheButton()
+    {
+        var d = SearchStrengthPolicy.Decide("invoice", "No good matches, 60 weaker.", 3, showWeaker: false);
+        Assert.True(d.KeywordOnly);
+        Assert.Equal("3 by name, tag or text", d.Label);
+        Assert.Equal(60, d.HiddenWeaker);
+    }
+
+    [Fact]
+    public void WeakerOnlyShowsNothingUntilAsked()
+    {
+        var d = SearchStrengthPolicy.Decide("zzzqqq", "No good matches, 60 weaker.", 0, showWeaker: false);
+        Assert.True(d.KeywordOnly);
+        Assert.Equal("No good matches", d.Label);
+        Assert.Equal(60, d.HiddenWeaker);
+        var shown = SearchStrengthPolicy.Decide("zzzqqq", "No good matches, 60 weaker.", 0, showWeaker: true);
+        Assert.False(shown.KeywordOnly);
+        Assert.Equal(0, shown.HiddenWeaker);
+        Assert.Equal("No good matches, 60 weaker.", shown.Label);
+    }
+
+    [Fact]
+    public void NothingAtAll()
+    {
+        var d = SearchStrengthPolicy.Decide("zzzqqq", "No matches.", 0, showWeaker: false);
+        Assert.True(d.KeywordOnly);
+        Assert.Equal("No matches", d.Label);
+        Assert.Equal(0, d.HiddenWeaker);
+    }
+
+    [Theory]
+    [InlineData("sunset", null)]
+    [InlineData("sunset", "Matches by name, text and what's in the picture.")]
+    [InlineData("zz", "No matches.")]
+    public void NoSummaryOrAShortSearchKeepsTodaysBehaviour(string query, string? message)
+    {
+        var d = SearchStrengthPolicy.Decide(query, message, 0, showWeaker: false);
+        Assert.False(d.KeywordOnly);
+        Assert.Equal(SearchStrengthPolicy.Label(query, message), d.Label);
+        Assert.Equal(0, d.HiddenWeaker);
+    }
+
+    [Fact]
+    public void EmptyStateAndButtonUseTheMacsWords()
+    {
+        Assert.Equal("Show 60 weaker matches", SearchStrengthPolicy.WeakerButtonText(60));
+        Assert.Equal(
+            "No matches for \u201Czzzqqq\u201D. Nothing has that in its name, tags or text, and no picture matches it well. 60 weaker look-alikes were set aside.",
+            SearchStrengthPolicy.NoMatchesText("zzzqqq", 60));
+        Assert.Equal(
+            "No matches for \u201Czzzqqq\u201D. Nothing has that in its name, tags or text, and no picture matches it. Try other words.",
+            SearchStrengthPolicy.NoMatchesText("zzzqqq", 0));
+    }
 }

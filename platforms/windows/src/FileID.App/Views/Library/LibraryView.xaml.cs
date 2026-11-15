@@ -380,7 +380,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
         }
-        if (e.PropertyName is nameof(LibraryViewModel.TotalCount) or nameof(LibraryViewModel.SearchSummary))
+        if (e.PropertyName is nameof(LibraryViewModel.HiddenWeaker) or nameof(LibraryViewModel.SearchSummary))
+        {
+            OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(FooterVisibility));
+        }
+        if (e.PropertyName is nameof(LibraryViewModel.TotalCount) or nameof(LibraryViewModel.SearchSummary) or nameof(LibraryViewModel.HiddenWeaker))
         {
             DispatcherQueue.TryEnqueue(SyncShownCount);
         }
@@ -420,6 +425,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var summary = shown == 0 ? null : ViewModel.SearchSummary;
         var text = SearchStrengthPolicy.CountText(plain, summary);
         ShownCountText.Text = text;
+        ShowWeakerButton.Visibility = ViewModel.HiddenWeaker > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowWeakerButton.Content = SearchStrengthPolicy.WeakerButtonText(ViewModel.HiddenWeaker);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ShownCountText, SearchStrengthPolicy.AccessibleName(text, summary));
     }
 
@@ -437,6 +444,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             if (ViewModel.Items.Count == 0)
             {
+                if (!string.IsNullOrWhiteSpace(ViewModel.Query)
+                    && (ViewModel.HiddenWeaker > 0 || ViewModel.SearchSummary == "No matches"))
+                {
+                    return SearchStrengthPolicy.NoMatchesText(ViewModel.Query.Trim(), ViewModel.HiddenWeaker);
+                }
                 return string.IsNullOrWhiteSpace(ViewModel.Query)
                     ? "No files yet. Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar."
                     : "Nothing matches this filter. Try other words, or choose All kinds to see every file.";
@@ -448,8 +460,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     public Visibility FooterVisibility =>
         ViewModel.IsLoading
         || !string.IsNullOrEmpty(ViewModel.ErrorMessage)
+        || ViewModel.HiddenWeaker > 0
         || ViewModel.Items.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
+
+    private void OnShowWeakerClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnShowWeakerClicked), () => ViewModel.ShowWeakerMatches());
 
     private void OnSearchChanged(object sender, TextChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnSearchChanged), () =>

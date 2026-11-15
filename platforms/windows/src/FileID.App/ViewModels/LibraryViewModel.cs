@@ -257,6 +257,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             if (_query == value) return;
             _query = value;
+            _showWeaker = false;
             OnPropertyChanged();
             ScheduleRefresh();
         }
@@ -275,6 +276,28 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private string? _searchSummary;
+    private int _hiddenWeaker;
+    private bool _showWeaker;
+
+    /// <summary>Weaker look-alikes held back behind "Show N weaker matches" for the
+    /// search on screen; 0 when none are.</summary>
+    public int HiddenWeaker
+    {
+        get => _hiddenWeaker;
+        private set
+        {
+            if (_hiddenWeaker == value) return;
+            _hiddenWeaker = value;
+            OnPropertyChanged();
+        }
+    }
+
+    /// <summary>Shows the weaker matches held back for the current search.</summary>
+    public void ShowWeakerMatches()
+    {
+        _showWeaker = true;
+        ScheduleRefresh();
+    }
 
     /// <summary>The helper's "3 good matches, 1 weaker." for the search on screen;
     /// null when there is none, and the view then shows the plain count.</summary>
@@ -362,6 +385,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             int? total = null;
             string? summary = null;
+            int hiddenWeaker = 0;
             bool pageable = false;
             bool headOnly = false;
             string? listedKind = null;
@@ -392,7 +416,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter, text => summary = text).ConfigureAwait(false);
+                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter, text => summary = text, _showWeaker, count => hiddenWeaker = count).ConfigureAwait(false);
             }
 
             if (_disposed || token.IsCancellationRequested) return;
@@ -413,7 +437,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind, summary);
+                ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind, summary, hiddenWeaker);
             }
         }
         catch (OperationCanceledException)
@@ -546,7 +570,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     internal static int RefreshWindow(bool sameListing, int loadedRows) =>
         sameListing ? Math.Min(Math.Max(PageSize, loadedRows), RefreshCap) : PageSize;
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null, string? summary = null)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null, string? summary = null, int hiddenWeaker = 0)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -555,6 +579,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             SearchSummary = summary;
+            HiddenWeaker = hiddenWeaker;
             ReplaceItems(next);
             TotalCount = total;
             _listedKind = listedKind;
