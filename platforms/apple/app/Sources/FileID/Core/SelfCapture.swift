@@ -10,6 +10,7 @@
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
+//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -118,6 +119,7 @@ enum SelfShot {
         environment: ProcessInfo.processInfo.environment,
         available: MainWindow.Tab.allCases.map(\.rawValue))
     static var isActive: Bool { plan != nil }
+    static let expandAdvanced = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_ADVANCED"] == "1" && plan != nil
     private static weak var engineRef: EngineClient?
     private static var started = false
 

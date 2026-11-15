@@ -502,6 +502,7 @@ public final class EngineClient {
         }
         proc.environment = env
         let inPipe = Pipe()
+        Self.refuseSigpipe(on: inPipe)
         let outPipe = Pipe()
         let errPipe = Pipe()
         proc.standardInput = inPipe
@@ -629,6 +630,12 @@ public final class EngineClient {
         runningBackend = backend
         runningReachedReady = false
         return nil
+    }
+
+    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
+    /// (an engine that exits at once is the Rust-to-Swift fallback case).
+    nonisolated static func refuseSigpipe(on pipe: Pipe) {
+        _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
 
     /// Frame samples can carry full user paths in JSON values (e.g. a
