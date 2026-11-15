@@ -26,7 +26,12 @@ public enum EngineBackendPolicy {
     /// `assemble_app.sh` does not bundle `fileidd` for those builds.
     public static var isAppStoreBuild: Bool {
         #if FILEID_APP_STORE
+        #if DEBUG
+        // Sandbox acceptance runs only: a debug build lets the environment lift the gate.
+        ProcessInfo.processInfo.environment["FILEID_SANDBOX_TEST_ALLOW_RUST"] != "1"
+        #else
         true
+        #endif
         #else
         false
         #endif
