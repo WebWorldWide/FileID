@@ -243,6 +243,18 @@ impl NamingContext {
     }
 }
 
+/// Organize Folders: a file whose reviewed label gives a name uses it in place of
+/// the stored model name; any load failure or abstention keeps the stored name
+/// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
+pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
+    let (model, processing) = selected_space();
+    for file in files {
+        if let Some(name) = load(conn, file.file_id, model.as_deref(), processing).ok().and_then(|c| c.proposed_name()) {
+            file.vlm_proposed = Some(name);
+        }
+    }
+}
+
 /// The selected face space: the installed weights' identity and this
 /// engine's processing namespace.
 pub(crate) fn selected_space() -> (Option<String>, &'static str) {

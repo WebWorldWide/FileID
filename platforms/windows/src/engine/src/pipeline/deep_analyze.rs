@@ -50,6 +50,12 @@ impl AnalyzeMode {
         self == Self::Both
     }
 
+    /// The passes the model is asked for. A reviewed label names the file, so
+    /// the rename request is dropped (macOS `proposeFilename: !contextNameAvailable && ...`).
+    pub(crate) fn asked_of_model(self, context: &NamingContext) -> Self {
+        if self == Self::Both && context.label.is_some() { Self::CaptionAndTags } else { self }
+    }
+
     fn establishes_completion(self) -> bool {
         matches!(self, Self::Both | Self::CaptionAndTags)
     }
@@ -97,6 +103,7 @@ pub(crate) async fn analyze_file_scoped(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
     let face_names = &context.subjects[..];
+    let asked = mode.asked_of_model(context);
 
     // Documents, audio and (without installed weights) 3D models are named
     // from their own text and metadata, so they work with no VLM at all.
@@ -169,7 +176,7 @@ pub(crate) async fn analyze_file_scoped(
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
         tags = parse_vlm_tags(&result.text);
     }
-    if mode == AnalyzeMode::Both {
+    if asked == AnalyzeMode::Both {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -556,6 +563,69 @@ async fn complete_cancellable(
     server.complete_with_cancel(image, prompt, max_tokens, cancel.clone()).await
 }
 
+/// One prompt sent to the model; the real implementation is the persistent
+/// server, tests count the requests.
+trait VisualAsker {
+    fn ask(&self, prompt: &str, max_tokens: u32) -> impl std::future::Future<Output = anyhow::Result<String>> + Send;
+}
+
+struct ServerFrame<'a> {
+    server: &'a crate::models::vlm_server::VlmServer,
+    image: &'a std::path::Path,
+    cancel: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl VisualAsker for ServerFrame<'_> {
+    fn ask(&self, prompt: &str, max_tokens: u32) -> impl std::future::Future<Output = anyhow::Result<String>> + Send {
+        complete_cancellable(self.server, self.image, prompt, max_tokens, self.cancel)
+    }
+}
+
+/// The model requests for an image, video frame or PDF page through a
+/// persistent server: caption, tags and name in one request, with separate
+/// prompts only for the sections the answer missed. `ask` sends one prompt;
+/// a reviewed label drops the name request upstream (`AnalyzeMode::asked_of_model`).
+async fn visual_answers<A: VisualAsker>(
+    asked: AnalyzeMode,
+    face_names: &[String],
+    ask: &A,
+) -> anyhow::Result<(Option<String>, Vec<String>, Option<String>)> {
+    use crate::models::vlm;
+    let mut description: Option<String> = None;
+    let mut proposed_name: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
+    if asked.requests_caption() {
+        let include_filename = asked.requests_rename();
+        let prompt = naming::combined_visual_prompt(face_names, include_filename);
+        let raw = ask.ask(&prompt, if include_filename { 140 } else { 110 }).await?;
+        (description, tags, proposed_name) = naming::parse_combined_visual_completion(&raw, include_filename);
+        if description.is_none() {
+            let cap_prompt = vlm::caption_prompt_with_faces(face_names);
+            description = Some(ask.ask(&cap_prompt, 80).await?);
+        }
+        if tags.is_empty() {
+            tags = naming::grounded_fallback_tags(description.as_deref().unwrap_or(&raw));
+        }
+        if include_filename && proposed_name.is_none() {
+            proposed_name = description.as_deref().and_then(crate::util::keywords::grounded_filename);
+        }
+        if include_filename && proposed_name.is_none() {
+            let ren_prompt = vlm::rename_prompt_with_faces(face_names);
+            proposed_name = naming::generated_filename_candidate(&ask.ask(&ren_prompt, 30).await?);
+            if proposed_name.is_none() {
+                proposed_name = naming::generated_filename_candidate(&ask.ask(vlm::RENAME_RETRY_PROMPT, 30).await?);
+            }
+        }
+    } else if asked.requests_tags() {
+        let raw = ask.ask(vlm::TAG_PROMPT, 40).await?;
+        tags = parse_vlm_tags(&raw);
+        if tags.is_empty() {
+            tags = naming::grounded_fallback_tags(&raw);
+        }
+    }
+    Ok((description, tags, proposed_name))
+}
+
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
 /// with NO per-call model reload. Documents are named from their text, audio
 /// from tags or a speech transcript, 3D models from a render (or their embedded
@@ -576,6 +646,7 @@ pub(crate) async fn analyze_file_via_server(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
     let face_names = &context.subjects[..];
+    let asked = mode.asked_of_model(context);
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         anyhow::bail!("cancelled");
     }
@@ -609,50 +680,15 @@ pub(crate) async fn analyze_file_via_server(
     let mut proposed_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    if mode.requests_caption() {
+    if asked.requests_caption() || asked.requests_tags() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let include_filename = mode.requests_rename();
-        let prompt = naming::combined_visual_prompt(face_names, include_filename);
-        let raw = complete_cancellable(server, &rasterized, &prompt, if include_filename { 140 } else { 110 }, &cancel)
-            .await?;
-        (description, tags, proposed_name) = naming::parse_combined_visual_completion(&raw, include_filename);
-        if description.is_none() {
-            let cap_prompt = vlm::caption_prompt_with_faces(face_names);
-            description = Some(complete_cancellable(server, &rasterized, &cap_prompt, 80, &cancel).await?);
-        }
-        if tags.is_empty() {
-            tags = naming::grounded_fallback_tags(description.as_deref().unwrap_or(&raw));
-        }
-        if include_filename && proposed_name.is_none() {
-            proposed_name = description.as_deref().and_then(crate::util::keywords::grounded_filename);
-        }
-        if include_filename && proposed_name.is_none() {
-            let ren_prompt = vlm::rename_prompt_with_faces(face_names);
-            proposed_name = naming::generated_filename_candidate(
-                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
-            );
-            if proposed_name.is_none() {
-                proposed_name = naming::generated_filename_candidate(
-                    &complete_cancellable(server, &rasterized, vlm::RENAME_RETRY_PROMPT, 30, &cancel).await?,
-                );
-            }
-        }
-        if let Some(value) = description.as_deref() {
+        (description, tags, proposed_name) = visual_answers(asked, face_names, &ServerFrame { server, image: &rasterized, cancel: &cancel }).await?;
+        if asked.requests_caption()
+            && let Some(value) = description.as_deref()
+        {
             on_token(value);
-        }
-        if !tags.is_empty() {
-            on_token(&tags.join(", "));
-        }
-    } else if mode.requests_tags() {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            anyhow::bail!("cancelled");
-        }
-        let raw = complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?;
-        tags = parse_vlm_tags(&raw);
-        if tags.is_empty() {
-            tags = naming::grounded_fallback_tags(&raw);
         }
         if !tags.is_empty() {
             on_token(&tags.join(", "));
@@ -703,6 +739,7 @@ pub(crate) async fn analyze_file_via_mlx(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use std::sync::atomic::Ordering;
     let face_names = &context.subjects[..];
+    let asked = mode.asked_of_model(context);
     if cancel.load(Ordering::Relaxed) {
         anyhow::bail!("cancelled");
     }
@@ -734,7 +771,7 @@ pub(crate) async fn analyze_file_via_mlx(
         media_kind: kind.clone(),
         document_text,
         face_names: context.subjects.clone(),
-        propose_filename: mode.requests_rename(),
+        propose_filename: asked.requests_rename(),
         tags_only: mode == AnalyzeMode::TagsOnly,
         scene_caption: false,
     };
@@ -845,9 +882,10 @@ async fn analyze_document_via_server(
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
     let mut description = None;
     let mut proposed_name = None;
-    if mode.requests_caption() || mode.requests_rename() {
-        let prompt = naming::document_analysis_prompt(extension, &text, mode)?;
-        let max_tokens = match (mode.requests_caption(), mode.requests_rename()) {
+    let asked = mode.asked_of_model(context);
+    if asked.requests_caption() || asked.requests_rename() {
+        let prompt = naming::document_analysis_prompt(extension, &text, asked)?;
+        let max_tokens = match (asked.requests_caption(), asked.requests_rename()) {
             (true, true) => 120,
             (true, false) => 90,
             (false, true) => 40,
@@ -863,7 +901,7 @@ async fn analyze_document_via_server(
             on_token(&grounded);
             description = Some(grounded);
         }
-        if mode.requests_rename() {
+        if asked.requests_rename() {
             proposed_name = naming::grounded_document_filename(parsed_name, &text).or(fallback_name);
         }
     }
@@ -911,7 +949,7 @@ async fn analyze_metadata_named_file(
         tokio::task::spawn_blocking(move || metadata_naming_blocking(&source, &task_kind))
             .await
             .context("metadata naming task failed")??;
-    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.requests_rename()
+    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.asked_of_model(context).requests_rename()
         && let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
             proposed_name = Some(name);
             description = description.or(Some(transcript));
@@ -1305,6 +1343,70 @@ mod tests {
             let tags: i64 = source.conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
             assert_eq!(tags, 0, "{fault}");
         }
+    }
+
+    struct Recorder<'a> {
+        sent: &'a parking_lot::Mutex<Vec<(String, u32)>>,
+        reply: &'a str,
+    }
+
+    impl VisualAsker for Recorder<'_> {
+        async fn ask(&self, prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
+            self.sent.lock().push((prompt.to_owned(), max_tokens));
+            Ok(self.reply.to_owned())
+        }
+    }
+
+    async fn requests_for(mode: AnalyzeMode, context: &NamingContext, reply: &str) -> (Vec<(String, u32)>, Option<String>) {
+        let sent = parking_lot::Mutex::new(Vec::new());
+        let (_, _, name) =
+            visual_answers(mode.asked_of_model(context), &context.subjects, &Recorder { sent: &sent, reply }).await.unwrap();
+        (sent.into_inner(), name)
+    }
+
+    const MODEL_REPLY: &str = "DESCRIPTION: A boy swings a bat.\nTAGS: boy, bat\nFILENAME: boy-swinging-bat";
+
+    #[tokio::test]
+    async fn a_reviewed_label_skips_the_model_name_request() {
+        let source = source("skip");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let with_label = context(&source);
+        let (sent, name) = requests_for(AnalyzeMode::Both, &with_label, MODEL_REPLY).await;
+        assert_eq!(sent.len(), 1);
+        assert!(!sent[0].0.contains("FILENAME"), "the one request must not ask for a name");
+        assert_eq!(sent[0].1, 110);
+        assert_eq!(name, None);
+        assert_eq!(AnalyzeMode::Both.asked_of_model(&with_label), AnalyzeMode::CaptionAndTags);
+        assert_eq!(AnalyzeMode::TagsOnly.asked_of_model(&with_label), AnalyzeMode::TagsOnly);
+    }
+
+    #[tokio::test]
+    async fn a_reviewed_label_sends_no_fallback_name_prompt_after_a_reply_without_a_name() {
+        let source = source("skip-fallback");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let (sent, name) = requests_for(AnalyzeMode::Both, &context(&source), "DESCRIPTION: A boy.\nTAGS: boy").await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(name, None);
+    }
+
+    #[tokio::test]
+    async fn without_a_reviewed_label_the_model_is_asked_for_a_name() {
+        let source = source("ask");
+        let none = context(&source);
+        let (sent, name) = requests_for(AnalyzeMode::Both, &none, MODEL_REPLY).await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].0.contains("FILENAME") && sent[0].1 == 140);
+        assert_eq!(name.as_deref(), Some("boy-swinging-bat"));
+        assert_eq!(AnalyzeMode::Both.asked_of_model(&none), AnalyzeMode::Both);
+    }
+
+    #[test]
+    fn a_reviewed_label_leaves_the_name_out_of_a_document_request() {
+        let source = source("document");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let asked = AnalyzeMode::Both.asked_of_model(&context(&source));
+        assert!(!naming::document_analysis_prompt("txt", "hello", asked).unwrap().contains("FILENAME: A 3-5"));
+        assert!(naming::document_analysis_prompt("txt", "hello", AnalyzeMode::Both).unwrap().contains("FILENAME: A 3-5"));
     }
 
     #[test]
