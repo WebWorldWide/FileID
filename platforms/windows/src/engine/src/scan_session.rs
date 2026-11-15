@@ -578,9 +578,15 @@ impl ScanSession {
         let discovered_heavy_for_batch = discovered_heavy.clone();
         let discovered_done_for_batch = discovered_done_post.clone();
         let mut last_summary_processed = 0u64;
+        let cursor_db = self.db_conn.clone();
+        let cursor_session = session_id.clone();
+        let cursor_carried = self.carried.0;
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
+                // The Swift engine's resume cursor: files written so far, which Settings ▸ Recent
+                // scans shows as "N files" even for a scan that never finished.
+                record_scan_cursor(&cursor_db.lock(), &cursor_session, stats.processed_total + cursor_carried);
                 if should_emit_batch_summary(stats.batch_index, stats.processed_total, last_summary_processed) {
                     emit_batch_summary(&sink_for_batch, &stats);
                     last_summary_processed = stats.processed_total;
@@ -891,10 +897,7 @@ impl ScanSession {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
-            let _ = conn.execute(
-                "UPDATE scan_sessions SET completed_at = ?1, total_files = ?2, status = ?3 WHERE id = ?4",
-                rusqlite::params![completed_unix, total as i64, final_status, session_id],
-            );
+            stamp_scan_session_end(&conn, &session_id, completed_unix, total + self.carried.0, final_status);
             let _ = conn.execute(
                 "UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?3)",
                 rusqlite::params![completed_unix, final_status, session_id],
@@ -1521,6 +1524,24 @@ fn text_embed_gate(installed: bool, runtime_available: bool) -> &'static str {
     }
 }
 
+/// `scan_sessions.last_file_index` is the Swift engine's resume cursor: files written so far.
+/// The Mac app shows it as "N files" under Settings ▸ Recent scans.
+fn record_scan_cursor(conn: &Connection, session_id: &str, files_written: u64) {
+    let _ = conn.execute(
+        "UPDATE scan_sessions SET last_file_index = ?1 WHERE id = ?2",
+        rusqlite::params![files_written as i64, session_id],
+    );
+}
+
+/// The end of a session fills `total_files` (read by the Windows and Linux apps) and
+/// `last_file_index` (read by the Mac app) with the same count.
+fn stamp_scan_session_end(conn: &Connection, session_id: &str, completed_unix: f64, files_written: u64, status: &str) {
+    let _ = conn.execute(
+        "UPDATE scan_sessions SET completed_at = ?1, total_files = ?2, last_file_index = ?2, status = ?3 WHERE id = ?4",
+        rusqlite::params![completed_unix, files_written as i64, status, session_id],
+    );
+}
+
 fn should_reconcile_missing_rows(
     cancelled: bool,
     gpu_dead: bool,
@@ -1912,6 +1933,25 @@ fn maybe_emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_row_carries_the_file_count_in_both_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute("INSERT INTO scan_sessions (id, root_path, started_at, status) VALUES ('s', '/lib', 1.0, 'running')", [])
+            .unwrap();
+        let read = || -> (Option<i64>, Option<i64>, String) {
+            conn.query_row("SELECT last_file_index, total_files, status FROM scan_sessions WHERE id = 's'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+        };
+        assert_eq!(read(), (None, None, "running".into()));
+        record_scan_cursor(&conn, "s", 100);
+        assert_eq!(read(), (Some(100), None, "running".into()), "a scan cut short still shows how far it got");
+        stamp_scan_session_end(&conn, "s", 2.0, 137, "completed");
+        assert_eq!(read(), (Some(137), Some(137), "completed".into()));
+    }
 
     #[test]
     fn a_scan_root_must_exist_be_a_folder_and_list_something() {
