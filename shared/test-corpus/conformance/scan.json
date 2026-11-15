@@ -458,7 +458,19 @@
             ],
             [
               "{path:docs/notes.txt}",
-              "bicycle repair checklist brake pads chain oil tyre pressure"
+              "bicycle repair checklist"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "brake pads"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "chain oil"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "tyre pressure"
             ],
             [
               "{path:docs/report.pdf}",
