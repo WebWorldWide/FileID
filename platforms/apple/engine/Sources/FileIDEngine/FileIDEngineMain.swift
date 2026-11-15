@@ -805,7 +805,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
-            guard let restructureToken = await coordinator.reserveRestructure() else {
+            guard let restructureToken = await Self.reserveRestructure(coordinator) else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
                     message: "Organize Folders is already working. Wait for it to finish.")))
@@ -900,7 +900,7 @@ struct FileIDEngineMain {
                     fileID: m.fileID, oldPath: m.source, newPath: m.destination,
                     bucket: m.category, confidence: m.confidence, reason: m.reason)
             }
-            guard let restructureToken = await coordinator.reserveRestructure() else {
+            guard let restructureToken = await Self.reserveRestructure(coordinator) else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
                     message: "Organize Folders is already moving files. Wait for it to finish.")))
@@ -984,7 +984,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
-            guard let restructureToken = await coordinator.reserveRestructure() else {
+            guard let restructureToken = await Self.reserveRestructure(coordinator) else {
                 await sink.emit(.error(EngineError(
                     kind: "restructure_busy",
                     message: "Organize Folders is already moving files. Wait for it to finish.")))
@@ -2739,6 +2739,18 @@ struct FileIDEngineMain {
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.
+    /// Reserves the Organize Folders slot, waiting up to a second for it. A plan,
+    /// apply or undo releases its slot just after its last event, so a client that
+    /// answers that event at once would otherwise be told the engine is still busy.
+    private static func reserveRestructure(_ coordinator: ScanCoordinator, timeout: Duration = .seconds(1)) async -> UUID? {
+        let deadline = ContinuousClock.now + timeout
+        while true {
+            if let token = await coordinator.reserveRestructure() { return token }
+            if ContinuousClock.now >= deadline { return nil }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
     /// A count stored by an older build, or left by a path that forgot the recount,
     /// corrects itself at the end of every completed scan.
     private static func recountStalePersons(database: Database, sessionID: String) async {
