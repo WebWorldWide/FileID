@@ -847,15 +847,17 @@ struct SearchDecision {
     label: Option<String>,
     /// Weaker look-alikes kept back behind "Show N weaker matches".
     hidden_weaker: u64,
+    /// Name, tag and text matches the engine's list lacks follow its rows.
+    add_keyword_rows: bool,
 }
 
 /// How a search with the engine's summary is shown (Mac `LibrarySearchOutcome.decide`).
 fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool) -> SearchDecision {
     let Some((good, weaker)) = parse_strength(message) else {
-        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0 };
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0, add_keyword_rows: true };
     };
     if good > 0 || show_weaker {
-        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0 };
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0, add_keyword_rows: true };
     }
     let label = if weaker == 0 {
         "No matches".to_owned()
@@ -864,7 +866,14 @@ fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool)
     } else {
         "No good matches".to_owned()
     };
-    SearchDecision { source: SearchSource::Keyword, label: Some(label), hidden_weaker: weaker }
+    SearchDecision { source: SearchSource::Keyword, label: Some(label), hidden_weaker: weaker, add_keyword_rows: false }
+}
+
+/// The engine's rows in its order, then the keyword rows it lacks in theirs.
+fn append_keyword_rows<T>(engine: Vec<T>, keyword: Vec<T>, id: impl Fn(&T) -> i64) -> Vec<T> {
+    let known: HashSet<i64> = engine.iter().map(&id).collect();
+    let extra = keyword.into_iter().filter(|row| !known.contains(&id(row))).collect::<Vec<_>>();
+    engine.into_iter().chain(extra).collect()
 }
 
 fn weaker_label(count: u64) -> String {
@@ -966,9 +975,16 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     }
     let ids: Vec<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
     let kind = ctx.kind_filter.borrow().clone();
-    let rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
+    let mut rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
     if ctx.query_gen.get() != generation {
         return;
+    }
+    if decision.add_keyword_rows {
+        let keyword: Vec<FileRow> = (0..ctx.model.n_items())
+            .filter_map(|i| ctx.model.item(i).and_downcast::<BoxedAnyObject>())
+            .map(|boxed| boxed.borrow::<FileRow>().clone())
+            .collect();
+        rows = append_keyword_rows(rows, keyword, |row| row.id);
     }
     let total = rows.len() as i64;
     show_rows(ctx, rows, total, &query, true);
@@ -2154,6 +2170,24 @@ mod tests {
         assert_eq!(d.label.as_deref(), Some("Matches by name, text and what's in the picture."));
         let none = decided(None, 0, false);
         assert_eq!((none.source, none.hidden_weaker, none.label), (SearchSource::Engine, 0, None));
+    }
+
+    #[test]
+    fn keyword_rows_follow_the_engines_without_repeats() {
+        let ids = |rows: Vec<i64>| rows;
+        assert_eq!(ids(append_keyword_rows(vec![5, 2], vec![2, 9, 5, 7], |id| *id)), vec![5, 2, 9, 7]);
+        assert_eq!(append_keyword_rows(Vec::<i64>::new(), vec![3, 1], |id| *id), vec![3, 1]);
+        assert_eq!(append_keyword_rows(vec![4], Vec::new(), |id| *id), vec![4]);
+    }
+
+    #[test]
+    fn only_the_engines_list_decisions_add_keyword_rows() {
+        assert!(decided(Some("4 good matches, 20 weaker."), 2, false).add_keyword_rows);
+        assert!(decided(Some("No good matches, 60 weaker."), 0, true).add_keyword_rows);
+        assert!(decided(Some("Matches by name, text and what's in the picture."), 0, false).add_keyword_rows);
+        assert!(decided(None, 0, false).add_keyword_rows);
+        assert!(!decided(Some("No good matches, 60 weaker."), 3, false).add_keyword_rows);
+        assert!(!decided(Some("No matches."), 0, false).add_keyword_rows);
     }
 
     #[test]
