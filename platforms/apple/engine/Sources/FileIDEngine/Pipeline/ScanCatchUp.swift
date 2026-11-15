@@ -223,12 +223,14 @@ enum ScanCatchUp {
         return (" AND (f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))", [root, prefix, upper])
     }
 
+    /// A row hidden as no longer present owes nothing: no pass visits it, so counting it would
+    /// leave the totals above zero for good.
     static func owed(database: Database, root: String?) async -> Counts {
         let scope = scope(root)
         return (try? await database.pool.read { db in
             let row = try Row.fetchOne(db, sql: """
                 SELECT COALESCE(SUM((c.stages & 1) != 0), 0) AS tags, COALESCE(SUM((c.stages & 2) != 0), 0) AS careful
-                FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE 1 = 1\(scope.sql)
+                FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.failed = 0\(scope.sql)
                 """, arguments: StatementArguments(scope.arguments))
             return Counts(tags: row?["tags"] ?? 0, careful: row?["careful"] ?? 0)
         }) ?? Counts(tags: 0, careful: 0)

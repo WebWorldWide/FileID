@@ -165,6 +165,24 @@ struct ScanCatchUpTests {
         #expect(try await Self.stages(db, path: url.path) == nil)
     }
 
+    @Test("a row hidden as no longer present owes nothing")
+    func hiddenRowOwesNothing() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try Database(at: dir.appendingPathComponent("test.sqlite"))
+        let kept = dir.appendingPathComponent("kept.jpg"), gone = dir.appendingPathComponent("gone.jpg")
+        try Self.writeImage(kept, seed: 1)
+        try Self.writeImage(gone, seed: 2)
+        await Self.store([try Self.owingTags(kept), try Self.owingTags(gone)], in: db)
+        #expect(await ScanCatchUp.owed(database: db, root: dir.path) == .init(tags: 2, careful: 0))
+
+        try await db.pool.write { db in
+            try db.execute(sql: "UPDATE files SET failed = 1 WHERE path_text = ?", arguments: [gone.path])
+        }
+        #expect(await ScanCatchUp.owed(database: db, root: dir.path) == .init(tags: 1, careful: 0))
+        #expect(await ScanCatchUp.owed(database: db, root: nil) == .init(tags: 1, careful: 0))
+    }
+
     @Test("v36 moves failure memory out of scan_catchup and leaves owed rows alone")
     func v36MovesFailureMemory() throws {
         let dir = try Self.directory()
