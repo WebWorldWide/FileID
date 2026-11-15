@@ -881,7 +881,7 @@ class Soak:
         logdir = os.path.join(eng.state, "FileID", "logs")
         if os.path.isdir(logdir):
             for fn in sorted(os.listdir(logdir)):
-                if fn.startswith("engine.jsonl"):
+                if fn.startswith(("engine.jsonl", "scan.jsonl")):
                     with open(os.path.join(logdir, fn), errors="replace") as f:
                         out += f.read().splitlines()
         return out
@@ -908,6 +908,15 @@ class Soak:
             with open(self.p(rel), "wb") as f:
                 f.write(data)
             self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
+        if self.a.flavor == "swift":
+            # page-shaped pictures: a text read is called for and, until the accurate reader is warm, the careful one is owed
+            for i in range(3):
+                w = self.rng.choice((297, 420, 594))
+                data = lib.png(w, round(w * 2 ** 0.5), self.rng, tweak=self.rng.randrange(1, 1000))
+                rel = f"{d}/page-{i}-{uuid.uuid4().hex[:6]}.png"
+                with open(self.p(rel), "wb") as f:
+                    f.write(data)
+                self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
         reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")]
         for i in range(min(real, len(reals))):
             src = self.rng.choice(reals)
@@ -1120,6 +1129,73 @@ class Soak:
         self.catchups.append(rec)
         log("catch-up stop:", json.dumps(rec))
         return rec
+
+    def step_catchup_stop_fresh(self, rnd):
+        """Swift: the long-lived engine's accurate text reader is warm after its first scan, so the stop in step_catchup_stop
+        finds nothing owed. A new engine reads page-shaped pictures with the fast reader and owes the careful reads until
+        the accurate reader has compiled (ScanCatchUp waits up to 180 s for it, and not at all with FILEID_OCR_WARMUP=0). A
+        scan stopped at its after-scan phase must leave those reads owed (never dropped), and the next scan must settle
+        them when the reader is warm (the careful bit is checked only with --warm-reader, as everywhere)."""
+        state = os.path.join(self.work, "catchup")
+        shutil.rmtree(state, ignore_errors=True)
+        cl = os.path.join(self.work, "catchup-lib")
+        shutil.rmtree(cl, ignore_errors=True)
+        os.makedirs(cl)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("soak_library", os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_library.py"))
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        for i in range(12):
+            w = self.rng.choice((297, 420, 594))
+            with open(os.path.join(cl, f"page-{i}.png"), "wb") as f:
+                f.write(gen.png(w, round(w * 2 ** 0.5), self.rng, tweak=self.rng.randrange(1, 1000)))
+        for i in range(6):
+            with open(os.path.join(cl, f"pic-{i}.png"), "wb") as f:
+                f.write(gen.png(160, 120, self.rng, tweak=self.rng.randrange(1, 1000)))
+        v = Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "catchup-engine.log"), self.trash, self.models, self.a.no_trash, "catchup")
+        try:
+            v.drain()
+            v.send("startScan", {"rootPath": cl, "rescan": False})
+            seen_post = True
+            try:
+                v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 300)
+            except TimeoutError:
+                seen_post = False
+                fail(rnd, "a fresh engine's scan reaches its after-scan phase", "no postScan phase in 300s")
+            v.send("cancelScan")
+            k, res = v.wait_scan_end(300)
+            with ro(v.db) as c:
+                careful = c.execute("SELECT count(*) FROM scan_catchup c JOIN files f ON f.id=c.file_id WHERE (c.stages & 2) != 0 AND f.failed=0").fetchone()[0]
+                rows = c.execute("SELECT count(*) FROM files WHERE failed=0").fetchone()[0]
+            self.check_db(rnd, v.db, "catch-up stop (fresh engine)")
+            rec = dict(round=rnd, saw_postscan=seen_post, stop_result=k, careful_owed_after_stop=careful, rows=rows)
+            if k not in ("cancelled", "scanComplete"):
+                fail(rnd, "a stop in the after-scan phase of a fresh engine ends the scan", (k, res))
+            if rows != 18:
+                fail(rnd, "files scanned before the stop have rows", rec)
+            if careful == 0 and k == "cancelled":
+                fail(rnd, "a stopped scan leaves the careful text reads it owed", rec)
+            owed, passes = None, 0
+            while passes < 3:
+                passes += 1
+                k2, v2 = v.scan(cl)
+                if k2 != "scanComplete":
+                    fail(rnd, "the scan after a stop completes", (k2, v2))
+                    break
+                owed = self.owed_all(v)
+                if not owed:
+                    break
+            rec.update(owed_end=owed, settling_scans=passes)
+            if owed:
+                fail(rnd, "the scans after a stop finish what the after-scan pass owed", rec)
+            self.catchups.append(rec)
+            log("catch-up stop (fresh engine):", json.dumps(rec))
+        finally:
+            v.close()
+
+    def owed_all(self, eng):
+        with ro(eng.db) as c:
+            return c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0 AND file_id IN (SELECT id FROM files WHERE failed = 0)").fetchone()[0]
 
     def step_victim_phase(self, rnd):
         """SIGKILL an engine on a fresh catalog during its model load, its tagging pass or its after-scan pass (rotating),
@@ -1343,7 +1419,7 @@ class Soak:
             with ro(v.db) as c:
                 running = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]
                 crashed = c.execute("SELECT count(*) FROM scan_sessions WHERE status='crashed' AND completed_at IS NOT NULL").fetchone()[0]
-            logged = self.log_count(v, '"crash_recovery_detected"')
+            logged = self.log_count(v, "crash_recovery_detected")
             rec = dict(round=rnd, cancel_first=cancel_first, crash_row_seen=crash_seen, kill_attempts=attempt + 1, running_after_start=running,
                        crashed_sessions=crashed, crash_logged=logged)
             if cancel_first:
@@ -1488,6 +1564,8 @@ class Soak:
                 if rnd <= 2:
                     steps.append(("crash-heal", lambda: self.step_heal(rnd, cancel_first=(rnd == 2))))
                 steps.insert(3, ("catchup-stop", lambda: self.step_catchup_stop(rnd, eng)))
+            if a.flavor == "swift":
+                steps.insert(4, ("catchup-stop-fresh", lambda: self.step_catchup_stop_fresh(rnd)))
             if a.flavor == "hosted":
                 if rnd % a.cycle_every == 0 or rnd == 1:
                     steps.insert(4, ("model-cycle", lambda: self.step_model_cycle(rnd, eng)))

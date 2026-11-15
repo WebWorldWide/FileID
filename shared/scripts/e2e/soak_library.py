@@ -209,6 +209,15 @@ def main():
     os.symlink(os.path.join(root, "Edge/loop"), os.path.join(root, "Edge/loop/self"))
     os.symlink("does-not-exist", os.path.join(root, "Edge/loop/dangling"))
 
+    # Page-shaped pictures (ISO A4 ratio, no camera data): the Swift engine reads their text with the fast reader and owes
+    # the careful read until the accurate reader has warmed up, so the soak's catch-up checks have something to settle.
+    # A separate generator keeps every other file of the library as it was.
+    paper = random.Random(4242)
+    for i in range(n(40)):
+        w = paper.choice((297, 420, 594))
+        h = round(w * 2 ** 0.5)
+        put("Paper", f"scan-{i}.png", png(w, h, paper) if i % 2 else png(h, w, paper))
+
     manifest = {}
     for dp, dns, fns in os.walk(root, followlinks=False):
         for fn in fns:
