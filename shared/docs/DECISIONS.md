@@ -5009,3 +5009,7 @@ NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since
 - **Model gates check that the model can run, not only that its files exist** (text embeddings earlier today, CLIP now). Weights without a runtime made every document or picture be re-read on every scan.
 - **File actions during a scan wait for the scan** (the mutation gate), unchanged. It protects the catalog-equals-disk invariant the soak checks; whether to allow renames between scan batches is an open product question in NEXT.
 
+## 2026-11-14 — Organize Folders leaves chains of throwaway folder names alone
+
+A chain like `stuff/old/new/final/really final` gets no suggestion because `old`, `new` and `final` are not on the generic-name list, so the folders count as the person's own organisation (RESTRUCTURE.md, 2026-10-15 rule 1). A wider rule (generic when every word is a throwaway word) was tried in a scratch build: on the capture library the plan grew from 22 to 46 moves, and all 24 new moves were automatic, date-only moves of scans out of a folder the person had named. Not adopted: a wrong move costs more than a missing suggestion, and "final" or "old" is often a real label. If this is revisited it should be a reviewed suggestion to flatten the chain, never an automatic move.
+
