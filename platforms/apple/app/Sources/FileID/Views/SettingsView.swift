@@ -209,6 +209,9 @@ struct SettingsTab: View {
         }
         .onAppear {
             Task { sessions = store.recentSessions() }
+            #if DEBUG
+            if SelfShot.expandAdvanced { showAdvanced = true }
+            #endif
         }
         .onChange(of: showAdvanced) { _, expanded in
             if expanded { Task { sessions = store.recentSessions() } }

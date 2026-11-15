@@ -9,6 +9,8 @@
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
+//   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
+//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -61,6 +63,7 @@ struct SelfShotPlan: Equatable {
     var settle: Double
     var windowSize: CGSize?
     var query: String?
+    var clusterFaces = false
     var views: [SelfShotView] = []
 
     static let dirKey = "FILEID_SELF_SHOT_DIR"
@@ -74,6 +77,7 @@ struct SelfShotPlan: Equatable {
                             folder: folder, settle: settle,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
                             query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
+                            clusterFaces: environment["FILEID_SELF_SHOT_CLUSTER"] == "1",
                             views: SelfShotView.parse(environment["FILEID_SELF_SHOT_VIEWS"], available: available))
     }
 
@@ -115,12 +119,15 @@ enum SelfShot {
         environment: ProcessInfo.processInfo.environment,
         available: MainWindow.Tab.allCases.map(\.rawValue))
     static var isActive: Bool { plan != nil }
+    static let expandAdvanced = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_ADVANCED"] == "1" && plan != nil
+    private static weak var engineRef: EngineClient?
     private static var started = false
 
     static func run(engine: EngineClient, store: ReadStore, navigate: @escaping (String) -> Void,
                     openFolder: @escaping (URL, Bool) -> Void) {
         guard let plan, !started else { return }
         started = true
+        engineRef = engine
         NSApp.setActivationPolicy(.accessory)
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: plan.dir, withIntermediateDirectories: true)
@@ -141,6 +148,16 @@ enum SelfShot {
                     await waitUntil(timeout: 10) { store.totalFiles >= (engine.lastProgress?.processed ?? 0) }
                     FileHandle.standardError.write(Data("self-shot: files counter \(store.totalFiles) \(Int(Date().timeIntervalSince(done) * 1000)) ms after the scan completed\n".utf8))
                 }
+            }
+            if plan.clusterFaces {
+                await waitUntil(timeout: 30) { store.totalFiles > 0 }
+                let before = engine.lastFaceClustering?.personCount
+                engine.runFaceClustering()
+                await waitUntil(timeout: 900) { !engine.faceClusteringInFlight }
+                let people = engine.lastFaceClustering.map { String($0.personCount) } ?? "none"
+                FileHandle.standardError.write(Data("self-shot: face clustering finished, persons \(people) (before \(before.map(String.init) ?? "none"))\n".utf8))
+                store.notifyChanged()
+                try? await Task.sleep(for: .seconds(1))
             }
             for page in plan.pages {
                 if page == MainWindow.Tab.moments.rawValue, let query = plan.query { ChatHandoff.shared.momentsQuery = query }
@@ -215,6 +232,9 @@ enum SelfShot {
     }
 
     private static func write(name: String, plan: SelfShotPlan, sheet: Bool = false) {
+        if let p = engineRef?.lastProgress {
+            FileHandle.standardError.write(Data("self-shot: progress at \(name): \(p.phase) \(p.processed)/\(p.total) discovered \(p.discovered)\n".utf8))
+        }
         let url = plan.dir.appendingPathComponent("\(name).png")
         guard let window = (sheet ? window()?.attachedSheet : nil) ?? window(), let view = window.contentView?.superview ?? window.contentView else {
             FileHandle.standardError.write(Data("self-shot: no window for \(name)\n".utf8)); return

@@ -3196,7 +3196,16 @@ async fn process_file_predecoded(
     // scene tags didn't clear the threshold. (Aspect and the generic "Has
     // Faces/Text/Location" capability tags were removed — see
     // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
-    let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
+    // Year and camera belong to images only, and every other kind starts with
+    // its kind tag, as `Tagging.swift` stores them.
+    let extras = if file.kind == FileKind::Image {
+        enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref())
+    } else {
+        Vec::new()
+    };
+    if let Some(label) = kind_tag(file.kind) {
+        tagged.tags.insert(0, (label.to_string(), None));
+    }
     // What the scan stored in RAM++'s place, for the catch-up pass.
     let stored_in_place: Vec<String> = tagged.tags.iter().map(|(tag, _)| tag.clone()).collect();
     // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
@@ -3470,6 +3479,21 @@ fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32,
 fn push_enriched_extras(tagged: &mut TaggedFile) {
     let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
     tagged.tags.extend(extras.into_iter().map(|tag| (tag, None)));
+}
+
+/// The tag every file that is not an image starts with, as the Swift engine
+/// stores it (`Tagging.swift`: `Doc`, `PDF`, `Audio`, `Video`, `3D Model`,
+/// `Other`).
+fn kind_tag(kind: FileKind) -> Option<&'static str> {
+    match kind {
+        FileKind::Image => None,
+        FileKind::Video => Some("Video"),
+        FileKind::Pdf => Some("PDF"),
+        FileKind::Doc => Some("Doc"),
+        FileKind::Audio => Some("Audio"),
+        FileKind::Model => Some("3D Model"),
+        FileKind::Other => Some("Other"),
+    }
 }
 
 /// The Year and camera-family tags for a file with these dates and camera.
@@ -4312,6 +4336,84 @@ mod tests {
             moved_from_known_row: false,
             file_ref: None,
         }
+    }
+
+    fn wav_with_info(entries: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        let mut info = b"INFO".to_vec();
+        for (id, value) in entries {
+            let mut text = value.as_bytes().to_vec();
+            text.push(0);
+            if text.len() % 2 == 1 {
+                text.push(0);
+            }
+            info.extend_from_slice(*id);
+            info.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            info.extend_from_slice(&text);
+        }
+        let mut body = b"WAVEfmt ".to_vec();
+        body.extend_from_slice(&16u32.to_le_bytes());
+        for field in [1u16, 1] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(&8000u32.to_le_bytes());
+        body.extend_from_slice(&16000u32.to_le_bytes());
+        for field in [2u16, 16] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(b"LIST");
+        body.extend_from_slice(&(info.len() as u32).to_le_bytes());
+        body.extend_from_slice(&info);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&8u32.to_le_bytes());
+        body.extend_from_slice(&[0; 8]);
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&body);
+        wav
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_an_image_stores_its_kind_tag_and_no_year() {
+        let dir = std::env::temp_dir().join(format!("fileid-kind-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut note = text_file(&dir, "note.txt");
+        note.created_unix = Some(1_500_000_000.0);
+        note.modified_unix = 1_500_000_000.0;
+        let blob = dir.join("blob.bin");
+        std::fs::write(&blob, vec![7u8; 64]).unwrap();
+        let song = dir.join("song.wav");
+        std::fs::write(&song, wav_with_info(&[(b"IART", "The Band"), (b"INAM", "Song One"), (b"IGNR", "Rock"), (b"ICRD", "2009")])).unwrap();
+        let file = |path: std::path::PathBuf, kind, size| DiscoveredFile {
+            path,
+            kind,
+            size_bytes: size,
+            modified_unix: 1_500_000_000.0,
+            created_unix: Some(1_500_000_000.0),
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        };
+        let song_size = std::fs::metadata(&song).unwrap().len();
+        let (tx, rx) = mpsc::channel(8);
+        let tagger = Tagger::with_model_source(ScanCoordinator::new(), 2, counting_source(Arc::new(AtomicUsize::new(0)), false));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        for item in [note, file(blob, FileKind::Other, 64), file(song, FileKind::Audio, song_size)] {
+            tx.send(item).await.unwrap();
+        }
+        drop(tx);
+        let mut stored = std::collections::BTreeMap::new();
+        while let Some(row) = tokio::time::timeout(Duration::from_secs(10), out.recv()).await.unwrap() {
+            assert!(!row.failed && row.tags_evaluated);
+            let name = row.path.file_name().unwrap().to_string_lossy().to_string();
+            let mut tags: Vec<String> = row.tags.iter().map(|(tag, _)| tag.clone()).collect();
+            tags.sort();
+            stored.insert(name, tags);
+        }
+        decoder_join.await.unwrap();
+        assert_eq!(stored["note.txt"], ["Doc", "garden notes"]);
+        assert_eq!(stored["blob.bin"], ["Other"]);
+        assert_eq!(stored["song.wav"], ["Audio", "Song One", "The Band"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

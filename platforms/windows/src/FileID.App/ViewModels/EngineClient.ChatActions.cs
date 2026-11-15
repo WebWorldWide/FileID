@@ -8,7 +8,7 @@ internal sealed partial class EngineClient
 {
     private static readonly HashSet<string> PlanFailureKinds = new(StringComparer.Ordinal)
     {
-        "restructure_busy", "plan_restructure_failed", "db_unavailable",
+        "restructure_busy", "plan_restructure_failed", "plan_restructure_root", "db_unavailable",
     };
 
     private static readonly HashSet<string> ApplyFailureKinds = new(StringComparer.Ordinal)

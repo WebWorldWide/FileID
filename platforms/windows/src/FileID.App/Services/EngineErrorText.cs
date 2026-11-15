@@ -20,6 +20,7 @@ internal static class EngineErrorText
         "folder_access_denied" or "bookmark_unavailable" or "list_roots_failed" => "FileID can't reach that folder",
         "command_decode_failed" => "FileID couldn't do that",
         "plan_restructure_failed" => "The folder plan didn't finish",
+        "plan_restructure_root" => "This folder isn't available",
         "apply_restructure" => "The folder move didn't finish",
         "undo_restructure" => "Putting folders back didn't finish",
         "orphan_sweep_failed" or "purge_excluded_failed" => "Cleaning up the library didn't finish",
@@ -53,6 +54,7 @@ internal static class EngineErrorText
         "folder_access_denied" or "bookmark_unavailable" or "list_roots_failed" => "Choose the folder again so FileID can open it.",
         "command_decode_failed" => TryAgain,
         "plan_restructure_failed" => "Open Organize Folders and try again, or pick a smaller folder.",
+        "plan_restructure_root" => "Reconnect it, then try again.",
         "orphan_sweep_failed" or "purge_excluded_failed" => "Nothing was lost. Scan again to finish tidying up.",
         "model_load_failed" or "prewarm_failed" or "unknown_model" or "models_not_installed" or "vlm_model_missing"
             or "llama_cpp_missing" or "models_dir_unavailable" => "Open Settings and install the model again.",

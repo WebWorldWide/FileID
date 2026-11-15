@@ -1,4 +1,4 @@
-//! Audio metadata extraction (artist / album / title / genre / year)
+//! Audio metadata extraction (artist / album / title)
 //! via `symphonia`. Pure-Rust, no Java/ffmpeg system dependency, supports
 //! mp3 (ID3v1/v2), flac (Vorbis comments), ogg/vorbis, wav, m4a/aac (iso-mp4),
 //! and plain PCM containers.
@@ -29,7 +29,7 @@ fn probe(hint: &Hint, mss: MediaSourceStream) -> Option<symphonia::core::probe::
     .ok()
 }
 
-/// Extract artist / album / title / genre / year tags from `path`. Returns
+/// Extract artist / album / title tags from `path`. Returns
 /// an empty Vec on any decode/probe failure — audio metadata is best-effort.
 ///
 /// `bytes` is an optional pre-read buffer (decoder thread reads the file once
@@ -169,18 +169,7 @@ fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::me
             continue;
         }
         let label = match tag.std_key {
-            Some(
-                StandardTagKey::Artist | StandardTagKey::AlbumArtist | StandardTagKey::Album
-                | StandardTagKey::TrackTitle | StandardTagKey::Genre,
-            ) => value,
-            Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => {
-                // Keep only the year (first 4 digits) so different date formats
-                // collapse to a single tag (mm/dd/yyyy, yyyy-mm-dd, yyyy).
-                // Emit as "Year_NNN" to match the enriched-extras format used by
-                // all other file kinds — prevents a double tag ("2019" + "Year_2019").
-                let year: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
-                if year.len() == 4 { format!("Year_{year}") } else { continue }
-            }
+            Some(StandardTagKey::Artist | StandardTagKey::AlbumArtist | StandardTagKey::Album | StandardTagKey::TrackTitle) => value,
             _ => continue,
         };
         if !label.is_empty() {
