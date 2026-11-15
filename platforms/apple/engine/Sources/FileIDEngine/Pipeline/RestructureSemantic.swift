@@ -561,10 +561,17 @@ public enum RestructureSemantic {
     /// dumping ground the butler should organize files *out of*, not route them
     /// back into. Matches the exact junk names AND any folder whose first word is
     /// a dumping-ground word, so versioned/suffixed variants ("Desktop 1.0",
-    /// "Downloads (2)", "Temp files") are caught too. (RESTRUCTURE.md R1)
+    /// "Downloads (2)", "Temp files") are caught too. All-digit names that are not a
+    /// plausible year (export/DB artifacts like "332699") are machine noise, not a
+    /// place a butler files things; year folders ("2019") stay valid targets.
+    /// (RESTRUCTURE.md R1)
     static func isJunkPrototypeFolder(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent.lowercased()
         if junkFolderNames.contains(name) { return true }
+        if !name.isEmpty, name.allSatisfy({ $0.isASCII && $0.isNumber }) {
+            let plausibleYear = name.count == 4 && (1900...2099).contains(Int(name) ?? 0)
+            if !plausibleYear { return true }
+        }
         let firstWord = name.split { !$0.isLetter }.first.map(String.init) ?? name
         return junkPrototypePrefixes.contains(firstWord)
     }
