@@ -12,6 +12,7 @@ struct FileIDApp: App {
     @State private var toolsSession = ToolsSession()
 
     init() {
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
         ORTPrivacy.disableTelemetryBeforeLoad()
         BrandFonts.register()
     }
