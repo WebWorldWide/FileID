@@ -11,6 +11,7 @@
 use anyhow::Context;
 
 use super::deep_analyze_naming as naming;
+use super::naming_context::NamingContext;
 use super::text_reading;
 
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
@@ -70,17 +71,17 @@ impl Drop for TempFileGuard {
     }
 }
 
-pub async fn analyze_file(
+pub(crate) async fn analyze_file(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     runner: &crate::models::vlm::VlmRunner,
     file_id: i64,
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    context: &NamingContext,
     on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
-    analyze_file_scoped(db, runner, file_id, model_kind, mode, cancel, face_names, on_token, None).await
+    analyze_file_scoped(db, runner, file_id, model_kind, mode, cancel, context, on_token, None).await
 }
 
 pub(crate) async fn analyze_file_scoped(
@@ -90,11 +91,12 @@ pub(crate) async fn analyze_file_scoped(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    context: &NamingContext,
     mut on_token: impl FnMut(&str),
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
+    let face_names = &context.subjects[..];
 
     // Documents, audio and (without installed weights) 3D models are named
     // from their own text and metadata, so they work with no VLM at all.
@@ -103,7 +105,7 @@ pub(crate) async fn analyze_file_scoped(
     }
     let weights_installed = naming::vlm_weights_installed(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, true, &cancel, scope).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, true, &cancel, context, scope).await?
     {
         return Ok(outcome);
     }
@@ -117,7 +119,7 @@ pub(crate) async fn analyze_file_scoped(
         Ok(r) => r,
         Err(e) => {
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, context, scope).await?
             {
                 return Ok(outcome);
             }
@@ -187,7 +189,7 @@ pub(crate) async fn analyze_file_scoped(
     {
         proposed_name = proposed_name.and_then(|name| crate::util::smart_name::readable_stem(&name, face_names));
         let conn = db.lock();
-        persist_vlm_results(
+        proposed_name = persist_vlm_results(
             &conn,
             file_id,
             model_kind,
@@ -195,6 +197,7 @@ pub(crate) async fn analyze_file_scoped(
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
+            context,
         )?;
     }
     if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -406,7 +409,8 @@ fn persist_vlm_results(
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
-) -> anyhow::Result<()> {
+    context: &NamingContext,
+) -> anyhow::Result<Option<String>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -416,6 +420,13 @@ fn persist_vlm_results(
     // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
+    context.validate(&tx)?;
+    // A reviewed label names the file; the model's proposal is not used.
+    let reviewed_name = (mode.requests_rename() && context.label.is_some()).then(|| context.proposed_name());
+    let proposed_name = match &reviewed_name {
+        Some(reviewed) => reviewed.as_deref(),
+        None => proposed_name,
+    };
     if mode.establishes_completion() {
         tx.execute(
             "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
@@ -459,7 +470,7 @@ fn persist_vlm_results(
         }
     }
     tx.commit()?;
-    Ok(())
+    Ok(proposed_name.map(str::to_owned))
 }
 
 /// Copy a near-duplicate's persisted caption and VLM tags onto `file_id`, flagged
@@ -472,6 +483,7 @@ pub(crate) fn inherit_vlm_results(
     model_kind: &str,
     mode: AnalyzeMode,
     proposed_name: Option<&str>,
+    context: &NamingContext,
 ) -> anyhow::Result<AnalyzeOutcome> {
     let (description, source_name): (Option<String>, Option<String>) = conn.query_row(
         "SELECT vlm_description, vlm_proposed_name FROM files WHERE id=?1",
@@ -485,7 +497,7 @@ pub(crate) fn inherit_vlm_results(
     };
     let description = if mode.requests_caption() { description } else { None };
     let proposed_name = if mode.requests_rename() { proposed_name.map(str::to_owned).or(source_name) } else { None };
-    persist_vlm_results(conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    let proposed_name = persist_vlm_results(conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags, context)?;
     conn.execute("UPDATE files SET vlm_inherited_from=?1 WHERE id=?2", rusqlite::params![from_id, file_id])?;
     Ok(AnalyzeOutcome { file_id, description, proposed_name })
 }
@@ -558,22 +570,23 @@ pub(crate) async fn analyze_file_via_server(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    context: &NamingContext,
     mut on_token: impl FnMut(&str),
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
+    let face_names = &context.subjects[..];
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         anyhow::bail!("cancelled");
     }
     if let Some(outcome) =
-        analyze_document_via_server(&db, server, file_id, model_kind, mode, &cancel, &mut on_token, scope).await?
+        analyze_document_via_server(&db, server, file_id, model_kind, mode, &cancel, &mut on_token, context, scope).await?
     {
         return Ok(outcome);
     }
     // The caller holds a resident lease; transcribing would acquire another
     // and wait on that same lock until the user cancels.
-    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, false, &cancel, scope).await? {
+    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, false, &cancel, context, scope).await? {
         return Ok(outcome);
     }
     let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id, scope).await {
@@ -581,7 +594,7 @@ pub(crate) async fn analyze_file_via_server(
         Err(e) => {
             // A 3D model we couldn't render falls back to its embedded names.
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, false, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, false, &cancel, context, scope).await?
             {
                 return Ok(outcome);
             }
@@ -652,7 +665,7 @@ pub(crate) async fn analyze_file_via_server(
     {
         let conn = db.lock();
         proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
-        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+        proposed_name = persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags, context)?;
     }
     if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
         match complete_cancellable(server, &rasterized, text_reading::TRANSCRIPTION_PROMPT, TRANSCRIPTION_MAX_TOKENS, &cancel)
@@ -684,17 +697,18 @@ pub(crate) async fn analyze_file_via_mlx(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    context: &NamingContext,
     on_token: impl FnMut(&str),
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use std::sync::atomic::Ordering;
+    let face_names = &context.subjects[..];
     if cancel.load(Ordering::Relaxed) {
         anyhow::bail!("cancelled");
     }
     let (path, kind) = analysis_source(&db, file_id, scope)?;
     if kind == "audio"
-        && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
+        && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, context, scope).await?
     {
         return Ok(outcome);
     }
@@ -719,7 +733,7 @@ pub(crate) async fn analyze_file_via_mlx(
         path: path.clone(),
         media_kind: kind.clone(),
         document_text,
-        face_names: face_names.to_vec(),
+        face_names: context.subjects.clone(),
         propose_filename: mode.requests_rename(),
         tags_only: mode == AnalyzeMode::TagsOnly,
         scene_caption: false,
@@ -731,7 +745,7 @@ pub(crate) async fn analyze_file_via_mlx(
     let failed = if mode == AnalyzeMode::TagsOnly { reply.description_failed() } else { reply.failed() };
     if failed {
         if kind == "model"
-            && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
+            && let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, context, scope).await?
         {
             return Ok(outcome);
         }
@@ -747,8 +761,7 @@ pub(crate) async fn analyze_file_via_mlx(
         } else {
             None
         };
-        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
-        proposed_name
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags, context)?
     };
     if mode.requests_caption() && (kind == "image" || kind == "pdf") && transcription_wanted(&db, file_id) && !cancel.load(Ordering::Relaxed) {
         match lease.transcribe(&path, kind == "pdf", &cancel).await {
@@ -801,6 +814,7 @@ async fn analyze_document_via_server(
     mode: AnalyzeMode,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     on_token: &mut impl FnMut(&str),
+    context: &NamingContext,
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
     let (path, kind) = analysis_source(db, file_id, scope)?;
@@ -825,7 +839,7 @@ async fn analyze_document_via_server(
         }
     };
     let Some(text) = naming::bounded_document_text(&text) else {
-        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, false, cancel, scope).await;
+        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, false, cancel, context, scope).await;
     };
     let (_, fallback_name, deterministic_tags) = naming::document_metadata_from_text(&text);
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
@@ -860,7 +874,7 @@ async fn analyze_document_via_server(
     {
         let conn = db.lock();
         proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
-        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+        proposed_name = persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags, context)?;
     }
     Ok(Some(AnalyzeOutcome { file_id, description, proposed_name }))
 }
@@ -877,6 +891,7 @@ async fn analyze_metadata_named_file(
     model_to_vlm: bool,
     may_transcribe: bool,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    context: &NamingContext,
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
     let (path, kind) = analysis_source(db, file_id, scope)?;
@@ -907,8 +922,7 @@ async fn analyze_metadata_named_file(
     let proposed_name = {
         let conn = db.lock();
         let proposed_name = naming::vetted_proposed_name(&conn, file_id, proposed_name)?;
-        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
-        proposed_name
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags, context)?
     };
     Ok(Some(AnalyzeOutcome { file_id, description, proposed_name }))
 }
@@ -1189,6 +1203,109 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
 mod tests {
     use super::sanitize_proposed_name;
     use super::*;
+
+    struct Source {
+        conn: rusqlite::Connection,
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+        revision: String,
+    }
+
+    impl Drop for Source {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn source(tag: &str) -> Source {
+        let dir = std::env::temp_dir().join(format!("fileid-deep-naming-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("IMG_001.jpg");
+        std::fs::write(&path, [1u8]).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified = crate::util::catalog_unix_seconds(metadata.modified().unwrap()).unwrap();
+        let revision = super::super::naming_context::source_revision(1, Some(modified));
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,kind,extension,scanned_at) VALUES(1,?1,1,1,?2,'image','jpg',1)",
+            rusqlite::params![path.to_string_lossy(), modified],
+        )
+        .unwrap();
+        Source { conn, dir, path, revision }
+    }
+
+    fn reviewed_chapter(source: &Source, title: &str) {
+        source
+            .conn
+            .execute(
+                "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,source_revision,model_version,confidence,user_edited,stale) VALUES('c',1,0,1,?1,?2,'user',1,1,0)",
+                rusqlite::params![title, source.revision],
+            )
+            .unwrap();
+    }
+
+    fn stored_name(source: &Source) -> Option<String> {
+        source.conn.query_row("SELECT vlm_proposed_name FROM files WHERE id=1", [], |r| r.get(0)).unwrap()
+    }
+
+    fn context(source: &Source) -> NamingContext {
+        super::super::naming_context::load(&source.conn, 1, None, "p").unwrap()
+    }
+
+    #[test]
+    fn a_reviewed_label_names_the_file_instead_of_the_model_proposal() {
+        let source = source("label");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let context = context(&source);
+        let written =
+            persist_vlm_results(&source.conn, 1, "m", AnalyzeMode::Both, Some("caption"), Some("Sunset Over Bay"), &[], &context).unwrap();
+        assert_eq!(written, context.proposed_name());
+        assert_eq!(stored_name(&source), context.proposed_name());
+        assert!(stored_name(&source).unwrap().to_lowercase().contains("home"));
+    }
+
+    #[test]
+    fn without_a_reviewed_label_the_model_proposal_is_kept() {
+        let source = source("no-label");
+        let context = context(&source);
+        persist_vlm_results(&source.conn, 1, "m", AnalyzeMode::Both, Some("caption"), Some("Sunset Over Bay"), &[], &context).unwrap();
+        assert_eq!(stored_name(&source).as_deref(), Some("Sunset Over Bay"));
+    }
+
+    #[test]
+    fn a_reviewed_label_does_not_rename_when_renames_were_not_requested() {
+        let source = source("no-rename");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let context = context(&source);
+        persist_vlm_results(&source.conn, 1, "m", AnalyzeMode::CaptionAndTags, Some("caption"), None, &[], &context).unwrap();
+        assert_eq!(stored_name(&source), None);
+    }
+
+    #[test]
+    fn evidence_that_changed_before_commit_writes_nothing() {
+        for fault in ["label", "source"] {
+            let source = source(fault);
+            reviewed_chapter(&source, "Maya hits a home run");
+            let context = context(&source);
+            if fault == "label" {
+                source.conn.execute("UPDATE catalog_chapters SET title='Birthday gift'", []).unwrap();
+            } else {
+                std::fs::write(&source.path, [1u8, 2]).unwrap();
+            }
+            let error = persist_vlm_results(
+                &source.conn, 1, "m", AnalyzeMode::Both, Some("stale result"), context.proposed_name().as_deref(), &["tag".into()], &context,
+            )
+            .unwrap_err();
+            assert!(error.is::<super::super::naming_context::EvidenceChanged>(), "{fault}");
+            assert_eq!(stored_name(&source), None, "{fault}");
+            let description: Option<String> =
+                source.conn.query_row("SELECT vlm_description FROM files WHERE id=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(description, None, "{fault}");
+            let tags: i64 = source.conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+            assert_eq!(tags, 0, "{fault}");
+        }
+    }
 
     #[test]
     fn sanitize_strips_quotes_and_normalizes() {

@@ -15,6 +15,7 @@ use crate::ipc::{
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, EngineError, EventPayload, IpcEvent, Wrap,
 };
 use crate::pipeline::deep_analyze::{analyze_file, analyze_file_scoped, analyze_file_via_server, AnalyzeMode};
+use crate::pipeline::naming_context::{self, NamingContext};
 
 /// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
 /// single-space separators. The CLI emits one stdout line per `on_token`
@@ -52,58 +53,14 @@ pub(super) fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) ->
     }
 }
 
-/// Distinct named people in a file, formatted for display. Skips clusters flagged
-/// `is_unknown` (explicitly opted out). Feeds the Deep Analyze prompt + the
-/// deterministic filename prefix so renames carry the people you've named.
-/// Byte-faithful with the macOS engine's `fetchFaceNames`. (item 3)
-pub(super) fn fetch_face_names(conn: &rusqlite::Connection, file_id: i64) -> Vec<String> {
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT persons.title, persons.first_name, persons.name \
-         FROM persons \
-         INNER JOIN face_prints ON face_prints.person_id = persons.id \
-         WHERE face_prints.file_id = ?1 \
-           AND IFNULL(persons.is_unknown, 0) = 0",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = stmt.query_map([file_id], |row| {
-        let title: Option<String> = row.get(0)?;
-        let first: Option<String> = row.get(1)?;
-        let legacy: Option<String> = row.get(2)?;
-        Ok(format_person_ref(
-            title.as_deref(),
-            first.as_deref(),
-            legacy.as_deref(),
-        ))
-    });
-    let mut names = Vec::new();
-    if let Ok(rows) = rows {
-        for formatted in rows.flatten() {
-            if !formatted.is_empty() {
-                names.push(formatted);
-            }
-        }
-    }
-    names
+/// The reviewed evidence a name may use for one file, read live, in the
+/// engine's selected face space. Fails when the source changed or is gone.
+pub(super) fn fetch_naming(conn: &rusqlite::Connection, file_id: i64) -> anyhow::Result<NamingContext> {
+    let (model, processing) = naming_context::selected_space();
+    naming_context::load(conn, file_id, model.as_deref(), processing)
 }
 
-/// `title + first_name`, else `first_name`, else `title`, else legacy `name`
-/// (each trimmed). Matches the macOS `formatPersonRef`. (item 3)
-fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&str>) -> String {
-    let t = title.unwrap_or("").trim();
-    let f = first.unwrap_or("").trim();
-    if !t.is_empty() && !f.is_empty() {
-        return format!("{t} {f}");
-    }
-    if !f.is_empty() {
-        return f.to_string();
-    }
-    if !t.is_empty() {
-        return t.to_string();
-    }
-    legacy.unwrap_or("").trim().to_string()
-}
+pub(super) const SOURCE_CHANGED: &str = "A file changed or can't be reached. Scan the folder again, then describe it.";
 
 /// Reject Deep Analyze after the GPU device was removed in this process: one
 /// diagnostic plus a terminal complete, so the app never waits on a run that
@@ -224,11 +181,12 @@ pub(crate) async fn handle_deep_analyze_file(
     let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
-    let face_names = {
+    let context = {
         let db = db.clone();
-        tokio::task::spawn_blocking(move || fetch_face_names(&db.lock(), file_id))
+        tokio::task::spawn_blocking(move || fetch_naming(&db.lock(), file_id))
             .await
-            .unwrap_or_default()
+            .map_err(anyhow::Error::from)
+            .and_then(|loaded| loaded)
     };
     let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
@@ -263,12 +221,16 @@ pub(crate) async fn handle_deep_analyze_file(
                 },
             ))));
     };
-    let outcome = match &backend {
-        SingleFileBackend::Cli(runner) => {
-            analyze_file(db, runner, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token).await
+    let outcome = match (&backend, &context) {
+        (_, Err(error)) => {
+            tracing::warn!(%error, file_id, "naming evidence unavailable");
+            Err(anyhow::anyhow!(SOURCE_CHANGED))
         }
-        SingleFileBackend::Server(server) => {
-            analyze_file_via_server(db, server, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token, None).await
+        (SingleFileBackend::Cli(runner), Ok(context)) => {
+            analyze_file(db, runner, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), context, on_token).await
+        }
+        (SingleFileBackend::Server(server), Ok(context)) => {
+            analyze_file_via_server(db, server, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), context, on_token, None).await
         }
     };
     if let SingleFileBackend::Server(server) = backend
@@ -901,12 +863,12 @@ async fn run_deep_analyze_batch(
         if let Some((from_id, from_faces, base_name)) = group_index.and_then(|g| shared.get(&g)).cloned() {
             let inherited = {
                 let conn = db.lock();
-                let faces = fetch_face_names(&conn, file_id);
-                if from_id != file_id && same_people(&faces, &from_faces) {
-                    let name = base_name.as_deref().map(|n| crate::pipeline::near_duplicate_grouping::appending_sequence(n, &suffix));
-                    Some(crate::pipeline::deep_analyze::inherit_vlm_results(&conn, file_id, from_id, model_kind, mode, name.as_deref()))
-                } else {
-                    None
+                match fetch_naming(&conn, file_id) {
+                    Ok(context) if from_id != file_id && same_people(&context.subjects, &from_faces) => {
+                        let name = base_name.as_deref().map(|n| crate::pipeline::near_duplicate_grouping::appending_sequence(n, &suffix));
+                        Some(crate::pipeline::deep_analyze::inherit_vlm_results(&conn, file_id, from_id, model_kind, mode, name.as_deref(), &context))
+                    }
+                    _ => None,
                 }
             };
             match inherited {
@@ -1015,9 +977,18 @@ async fn run_deep_analyze_batch(
         // per-file CLI. `use_server` flips off below if the server dies.
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
-        let face_names = {
+        let context = {
             let conn = db.lock();
-            fetch_face_names(&conn, file_id)
+            fetch_naming(&conn, file_id)
+        };
+        let context = match context {
+            Ok(context) => context,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(%error, file_id, "naming evidence unavailable");
+                sink.send(EngineError::event("deep_source_changed", SOURCE_CHANGED)).await;
+                continue;
+            }
         };
         let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(
@@ -1027,7 +998,7 @@ async fn run_deep_analyze_batch(
                 model_kind,
                 mode,
                 cancel.clone(),
-                &face_names,
+                &context,
                 on_token,
                 scope.as_ref(),
             )
@@ -1040,7 +1011,7 @@ async fn run_deep_analyze_batch(
                 model_kind,
                 mode,
                 cancel.clone(),
-                &face_names,
+                &context,
                 on_token,
                 scope.as_ref(),
             )
@@ -1078,7 +1049,7 @@ async fn run_deep_analyze_batch(
                         out.proposed_name = Some(named);
                     }
                 }
-                shared.insert(g, (file_id, face_names.clone(), base_name));
+                shared.insert(g, (file_id, context.subjects.clone(), base_name));
                 Ok(out)
             }
             (other, _) => other,
