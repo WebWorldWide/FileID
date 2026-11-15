@@ -344,7 +344,7 @@ impl ScanSession {
             // affected files back out of the skip set so they reprocess and
             // re-emit their crops. Bounded to face-bearing files under the
             // scan root; clean shutdowns skip this entirely.
-            if crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            if crash_self_heal_due(&lo) {
                 let removed = reconcile_missing_face_crops(&conn, &mut set, &lo, hi.as_deref());
                 if removed > 0 {
                     tracing::info!(
@@ -1181,6 +1181,19 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
 /// returns how many files were reopened for reprocessing. Best-effort: a query
 /// or FS error just leaves the skip set as-is (the file stays gray, no worse
 /// than before).
+/// Whether this scan root still needs the crash self-heal: the previous engine died mid-scan and this process has
+/// not yet reconciled the root. Once per root per process: a build whose face crops are written later than the scan
+/// (the Mac adapters path writes them when faces are extracted) never has a crop to find, and without this every scan
+/// after a crash would reprocess every face-bearing file again.
+fn crash_self_heal_due(root_prefix: &str) -> bool {
+    static HEALED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+    heal_root_once(crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed), &HEALED, root_prefix)
+}
+
+fn heal_root_once(unclean: bool, healed: &Mutex<std::collections::HashSet<String>>, root_prefix: &str) -> bool {
+    unclean && healed.lock().insert(root_prefix.to_string())
+}
+
 fn reconcile_missing_face_crops(
     conn: &rusqlite::Connection,
     set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
@@ -1974,6 +1987,15 @@ mod tests {
     /// Crash self-heal: after an unclean shutdown, a file with committed
     /// face_prints rows but a missing crop JPEG must be pulled OUT of the skip
     /// set (so it reprocesses), while a file whose crops all exist stays in it.
+    #[test]
+    fn crash_self_heal_runs_once_per_root_and_only_after_an_unclean_shutdown() {
+        let healed = Mutex::new(std::collections::HashSet::new());
+        assert!(!heal_root_once(false, &healed, "/a/"), "clean shutdown: never");
+        assert!(heal_root_once(true, &healed, "/a/"), "first scan of the root after a crash");
+        assert!(!heal_root_once(true, &healed, "/a/"), "the next scan of the same root must not reopen files again");
+        assert!(heal_root_once(true, &healed, "/b/"), "another root still gets its own pass");
+    }
+
     #[test]
     fn reconcile_missing_face_crops_reopens_only_crop_missing_files() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
