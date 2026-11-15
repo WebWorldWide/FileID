@@ -109,11 +109,11 @@ struct Sidebar: View {
     }
 
     /// The area whose pill is lit: the one holding the open page, none on Settings.
-    static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
+    nonisolated static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
 
     /// A fall back to the Swift engine explains itself in Settings; the sidebar
     /// keeps its card for errors nothing else explains.
-    static func showsErrorCard(_ kind: String) -> Bool { kind != "engine_fallback" }
+    nonisolated static func showsErrorCard(_ kind: String) -> Bool { kind != "engine_fallback" }
 
     private var shouldShowEngineSection: Bool {
         if let err = engine.lastError, Self.showsErrorCard(err.kind) { return true }

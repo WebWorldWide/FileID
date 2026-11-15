@@ -112,7 +112,7 @@ struct MainWindow: View {
 
     /// A job list taken from a search reply goes stale (the pill kept saying
     /// "Moments 0%"), so any page asks again each second while a job runs.
-    static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
+    nonisolated static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
         jobs.contains { $0.state == "queued" || $0.state == "running" }
     }
 
