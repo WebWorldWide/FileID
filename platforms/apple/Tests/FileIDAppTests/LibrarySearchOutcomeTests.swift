@@ -8,7 +8,8 @@ struct LibrarySearchOutcomeTests {
     }
 
     @Test func parsesTheEnginesSentences() {
-        #expect(LibrarySearchOutcome.Strength(message: "3 good matches, 1 weaker.") == .init(good: 3, weaker: 1, text: "3 good matches, 1 weaker."))
+        let both = LibrarySearchOutcome.Strength(message: "3 good matches, 1 weaker.")
+        #expect(both?.good == 3 && both?.weaker == 1 && both?.text == "3 good matches, 1 weaker.")
         #expect(LibrarySearchOutcome.Strength(message: "1 good match.")?.good == 1)
         #expect(LibrarySearchOutcome.Strength(message: "No good matches, 60 weaker.")?.weaker == 60)
         #expect(LibrarySearchOutcome.Strength(message: "No matches.")?.good == 0)
