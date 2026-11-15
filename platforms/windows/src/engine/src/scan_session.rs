@@ -281,7 +281,7 @@ impl ScanSession {
             // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
             // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
             // isn't on disk (no doc could embed → don't force a perpetual re-walk).
-            let text_embed_gate = if bge_installed() { SKIP_SET_TEXT_EMBED_GATE } else { "" };
+            let text_embed_gate = text_embed_gate(bge_installed(), crate::ort_runtime::is_available());
             // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
             // to backfill its rendered-shape CLIP vector (lockstep with macOS).
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
@@ -344,7 +344,7 @@ impl ScanSession {
             // affected files back out of the skip set so they reprocess and
             // re-emit their crops. Bounded to face-bearing files under the
             // scan root; clean shutdowns skip this entirely.
-            if crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            if crash_self_heal_due(&lo) {
                 let removed = reconcile_missing_face_crops(&conn, &mut set, &lo, hi.as_deref());
                 if removed > 0 {
                     tracing::info!(
@@ -740,6 +740,9 @@ impl ScanSession {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0),
         );
+        if clean_walk {
+            mark_heal_done(&CRASH_HEALED_ROOTS, &root_descendant_prefix(root));
+        }
         if clean_walk
             && self.allow_follow_up
             && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started)
@@ -1177,6 +1180,29 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
+static CRASH_HEALED_ROOTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The crash self-heal runs until one scan of the root walks it to the end, then stops for this process. A build
+/// that writes face crops after the scan (the Mac adapters path) never has a crop to find, so without the stop every
+/// scan after a crash reprocessed every face-bearing file; a cancelled scan leaves the root due so the repair is
+/// not lost.
+fn crash_self_heal_due(root_prefix: &str) -> bool {
+    heal_due(
+        crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
+        &CRASH_HEALED_ROOTS,
+        root_prefix,
+    )
+}
+
+fn heal_due(unclean: bool, healed: &Mutex<std::collections::HashSet<String>>, root_prefix: &str) -> bool {
+    unclean && !healed.lock().contains(root_prefix)
+}
+
+fn mark_heal_done(healed: &Mutex<std::collections::HashSet<String>>, root_prefix: &str) {
+    healed.lock().insert(root_prefix.to_string());
+}
+
 /// skip-set guard: drop any content-bearing row that was scanned
 /// without a content_hash (the signature of an online-only OneDrive
 /// placeholder, whose content read is skipped to avoid a network hydration).
@@ -1403,6 +1429,16 @@ fn bge_installed() -> bool {
     crate::models::bge_text::default_weights_path()
         .map(|p| p.exists())
         .unwrap_or(false)
+}
+
+/// The gate applies only when a scan can actually embed a document: weights on disk and a runtime to run them.
+/// With the weights installed but no ONNX Runtime, every document would be re-read on every scan and never embed.
+fn text_embed_gate(installed: bool, runtime_available: bool) -> &'static str {
+    if installed && runtime_available {
+        SKIP_SET_TEXT_EMBED_GATE
+    } else {
+        ""
+    }
 }
 
 fn should_reconcile_missing_rows(
@@ -2281,6 +2317,24 @@ mod tests {
         let _ = st.observe_rate(10, 0, t0 + Duration::from_secs(1)); // seeds ~10/s
         let held = st.observe_rate(1000, 0, t0 + Duration::from_millis(1100)); // only +0.1 s
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
+    }
+
+    #[test]
+    fn text_embed_gate_needs_both_the_weights_and_a_runtime() {
+        assert_eq!(text_embed_gate(true, true), SKIP_SET_TEXT_EMBED_GATE);
+        assert_eq!(text_embed_gate(true, false), "", "weights without a runtime must not re-walk every document");
+        assert_eq!(text_embed_gate(false, true), "");
+    }
+
+    #[test]
+    fn crash_self_heal_stops_after_one_finished_scan_of_the_root() {
+        let healed = Mutex::new(std::collections::HashSet::new());
+        assert!(!heal_due(false, &healed, "/a/"), "clean shutdown: never");
+        assert!(heal_due(true, &healed, "/a/"), "first scan of the root after a crash");
+        assert!(heal_due(true, &healed, "/a/"), "a scan that was cancelled leaves the root due");
+        mark_heal_done(&healed, "/a/");
+        assert!(!heal_due(true, &healed, "/a/"), "after a finished scan the root is not reopened again");
+        assert!(heal_due(true, &healed, "/b/"), "another root still gets its own pass");
     }
 
     /// Crash self-heal: after an unclean shutdown, a file with committed

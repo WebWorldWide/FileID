@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Soak test for a FileID engine (the shared Rust engine or the Swift engine) on a library that changes under it.
+"""Soak test for a FileID engine (the shared Rust engine, the Swift engine, or the Rust engine built with the Apple adapters) on a library that changes under it.
 
-usage: python3 soak.py --engine <binary> --flavor rust|swift --library <generated library dir> --work <scratch dir>
+usage: python3 soak.py --engine <binary> --flavor rust|swift|hosted --library <generated library dir> --work <scratch dir>
                        [--minutes 45] [--max-rounds N] [--seed S] [--models-dir DIR] [--no-trash]
 
 --library is a directory made by soak_library.py (its <name>.manifest.json sits beside it); it is copied to
@@ -90,8 +90,8 @@ class Engine:
         env.update({"HOME": home, "CFFIXED_USER_HOME": home, "XDG_DATA_HOME": state, "LOCALAPPDATA": state,
                     "FILEID_MODELS_DIR": models, "FILEID_HF_CACHE_ROOT": os.path.join(state, "hf"),
                     "ORT_DISABLE_TELEMETRY": "1", "FILEID_OCR_WARMUP": "0", "TZ": "UTC"})
-        env["FILEID_DB" if flavor == "rust" else "FILEID_DATABASE_PATH"] = db
-        env["FILEID_DATABASE_PATH" if flavor == "rust" else "FILEID_DB"] = db
+        env["FILEID_DB" if flavor != "swift" else "FILEID_DATABASE_PATH"] = db
+        env["FILEID_DATABASE_PATH" if flavor != "swift" else "FILEID_DB"] = db
         if not no_trash:
             env["FILEID_TEST_TRASH_ROOT"] = trash_root
         assert db.startswith(os.path.abspath(state)), "database must be inside scratch"
@@ -226,7 +226,16 @@ class Engine:
                 return "failed", inner(err)
             except TimeoutError:
                 return "failed", {}
-        return ("scanComplete", inner(ev)) if kind(ev) == "scanComplete" else (inner(ev), {})
+        if kind(ev) == "scanComplete":
+            return "scanComplete", inner(ev)
+        if inner(ev) == "cancelled":
+            # a cancelled scan still sends its closing scanComplete after phaseChanged(cancelled) (scan_session.rs); take it
+            # here so the next scan does not mistake it for its own
+            try:
+                self.wait(lambda e: kind(e) == "scanComplete", 15)
+            except TimeoutError:
+                pass
+        return inner(ev), {}
 
     def kill(self):
         if self.alive():
@@ -310,6 +319,7 @@ class Soak:
         self.uncatalogued = {}
         self.counter = 0
         self.notes = {}
+        self.cycles, self.catchups, self.kills = [], [], []
 
     # ---------- model of the library on disk
     def p(self, rel):
@@ -331,7 +341,7 @@ class Soak:
         self.victim_lib = os.path.join(self.work, "victim-lib")
         if os.path.exists(self.victim_lib):
             shutil.rmtree(self.victim_lib)
-        keep = sorted(self.model)[::5][:600]
+        keep = sorted(self.model)[::12 if self.a.flavor == "hosted" else 5][:600]
         for rel in keep:
             dst = os.path.join(self.victim_lib, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -377,7 +387,7 @@ class Soak:
         disk = {os.path.join(root, r) for r in model}
         visible = {p for p, v in rows.items() if not self.tombstone(v)}
         stale = sorted(visible - disk)
-        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
+        missing = sorted(p for p in disk - visible if os.path.exists(p) and os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
         hidden_rows = sorted(p for p in visible & disk if self.never_catalogued(p, root))
         if hidden_rows:
             fail(rnd, f"{name}: hidden files are not catalogued (swift)", [os.path.relpath(h, root) for h in hidden_rows[:4]])
@@ -439,7 +449,7 @@ class Soak:
         # The Rust engine leaves scanned_at alone for an unchanged file. The Swift engine stamps it on every skipped file
         # (Discovery.swift bumpScannedAt: the orphan sweep deletes rows with scanned_at < scanStart), so for swift the
         # check compares every other column, ids included, and requires processedFiles == 0 besides.
-        cols = "id, scanned_at" if self.a.flavor == "rust" else "id, size_bytes, modified_at, kind, content_hash, phash, failed, error_message"
+        cols = "id, scanned_at" if self.a.flavor != "swift" else "id, size_bytes, modified_at, kind, content_hash, phash, failed, error_message"
         with ro(eng.db) as c:
             before = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
         k, v = eng.scan(self.lib)
@@ -478,7 +488,7 @@ class Soak:
                 continue
             os.rename(self.p(r), self.p(new)); self.model[new] = self.model.pop(r); moved.append((r, new))
         for r in picks[80:110]:
-            t = time.time() + rng.randint(5, 500)
+            t = time.time() - rng.randint(5, 500)  # not in the future: a file dated ahead is re-stamped on every scan until its date passes
             os.utime(self.p(r), (t, t)); touched.append(r)
         for r in picks[110:135]:
             if r.endswith((".txt", ".md", ".csv", ".html")):
@@ -711,7 +721,7 @@ class Soak:
         quiet = 0
         while time.time() < deadline:
             try:
-                ev = eng.wait(lambda e: kind(e) in ("scanComplete", "bulkActionResult") or (kind(e) == "phaseChanged" and inner(e) in ("cancelled", "failed")), 20)
+                ev = eng.wait(lambda e: kind(e) in ("scanComplete", "bulkActionResult") or (kind(e) == "phaseChanged" and inner(e) in ("cancelled", "failed")), 60)
             except TimeoutError:
                 break
             if kind(ev) == "bulkActionResult":
@@ -798,7 +808,320 @@ class Soak:
         if snapshot(self.lib) != self.model:
             fail(rnd, "malformed burst changed the library", "")
 
+
+    # ---------- hosted flavor: the shared Rust engine with the Apple adapters and real models
+    def engine_log_lines(self, eng):
+        out = []
+        logdir = os.path.join(eng.state, "FileID", "logs")
+        if os.path.isdir(logdir):
+            for fn in sorted(os.listdir(logdir)):
+                if fn.startswith("engine.jsonl"):
+                    with open(os.path.join(logdir, fn), errors="replace") as f:
+                        out += f.read().splitlines()
+        return out
+
+    def log_count(self, eng, needle):
+        return sum(1 for ln in self.engine_log_lines(eng) if needle in ln)
+
+    def fp(self, eng):
+        return proc_metrics(eng.p.pid, eng.state).get("footprint_mb")
+
+    def add_new_images(self, rnd, tag, count, real=0):
+        """New files for the library: generated pictures, and `real` copies of a camera JPEG with one byte appended
+        (a different hash, still decodable) so the scan has realistic work. Updates the model of the disk."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("soak_library", os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_library.py"))
+        lib = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lib)
+        added = []
+        d = f"New/{tag}-r{rnd}"
+        os.makedirs(self.p(d), exist_ok=True)
+        for i in range(count):
+            data = lib.png(self.rng.choice((96, 160, 240)), self.rng.choice((64, 120, 180)), self.rng, tweak=self.rng.randrange(1, 1000))
+            rel = f"{d}/gen-{i}-{uuid.uuid4().hex[:6]}.png"
+            with open(self.p(rel), "wb") as f:
+                f.write(data)
+            self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
+        reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")]
+        for i in range(min(real, len(reals))):
+            src = self.rng.choice(reals)
+            with open(self.p(src), "rb") as f:
+                data = f.read() + uuid.uuid4().bytes
+            rel = f"{d}/real-{i}-{uuid.uuid4().hex[:6]}.jpg"
+            with open(self.p(rel), "wb") as f:
+                f.write(data)
+            self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
+        return added
+
+    def new_file_state(self, eng, rels):
+        """(files with a row, files with a CLIP embedding, files with tags, failed rows) for the given library files."""
+        paths = [self.p(r) for r in rels]
+        with ro(eng.db) as c:
+            rows = {}
+            for pth in paths:
+                r = c.execute("SELECT id, failed FROM files WHERE path_text=?", (pth,)).fetchone()
+                if r:
+                    rows[pth] = r
+            ids = [r[0] for r in rows.values()]
+            marks = ",".join("?" * len(ids)) or "NULL"
+            emb = c.execute(f"SELECT count(*) FROM clip_embeddings WHERE file_id IN ({marks})", ids).fetchone()[0]
+            tagged = c.execute(f"SELECT count(DISTINCT file_id) FROM tags WHERE file_id IN ({marks})", ids).fetchone()[0]
+        return len(rows), emb, tagged, sum(1 for r in rows.values() if r[1])
+
+    def owed(self, eng):
+        with ro(eng.db) as c:
+            return c.execute("SELECT count(*) FROM scan_catchup WHERE (stages & 3) != 0 AND file_id IN (SELECT id FROM files WHERE path_text LIKE ?)",
+                             (self.lib + "/%",)).fetchone()[0]
+
+    def step_real_first(self, eng):
+        """Scan the real camera files alone, first, and report aggregate throughput, tags per photo and failures."""
+        root = self.p(self.a.real_dir)
+        if not os.path.isdir(root):
+            return
+        n = sum(len(f) for _, _, f in os.walk(root))
+        load = os.getloadavg()[0]
+        t = time.time()
+        k, v = eng.scan(root, timeout=1800)
+        dt = time.time() - t
+        if k != "scanComplete":
+            fail(0, "first scan of the real files completes", (k, v))
+            return
+        with ro(eng.db) as c:
+            rows = c.execute("SELECT count(*), sum(failed), sum(kind='image') FROM files WHERE path_text LIKE ?", (root + "/%",)).fetchone()
+            tagged = c.execute("SELECT count(DISTINCT t.file_id), count(*) FROM tags t JOIN files f ON f.id=t.file_id WHERE f.path_text LIKE ? AND f.kind='image'", (root + "/%",)).fetchone()
+            emb = c.execute("SELECT count(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE f.path_text LIKE ?", (root + "/%",)).fetchone()[0]
+            by_ext = {}
+            for pth, failed in c.execute("SELECT path_text, failed FROM files WHERE path_text LIKE ?", (root + "/%",)):
+                e = os.path.splitext(pth)[1].lower()
+                a = by_ext.setdefault(e, [0, 0]); a[0] += 1; a[1] += failed or 0
+        self.notes["real_first_scan"] = dict(files_on_disk=n, rows=rows[0], failed=rows[1], images=rows[2], seconds=round(dt, 1), files_per_s=round(n / dt, 2),
+                                             engine_seconds=v.get("totalSeconds"), load=round(load, 1), images_tagged=tagged[0], tag_rows=tagged[1],
+                                             tags_per_tagged_image=round(tagged[1] / max(1, tagged[0]), 2), clip_embeddings=emb, by_ext=by_ext)
+        log("real files first scan:", json.dumps(self.notes["real_first_scan"]))
+
+    def step_model_cycle(self, rnd, eng):
+        """Scan (models load), wait past the idle period (they unload), scan new files (they load again), and search with
+        the embeddings. Records the footprint before the wait, after the unload and after the reload."""
+        rec = dict(round=rnd)
+        added = self.add_new_images(rnd, "cycleA", 6, real=6)
+        k, v = eng.scan(self.lib)
+        if k != "scanComplete":
+            fail(rnd, "scan before the idle wait completes", (k, v))
+            return rec
+        self.wait_jobs(eng)
+        parks0 = self.log_count(eng, "idle model parked")
+        loads0 = self.log_count(eng, "Mac scan adapters (MLX)")
+        rec["fp_loaded"] = self.fp(eng)
+        st = self.new_file_state(eng, added)
+        if st[1] != st[0] - st[3]:
+            fail(rnd, "every analysed new file has a CLIP embedding", st)
+        t = time.time()
+        deadline = t + 360
+        while time.time() < deadline and self.log_count(eng, "idle model parked") <= parks0:
+            time.sleep(5)
+        rec["idle_s"] = round(time.time() - t, 1)
+        if self.log_count(eng, "idle model parked") <= parks0:
+            fail(rnd, "scan models unload after the idle period", f"no 'idle model parked' in {rec['idle_s']}s")
+        time.sleep(4)
+        rec["fp_unloaded"] = self.fp(eng)
+        h = eng.health()
+        if h.get("pid") != eng.p.pid:
+            fail(rnd, "engine answers while the models are unloaded", h)
+        added2 = self.add_new_images(rnd, "cycleB", 6, real=6)
+        t = time.time()
+        k, v = eng.scan(self.lib)
+        rec["reload_scan_s"] = round(time.time() - t, 1)
+        if k != "scanComplete":
+            fail(rnd, "scan after the unload completes", (k, v))
+        rec["fp_reloaded"] = self.fp(eng)
+        loads1 = self.log_count(eng, "Mac scan adapters (MLX)")
+        rec["adapter_loads"] = loads1 - loads0
+        ok_lines = [ln for ln in self.engine_log_lines(eng) if "Mac scan adapters (MLX)" in ln][loads0:]
+        if loads1 <= loads0 or not all('"clip":true' in ln and '"ram_plus":true' in ln for ln in ok_lines):
+            fail(rnd, "scan models load again on MLX after the unload", ok_lines[-2:])
+        st = self.new_file_state(eng, added2)
+        rec["new_after_reload"] = st
+        if st[1] != st[0] - st[3] or st[0] != len(added2):
+            fail(rnd, "files scanned after the reload get rows and CLIP embeddings", st)
+        self.step_embedding_search(rnd, eng, rec)
+        self.cycles.append(rec)
+        log("model cycle:", json.dumps(rec))
+        return rec
+
+    def wait_jobs(self, eng, timeout=240):
+        """Background jobs a scan starts by itself (catalogIndex, takeGrouping) run to a terminal state before the idle wait,
+        so the models' idle period is not extended by them and their effect is part of what the round measures."""
+        end = time.time() + timeout
+        seen = set()
+        while time.time() < end:
+            jobs = [j for j in (eng.catalog("jobs", limit=50).get("jobs") or []) if j.get("kind") in ("catalogIndex", "takeGrouping")]
+            seen |= {j.get("kind") for j in jobs}
+            if all(j.get("state") in ("completed", "failed", "cancelled") for j in jobs):
+                for k in seen:
+                    self.notes.setdefault("jobs_seen", {})[k] = self.notes.get("jobs_seen", {}).get(k, 0) + 1
+                return
+            time.sleep(2)
+        self.notes["job_wait_timeouts"] = self.notes.get("job_wait_timeouts", 0) + 1
+
+    def step_embedding_search(self, rnd, eng, rec):
+        """The engine takes the query vector from its client (the text tower runs in the app and needs ONNX Runtime, which
+        this Mac does not have), so the vector here is a stored image embedding: searching with a file's own vector must
+        find that file (or a byte-identical twin) first, in semantic mode, in hybrid mode with a keyword, and by seed file."""
+        import struct
+        # the visual index is built by a background job after a scan; similarity answers "preparing" until it is done
+        end = time.time() + 180
+        while time.time() < end:
+            jobs = [j for j in (eng.catalog("jobs", limit=50).get("jobs") or []) if j.get("kind") in ("catalogIndex", "takeGrouping")]
+            if jobs and all(j.get("state") in ("completed", "failed") for j in jobs):
+                break
+            time.sleep(2)
+        with ro(eng.db) as c:
+            picks = c.execute("SELECT f.id, f.path_text, e.model, e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id "
+                              "WHERE f.failed=0 AND f.path_text LIKE ? ORDER BY random() LIMIT 3", (self.lib + "/%",)).fetchall()
+        out = []
+        for fid, pth, model, blob in picks:
+            vec = list(struct.unpack("<512f", blob))
+            with ro(eng.db) as c:
+                twins = {r[0] for r in c.execute("SELECT id FROM files WHERE content_hash=(SELECT content_hash FROM files WHERE id=?) AND failed=0", (fid,))}
+            word = os.path.splitext(os.path.basename(pth))[0].split("-")[0][:20] or "photo"
+            for mode, kw in (("semantic", dict(queryVector=vec, embeddingModel=model)), ("hybrid", dict(query=word, queryVector=vec, embeddingModel=model)),
+                             ("semantic", dict(fileID=fid))):
+                res = eng.catalog("search", searchMode=mode, limit=20, **kw)
+                for _ in range(60):
+                    # the first similarity request after new embeddings starts the index job and is answered "preparing"
+                    if "Preparing the local visual search index" not in str(res.get("message")):
+                        break
+                    time.sleep(2)
+                    res = eng.catalog("search", searchMode=mode, limit=20, **kw)
+                tag = f"{mode}{'-seed' if 'fileID' in kw else ''}"
+                if res.get("status") != "ok":
+                    if mode == "hybrid" and "ONNX Runtime" in str(res.get("message")):
+                        # hybrid ranking loads ONNX Runtime for its text half; this Mac has none (a shipped app bundles it)
+                        self.notes["hybrid_search_needs_onnxruntime"] = self.notes.get("hybrid_search_needs_onnxruntime", 0) + 1
+                        continue
+                    fail(rnd, f"{tag} search answers", (res.get("status"), res.get("message")))
+                    continue
+                hits = res.get("hits") or []
+                for h in hits:
+                    if not os.path.exists(h["path"]):
+                        fail(rnd, f"{tag} search hit points at a file that exists", h["path"]); break
+                top = [h["fileID"] for h in hits[:5]]
+                if mode == "semantic" and "fileID" not in kw and not (twins & set(top)):
+                    fail(rnd, f"{tag} search with a file's own vector finds it in the top 5", (fid, top))
+                out.append((tag, len(hits)))
+        rec["embedding_searches"] = out
+        res = eng.catalog("search", query="a photo of people outdoors", searchMode="hybrid", limit=5)
+        rec["hybrid_text_only"] = (res.get("status"), (res.get("message") or "")[:80])
+        # a hybrid query without a vector is refused by contract (the client supplies it); it must be refused, not crash
+        if eng.health().get("pid") != eng.p.pid:
+            fail(rnd, "engine survives a hybrid search without a vector", "")
+
+    def step_catchup_stop(self, rnd, eng):
+        """A scan of new camera files that is stopped in its after-scan tagging pass leaves a consistent catalog, and the
+        next scan finishes the tagging it still owed."""
+        added = self.add_new_images(rnd, "catchup", 4, real=20)
+        eng.drain()
+        eng.send("startScan", {"rootPath": self.lib, "rescan": False})
+        seen_post = False
+        try:
+            eng.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 600)
+            seen_post = True
+        except TimeoutError:
+            fail(rnd, "scan reaches its after-scan tagging pass", "no postScan phase in 600s")
+        except RuntimeError:
+            raise
+        eng.send("cancelScan")
+        k, v = eng.wait_scan_end(300)
+        owed_after_stop = self.owed(eng)
+        self.check_db(rnd, eng.db, "main (after a stop in the after-scan pass)")
+        if k not in ("cancelled", "scanComplete"):
+            fail(rnd, "a stop during the after-scan pass ends the scan", (k, v))
+        st = self.new_file_state(eng, added)
+        if st[0] != len(added):
+            fail(rnd, "files scanned before the stop have rows", st)
+        k2, v2 = eng.scan(self.lib)
+        if k2 != "scanComplete":
+            fail(rnd, "the scan after a stop completes", (k2, v2))
+        owed_end = self.owed(eng)
+        if owed_end:
+            fail(rnd, "the next scan finishes what the after-scan pass owed", owed_end)
+        st2 = self.new_file_state(eng, added)
+        if st2[1] != st2[0] - st2[3]:
+            fail(rnd, "files of a stopped scan get their CLIP embeddings by the next scan", st2)
+        rec = dict(round=rnd, saw_postscan=seen_post, stop_result=k, owed_after_stop=owed_after_stop, owed_end=owed_end, new_state=st2)
+        self.catchups.append(rec)
+        log("catch-up stop:", json.dumps(rec))
+        return rec
+
+    def step_victim_phase(self, rnd):
+        """SIGKILL an engine on a fresh catalog during its model load, its tagging pass or its after-scan pass (rotating),
+        restart it on the same catalog, rescan twice and verify."""
+        phase = ("load", "tagging", "postscan")[(rnd - 1) % 3]
+        state = os.path.join(self.work, "victim")
+        shutil.rmtree(state, ignore_errors=True)
+        mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "victim-engine.log"), self.trash, self.models, self.a.no_trash, "victim")
+        v = mk()
+        killed_at = None
+        try:
+            v.drain()
+            v.send("startScan", {"rootPath": self.victim_lib, "rescan": True})
+            t = time.time()
+            if phase == "load":
+                # the first progress event comes after the stack has loaded; kill while the load is running
+                end = t + 0.05 + self.rng.random() * 0.65
+                while time.time() < end and v.alive():
+                    time.sleep(0.05)
+                killed_at = "after %.1fs" % (time.time() - t)
+            elif phase == "tagging":
+                try:
+                    v.wait(lambda e: kind(e) == "progress" and (inner(e).get("processed") or 0) >= 1 and inner(e).get("phase") == "tagging", 120)
+                    killed_at = "tagging, processed>=1"
+                except TimeoutError:
+                    killed_at = "no tagging progress seen"
+            else:
+                try:
+                    v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 300)
+                    time.sleep(self.rng.random() * 2)
+                    killed_at = "postScan"
+                except TimeoutError:
+                    killed_at = "no postScan seen"
+            v.kill()
+        finally:
+            v.raw.close()
+        v = mk()
+        try:
+            k, res = v.scan(self.victim_lib)
+            if k != "scanComplete":
+                fail(rnd, f"scan after SIGKILL during {phase} and restart completes", (k, res))
+            self.check_db(rnd, v.db, f"victim ({phase})")
+            self.check_disk(rnd, self.victim_model, self.victim_lib, "victim library")
+            k, res = v.scan(self.victim_lib)
+            with ro(v.db) as c:
+                failed_rows = c.execute("SELECT count(*) FROM files WHERE failed=1").fetchone()[0]
+            if k != "scanComplete" or (res.get("processedFiles") or 0) > failed_rows:
+                fail(rnd, f"second scan after the {phase} kill analyses nothing but retries of failed files", (k, res, failed_rows))
+            rows = self.db_rows(v.db, self.victim_lib)
+            disk = {os.path.join(self.victim_lib, r) for r in self.victim_model}
+            stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
+            if stale or uncovered:
+                fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
+            with ro(v.db) as c:
+                owed = c.execute("SELECT count(*) FROM scan_catchup WHERE (stages & 3) != 0").fetchone()[0]
+                noemb = c.execute("SELECT count(*) FROM files f WHERE kind='image' AND failed=0 AND size_bytes>0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings e WHERE e.file_id=f.id)").fetchone()[0]
+            if owed:
+                fail(rnd, f"nothing is still owed after the {phase} kill and two scans", owed)
+            self.kills.append(dict(round=rnd, phase=phase, killed=killed_at, images_without_embedding=noemb))
+            log("victim kill:", json.dumps(self.kills[-1]))
+        finally:
+            v.close()
+
     def step_victim(self, rnd):
+        if self.a.flavor == "hosted":
+            return self.step_victim_phase(rnd)
+        return self.step_victim_plain(rnd)
+
+    def step_victim_plain(self, rnd):
         """SIGKILL an engine in the middle of a scan, restart it on the same catalog, rescan."""
         v = Engine(self.a.engine, self.a.flavor, os.path.join(self.work, "victim"), os.path.join(self.work, "victim-engine.log"),
                    self.trash, self.models, self.a.no_trash, "victim")
@@ -870,6 +1193,8 @@ class Soak:
         self.setup()
         eng = self.start_main()
         log("engine ready:", json.dumps(eng.ready)[:200])
+        if a.flavor == "hosted":
+            self.step_real_first(eng)
         t_start = time.time()
         rnd = 0
         deadline = t_start + a.minutes * 60
@@ -889,6 +1214,10 @@ class Soak:
                 ("malformed", lambda: self.step_malformed(rnd, eng)),
                 ("victim-kill", lambda: self.step_victim(rnd)),
             ]
+            if a.flavor == "hosted":
+                steps.insert(3, ("catchup-stop", lambda: self.step_catchup_stop(rnd, eng)))
+                if rnd % a.cycle_every == 0 or rnd == 1:
+                    steps.insert(4, ("model-cycle", lambda: self.step_model_cycle(rnd, eng)))
             try:
                 self.round(rnd, eng, steps)
             except Exception as exc:
@@ -940,20 +1269,29 @@ class Soak:
             c = col(key)
             if len(c) > 5 and c[-1] > max(c[2:5]) + max(2, 0.1 * max(c[2:5])) and c[-1] >= c[len(c) // 2] >= c[2]:
                 fail(rounds, f"{key} not growing", f"{c[:6]} ... {c[-3:]}")
+        if self.cycles:
+            log("unload/reload footprint series (MB):")
+            for c in self.cycles:
+                log("  ", json.dumps({k: c.get(k) for k in ("round", "fp_loaded", "fp_unloaded", "fp_reloaded", "idle_s", "reload_scan_s", "adapter_loads")}))
+            fl = [c["fp_unloaded"] for c in self.cycles if c.get("fp_unloaded")]
+            if len(fl) >= 3 and fl[-1] > fl[0] * 1.10 and fl[-1] >= max(fl[:-1]):
+                fail(rounds, "footprint after the unload does not climb from cycle to cycle", fl)
+        log("kills:", json.dumps(self.kills))
+        log("catch-up stops:", json.dumps(self.catchups))
         log("error kinds seen:", json.dumps(ERROR_KINDS))
         for k, v in ERROR_SAMPLES.items():
             log(f"  sample {k}: {v}")
         log(f"failures: {len(FAILURES)}")
         for f in FAILURES:
             log("  ", f)
-        json.dump({"rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "error_samples": ERROR_SAMPLES, "failures": FAILURES, "series": s},
+        json.dump({"cycles": self.cycles, "catchups": self.catchups, "kills": self.kills, "rounds": rounds, "seconds": seconds, "error_kinds": ERROR_KINDS, "error_samples": ERROR_SAMPLES, "failures": FAILURES, "series": s},
                   open(os.path.join(self.work, "soak-summary.json"), "w"), indent=1)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
-    ap.add_argument("--flavor", choices=("rust", "swift"), required=True)
+    ap.add_argument("--flavor", choices=("rust", "swift", "hosted"), required=True)
     ap.add_argument("--library", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--minutes", type=float, default=45)
@@ -961,6 +1299,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--models-dir")
     ap.add_argument("--no-trash", action="store_true")
+    ap.add_argument("--cycle-every", type=int, default=2, help="hosted: every Nth round, wait for the idle unload of the scan models and scan again")
+    ap.add_argument("--real-dir", default="Real", help="hosted: library subfolder of real camera files; scanned alone first and timed")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
     if not (a.no_trash or os.path.isabs(os.path.join(work, "Trash"))):
