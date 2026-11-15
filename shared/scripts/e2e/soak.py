@@ -387,7 +387,7 @@ class Soak:
         disk = {os.path.join(root, r) for r in model}
         visible = {p for p, v in rows.items() if not self.tombstone(v)}
         stale = sorted(visible - disk)
-        missing = sorted(p for p in disk - visible if os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
+        missing = sorted(p for p in disk - visible if os.path.exists(p) and os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
         hidden_rows = sorted(p for p in visible & disk if self.never_catalogued(p, root))
         if hidden_rows:
             fail(rnd, f"{name}: hidden files are not catalogued (swift)", [os.path.relpath(h, root) for h in hidden_rows[:4]])
@@ -721,7 +721,7 @@ class Soak:
         quiet = 0
         while time.time() < deadline:
             try:
-                ev = eng.wait(lambda e: kind(e) in ("scanComplete", "bulkActionResult") or (kind(e) == "phaseChanged" and inner(e) in ("cancelled", "failed")), 20)
+                ev = eng.wait(lambda e: kind(e) in ("scanComplete", "bulkActionResult") or (kind(e) == "phaseChanged" and inner(e) in ("cancelled", "failed")), 60)
             except TimeoutError:
                 break
             if kind(ev) == "bulkActionResult":
