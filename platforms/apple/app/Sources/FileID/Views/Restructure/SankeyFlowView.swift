@@ -67,7 +67,7 @@ struct SankeyFlowView: View {
                     .font(Theme.Font.sectionLabel)
                     .tracking(0.6)
                     .foregroundStyle(Theme.text2)
-                Text("\(layout.sources.count)")
+                Text("\(layout.sourceFolderCount)")
                     .font(Theme.Font.body(11.5, .semibold).monospacedDigit())
                     .foregroundStyle(Theme.text3)
             }
@@ -82,7 +82,7 @@ struct SankeyFlowView: View {
             }
             Spacer(minLength: 0)
             HStack(spacing: 6) {
-                Text("\(layout.destinations.count)")
+                Text("\(layout.destinationFolderCount)")
                     .font(Theme.Font.body(11.5, .semibold).monospacedDigit())
                     .foregroundStyle(Theme.text3)
                 Text("TO")

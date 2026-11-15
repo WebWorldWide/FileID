@@ -336,6 +336,9 @@ pub struct EngineClient {
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
     subscribers: Vec<EventSender>,
+    /// The newest event of each job still running, for pages built late.
+    replay: crate::job_replay::JobReplay,
+    replaying: bool,
     thumbs: Arc<ThumbQueue>,
     preview: Arc<PreviewSlot>,
     query_worker: Arc<QueryWorkerState>,
@@ -363,6 +366,8 @@ impl EngineClient {
             raw_tx,
             raw_rx: Some(raw_rx),
             subscribers: Vec::new(),
+            replay: crate::job_replay::JobReplay::default(),
+            replaying: false,
             thumbs: Arc::new(ThumbQueue::new()),
             preview: Arc::new(PreviewSlot::new()),
             query_worker: spawn_query_worker(),
@@ -379,11 +384,24 @@ impl EngineClient {
     /// from now on, and the newest of each kind of progress event.
     pub fn subscribe(&mut self) -> EventReceiver {
         let (tx, rx) = crate::event_queue::channel();
+        if self.replaying {
+            for event in self.replay.snapshot(self.ready) {
+                tx.push(&event);
+            }
+        }
         self.subscribers.push(tx);
         rx
     }
 
+    /// While on, a new subscriber first receives `Ready` (when the engine is
+    /// up) and the newest event of every running job, as if it had been
+    /// listening since launch. Switched on only around a page's `build`.
+    pub fn replay_to_new_subscribers(&mut self, on: bool) {
+        self.replaying = on;
+    }
+
     fn publish(&mut self, event: &Rc<EngineState>) {
+        self.replay.observe(event);
         prune_closed_subscribers(&mut self.subscribers);
         for subscriber in &self.subscribers {
             subscriber.push(event);
@@ -630,6 +648,12 @@ impl EngineClient {
     }
 
     pub fn send(&mut self, payload: CommandPayload) -> Result<()> {
+        self.send_with_id(payload).map(drop)
+    }
+
+    /// Sends a command and returns the id it went out under, which the engine
+    /// echoes on a bulk result so the sender can recognise its reply.
+    pub fn send_with_id(&mut self, payload: CommandPayload) -> Result<String> {
         let shutdown = matches!(payload, CommandPayload::Shutdown(_));
         self.next_id = self.next_id.wrapping_add(1);
         let command = IpcCommand {
@@ -645,7 +669,7 @@ impl EngineClient {
         if shutdown {
             self.shutting_down.store(true, Ordering::Release);
         }
-        Ok(())
+        Ok(command.id)
     }
 
     /// Queue a read on the query worker. Within one `QueryChannel` the latest
@@ -1618,6 +1642,31 @@ mod tests {
         let order: Vec<_> = std::iter::from_fn(|| slots.take_next()).map(|job| job.spec.search).collect();
         assert_eq!(order, ["grid", "siblings", "picker"]);
         assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn a_page_built_mid_job_is_told_what_is_running_and_others_are_not() {
+        let mut client = EngineClient::new();
+        client.publish_test_event(EngineState::Scanning);
+        client.publish_test_event(EngineState::ModelDownloadProgress(ModelDownloadProgress {
+            model_kind: "clip".into(),
+            fraction: 0.4,
+            message: String::new(),
+            bytes_done: None,
+            total_bytes: None,
+        }));
+        let ordinary = client.subscribe();
+        assert!(ordinary.try_recv().is_none());
+        client.replay_to_new_subscribers(true);
+        let late = client.subscribe();
+        client.replay_to_new_subscribers(false);
+        let after = client.subscribe();
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::Scanning)));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ModelDownloadProgress(p)) if p.model_kind == "clip"));
+        assert!(late.try_recv().is_none());
+        assert!(after.try_recv().is_none());
+        client.publish_test_event(EngineState::ScanComplete(3));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ScanComplete(3))));
     }
 
     #[test]

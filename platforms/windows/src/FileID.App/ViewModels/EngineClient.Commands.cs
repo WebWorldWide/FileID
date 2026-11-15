@@ -104,6 +104,7 @@ internal sealed partial class EngineClient
         }
 
         var generation = SpawnGeneration;
+        var commandIdObserver = _bulkCommandIdObserver.Value;
         Task queued;
         lock (_writeLock)
         {
@@ -134,6 +135,7 @@ internal sealed partial class EngineClient
                     }
 
                     onWriteStarted?.Invoke();
+                    commandIdObserver?.Invoke(command.Id);
                     _stdin.BaseStream.Write(bytes, 0, bytes.Length);
                     _stdin.BaseStream.Flush();
                 }
@@ -519,15 +521,14 @@ internal sealed partial class EngineClient
         }
     }
 
-    // BulkActionResult replies are correlated only by `actionPrefix` against
-    // the single shared LastBulkAction slot — the engine echoes no per-request id
-    // (only trashFiles carries an undo-batch suffix, which the StartsWith match
-    // ignores). Two concurrent same-prefix waits would both subscribe a handler
-    // against that one slot and both resolve off whichever reply lands first, so
-    // the later op silently reports the earlier op's Succeeded/Failed and its own
-    // reply is dropped. Serialize per prefix so at most one same-prefix wait (one
-    // handler, one in-flight command) is live at a time; the per-request-id fix is
-    // a deferred cross-platform IPC-schema change.
+    // A reply that carries commandID (IPC 1.28.0) goes only to the wait that sent
+    // that command (BulkResultMatcher); a reply without one (an older engine) is
+    // matched by `actionPrefix` against the single shared LastBulkAction slot
+    // (trashFiles carries an undo-batch suffix, which the StartsWith match
+    // ignores). The prefix match alone would let two concurrent same-prefix waits
+    // both resolve off whichever reply lands first, so the per-prefix gate stays:
+    // at most one same-prefix wait is live at a time.
+    private static readonly AsyncLocal<Action<string>?> _bulkCommandIdObserver = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _bulkWaitGates = new();
 
     /// <summary>Run a bulk command and await its <c>BulkActionResult</c> reply,
@@ -555,6 +556,7 @@ internal sealed partial class EngineClient
             throw new InvalidOperationException($"A {actionPrefix} operation is already awaiting its engine result.");
 
         var generation = SpawnGeneration;
+        var matcher = new BulkResultMatcher(actionPrefix);
         var terminal = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         PropertyChangedEventHandler? handler = null;
         PropertyChangedEventHandler? lifecycleHandler = null;
@@ -576,8 +578,7 @@ internal sealed partial class EngineClient
         {
             if (e.PropertyName == nameof(LastBulkAction)
                 && LastBulkAction is { } result
-                && result.Action is { } action
-                && action.StartsWith(actionPrefix, StringComparison.Ordinal))
+                && matcher.Accepts(result.Action, result.CommandId))
             {
                 terminal.TrySetResult(result);
             }
@@ -599,7 +600,9 @@ internal sealed partial class EngineClient
             sendRegistration = beforeSend?.Invoke();
             PropertyChanged += handler;
             PropertyChanged += lifecycleHandler;
-            await send().ConfigureAwait(false);
+            _bulkCommandIdObserver.Value = matcher.NoteSent;
+            try { await send().ConfigureAwait(false); }
+            finally { _bulkCommandIdObserver.Value = null; }
             sendCompleted = true;
             return timeout == Timeout.InfiniteTimeSpan
                 ? await terminal.Task.WaitAsync(ct).ConfigureAwait(false)

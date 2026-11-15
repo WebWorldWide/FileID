@@ -27,6 +27,9 @@ bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
 
+A command step with "commandID" sends the command under that id instead of a random one,
+so a later "expect" can require an engine to echo it (bulkActionResult.commandID).
+
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
@@ -256,8 +259,8 @@ class Engine:
             raise RuntimeError(response.get("message", "Catalog request failed"))
         return response
 
-    def send(self, payload):
-        self.process.stdin.write(json.dumps({"id": str(uuid.uuid4()), "payload": payload}) + "\n")
+    def send(self, payload, command_id=None):
+        self.process.stdin.write(json.dumps({"id": command_id or str(uuid.uuid4()), "payload": payload}) + "\n")
         self.process.stdin.flush()
 
     def close(self):
@@ -666,7 +669,7 @@ def run_step(engine, ctx, step, binaries):
         engine.close()
         return start(binaries, step["restart"] if isinstance(step["restart"], str) else ctx.flavor, ctx)
     if "command" in step:
-        engine.send(ctx.expand(step["command"]))
+        engine.send(ctx.expand(step["command"]), ctx.expand(step.get("commandID")))
         actual = await_event(engine, ctx, step, timeout, seen) if "await" in step else None
     elif "catalog" in step:
         deadline = time.monotonic() + step.get("until", 0)

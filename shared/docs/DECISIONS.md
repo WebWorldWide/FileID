@@ -4944,3 +4944,82 @@ A copy of an image normally reaches a worker after the copy that owns the analys
 - **Not chosen:** handing the copy back to the decoder that holds the new owner (keeps every reuse, but adds a second hand-over path between the two pools), or shortening the patience (still a stall, only shorter).
 - **Cost:** in that narrow case one copy per stuck round is analyzed twice. Sharing in the normal case is unchanged.
 - **Evidence:** the pipeline test that failed 1 in 25 runs under 60 busy processes (each failure a full 20 s) passes 500 of 500 with the slowest run at 0.66 s.
+
+## 2026-11-14 — 4B selection check: the count-and-framing question is not adopted
+
+NEXT asked for the Qwen3-VL 4B confirmation question to learn framing (close-up vs wide) and counting, measured on a fresh held-out question set. A variant that makes the model state the number of people and the framing before its yes/no (extra `people` and `framing` fields ahead of `answer`) was run through the Swift engine on the new `selection-v2` set (10 tune and 10 held-out questions, about 28 minutes per run, load 2.6–9.1).
+
+- **Tune:** precision 0.475 → 0.542, recall 0.717 → 0.736.
+- **Held-out:** precision 0.478 → 0.364, recall 0.500 → 0.545. The extra yeses are wrong ones (H01: 10 photos confirmed, 2 of the 3 wanted; H02: 7 confirmed for one wanted photo).
+- **Decision:** keep the current question in both engines. The gain on tune does not carry to held-out, and precision is what a confirmed "yes" is for. The prompt edits stay uncommitted in the `selection-4b` worktree and should be discarded; only the eval script's `--set`, `--split` and ignore-list options are kept.
+- **Next lever, not tried:** framing and counting from evidence the engine already has (face boxes and their size in the frame) instead of asking the model, or the 8B model.
+
+## 2026-11-14 — Production pass: what was left unchanged, and why
+
+The remaining agent-doable follow-ups were read in the code before deciding. None was changed, because each either needs a screen or hardware to be judged, or is larger than its follow-up line suggests. Findings are in NEXT "Production to-do", section 5.
+
+- **GTK pages built on first visit:** not done blind. Pages subscribe to engine events when built; a page first opened mid-job would have to rebuild its state, and that cannot be checked without a Linux desktop. A wrong idle-looking Describe Files page is worse than a slower start.
+- **WinUI shimmer:** the storyboard animates a gradient offset without `EnableDependentAnimation`, so by WinUI's rule it does not run. Turning it on puts one UI-thread animation on every loading tile, which is the cost the Mac removed. Left for a decision on Windows hardware.
+- **Command id on bulk results:** the right fix for GTK's merge matching, but it touches about 30 reply sites per engine, several in digest-reviewed files, and all three conformance suites. Its own change, not a rider.
+- **Location filter JSON:** left as is (see NEXT).
+- **Scan models on the Mac-hosted engine:** the missing eviction call is a two-line change, but the models that matter live in the Swift adapter, which has no unload. Changing only the Rust side would look fixed and free almost nothing, so both halves go together with a measurement.
+- **Merging #331** stays with the owner: the agent session's permission check refuses a merge without review.
+
+## 2026-11-14 — Production pass: calls made while landing the follow-ups
+
+- **Command id (IPC 1.28.0).** Optional and additive, so an old app ignores it and a new app works with an engine that omits it. The Rust engine stamps it on the reply channel handed to each command instead of at the roughly 30 places a bulk result is built, so a new reply site cannot forget it. GTK keeps the sentence match only for a result without an id; an id it does not know belongs to no page.
+- **Scan models on the Mac.** A count of holders, not "unload when the stack is dropped": a new scan can load a stack while an old one is still alive. The after-scan tagging pass and timeline jobs are holders too. The adapter interface version goes to 2 so a mismatched engine and library refuse to start. Timeline jobs do not keep the model through an idle period: a cold reload measured 58–60 ms once the checksum is skipped for an unchanged file (same size and date as its last passed check, the identity the Swift install record uses), under the 200 ms bar set for adding one.
+- **Copies in Best Takes.** One try per content, where "same content" is the stored hash plus size for files up to 16 MB (above that the stored hash is sampled and proves nothing), the identity Duplicates verifies. The lowest file id is kept: stable, no extra reads, and the same tie-break the winner already uses. A reason chip requires a readable rival that scores strictly lower, so equal scores get no chip.
+- **GTK pages on first visit: merged after a second measurement.** The first numbers (debug builds, five runs each, load 30–55) were noise. Release builds launched alternately eight times each (load 52): first frame median 630 → 453 ms, best case 462 → 418 ms, faster in 7 of 8 pairs; footprint 2 s after the first frame 128 → 115 MB, lower in 8 of 8. A modest gain for about 300 lines of job replay, taken because the pages compared pixel-identical before and after and the one known regression is gone: Organize Folders stays built at startup, since a move applied from a Chat card before the page existed left it without its Undo move button. A quiet machine was never available; the paired runs stand in for it.
+- **Mac self-capture is debug-only.** It answers "what does the page look like" without Screen Recording or input events, which agent sessions do not have. It is no substitute for the owner's walk: no sheets, hover, drag and drop or playback.
+- **Count refresh lives in `MainWindow`**, the one view that is always mounted, and opens the reader first: a first scan creates the catalog after launch.
+- **Soak design.** Invariants are checked from outside the engine after every round (file hashes against a manifest, the catalog read-only from Python, the test Trash folder), a round is never made to pass by loosening a check, and memory is compared by quartile medians because footprint swings with system memory pressure. Two checks are weaker for the Swift engine because it stamps `scanned_at` on skipped files and skips hidden files by design.
+- **Digest refreshes.** The session's permission check refused two agents' commits of a refreshed digest (`apple/ffi.rs`, GTK `engine_client.rs`). The coordinator did not make those commits for them; the owner approved both on 2026-11-14, after which they were applied with the diff audited (one declaration; a 43-line replay hook).
+- **Not started, and why.** The next catalog version: each bump makes older apps refuse the library, and the soak's hidden-row finding may need a column in the same bump, so decide retention first. Restructure P2–P4 and the face-clustering rework are features with their own evaluation needs, not follow-ups. The WinUI shimmer and the Windows-only engine items need Windows.
+
+## 2026-11-14 — Hidden rows of files that are gone: kept 30 days, then removed (shared Rust engine)
+
+The soak showed the shared engine never removes the row of a file that is gone: after a complete, clean walk the row is hidden (`failed=1`, "File is no longer present under the completed scan root.") and stays, with its tags and text. After 208 rounds there were 6,128 hidden rows beside about 5,050 live and the catalog had grown from 3.7 to 22 MB. The Swift engine deletes such rows at once. Decided under the owner's standing delegation.
+
+- **Rule:** at the end of a scan that walked a location completely and cleanly, a hidden row under that location that was hidden more than 30 days ago is removed, with what hangs off it (tags, text, embeddings, faces, face crop files), and people are reconciled as the Swift engine does. No catalog change: hiding a row now stamps `scanned_at` with the time it was hidden. (As first written this said "last seen"; `scanned_at` turned out to mean "last analysed", which a rescan does not refresh for an unchanged file, so a file untouched for a month would have been removed by the same scan that hid it.)
+- **On upgrade:** rows hidden by an earlier build carry no hide time, only their last-analysed time, so the first clean scan of their location removes those analysed more than 30 days ago. Accepted: no released app has written such rows with the shared engine.
+- **Why keep them at all:** a file that comes back at the same path, or is found again by rename-heal, re-binds to its hidden row and keeps its tags and people. That is worth a month, not for ever.
+- **Why 30 days:** long enough for a folder moved away and back, a restore from backup or a holiday with the drive unplugged; short enough that a library with steady churn stops growing. The Swift engine's immediate delete is stricter, so this never loses anything the Mac's own engine would have kept.
+- **Never removed:** rows under a location that is offline or whose walk was partial or cancelled (they are not hidden in the first place), files that failed for any other reason, and anything when the clock looks wrong (a last-seen time in the future).
+- **Not chosen:** a cap on the number of hidden rows (drops the newest losses first under churn), removing at once like Swift (loses tags for a folder moved away and back the same week), a user setting (nobody should have to manage this).
+
+## 2026-11-14 — MLX models are owned by one thread
+
+`GPURequestBatcher` runs each model on its own dedicated thread, which also drops the model, instead of a serial dispatch queue. A serial queue guarantees order, not a thread, and MLX's compile cache is per thread: a compiled model dropped on a different thread than the one that compiled it leaves its weights in that thread's cache for the life of the process. `compile` is kept (without it RAM++ ran about 12 % slower in the reproduction). `roll` is avoided inside compiled graphs: it leaked intermediates in 139 of 150 cycles of a synthetic compiled function, and the same function without it in 0 of 450; why is not known, the evidence is behavioural. Rule for new MLX code here: a model is created, used and released on its batcher's thread, and a new graph is checked with the load/run/unload reproduction (`~/FileIDDev/scratch/mlx-residue`) before it ships.
+
+## 2026-11-14 — No per-page location chip
+
+NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since 2026-11-06 the title-bar location switcher scopes Library, Search & Moments and Chat on all three apps (Mac `CatalogWorkbench` and `ChatHandoff.rootID`, GTK `library_scope::current_id()`, WinUI `AppViewModel.Scope` and the `rootId` in `ChatContext`). A second control for the same choice on each page would let the page and the title bar disagree. Closed: one switcher, no chips.
+
+## 2026-11-14 — Catalog v36: failure memory gets a table; no new heal index
+
+- **Failure memory is a table, `scan_failures`, not columns on `scan_catchup`.** A file that keeps failing owes nothing, so it does not belong in the table of owed work; a separate table also lets `scan_catchup.stages` stay a pure bit set (1 tags, 2 careful read, 4 text read at scan). The row is keyed by file and dropped with it.
+- **No `files(file_ref)` index in v36.** It has existed since v8 (`idx_files_file_ref`, partial). The NEXT item asking for it was written without checking; the query plan was measured instead and pinned by a test in each engine.
+- **The careful-read marker needed no schema change.** Stage bit 2 was already in v34; only the hosted engine never set it. The adapter reports it in its JSON reply, so an older engine ignores it and the C interface is unchanged.
+
+## 2026-11-14 — A date change with the same bytes keeps the vector; a row without a vector is not "already analysed"
+
+- **Kept the catalog trigger** that drops a file's vectors when its size or date changes (v23). The soak agent proposed changing it to fire only on a content-hash change. Not done: the trigger is the guard that keeps a vector from outliving its bytes when a scan is interrupted between the row update and the new analysis, both engines share it, and changing it is a catalog version. The Swift engine's answer, carrying the vector across the rescan in the writer, was ported to the Rust engine instead.
+- **Reuse needs a vector when the scan can make one.** "Complete" for copy reuse was "has an automatic tag or a vector", and every scanned photo has a Year tag, so a photo scanned without CLIP counted as analysed and the CLIP backfill after an install could never run for it. Now, when CLIP can run, only rows with a vector are reusable. Rows scanned without CLIP are analysed once more on the first scan after CLIP is installed, which is the backfill the missing-vector gate always intended.
+- **Model gates check that the model can run, not only that its files exist** (text embeddings earlier today, CLIP now). Weights without a runtime made every document or picture be re-read on every scan.
+- **File actions during a scan wait for the scan** (the mutation gate), unchanged. It protects the catalog-equals-disk invariant the soak checks; whether to allow renames between scan batches is an open product question in NEXT.
+
+## 2026-11-14 — Organize Folders leaves chains of throwaway folder names alone
+
+A chain like `stuff/old/new/final/really final` gets no suggestion because `old`, `new` and `final` are not on the generic-name list, so the folders count as the person's own organisation (RESTRUCTURE.md, 2026-10-15 rule 1). A wider rule (generic when every word is a throwaway word) was tried in a scratch build: on the capture library the plan grew from 22 to 46 moves, and all 24 new moves were automatic, date-only moves of scans out of a folder the person had named. Not adopted: a wrong move costs more than a missing suggestion, and "final" or "old" is often a real label. If this is revisited it should be a reviewed suggestion to flatten the chain, never an automatic move.
+
+## 2026-11-14 — No crop-publication recovery at engine startup
+
+NEXT and MAC_FINISH asked for recovery of an interrupted face-crop publication when the shared engine starts, "as the Swift engine does". Reading both engines: neither has a publication journal. The Swift engine writes a crop atomically and replays nothing; the Rust engine writes a temporary file and renames it after the database commit; the journal protocol existed only in the Rust slice dropped on 2026-10-15. Recovery with no journal has nothing to recover, and the case it was for (a crash between the commit and the crop write) is already handled by the scan's crash repair, which reprocesses face-bearing files whose crop is missing after an unclean shutdown (made once-per-finished-scan today). Not built; the item is closed.
+
+## 2026-11-14 — Face clustering pass 1 left as it is; the Mac app ignores macOS's saved window state
+
+- **Pass 1 unchanged in both engines.** Measured on the labelled People set and a synthetic stress set: a density gate removes lone-face edges but cannot cut a face that links two clusters; mutual top-k cuts such bridges only with a recall loss (0.05 at top-10, 0.40 at top-3). The small gains seen (about two fewer mixed clusters, +0.01 held-out precision) are inside the noise of a 343- and 390-face split, and thresholds are not tuned to a set this small. The Swift engine's k = 10 single linkage was also left: k = 32 measured slightly better on all four numbers but inside the same noise, and changing it regroups people in existing Mac libraries.
+- **`ApplePersistenceIgnoreState` is registered at launch.** After a forced quit, a launch could stop in AppKit's window restoration and show no window. The app stores its own tab, folder and window frame, so macOS's restoration adds nothing and can only get in the way. My reading, not proven: the system keeps a "this app quit while restoring windows" marker outside the app's home folder and waits on a prompt that a launch from a script never shows. The marker was not found, so the fix is the documented switch rather than a cure of the cause.
+- **A focus ring belongs to the focused control.** `\.isFocused` is true for everything inside a focused container. Design-system buttons now read their own focus state.
+

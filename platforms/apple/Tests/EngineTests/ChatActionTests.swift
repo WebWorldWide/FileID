@@ -57,6 +57,30 @@ import FileIDShared
         #expect(ChatIntent.noun(["image", "video"], 2) == "photos and videos")
     }
 
+    @Test func mergeCountsOnlyFilesWithActiveFaces() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-chat-merge-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("test.sqlite"))
+        try await db.pool.write { d in
+            for id in 1...3 { try d.execute(sql: "INSERT INTO persons(id,name,first_name,created_at) VALUES(?,?,?,0)", arguments: [id, "P\(id)", "P\(id)"]) }
+            for id in 10...12 { try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,kind,extension,scanned_at) VALUES(?,?,?,1,1,'image','jpg',1)", arguments: [id, "/\(id).jpg", id]) }
+            for (id, file, person, excluded) in [(1, 10, 2, 0), (2, 11, 2, 1), (3, 12, 3, 1), (4, 10, 1, 0)] as [(Int, Int, Int, Int)] {
+                try d.execute(sql: "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,excluded) VALUES(?,?,?,X'00','[0.1,0.1,0.3,0.3]',?)", arguments: [id, file, person, excluded])
+            }
+        }
+        let resolution = try await db.pool.read { d -> ChatActions.Resolution in
+            let context = ChatActions.Context(requestID: "r", text: "merge these people", chat: ChatContext(personIDs: [1, 2, 3]),
+                                              people: try ChatActions.people(d), knownPeople: [], knownEvents: [], source: "parser")
+            return try ChatActions.resolve(d, try #require(ChatIntent.parse("merge these people")), context)
+        }
+        let proposed = try #require(resolution.actions.first)
+        #expect(proposed.kind == "mergePeople")
+        #expect(proposed.fileCount == 1)
+        #expect(proposed.detail.contains("(1 file)"))
+        #expect(resolution.hits.map(\.fileID) == [10])
+    }
+
     @Test func mutatingKindsAlwaysRequireConfirmation() {
         let mutating: Set = ["moveDuplicatesToTrash", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson", "mergePeople"]
         for kind in ChatAction.kinds { #expect(ChatActions.requiresConfirmation(kind) == mutating.contains(kind), "\(kind)") }

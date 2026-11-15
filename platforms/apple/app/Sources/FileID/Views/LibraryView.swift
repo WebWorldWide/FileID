@@ -56,6 +56,9 @@ struct LibraryView: View {
     @State private var similarSeed: FileRow? = nil
     @State private var visualSearchPending = false
     @State private var visualSummary: String?
+    @State private var hiddenWeaker = 0
+    @State private var showWeaker = false
+    @State private var shownQuery = ""
     @State private var searchProblem: SearchProblem?
     @State private var clipModelOnDisk = false
     /// Bumped whenever `rows` or `tagsByFile` is replaced, so the grid can tell
@@ -182,6 +185,11 @@ struct LibraryView: View {
                 engine.refreshLibraryRoots()
             }
             .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
+            #if DEBUG
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
+                if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
+            }
+            #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
             .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
@@ -618,8 +626,10 @@ struct LibraryView: View {
             HStack(alignment: .center, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
-                    TextField("Filter by name, tag, description or person", text: $searchText)
+                    TextField("Filter files", text: $searchText)
                         .textFieldStyle(.plain)
+                        .help("Filter by name, tag, description or person")
+                        .accessibilityLabel("Filter by name, tag, description or person")
                         .font(Theme.Font.body(13.5))
                         .focused($searchFocused)
                     if !searchText.isEmpty {
@@ -640,11 +650,19 @@ struct LibraryView: View {
 
                 ViewThatFits(in: .horizontal) {
                     if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
-                    MetaText("\(rows.count.formatted()) of \(shownTotal.formatted()) shown", size: 11).fixedSize()
-                    MetaText("\(rows.count.formatted())/\(shownTotal.formatted())", size: 11).fixedSize()
+                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
+                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
                     Color.clear.frame(width: 0, height: 0)
                 }
                 .fixedSize(horizontal: false, vertical: true)
+
+                if hiddenWeaker > 0, !rows.isEmpty {
+                    Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
+                        .buttonStyle(.plain)
+                        .font(Theme.Font.body(11.5, .semibold))
+                        .foregroundStyle(Theme.gold)
+                        .fixedSize()
+                }
 
                 Spacer(minLength: 8)
 
@@ -782,6 +800,13 @@ struct LibraryView: View {
         }
     }
 
+    /// The listing can load a moment before the store's file count catches up after a scan;
+    /// the total never reads lower than the rows already drawn.
+    static func shownSummary(rows: Int, total: Int, short: Bool = false) -> String {
+        let total = max(total, rows)
+        return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
+    }
+
     /// Files the current listing draws from: unreadable files appear only under their own filter.
     private var shownTotal: Int {
         kindFilter == ReadStore.unreadableFilter ? store.scopedUnreadableFiles : max(0, store.scopedTotalFiles - store.scopedUnreadableFiles)
@@ -904,11 +929,26 @@ struct LibraryView: View {
                                primaryAction: (label: "Choose a folder", run: pickFolder))
             }
         } else {
-            EmptyStateView(
-                icon: "magnifyingglass",
-                title: "No matches",
-                message: "Nothing matches this filter. Try other words, or choose All to see every file."
-            )
+            if hiddenWeaker > 0 {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches for \u{201C}\(shownQuery)\u{201D}",
+                    message: "Nothing has that in its name, tags or text, and no picture matches it well. \(hiddenWeaker) weaker look-alikes were set aside.",
+                    primaryAction: (label: "Show \(hiddenWeaker) weaker matches", run: { showWeaker = true; reload() })
+                )
+            } else if !shownQuery.isEmpty, visualSummary == "No matches" {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches for \u{201C}\(shownQuery)\u{201D}",
+                    message: "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
+                )
+            } else {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches",
+                    message: "Nothing matches this filter. Try other words, or choose All to see every file."
+                )
+            }
         }
     }
 
@@ -943,6 +983,7 @@ struct LibraryView: View {
         // overwrite a newer one's results.
         let seed = similarSeed
         let query = searchText
+        if query.trimmingCharacters(in: .whitespacesAndNewlines) != shownQuery { showWeaker = false }
         let kind = kindFilter
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
@@ -957,6 +998,7 @@ struct LibraryView: View {
             var newRows: [FileRow]
             var pageable = false
             var summary: String?
+            var hidden = 0
             var problem: SearchProblem?
             if let seed {
                 visualSearchPending = true
@@ -981,9 +1023,22 @@ struct LibraryView: View {
                         let response = await catalogSearch(query: trimmed, vector: vector)
                         guard !Task.isCancelled else { return }
                         if let response, response.status == "ok" {
-                            newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            #if DEBUG
+                            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: search reply status=\(response.status) hits=\(response.hits.count) message=\(response.message ?? "nil")\n".utf8)) }
+                            #endif
+                            let keywordRows = newRows
+                            let decision = LibrarySearchOutcome.decide(message: response.message, keywordCount: keywordRows.count, showWeaker: showWeaker)
+                            let engineRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            switch decision.source {
+                            case .engine:
+                                let known = Set(engineRows.map(\.id))
+                                newRows = engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : [])
+                            case .keyword:
+                                newRows = keywordRows
+                            }
                             pageable = false
-                            summary = "Matches by name, text and what's in the picture"
+                            summary = decision.label
+                            hidden = decision.hiddenWeaker
                         } else {
                             problem = Self.searchProblem(response, similar: false)
                         }
@@ -1004,6 +1059,8 @@ struct LibraryView: View {
             rowsEpoch &+= 1
             canLoadMore = pageable
             visualSummary = summary
+            hiddenWeaker = hidden
+            shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
             listedQuery = seed == nil ? (query, kind) : nil
         }
@@ -1065,6 +1122,7 @@ private struct FilePreviewSheet: View {
     var onNearEnd: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
+    @State private var previewFailed = false
     @State private var tags: [String] = []
     @State private var people: [String] = []
     @State private var renaming = false
@@ -1205,6 +1263,7 @@ private struct FilePreviewSheet: View {
             // and after Deep Analyze updates the current row. Clear first so the
             // spinner shows and the prior preview never bleeds into the new state.
             preview = nil
+            previewFailed = false
             tags = []
             people = []
             // Read DB tags off the main actor (detached read doesn't inherit
@@ -1218,15 +1277,15 @@ private struct FilePreviewSheet: View {
             let loadedPeople = await Task.detached { [store] in store.personNames(forFileID: fileID) }.value
             guard !Task.isCancelled else { return }
             people = loadedPeople
-            let image = file.kind == "image"
-                ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400)
-                : await ThumbnailService.shared.thumbnail(for: file.url, size: 1600)
+            var image = file.kind == "image" ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
+            if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
             // drop it once `.task(id:)` superseded us, else it overwrites the current
             // file's image. Mirrors the FinderTagsEditor read guard.
             guard !Task.isCancelled else { return }
             preview = image
+            previewFailed = image == nil
         }
     }
 
@@ -1293,6 +1352,8 @@ private struct FilePreviewSheet: View {
                             .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
                             .padding(28)
                             .transition(.opacity)
+                    } else if previewFailed {
+                        Image(systemName: "photo").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                     } else {
                         ProgressView().controlSize(.small)
                     }

@@ -63,6 +63,7 @@ enum Container {
     IsoMp4,
     Matroska,
     Caf,
+    Riff,
     Other,
 }
 
@@ -71,7 +72,8 @@ fn marker(window: &[u8]) -> Option<Container> {
         [_, _, _, _, ..] if &window[..4] == b"ftyp" => Some(Container::IsoMp4),
         [0x1A, 0x45, 0xDF, 0xA3, ..] => Some(Container::Matroska),
         [b'c', b'a', b'f', b'f', ..] => Some(Container::Caf),
-        [b'f', b'L', b'a', b'C', ..] | [b'R', b'I', b'F', b'F', ..] | [b'F', b'O', b'R', b'M', ..] | [b'O', b'g', b'g', b'S', ..] => {
+        [b'R', b'I', b'F', b'F', ..] => Some(Container::Riff),
+        [b'f', b'L', b'a', b'C', ..] | [b'F', b'O', b'R', b'M', ..] | [b'O', b'g', b'g', b'S', ..] => {
             Some(Container::Other)
         }
         [0xFF, 0xE2..=0xE7 | 0xF1..=0xF7 | 0xFA..=0xFF, ..] => Some(Container::Other),
@@ -125,6 +127,7 @@ pub(crate) fn symphonia_safe(mut src: Source) -> bool {
         Container::IsoMp4 => at >= 4 && bmff(&mut src, at - 4, end, Parent::Root, 0, &mut budget),
         Container::Matroska => ebml(&mut src, at, end, 0, &mut budget),
         Container::Caf => caf(&mut src, at, end),
+        Container::Riff => riff(&mut src, at, end),
         Container::Other => true,
     }
 }
@@ -154,7 +157,10 @@ fn bmff(src: &mut Source, start: u64, end: u64, parent: Parent, depth: u32, budg
         let Some(header) = src.exact::<8>(at) else { return false };
         let kind: [u8; 4] = [header[4], header[5], header[6], header[7]];
         let (size, header_len) = match be_u32(&header) {
-            0 => (end - at, 8),
+            // A size of 0 means "to the end of the file", which only the last top-level box may say;
+            // symphonia reads it inside a container as running past that container's end.
+            0 if parent == Parent::Root => (end - at, 8),
+            0 => return false,
             1 => match src.exact::<8>(at + 8) {
                 Some(large) => (u64::from_be_bytes(large), 16),
                 None => return false,
@@ -203,6 +209,27 @@ fn table(src: &mut Source, payload: u64, len: u64, fixed: u64, entry: u64) -> bo
         Some(fields) if len >= fixed => be_u32(&fields[4..8]) * entry <= len - fixed,
         _ => false,
     }
+}
+
+/// WAVE: symphonia's reader builds a `TimeBase` from the `fmt ` chunk's sample
+/// rate and panics when it is zero, so a file that declares none is refused.
+fn riff(src: &mut Source, start: u64, end: u64) -> bool {
+    if src.exact::<4>(start + 8) != Some(*b"WAVE") {
+        return true;
+    }
+    let mut at = start + 12;
+    for _ in 0..64 {
+        let Some(header) = src.exact::<8>(at) else { return true };
+        if &header[..4] == b"fmt " {
+            return src.exact::<8>(at + 8).is_none_or(|fields| u32::from_le_bytes([fields[4], fields[5], fields[6], fields[7]]) != 0);
+        }
+        let size = u64::from(u32::from_le_bytes([header[4], header[5], header[6], header[7]]));
+        at = match at.checked_add(8 + size + (size & 1)) {
+            Some(next) if next < end => next,
+            _ => return true,
+        };
+    }
+    true
 }
 
 /// CAF: `caff` + version + flags, then chunks of type, i64 size and body.
@@ -334,6 +361,44 @@ mod tests {
         huge_data[8..12].copy_from_slice(&1u32.to_be_bytes());
         huge_data.splice(16..16, (1u64 << 40).to_be_bytes());
         assert!(!symphonia_safe(Source::Bytes(&m4a(&huge_data, 1))));
+    }
+
+    fn wav(rate: u32) -> Vec<u8> {
+        let mut fmt = [1u16.to_le_bytes(), 1u16.to_le_bytes()].concat();
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&(rate * 2).to_le_bytes());
+        fmt.extend_from_slice(&[2, 0, 16, 0]);
+        let mut body = b"WAVEfmt ".to_vec();
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&fmt);
+        body.extend_from_slice(b"data\x04\0\0\0\0\0\0\0");
+        [b"RIFF".to_vec(), (body.len() as u32).to_le_bytes().to_vec(), body].concat()
+    }
+
+    #[test]
+    fn a_nested_box_of_size_zero_is_refused_but_a_last_top_level_one_is_not() {
+        // The 204-byte input the decoder fuzzer (seed 5) found: an hdlr box of size 0 inside mdia.
+        let fuzz_case = hex_bytes(
+            "00000010667479704d34412000000000000000bc6d6f6f76000000557472616b0000004d6d6469610000000068646c72000000000000000000000000\
+             00000000000000000000000000000000246d697e660000001c7374626c000000147374636f0000000000000001000000010000005f75647461000000\
+             576d657461000000000000002168646c72000000000000000000000000000000000000000000000000000000002a696c737400000022a96e616d0000\
+             001a64617461000000010000000046757a7a205469746c65",
+        );
+        assert!(!symphonia_safe(Source::Bytes(&fuzz_case)));
+        let mut last_mdat = m4a(&title(b"\0\0\0\x01\0\0\0\0Song"), 1);
+        last_mdat.extend_from_slice(&[0, 0, 0, 0, b'm', b'd', b'a', b't', 1, 2, 3, 4]);
+        assert!(symphonia_safe(Source::Bytes(&last_mdat)));
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_wav_that_declares_no_sample_rate_is_refused() {
+        assert!(symphonia_safe(Source::Bytes(&wav(8000))));
+        assert!(!symphonia_safe(Source::Bytes(&wav(0))));
+        assert!(symphonia_safe(Source::Bytes(b"RIFF\x04\0\0\0WAVE")), "no fmt chunk at all is left to the probe");
     }
 
     #[test]

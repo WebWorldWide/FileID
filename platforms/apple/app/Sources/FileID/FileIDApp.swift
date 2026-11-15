@@ -13,6 +13,9 @@ struct FileIDApp: App {
 
     init() {
         ORTPrivacy.disableTelemetryBeforeLoad()
+        // After a forced quit AppKit can stop in window restoration and show no
+        // window. The app keeps its own tab, folder and window frame.
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
         BrandFonts.register()
     }
     @State private var engineStarted = false
@@ -50,6 +53,9 @@ struct FileIDApp: App {
                     }
                     ModelInstaller.ramPlus.refreshStatus()
                     ModelInstaller.face.refreshStatus()
+                    #if DEBUG
+                    if SelfShot.isActive { return }
+                    #endif
                     if !welcomeSheetSeen { showWelcome = true }
                 }
                 .sheet(isPresented: $showWelcome) {

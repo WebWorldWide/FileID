@@ -625,6 +625,7 @@ mod tests {
 
     fn bulk(ok: &[i64], failed: u32) -> BulkActionResult {
         BulkActionResult {
+            command_id: None,
             action: "trashFiles:batch-1".into(),
             succeeded: ok.len() as u32,
             failed,

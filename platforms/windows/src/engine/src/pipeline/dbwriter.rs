@@ -390,6 +390,8 @@ impl DbWriter {
                     "SELECT EXISTS (SELECT 1 FROM tags WHERE file_id = ?1 AND source = 'auto')                      OR EXISTS (SELECT 1 FROM clip_embeddings WHERE file_id = ?1)",
                 )
                 .context("preparing twin children check")?;
+            let mut own_clip = tx.prepare_cached(OWN_CLIP_SQL).context("preparing own clip read")?;
+            let mut own_clip_restore = tx.prepare_cached(OWN_CLIP_RESTORE_SQL).context("preparing own clip restore")?;
             let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
             let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
             let mut twin_clip = tx.prepare_cached(TWIN_CLIP_SQL).context("preparing twin clip copy")?;
@@ -526,6 +528,17 @@ impl DbWriter {
                     }
                     continue;
                 }
+
+                // A file whose date changed with the same bytes: the catalog drops a
+                // row's vector when its size or date changes, so it is read before the
+                // upsert and put back below when no other row has these bytes.
+                let kept_clip: Option<(Vec<u8>, Option<String>)> = match f.content_hash.as_ref() {
+                    Some(hash) if f.reuse_twin => own_clip
+                        .query_row(params![path_text, hash.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()
+                        .with_context(|| format!("own clip read for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                    _ => None,
+                };
 
                 let file_id: i64 = file_stmt
                     .query_row(
@@ -813,6 +826,11 @@ impl DbWriter {
                         }
                         reused_twins += 1;
                     } else {
+                        if let Some((embedding, model)) = &kept_clip {
+                            own_clip_restore
+                                .execute(params![file_id, embedding, model])
+                                .with_context(|| format!("own clip restore for {}", redacted()))?;
+                        }
                         let has_results: bool = twin_children
                             .query_row(params![file_id], |r| r.get(0))
                             .with_context(|| format!("twin children check for {}", redacted()))?;
@@ -838,6 +856,9 @@ impl DbWriter {
                                 f.scanned_unix,
                             ])
                             .with_context(|| format!("failure memory for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                        owed_clear
+                            .execute(params![file_id])
+                            .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     }
                 } else if let Some(owed) = f
                     .catch_up
@@ -862,7 +883,8 @@ impl DbWriter {
                     owed_clear
                         .execute(params![file_id])
                         .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                } else {
+                }
+                if !f.failed {
                     failure_clear
                         .execute(params![file_id])
                         .with_context(|| format!("failure memory clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -870,6 +892,11 @@ impl DbWriter {
 
                 if f.failed {
                     *failed += 1;
+                } else if matches!(
+                    f.kind,
+                    crate::pipeline::discovery::FileKind::Image | crate::pipeline::discovery::FileKind::Video
+                ) {
+                    self.coordinator.note_media_analyzed(1);
                 }
                 *total += 1;
                 if matches!(
@@ -1131,9 +1158,19 @@ const fn const_format_twin_lookup() -> &'static str {
         "kind = 'image' AND failed = 0 AND content_hash IS NOT NULL AND length(content_hash) = 32 ",
         "AND (EXISTS (SELECT 1 FROM tags t WHERE t.file_id = files.id AND t.source = 'auto') ",
         "OR EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id)) ",
-        "ORDER BY id LIMIT 1"
+        "ORDER BY EXISTS (SELECT 1 FROM clip_embeddings c WHERE c.file_id = files.id) DESC, id LIMIT 1"
     )
 }
+
+const OWN_CLIP_SQL: &str = r#"
+    SELECT c.embedding, c.model FROM clip_embeddings c JOIN files f ON f.id = c.file_id
+    WHERE f.path_text = ?1 AND f.content_hash = ?2
+"#;
+
+const OWN_CLIP_RESTORE_SQL: &str = r#"
+    INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?1, ?2, ?3)
+    ON CONFLICT(file_id) DO NOTHING
+"#;
 
 const TWIN_FILES_SQL: &str = r#"
     UPDATE files SET phash = t.phash, aesthetic = t.aesthetic, has_faces = t.has_faces, has_text = t.has_text,
@@ -1769,6 +1806,25 @@ mod tests {
     }
 
     // ---- rename-heal data-loss regression -----------------------------------
+
+    #[test]
+    fn only_new_or_changed_images_and_videos_count_as_analysed_media() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let coordinator = ScanCoordinator::new();
+        let writer = DbWriter::new(conn, coordinator.clone());
+        let mut document = fixture("/lib/notes.pdf");
+        document.kind = FileKind::Pdf;
+        let mut broken = fixture("/lib/broken.jpg");
+        broken.failed = true;
+        let mut buffer = vec![document, broken];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        assert_eq!(coordinator.media_analyzed(), 0);
+        let mut video = fixture("/lib/clip.mov");
+        video.kind = FileKind::Video;
+        let mut buffer = vec![fixture("/lib/a.jpg"), video];
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(coordinator.media_analyzed(), 2);
+    }
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -2963,7 +3019,7 @@ mod twin_reuse_tests {
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let hash = [5u8; 32];
         writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
-        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock()).unwrap();
+        let known = crate::pipeline::twin_reuse::known_image_hashes(&conn.lock(), true).unwrap();
         assert_eq!(known, vec![hash]);
 
         writer.flush(&mut vec![reused("/lib/b.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 1).unwrap();
@@ -2991,6 +3047,58 @@ mod twin_reuse_tests {
             .query_row("SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((failed, tags), (0, 3));
+        let vectors: i64 = db
+            .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/own.jpg'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(vectors, 1, "a date change with the same bytes must not cost the file its vector");
+    }
+
+    fn tags_only(path: &str, hash: [u8; 32]) -> TaggedFile {
+        let mut file = image(path, hash);
+        file.tags = vec![("Year_2020".to_owned(), None)];
+        file.tags_evaluated = true;
+        file
+    }
+
+    #[test]
+    fn a_row_without_a_vector_is_not_reusable_when_the_scan_can_embed() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer
+            .flush(&mut vec![tags_only("/lib/tags-only.jpg", [9u8; 32]), analyzed("/lib/full.jpg", [10u8; 32])], &mut 0, &mut 0, &mut 0, 0)
+            .unwrap();
+        let db = conn.lock();
+        assert_eq!(crate::pipeline::twin_reuse::known_image_hashes(&db, true).unwrap(), vec![[10u8; 32]]);
+        let mut any = crate::pipeline::twin_reuse::known_image_hashes(&db, false).unwrap();
+        any.sort();
+        assert_eq!(any, vec![[9u8; 32], [10u8; 32]]);
+    }
+
+    #[test]
+    fn a_copy_prefers_the_twin_that_has_a_vector() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        writer.flush(&mut vec![tags_only("/lib/older.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        writer.flush(&mut vec![analyzed("/lib/newer.jpg", hash)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        writer.flush(&mut vec![reused("/lib/copy.jpg", hash, "Year_2020")], &mut 0, &mut 0, &mut 0, 2).unwrap();
+        let vectors: i64 = conn
+            .lock()
+            .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/copy.jpg'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(vectors, 1);
+    }
+
+    #[test]
+    fn a_path_whose_bytes_changed_does_not_keep_the_old_vector() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer.flush(&mut vec![analyzed("/lib/own.jpg", [7u8; 32])], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let mut replaced = reused("/lib/own.jpg", [8u8; 32], "Year_2020");
+        replaced.modified_unix += 10.0;
+        writer.flush(&mut vec![replaced], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let vectors: i64 = conn.lock().query_row("SELECT count(*) FROM clip_embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(vectors, 0, "the vector of the old bytes must not be attached to new bytes");
     }
 }
 
@@ -3124,7 +3232,7 @@ mod failure_memory_tests {
     fn memory(conn: &Arc<Mutex<Connection>>, path: &str) -> Option<(i64, i64, String)> {
         conn.lock()
             .query_row(
-                "SELECT c.stages, c.attempts, c.vision FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
+                "SELECT 4, c.attempts, c.engine_build FROM scan_failures c JOIN files f ON f.id = c.file_id WHERE f.path_text = ?1",
                 [path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -3175,7 +3283,7 @@ mod failure_memory_tests {
         assert!(given_up(&conn).is_empty());
 
         // Failures recorded by another engine build do not count for this one.
-        conn.lock().execute("UPDATE scan_catchup SET attempts = 3, vision = '{\"failedBy\":\"fileid-engine 0.0.1 portable\"}'", []).unwrap();
+        conn.lock().execute("UPDATE scan_failures SET attempts = 3, engine_build = 'fileid-engine 0.0.1 portable'", []).unwrap();
         assert!(given_up(&conn).is_empty());
         let mut again = file("/lib/a.jpg", true);
         again.modified_unix += 60.0;
@@ -3183,7 +3291,7 @@ mod failure_memory_tests {
         assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
 
         // The stored row changed without a scan (size differs): not given up.
-        conn.lock().execute("UPDATE scan_catchup SET attempts = 3", []).unwrap();
+        conn.lock().execute("UPDATE scan_failures SET attempts = 3", []).unwrap();
         assert_eq!(given_up(&conn).len(), 1);
         conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
         assert!(given_up(&conn).is_empty());

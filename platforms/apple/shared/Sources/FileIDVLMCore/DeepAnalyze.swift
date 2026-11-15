@@ -277,6 +277,9 @@ public actor DeepAnalyze {
 
     var activePrewarmCount: Int { prewarmTasks.count }
 
+    /// True while a model download or prewarm is running.
+    public var hasActivePrewarm: Bool { !prewarmTasks.isEmpty }
+
     /// Idefics3 and SmolVLM tile images at a fixed size and crash on any other.
     nonisolated static func acceptsResize(_ context: ModelContext) -> Bool {
         acceptsResize(architecture: MLXModelCatalog.entry(forRepo: context.configuration.name)?.architecture)
@@ -401,6 +404,7 @@ public actor DeepAnalyze {
         let lease = try await residencyGate.acquire()
         defer { Task { await self.releaseResidency(lease) } }
         try Task.checkCancellation()
+        ScanModelResidency.shared.releaseForOtherModel()
         let totalMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
         let requestedMB = UInt64((kind.ramBudgetGB * 1024).rounded(.up))
         if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: totalMB, requestedMB: requestedMB) {

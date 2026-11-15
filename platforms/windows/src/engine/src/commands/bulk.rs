@@ -230,6 +230,7 @@ pub(crate) async fn handle_apply_tags(
         const MAX_FILES: usize = 100_000;
         if payload.tags.len() > MAX_TAGS || payload.file_ids.len() > MAX_FILES {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "applyTags".into(),
                 succeeded: 0,
                 failed: payload.file_ids.len().min(u32::MAX as usize) as u32,
@@ -341,6 +342,7 @@ pub(crate) async fn handle_apply_tags(
             tx.commit()?;
         }
         Ok(BulkActionResult {
+            command_id: None,
             action: "applyTags".into(),
             succeeded,
             failed,
@@ -760,6 +762,7 @@ fn rename_files_blocking(
     let messages: Vec<BulkActionItem> = results.into_iter().flatten().collect();
     let succeeded = messages.iter().filter(|item| item.ok).count() as u32;
     BulkActionResult {
+        command_id: None,
         action: "renameFiles".into(),
         succeeded,
         failed: messages.len() as u32 - succeeded,
@@ -1194,6 +1197,7 @@ fn trash_commit_failure_result(
         operation_id: None,
     });
     BulkActionResult {
+        command_id: None,
         action: format!("trashFiles:{batch_id}"),
         succeeded: 0,
         failed: failed.saturating_add(succeeded),
@@ -1454,6 +1458,7 @@ pub(crate) async fn handle_trash_files(
         // Tag the BulkActionResult.action with the batch id so the app can
         // store it on the UndoStack entry without an extra IPC.
         Ok(BulkActionResult {
+            command_id: None,
             action: format!("trashFiles:{}", batch_id),
             succeeded,
             failed,
@@ -1695,6 +1700,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
         )?;
         if !source_exists || !destination_exists {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "mergeClusters".into(),
                 succeeded: 0,
                 failed: 1,
@@ -1711,6 +1717,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
         // its row would orphan every face (person_id points at a deleted row).
         if src == dst {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "mergeClusters".into(),
                 succeeded: 1,
                 failed: 0,
@@ -1761,7 +1768,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
         // the People card + suggestion anchor reflect the combined membership.
         anyhow::ensure!(
             tx.execute(
-                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
                 rusqlite::params![dst],
             )? == 1,
             "destination person disappeared during merge"
@@ -1787,6 +1794,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
         };
         tx.commit()?;
         Ok(BulkActionResult {
+            command_id: None,
             action: "mergeClusters".into(),
             succeeded: 1,
             failed: 0,
@@ -1815,6 +1823,7 @@ pub(crate) async fn emit_bulk_result(
             tracing::warn!(?err, action, "bulk action failed");
             sink.send(IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
                 BulkActionResult {
+                    command_id: None,
                     action: action.into(),
                     succeeded: 0,
                     failed: 1,
@@ -1833,6 +1842,7 @@ pub(crate) async fn emit_bulk_result(
             tracing::warn!(?err, action, "bulk action spawn_blocking failed");
             sink.send(IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
                 BulkActionResult {
+                    command_id: None,
                     action: action.into(),
                     succeeded: 0,
                     failed: 1,
@@ -1884,6 +1894,7 @@ fn save_person_name(
     let (display, changed) = update_person_name(&tx, payload)?;
     if changed == 0 {
         return Ok(BulkActionResult {
+            command_id: None,
             action: "renamePerson".into(),
             succeeded: 0,
             failed: 1,
@@ -1898,6 +1909,7 @@ fn save_person_name(
     }
     tx.commit()?;
     Ok(BulkActionResult {
+        command_id: None,
         action: "renamePerson".into(),
         succeeded: 1,
         failed: 0,
@@ -1990,6 +2002,7 @@ pub(crate) async fn handle_reassign_face(
             .optional()?;
         let Some(previous_person_id) = previous_row else {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "reassignFace".into(),
                 succeeded: 0,
                 failed: 1,
@@ -2004,6 +2017,7 @@ pub(crate) async fn handle_reassign_face(
         };
         if payload.create_new_person && payload.destination_person_id.is_some() {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "reassignFace".into(),
                 succeeded: 0,
                 failed: 1,
@@ -2038,6 +2052,7 @@ pub(crate) async fn handle_reassign_face(
             )?;
             if !target_exists {
                 return Ok(BulkActionResult {
+                    command_id: None,
                     action: "reassignFace".into(),
                     succeeded: 0,
                     failed: 1,
@@ -2057,6 +2072,7 @@ pub(crate) async fn handle_reassign_face(
 
         if destination == previous_person_id {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "reassignFace".into(),
                 succeeded: 1,
                 failed: 0,
@@ -2086,7 +2102,7 @@ pub(crate) async fn handle_reassign_face(
             tx.execute(
                 "UPDATE persons
                  SET file_count = (SELECT COUNT(DISTINCT file_id)
-                                   FROM face_prints WHERE person_id = ?1),
+                                   FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                      representative_face_id = COALESCE(
                          (SELECT fp.id FROM face_prints fp
                           WHERE fp.person_id = ?1
@@ -2127,6 +2143,7 @@ pub(crate) async fn handle_reassign_face(
         }
         tx.commit()?;
         Ok(BulkActionResult {
+            command_id: None,
             action: "reassignFace".into(),
             succeeded: 1,
             failed: 0,
@@ -2208,6 +2225,7 @@ fn mark_persons_unknown(
     }
     tx.commit()?;
     Ok(BulkActionResult {
+        command_id: None,
         action: "markPersonsAsUnknown".into(),
         succeeded,
         failed,
@@ -2257,6 +2275,7 @@ pub(crate) async fn handle_mark_persons_different(
             || !anchored(payload.destination_anchor_face_id, payload.destination_person_id)
         {
             return Ok(BulkActionResult {
+                command_id: None,
                 action: "markPersonsDifferent".into(),
                 succeeded: 0,
                 failed: 1,
@@ -2291,6 +2310,7 @@ pub(crate) async fn handle_mark_persons_different(
             rusqlite::params![pa, pb, now, fa, fb, file_a, bbox_a, file_b, bbox_b],
         )?;
         Ok(BulkActionResult {
+            command_id: None,
             action: "markPersonsDifferent".into(),
             succeeded: 1,
             failed: 0,
@@ -3581,6 +3601,24 @@ mod tests {
     }
 
     #[test]
+    fn trashing_one_copy_leaves_the_kept_byte_identical_copy_on_disk() {
+        let dir = unique_temp_dir("trash-copy-kept");
+        let kept = dir.join("kept.jpg");
+        let copy = dir.join("copy.jpg");
+        std::fs::write(&kept, b"same bytes").unwrap();
+        std::fs::write(&copy, b"same bytes").unwrap();
+        let victim = trash_candidate(&copy, 2);
+        let outcome = checked_trash_one_with(&victim, |staged, _, _| {
+            std::fs::remove_file(staged)?;
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Trashed));
+        assert!(!copy.exists());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"same bytes");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn trash_commit_failure_preserves_recovery_batch_and_reports_failure() {
         let result = trash_commit_failure_result(
             "batch-123".into(),
@@ -3992,7 +4030,7 @@ mod tests {
                  CREATE TABLE face_prints (
                     id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, person_id INTEGER,
                     arcface_embedding BLOB, face_quality REAL, bbox TEXT NOT NULL DEFAULT '',
-                    embedding_model TEXT, processing_version TEXT
+                    embedding_model TEXT, processing_version TEXT, excluded INTEGER NOT NULL DEFAULT 0
                  );
                  CREATE TABLE face_verifications (
                     person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,

@@ -223,7 +223,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     /// ready, its index is still being built, it did not answer in time, or
     /// it had nothing. After a miss the helper is left alone for a few
     /// seconds so a busy scan never adds a wait to every keystroke.</summary>
-    public async Task<IReadOnlyList<long>?> EngineRankedIdsAsync(CatalogRequest request, CancellationToken ct)
+    public async Task<IReadOnlyList<long>?> EngineRankedIdsAsync(CatalogRequest request, CancellationToken ct) =>
+        (await EngineRankedAsync(request, ct).ConfigureAwait(false))?.Ids;
+
+    /// <summary>The same ranking plus the helper's own note on the reply, which
+    /// for a typed search is the strength summary.</summary>
+    public async Task<(IReadOnlyList<long> Ids, string? Message)?> EngineRankedAsync(CatalogRequest request, CancellationToken ct)
     {
         var engine = EngineClient.Instance;
         if (_disposed || engine.State != EngineClient.LifecycleState.Ready) return null;
@@ -239,7 +244,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
                 DebugLog.Info($"[CLIP] helper ranking unavailable (pending={EngineSimilarity.IsPending(response)}); ranking in the app.");
                 DeferEngineRanking();
             }
-            return ids;
+            return ids is null ? null : (ids, response.Message);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -264,7 +269,8 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             Environment.TickCount64 + (long)EngineSimilarity.RetryAfterMiss.TotalMilliseconds);
 
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct, string? kind = null)
+        string query, int limit, CancellationToken ct, string? kind = null, Action<string?>? onSummary = null,
+        bool showWeaker = false, Action<int>? onHiddenWeaker = null)
     {
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
@@ -273,10 +279,27 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             // kind-filtered search still ranks here to keep the grid full.
             if (kind is null
                 && EngineSimilarity.QueryRequest(query, embed, _store.Scope?.Root.Id, limit) is { } request
-                && await EngineRankedIdsAsync(request, ct).ConfigureAwait(false) is { } ids)
+                && await EngineRankedAsync(request, ct).ConfigureAwait(false) is { } ranking)
             {
-                var engineRows = await _store.RowsByIdsAsync(ids, ct).ConfigureAwait(false);
-                if (engineRows.Count > 0) return engineRows;
+                // No good match: only the name, tag and text matches show, and
+                // the helper's weaker look-alikes wait behind a button.
+                if (!showWeaker && SearchStrengthPolicy.Counts(ranking.Message) is { Good: 0 })
+                {
+                    var keyword = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+                    var decision = SearchStrengthPolicy.Decide(query, ranking.Message, keyword.Count, showWeaker);
+                    if (decision.KeywordOnly)
+                    {
+                        onSummary?.Invoke(decision.Label);
+                        onHiddenWeaker?.Invoke(decision.HiddenWeaker);
+                        return keyword;
+                    }
+                }
+                var engineRows = await _store.RowsByIdsAsync(ranking.Ids, ct).ConfigureAwait(false);
+                if (engineRows.Count > 0)
+                {
+                    onSummary?.Invoke(SearchStrengthPolicy.Label(query, ranking.Message));
+                    return engineRows;
+                }
             }
             var ranked = await _store.SemanticSearchAsync(embed, limit, ct, kind).ConfigureAwait(false);
             var rows = new List<FileRow>(ranked.Count);

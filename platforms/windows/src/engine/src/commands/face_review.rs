@@ -404,7 +404,7 @@ pub(crate) fn assess(
     received.sort_unstable();
     for (person, face) in &received {
         conn.execute(
-            "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
+            "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), \
              representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1",
             params![person, face],
         )?;
@@ -568,7 +568,7 @@ struct Pending {
 
 pub(crate) fn recount(conn: &Connection, person: i64) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
+        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), \
          representative_face_id=CASE WHEN representative_face_id IS NOT NULL AND EXISTS(SELECT 1 FROM face_prints WHERE id=persons.representative_face_id AND person_id=?1) \
            THEN representative_face_id ELSE COALESCE( \
              (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp.face_quality,0) DESC LIMIT 1), \
@@ -641,7 +641,7 @@ fn resolve_face_in(conn: &Connection, request: &str, face_id: i64, person_id: i6
             }
             conn.execute("UPDATE face_prints SET person_id=?1 WHERE id=?2", params![person, face_id])?;
             conn.execute(
-                "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
+                "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), \
                  representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1",
                 params![person, face_id],
             )?;
@@ -917,7 +917,7 @@ fn accept_all_in(conn: &Connection, request: &str, person: i64) -> rusqlite::Res
         });
     }
     conn.execute(
-        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1), \
+        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0), \
          representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1",
         params![person, accepted[0]],
     )?;

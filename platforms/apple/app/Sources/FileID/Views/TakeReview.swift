@@ -468,7 +468,8 @@ struct TakeReview: View {
             trashProblem = "FileID is still getting ready. Try again in a moment."
             return
         }
-        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", timeout: 120) else {
+        let commandID = engine.lastSentCommandID
+        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID, timeout: 120) else {
             trashProblem = "Moving to Trash took too long, so FileID can't tell how many moved. Check the Trash before trying again."
             return
         }
@@ -490,7 +491,7 @@ struct TakeReview: View {
                 Task {
                     let before = engine.bulkActionResultSignal
                     guard engine.send(.restoreFromTrash(batchID: batch)) else { return }
-                    let restored = await TakeRequests.bulkResult(engine, after: before, prefix: "restoreFromTrash", timeout: 120)
+                    let restored = await TakeRequests.bulkResult(engine, after: before, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 120)
                     if keepAllShots {
                         _ = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
                                                                             takeDecision: CatalogTakeDecision(groupKey: group.groupKey, decision: "reopen", fileIDs: keptIDs)), timeout: 30)
@@ -536,8 +537,8 @@ enum TakeRequests {
         await engine.catalogReply(to: request, timeout: .seconds(timeout))
     }
 
-    static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, timeout: Double) async -> BulkActionResult? {
-        await engine.bulkActionResult(after: signal, prefix: prefix, timeout: .seconds(timeout))
+    static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, commandID: String? = nil, timeout: Double) async -> BulkActionResult? {
+        await engine.bulkActionResult(after: signal, prefix: prefix, commandID: commandID, timeout: .seconds(timeout))
     }
 }
 
@@ -606,7 +607,8 @@ private struct FilmstripTile: View {
                 .stroke(focused ? Theme.text1 : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
             .scaleEffect(focused ? 1.04 : 1)
         }
-        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         .focusable(false)
         .simultaneousGesture(TapGesture(count: 2).onEnded { onToggleKeep() })
         .help(URL(fileURLWithPath: quality.path).lastPathComponent + (quality.reasons.isEmpty ? "" : " · " + quality.reasons.joined(separator: ", ")))
@@ -623,6 +625,7 @@ private struct ZoomedTake: View {
     let url: URL
     let box: CatalogTakeBox?
     @State private var image: NSImage?
+    @State private var failed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -639,13 +642,20 @@ private struct ZoomedTake: View {
                     Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
+            } else if failed {
+                Image(systemName: "photo").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                    .frame(width: geo.size.width, height: geo.size.height)
             } else {
                 IndeterminateBar().frame(width: 60).frame(width: geo.size.width, height: geo.size.height)
             }
         }
         .clipped()
         .animation(Theme.springStandard, value: box)
-        .task(id: url) { image = await ThumbnailService.shared.thumbnail(for: url, size: 1600) }
+        .task(id: url) {
+            failed = false
+            image = await ThumbnailService.shared.thumbnail(for: url, size: 1600)
+            failed = image == nil
+        }
         .accessibilityHidden(true)
     }
 }

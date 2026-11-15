@@ -56,16 +56,20 @@ enum ScanVision {
         var text = fast
         var carefulMs = 0.0
         var handwritten = false
+        var carefulOwed = false
         if TextReading.needsCarefulRead(fastText: fast, tags: tags, textBearing: documentShape) {
             let carefulStart = CFAbsoluteTimeGetCurrent()
-            let careful = autoreleasepool { worker.ocrAccurate(image) }
+            let read = autoreleasepool { worker.ocrAccurateIfAvailable(image) }
             carefulMs = (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+            carefulOwed = read == nil
+            let careful = read ?? ""
             handwritten = TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: tags,
                                                     paperLike: TextReading.isPaperLike(tags: tags, hasCamera: hasCamera))
             text = TextReading.preferred(fast: fast, careful: careful)
         }
         var result: [String: Any] = ["ran": true, "handwritten": handwritten && !text.isEmpty,
                                      "fastMs": fastMs, "carefulMs": carefulMs]
+        if carefulOwed { result["carefulOwed"] = true }
         if !text.isEmpty { result["text"] = text }
         return result
     }
@@ -79,6 +83,7 @@ enum ScanVision {
         var fullText: [String] = []
         var carefulMs = 0.0
         var handwritten = false
+        var carefulOwed = false
         for pageNum in 1..<(pageCount + 1) {
             autoreleasepool {
                 guard let page = pdf.page(at: pageNum) else { return }
@@ -100,8 +105,10 @@ enum ScanVision {
                 guard let cg = ctx.makeImage() else { return }
                 let fast = worker.ocrFast(cg)
                 let carefulStart = CFAbsoluteTimeGetCurrent()
-                let careful = worker.ocrAccurate(cg)
+                let read = worker.ocrAccurateIfAvailable(cg)
                 carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+                if read == nil { carefulOwed = true }
+                let careful = read ?? ""
                 if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: [], paperLike: true) {
                     handwritten = true
                 }
@@ -111,6 +118,7 @@ enum ScanVision {
         }
         let ocr = fullText.joined(separator: "\n\n")
         var result: [String: Any] = ["opened": true, "handwritten": handwritten && !ocr.isEmpty, "carefulMs": carefulMs]
+        if carefulOwed { result["carefulOwed"] = true }
         if !ocr.isEmpty { result["text"] = ocr }
         return result
     }
@@ -149,5 +157,5 @@ public func fileid_apple_ocr_warmup() {
 
 @_cdecl("fileid_apple_ocr_ready")
 public func fileid_apple_ocr_ready() -> Bool {
-    AccurateOCRWarmup.shared.isReady
+    AccurateOCRWarmup.shared.isReady && AccurateOCRBreaker.shared.allowed
 }

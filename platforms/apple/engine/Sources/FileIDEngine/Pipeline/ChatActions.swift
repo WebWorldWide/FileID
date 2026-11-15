@@ -382,7 +382,7 @@ enum ChatActions {
             let destination = unique[0]
             let sources = Array(unique.dropFirst())
             let hits = try personFiles(db, sources)
-            let files = try Int64.fetchOne(db, sql: "SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))", arguments: [ChatFacts.json(sources)]) ?? 0
+            let files = try Int64.fetchOne(db, sql: "SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) AND COALESCE(excluded,0)=0", arguments: [ChatFacts.json(sources)]) ?? 0
             var proposed = action(context, "mergePeople", "Merge \(unique.count) people into \(nameOf(destination))",
                                   "Moves every face of \(sources.map(nameOf).joined(separator: " and ")) to \(nameOf(destination)) (\(plural(files, "file", "files"))). Merged entries leave People; no files are touched.")
             proposed.undo = "Faces can be moved back one by one in People."
@@ -397,7 +397,7 @@ enum ChatActions {
     }
 
     private static func personFiles(_ db: GRDB.Database, _ people: [Int64]) throws -> [CatalogHit] {
-        try Row.fetchAll(db, sql: "SELECT DISTINCT f.id,f.path_text,f.kind FROM face_prints p JOIN files f ON f.id=p.file_id WHERE p.person_id IN (SELECT value FROM json_each(?)) AND f.failed=0 ORDER BY f.id DESC LIMIT ?",
+        try Row.fetchAll(db, sql: "SELECT DISTINCT f.id,f.path_text,f.kind FROM face_prints p JOIN files f ON f.id=p.file_id WHERE p.person_id IN (SELECT value FROM json_each(?)) AND COALESCE(p.excluded,0)=0 AND f.failed=0 ORDER BY f.id DESC LIMIT ?",
                          arguments: [ChatFacts.json(people), ChatFacts.shown]).map {
             CatalogHit(fileID: $0["id"], path: $0["path_text"], kind: $0["kind"], text: "")
         }

@@ -103,7 +103,9 @@ pub(crate) const POOL_MAX_SIDE: u32 = 448;
 /// elsewhere. `None` when neither can load; callers fall back to luma.
 enum ClipEncoder {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    Mlx,
+    Mlx {
+        _hold: crate::pipeline::scan_models::AdapterHold,
+    },
     #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
     Ort(Box<crate::models::mobileclip::MobileClipImage>),
 }
@@ -113,17 +115,20 @@ impl ClipEncoder {
         let weights = crate::models::mobileclip::default_weights_path().ok().filter(|path| path.is_file())?;
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {
-            // Loaded once per process, after the manifest check the scan uses.
-            static MLX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let ready = *MLX.get_or_init(|| {
-                crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
-                    if crate::apple::scan::load_clip(&weights) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
-                })
-                .map_err(|error| tracing::warn!(%error, "timeline: MLX CLIP image tower not loaded"))
-                .is_ok()
-            });
-            if ready {
-                return Some(Self::Mlx);
+            // The adapter keeps CLIP while this encoder or a scan holds it.
+            let (_, hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
+                || {
+                    crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
+                        if crate::apple::scan::load_clip(&weights) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
+                    })
+                    .map_err(|error| tracing::warn!(%error, "timeline: MLX CLIP image tower not loaded"))
+                    .is_ok()
+                },
+                |ready| *ready,
+                crate::pipeline::tagging::mac_unload_adapters,
+            );
+            if let Some(hold) = hold {
+                return Some(Self::Mlx { _hold: hold });
             }
         }
         crate::models::mobileclip::MobileClipImage::load(weights).ok().map(|clip| Self::Ort(Box::new(clip)))
@@ -132,7 +137,7 @@ impl ClipEncoder {
     fn embed(&mut self, path: &Path) -> Option<Vec<f32>> {
         match self {
             #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-            Self::Mlx => {
+            Self::Mlx { .. } => {
                 let size = std::fs::metadata(path).ok()?.len();
                 crate::apple::scan::decode_image(path, size)?.clip_embedding()
             }
@@ -190,6 +195,37 @@ pub(crate) fn whole_seconds(pool: &Pool) -> Vec<(f64, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    #[ignore = "needs the CLIP model in FILEID_MODELS_DIR and mlx.metallib beside the test binary"]
+    fn clip_load_cost_cold_and_warm() {
+        let time = || {
+            let started = std::time::Instant::now();
+            let encoder = ClipEncoder::load();
+            (started.elapsed(), encoder)
+        };
+        let (first, held) = time();
+        assert!(matches!(held, Some(ClipEncoder::Mlx { .. })));
+        let (warm, second) = time();
+        drop((held, second));
+        let (cold, again) = time();
+        drop(again);
+        let weights = crate::models::mobileclip::default_weights_path().unwrap();
+        let started = std::time::Instant::now();
+        crate::models::clip_space::verify(&weights, "mobileclip_s2", 0).unwrap();
+        let hash = started.elapsed();
+        let started = std::time::Instant::now();
+        assert!(crate::apple::scan::load_clip(&weights));
+        let adapter_warm = started.elapsed();
+        crate::pipeline::tagging::mac_unload_adapters();
+        let started = std::time::Instant::now();
+        assert!(crate::apple::scan::load_clip(&weights));
+        let adapter_cold = started.elapsed();
+        crate::pipeline::tagging::mac_unload_adapters();
+        eprintln!("hash {hash:?}, adapter load warm {adapter_warm:?}, adapter load cold {adapter_cold:?}");
+        eprintln!("CLIP load: first {first:?}, warm {warm:?}, cold after unload {cold:?}");
+    }
 
     #[test]
     fn whole_seconds_keep_one_frame_per_second_of_the_half_second_pool() {

@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.27.0",
+  "version": "1.28.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1265,6 +1265,7 @@
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
               "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|markPersonsDifferent|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
+              "commandID": { "type": ["string", "null"], "description": "Schema 1.28.0. The id of the command this result answers, echoed from IPCCommand.id, so an app matches a result to the request that sent it without reading action or messages. Present on every result an engine sends in reply to a command, including refusals; omitted by engines that do not echo it." },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,

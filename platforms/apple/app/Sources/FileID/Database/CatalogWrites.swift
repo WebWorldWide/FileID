@@ -21,14 +21,15 @@ enum CatalogWrites {
         guard engine.send(command) else {
             return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: notReady)])
         }
+        let matcher = BulkResultMatcher(actionPrefix: action, sentID: engine.lastSentCommandID)
         func mine(_ result: BulkActionResult) -> Bool {
-            result.action == action
+            matcher.accepts(result) && result.action == action
                 && (id == nil || result.messages.allSatisfy({ $0.fileID == nil }) || result.messages.contains(where: { $0.fileID == id }))
         }
         let clock = ContinuousClock()
         let deadline = clock.now + .seconds(timeout)
         while clock.now < deadline {
-            guard let result = await engine.bulkActionResult(after: seen, prefix: action, timeout: deadline - clock.now) else { break }
+            guard let result = await engine.bulkActionResult(after: seen, prefix: action, commandID: matcher.sentID, timeout: deadline - clock.now) else { break }
             // A second reply can land before this resumes; check the newest too.
             let latest = engine.bulkActionResult
             seen = engine.bulkActionResultSignal

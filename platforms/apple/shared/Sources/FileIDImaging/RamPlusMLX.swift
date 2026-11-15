@@ -174,10 +174,23 @@ package final class RamPlusMLX: @unchecked Sendable {
         x * (erf(x / geluDivisor) + 1) * 0.5
     }
 
+    /// `roll` for axis 1 or 2 of a rank-4 array, as a slice and a concatenate. MLX's
+    /// `roll` goes through the multi-output `split`, and a compiled function that
+    /// contains one keeps memory live after it is dropped (measured: 36 to 880 MB
+    /// per load/run/unload cycle, with no leak once `roll` is replaced).
+    private static func rolled(_ x: MLXArray, shift: Int, axis: Int) -> MLXArray {
+        let size = x.dim(axis)
+        let cut = shift < 0 ? (-shift) % size : size - shift % size
+        guard cut != 0 else { return x }
+        return axis == 1
+            ? concatenated([x[0..., cut..., 0..., 0...], x[0..., ..<cut, 0..., 0...]], axis: 1)
+            : concatenated([x[0..., 0..., cut..., 0...], x[0..., 0..., ..<cut, 0...]], axis: 2)
+    }
+
     private func block(_ x: MLXArray, _ b: Block, count: Int, side: Int) -> MLXArray {
         let w = Self.window, c = x.dim(-1), grid = side / w, nW = grid * grid, headDim = c / b.heads
         var h = Self.norm(x, b.n1w, b.n1b, Self.swinEps).reshaped([count, side, side, c])
-        if b.mask != nil { h = roll(roll(h, shift: -w / 2, axis: 1), shift: -w / 2, axis: 2) }
+        if b.mask != nil { h = Self.rolled(Self.rolled(h, shift: -w / 2, axis: 1), shift: -w / 2, axis: 2) }
         h = h.reshaped([count, grid, w, grid, w, c]).transposed(axes: [0, 1, 3, 2, 4, 5]).reshaped([count, nW, w * w, c])
         let qkv = (matmul(h, b.qkvW) + b.qkvB).reshaped([count, nW, w * w, 3, b.heads, headDim])
             .transposed(axes: [3, 0, 1, 4, 2, 5])
@@ -186,7 +199,7 @@ package final class RamPlusMLX: @unchecked Sendable {
         let attention = matmul(softmax(scores, axis: -1, precise: true), qkv[2])
         h = matmul(attention.transposed(axes: [0, 1, 3, 2, 4]).reshaped([count, nW, w * w, c]), b.projW) + b.projB
         h = h.reshaped([count, grid, grid, w, w, c]).transposed(axes: [0, 1, 3, 2, 4, 5]).reshaped([count, side, side, c])
-        if b.mask != nil { h = roll(roll(h, shift: w / 2, axis: 1), shift: w / 2, axis: 2) }
+        if b.mask != nil { h = Self.rolled(Self.rolled(h, shift: w / 2, axis: 1), shift: w / 2, axis: 2) }
         let y = x + h.reshaped([count, side * side, c])
         let m = Self.gelu(matmul(Self.norm(y, b.n2w, b.n2b, Self.swinEps), b.fc1W) + b.fc1B)
         return y + (matmul(m, b.fc2W) + b.fc2B)

@@ -561,6 +561,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v35_foreign_key_indexes") { db in
             try db.execute(sql: CatalogSchema.v35)
         }
+        m.registerMigration("v36_scan_failures") { db in
+            try db.execute(sql: CatalogSchema.v36)
+        }
         return m
     }
 
@@ -731,6 +734,7 @@ public final class Database: @unchecked Sendable {
                     SELECT COUNT(DISTINCT file_id)
                     FROM face_prints
                     WHERE person_id = ?
+                      AND COALESCE(excluded, 0) = 0
                 )
                 WHERE id = ?
                 """, arguments: [target, target])

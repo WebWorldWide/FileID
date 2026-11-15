@@ -714,11 +714,21 @@ private struct GroupCard: View {
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {
-                        Label("Choose…", systemImage: "checkmark.circle")
-                            .font(Theme.Font.body(12))
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle")
+                            Text("Choose…")
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                        }
+                        .font(Theme.Font.body(12, .medium))
+                        .foregroundStyle(Theme.text1)
+                        .padding(.horizontal, 9).frame(height: 26)
+                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                     }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 100)
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
 
                     Button { onDeleteGroup() } label: { Label(selectedInGroup == 0 ? "Move to Trash" : "Move \(selectedInGroup) to Trash", systemImage: "trash") }
                     .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
@@ -797,9 +807,10 @@ private struct CopyTile: View {
     let isSelected: Bool
     let hovering: Bool
 
-    private var folder: String {
+    private var fullFolder: String {
         (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
     }
+    private var folder: String { PathText.tail(file.url.deletingLastPathComponent().path) }
     let onToggle: () -> Void
 
     private var borderColor: Color {
@@ -844,9 +855,9 @@ private struct CopyTile: View {
             Text(folder)
                 .font(Theme.Font.body(11.5))
                 .foregroundStyle(Theme.text2)
-                .lineLimit(1).truncationMode(.middle)
+                .lineLimit(1).truncationMode(.head)
                 .frame(width: CopyStrip.tile, alignment: .leading)
-                .help(folder)
+                .help(fullFolder)
             HStack(spacing: 4) {
                 Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                 Spacer(minLength: 4)

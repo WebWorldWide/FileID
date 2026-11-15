@@ -19,6 +19,67 @@ use crate::pipeline::tagging::ModelStack;
 /// the resident Deep Analyze model's idle period.
 pub const PARK_AFTER: Duration = Duration::from_secs(120);
 
+/// Counts the live holders of the models the Mac adapter keeps for the whole
+/// process (MLX CLIP and RAM++). One mutex covers the load and unload calls,
+/// so a new scan's load cannot interleave with the last holder's unload.
+pub struct AdapterModels {
+    holders: Mutex<usize>,
+}
+
+/// The Mac adapter's scan models: held by every live scan stack and timeline pass.
+pub static ADAPTER_MODELS: AdapterModels = AdapterModels::new();
+
+/// One holder's claim on the adapter models; the last drop unloads them.
+#[must_use]
+pub struct AdapterHold {
+    owner: &'static AdapterModels,
+    unload: fn(),
+}
+
+impl AdapterModels {
+    pub const fn new() -> Self {
+        Self { holders: Mutex::new(0) }
+    }
+
+    /// Run `load` under the lock. When `held` says it left a model loaded, the
+    /// caller becomes a holder and `unload` runs once the last holder drops.
+    pub fn hold<R>(&'static self, load: impl FnOnce() -> R, held: impl FnOnce(&R) -> bool, unload: fn()) -> (R, Option<AdapterHold>) {
+        let mut holders = self.holders.lock();
+        let loaded = load();
+        let hold = held(&loaded).then(|| {
+            *holders += 1;
+            AdapterHold { owner: self, unload }
+        });
+        (loaded, hold)
+    }
+
+    pub fn holders(&self) -> usize {
+        *self.holders.lock()
+    }
+}
+
+impl Default for AdapterModels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AdapterHold {
+    fn drop(&mut self) {
+        let mut holders = self.owner.holders.lock();
+        *holders = holders.saturating_sub(1);
+        if *holders == 0 {
+            (self.unload)();
+        }
+    }
+}
+
+impl std::fmt::Debug for AdapterHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdapterHold")
+    }
+}
+
 /// Why the scan's models could not be loaded; carried out of the scan as its
 /// error so the caller can report it under the right kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,5 +332,54 @@ mod tests {
         let before = evictions();
         release_for_other_models();
         assert!(evictions() > before);
+    }
+
+    static HOLDS: AdapterModels = AdapterModels::new();
+    static UNLOADS: AtomicU64 = AtomicU64::new(0);
+    fn count_unload() {
+        UNLOADS.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[test]
+    fn adapter_models_unload_with_the_last_holder() {
+        let before = UNLOADS.load(Ordering::Acquire);
+        let (_, first) = HOLDS.hold(|| true, |loaded| *loaded, count_unload);
+        let (_, second) = HOLDS.hold(|| true, |loaded| *loaded, count_unload);
+        assert_eq!(HOLDS.holders(), 2);
+        drop(first);
+        assert_eq!(UNLOADS.load(Ordering::Acquire), before, "one holder is still scanning");
+        drop(second);
+        assert_eq!(UNLOADS.load(Ordering::Acquire), before + 1);
+        let (_, third) = HOLDS.hold(|| true, |loaded| *loaded, count_unload);
+        assert_eq!(HOLDS.holders(), 1, "a load after the unload counts from zero");
+        drop(third);
+        assert_eq!(UNLOADS.load(Ordering::Acquire), before + 2);
+    }
+
+    #[test]
+    fn a_failed_load_holds_nothing() {
+        static OWNER: AdapterModels = AdapterModels::new();
+        let (_, hold) = OWNER.hold(|| false, |loaded| *loaded, count_unload);
+        assert!(hold.is_none());
+        assert_eq!(OWNER.holders(), 0);
+    }
+
+    #[test]
+    fn releasing_idle_models_keeps_adapter_models_a_running_scan_holds() {
+        static OWNER: AdapterModels = AdapterModels::new();
+        static UNLOADED: AtomicU64 = AtomicU64::new(0);
+        fn unload() {
+            UNLOADED.fetch_add(1, Ordering::AcqRel);
+        }
+        static SLOT: IdleSlot<(StackKey, Arc<ModelStack>)> = IdleSlot::new("test adapter holds", Duration::from_secs(60));
+        let key = StackKey::of(2, false, "cpu", true, vec![]);
+        let mut stack = ModelStack::empty();
+        stack.adapter_hold = OWNER.hold(|| true, |loaded| *loaded, unload).1;
+        let scan = Arc::new(stack);
+        SLOT.put((key, scan.clone()));
+        assert!(SLOT.clear());
+        assert_eq!(UNLOADED.load(Ordering::Acquire), 0, "the running scan still holds the stack");
+        drop(scan);
+        assert_eq!(UNLOADED.load(Ordering::Acquire), 1);
     }
 }

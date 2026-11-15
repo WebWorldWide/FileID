@@ -694,6 +694,7 @@ pub(crate) async fn handle_restore_from_trash(
             crate::shell::trash::forget_restore_record(std::path::Path::new(&original));
         }
         Ok(BulkActionResult {
+            command_id: None,
             action: "restoreFromTrash".into(),
             succeeded,
             failed,
@@ -1181,7 +1182,7 @@ fn apply_revert_merge(
     for pid in affected_people {
         tx.execute(
             "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-             FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+             FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
             [pid],
         )?;
     }
@@ -1221,6 +1222,7 @@ pub(crate) async fn handle_revert_merge(
             )
         };
         Ok(BulkActionResult {
+            command_id: None,
             action: "revertMerge".into(),
             succeeded: u32::from(complete),
             failed: u32::from(!complete),
@@ -1253,7 +1255,8 @@ mod tests {
              CREATE TABLE face_prints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_id INTEGER NOT NULL,
-                person_id INTEGER
+                person_id INTEGER,
+                excluded INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE face_verifications (
                 person_a INTEGER NOT NULL,

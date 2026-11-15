@@ -5,7 +5,7 @@ import Testing
 @Suite("FileIDAppleKit C interface", .serialized)
 struct AppleKitTests {
     @Test func reportsItsInterfaceVersion() {
-        #expect(fileid_apple_abi_version() == 1)
+        #expect(fileid_apple_abi_version() == 2)
     }
 
     @Test func sleepAssertionIsTakenAndReleased() {

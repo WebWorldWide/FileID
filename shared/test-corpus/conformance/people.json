@@ -15,6 +15,20 @@
     ]
   },
   {
+    "name": "people-merge-result-echoes-the-command-id",
+    "description": "A bulkActionResult carries the id of the command it answers (schema 1.28.0), on a merge that succeeds and on one the engine refuses.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,first_name,last_name,created_at,representative_face_id,file_count) VALUES(1,'Alex','Rivera',123,1,1)",
+      "INSERT INTO persons(id,first_name,last_name,created_at,representative_face_id,file_count) VALUES(2,'Sam','Lee',123,2,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.4),(2,2,2,X'00','[0,0,1,1]',X'0000803f',0.9)"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "commandID": "conformance-merge-ok", "await": "bulkActionResult", "expect": {"action": "mergeClusters", "succeeded": 1, "failed": 0, "commandID": "conformance-merge-ok"}},
+      {"label": "refused", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 99}}, "commandID": "conformance-merge-refused", "await": "bulkActionResult", "expect": {"action": "mergeClusters", "succeeded": 0, "failed": 1, "commandID": "conformance-merge-refused"}}
+    ]
+  },
+  {
     "name": "people-merge-named-destination-keeps-name",
     "description": "Two named people merge into the destination's identity; the source name is discarded.",
     "sql": [

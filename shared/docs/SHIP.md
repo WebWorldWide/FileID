@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-11-14 Where the release stands
+
+Not release-ready. The code for all three desktop apps, the CLI and the TUI is integrated on PR #331 with every CI check green, but `main` is red until that PR is merged, nothing since the 2026-11-12 audits has been seen on a screen, and no signed package of the current source exists on any platform. The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)". The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
+
 ## 2026-11-06 Linux llama.cpp runtime packaging
 
 Linux packages build `llama-server` from the pinned llama.cpp b9254 source archive (SHA-256 checked, outbound HTTP client patched out, CPU with run-time-selected ggml CPU variants) via `platforms/linux/build/build-llama-runtime.sh`; the Flatpak installs it at `/app/lib/fileid/llama.cpp`, the AppImage at `usr/bin/RuntimeBundles/llama.cpp`. The Flatpak CI job builds it in the offline sandbox and runs `--version` and a model-free outbound-HTTP probe inside the runtime; a separate CI job builds CPU and Vulkan variants on Ubuntu. Not yet done: a model-backed Deep Analyze run on native Linux hardware, the native AppImage build, aarch64, AUR/Nix bundling, and a Vulkan package after a real-GPU check. Locally verified only on macOS (pinned archive and file hashes, patch, configure and build of the same source, outbound probe against patched and unpatched builds).
@@ -117,14 +121,18 @@ Block release until all accepted feature milestones, held-out accuracy tests, 10
 ## What FileID is
 
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename
-tens of thousands of files locally. Two platforms ship at v1.0:
+tens of thousands of files locally. Three desktop apps, plus a CLI and a TUI:
 
-- **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 10 C# app.
-- **macOS** — Swift / SwiftUI app + engine, MLX inference. The visual + UX reference.
+- **macOS** — SwiftUI app, the visual + UX reference. Developer ID builds run the
+  shared Rust engine by default since 2026-11-11 (Apple ML through in-process Swift
+  adapters, MLX inference), with the Swift engine bundled as the fallback; App Store
+  builds run the Swift engine.
+- **Windows** — shared Rust engine (`fileid-engine`) + WinUI 3 / .NET 10 C# app.
+- **Linux** — shared Rust engine + GTK4 / libadwaita app (Flatpak first).
 
-Linux is deferred. The two binaries on each platform talk newline-delimited JSON
-over stdio; the engine owns a SQLite WAL DB (migrations v1–v12, byte-faithful
-across the macOS GRDB and Windows rusqlite stores).
+App and engine talk newline-delimited JSON over stdio (IPC 1.28.0); the engine owns
+a SQLite WAL catalog (schema v36, the same in the Swift GRDB and Rust rusqlite
+stores, so a library opens in either engine).
 
 ## Non-negotiables
 
@@ -212,6 +220,12 @@ after Windows lands.
 
 A green CI run is required before any feature is called done. Telemetry +
 source-URL scans are hard release blockers — no exceptions.
+
+As of 2026-11-14 eight workflows run on `main`: Repository policy, macOS app,
+Windows engine, Windows app (.NET), Windows Store package, Linux (engine + CLI +
+TUI + GTK app), Native tools (engine + CLI + TUI), and Packaging (Linux — Flatpak +
+llama.cpp runtime). The three described below are the original set; the workflow
+files are the source of truth for their current steps.
 
 - **`windows-engine.yml`** (x64 + arm64-native + arm64-cross): `cargo fmt`,
   `cargo clippy --all-targets -D warnings`, `cargo-deny` (license + advisory +

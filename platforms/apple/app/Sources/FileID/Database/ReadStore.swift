@@ -900,20 +900,21 @@ public final class ReadStore: @unchecked Sendable {
                     SELECT
                       p.id, p.name, p.title, p.first_name, p.middle_name,
                       p.last_name, p.suffix, p.is_unknown,
-                      p.representative_face_id, p.file_count,
+                      p.representative_face_id,
                       f.bbox AS rep_bbox, f.file_id AS rep_file_id,
                       files.path_text AS rep_path,
                       COALESCE(f.embedding_model,'') || '|' || COALESCE(f.processing_version,'') || '|' ||
                       COALESCE(f.source_revision,'') || '|' || COALESCE(CAST(files.size_bytes AS TEXT),'') || ':' ||
                       COALESCE(CAST(files.modified_at AS TEXT),'') AS rep_cache_revision,
-                      COUNT(fp.id) AS face_count
+                      COUNT(fp.id) AS face_count,
+                      COUNT(DISTINCT fp.file_id) AS live_file_count
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
                     LEFT JOIN files ON files.id = f.file_id
                     LEFT JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
                     \(where_)
                     GROUP BY p.id
-                    ORDER BY p.is_unknown ASC, p.file_count DESC, p.id ASC
+                    ORDER BY p.is_unknown ASC, live_file_count DESC, p.id ASC
                     """)
                 return rows.map { r in
                     PersonRow(
@@ -930,7 +931,7 @@ public final class ReadStore: @unchecked Sendable {
                         representativeBBox: r["rep_bbox"],
                         representativePath: r["rep_path"],
                         representativeCacheRevision: r["rep_cache_revision"],
-                        fileCount: r["file_count"] ?? 0,
+                        fileCount: r["live_file_count"] ?? 0,
                         faceCount: r["face_count"] ?? 0
                     )
                 }

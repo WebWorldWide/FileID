@@ -319,6 +319,20 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // `URL(fileURLWithPath:)` cuts a path at its first NUL and resolves an empty or
+            // relative one against the engine's working directory, so such a command would
+            // scan whatever folder the engine was launched from.
+            guard Self.isUsableScanRoot(rootPath) else {
+                await sink.emit(.error(EngineError(
+                    kind: "folder_access_denied",
+                    message: "FileID couldn't access that folder. Choose it again."
+                )))
+                await sink.emit(.scanComplete(ScanComplete(
+                    sessionID: "", totalFiles: 0, processedFiles: 0,
+                    failedFiles: 0, totalSeconds: 0
+                )))
+                return
+            }
             // Reject a start-scan while one is already queued or running. Mirrors
             // the Windows engine's scan_session.rs guard. Prevents unbounded job
             // queue growth from a misbehaving or rapidly-clicking app client.
@@ -991,51 +1005,51 @@ struct FileIDEngineMain {
             let deleted = await purgeExcludedRows(database: database, excludedPaths: normalized,
                                                  sink: sink, sessionID: nil)
             if deleted >= 0 {
-                await sink.emit(.bulkActionResult(BulkActionResult(
+                await sink.emitBulk(cmd.id, BulkActionResult(
                     action: "purgeExcluded",
                     succeeded: deleted,
                     failed: 0,
                     messages: []
-                )))
+                ))
             }
 
         // ── Cross-platform bulk actions ──────────────────────────
         case .applyTags(let fileIDs, let tags, let mode):
-            guard let database else { await emitDbUnavailable(sink, action: "applyTags"); return }
-            await sink.emit(.bulkActionResult(await applyTags(database: database, fileIDs: fileIDs, tags: tags, mode: mode)))
+            guard let database else { await emitDbUnavailable(sink, action: "applyTags", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await applyTags(database: database, fileIDs: fileIDs, tags: tags, mode: mode))
         case .renameFiles(let renames):
-            guard let database else { await emitDbUnavailable(sink, action: "renameFiles"); return }
-            await sink.emit(.bulkActionResult(await renameFiles(database: database, renames: renames)))
+            guard let database else { await emitDbUnavailable(sink, action: "renameFiles", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await renameFiles(database: database, renames: renames))
         case .trashFiles(let fileIDs, let exactIdentities):
             let identities = exactIdentities ?? []
             let exact = Dictionary(identities.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
             guard exact.count == identities.count else {
-                await sink.emit(.bulkActionResult(BulkActionResult(
+                await sink.emitBulk(cmd.id, BulkActionResult(
                     action: "trashFiles", succeeded: 0, failed: fileIDs.count,
-                    messages: fileIDs.map { item($0, ok: false, "The request named a file's duplicate evidence twice. Nothing was moved.") })))
+                    messages: fileIDs.map { item($0, ok: false, "The request named a file's duplicate evidence twice. Nothing was moved.") }))
                 return
             }
-            guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
-            await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs, exact: exact)))
+            guard let database else { await emitDbUnavailable(sink, action: "trashFiles", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await trashFiles(database: database, fileIDs: fileIDs, exact: exact))
         case .restoreFromTrash(let batchID):
-            guard let database else { await emitDbUnavailable(sink, action: "restoreFromTrash"); return }
-            await sink.emit(.bulkActionResult(await TrashJournal.restore(batchID: batchID, database: database)))
+            guard let database else { await emitDbUnavailable(sink, action: "restoreFromTrash", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await TrashJournal.restore(batchID: batchID, database: database))
         case .mergeClusters(let sourcePersonID, let destinationPersonID):
-            guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
-            await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
+            guard let database else { await emitDbUnavailable(sink, action: "mergeClusters", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID))
         case .revertMerge(let sourcePersonID, let destinationPersonID, let faceIDsToRevert):
-            guard let database else { await emitDbUnavailable(sink, action: "revertMerge"); return }
-            await sink.emit(.bulkActionResult(await revertMerge(
-                database: database, source: sourcePersonID, destination: destinationPersonID, faceIDs: faceIDsToRevert)))
+            guard let database else { await emitDbUnavailable(sink, action: "revertMerge", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await revertMerge(
+                database: database, source: sourcePersonID, destination: destinationPersonID, faceIDs: faceIDsToRevert))
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
-            guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
-            await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+            guard let database else { await emitDbUnavailable(sink, action: "renamePerson", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix))
         case .reassignFace(let faceID, let destinationPersonID, let createNewPerson):
-            guard let database else { await emitDbUnavailable(sink, action: "reassignFace"); return }
-            await sink.emit(.bulkActionResult(await reassignFace(
+            guard let database else { await emitDbUnavailable(sink, action: "reassignFace", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await reassignFace(
                 database: database, faceID: faceID,
                 destinationPersonID: destinationPersonID, createNewPerson: createNewPerson
-            )))
+            ))
         case .listFaceReview(let requestID, let personID, let offset, let limit, let queue):
             await emitFaceReview(.list(requestID: requestID, personID: personID, offset: offset, limit: limit, queue: queue),
                                  database: database, sink: sink)
@@ -1046,18 +1060,18 @@ struct FileIDEngineMain {
         case .undoFaceReview(let requestID, let operationID):
             await emitFaceReview(.undo(requestID: requestID, operationID: operationID), database: database, sink: sink)
         case .markPersonsAsUnknown(let personIDs):
-            guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
-            await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await markPersonsAsUnknown(database: database, personIDs: personIDs))
         case .markPersonsDifferent(let sourcePersonID, let destinationPersonID,
                                    let sourceAnchorFaceID, let destinationAnchorFaceID):
-            guard let database else { await emitDbUnavailable(sink, action: "markPersonsDifferent"); return }
-            await sink.emit(.bulkActionResult(await markPersonsDifferent(
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsDifferent", commandID: cmd.id); return }
+            await sink.emitBulk(cmd.id, await markPersonsDifferent(
                 database: database,
                 sourcePersonID: sourcePersonID,
                 destinationPersonID: destinationPersonID,
                 sourceAnchorFaceID: sourceAnchorFaceID,
                 destinationAnchorFaceID: destinationAnchorFaceID
-            )))
+            ))
         case .wipeLibrary:
             guard let database else { await sink.emit(.libraryWiped(LibraryWiped(ok: false, message: "Database unavailable."))); return }
             await sink.emit(.libraryWiped(await wipeLibrary(database: database)))
@@ -1116,13 +1130,13 @@ struct FileIDEngineMain {
         await sink.emit(.faceReview(await FaceReview.reply(command, database: database)))
     }
 
-    static func emitDbUnavailable(_ sink: IPCSink, action: String) async {
-        await sink.emit(.bulkActionResult(BulkActionResult(
+    static func emitDbUnavailable(_ sink: IPCSink, action: String, commandID: String) async {
+        await sink.emitBulk(commandID, BulkActionResult(
             action: action,
             succeeded: 0,
             failed: 0,
             messages: [BulkActionItem(ok: false, message: "Database unavailable.")]
-        )))
+        ))
     }
 
     static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil, reason: String? = nil,
@@ -1645,7 +1659,7 @@ struct FileIDEngineMain {
                 for person in Set([destination, newPerson].compactMap { $0 }) {
                     try db.execute(sql: """
                         UPDATE persons
-                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                             representative_face_id = COALESCE(
                                 (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
@@ -1700,7 +1714,7 @@ struct FileIDEngineMain {
                 for personID in Set([previous, destination].compactMap { $0 }) {
                     try db.execute(sql: """
                         UPDATE persons
-                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                             representative_face_id = COALESCE(
                                 (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
@@ -1917,6 +1931,8 @@ struct FileIDEngineMain {
         // system doesn't suspend mid-tag overnight. Released in defer.
         SleepGuard.shared.begin(reason: "Scanning \(url.lastPathComponent)")
         defer { SleepGuard.shared.end() }
+        ScanModelResidency.shared.begin()
+        defer { ScanModelResidency.shared.end() }
 
         let effectiveExcludedPaths = Discovery.resolvedExclusionPaths(
             root: url, rawPaths: excludedPaths)
@@ -2207,9 +2223,14 @@ struct FileIDEngineMain {
         }
 
         let totalDur = Date().timeIntervalSince(scanStart)
+        let cancelledScan = await coordinator.isCancelled
+        let mediaAnalyzed = await coordinator.mediaAnalyzed
         await markSessionFinal(database: database, session: session,
                                 coordinator: coordinator, sink: sink,
                                 totalSeconds: totalDur)
+        if !cancelledScan, mediaAnalyzed > 0 {
+            await CatalogTakeGrouping.shared.startAfterScan(database: database, sink: sink)
+        }
     }
 
     static let visionTimeoutMessage = "Vision pass timed out (will retry next scan)"
@@ -2561,6 +2582,11 @@ struct FileIDEngineMain {
         return s + String(next)
     }
 
+    /// An absolute path with no NUL, the only kind a scan may start from.
+    static func isUsableScanRoot(_ path: String) -> Bool {
+        path.hasPrefix("/") && !path.utf8.contains(0)
+    }
+
     /// Recompute persons.file_count and repair a dangling
     /// representative_face_id for the given persons, after their faces may
     /// have been removed (cascade delete). Must run inside the caller's write
@@ -2570,7 +2596,7 @@ struct FileIDEngineMain {
             try db.execute(sql: """
                 UPDATE persons
                 SET file_count = (SELECT COUNT(DISTINCT file_id)
-                                  FROM face_prints WHERE person_id = ?)
+                                  FROM face_prints WHERE person_id = ? AND COALESCE(excluded,0)=0)
                 WHERE id = ?
                 """, arguments: [pid, pid])
             // If the representative face was deleted (or never set), point it at

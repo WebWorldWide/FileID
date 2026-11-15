@@ -46,27 +46,43 @@ pub(crate) struct Frame {
 static CLIP_READY: AtomicBool = AtomicBool::new(false);
 static RAM_PLUS_READY: AtomicBool = AtomicBool::new(false);
 
+/// Runs under `ADAPTER_MODELS`' lock once no stack, catch-up pass or timeline
+/// encoder holds the adapter models.
+pub(crate) fn unload_adapters() {
+    CLIP_READY.store(false, Ordering::Release);
+    RAM_PLUS_READY.store(false, Ordering::Release);
+    scan::unload_models();
+}
+
 /// The models this path runs: CLIP and RAM++ on MLX through the adapter (CLIP
 /// falls back to ONNX Runtime when MLX cannot load), BGE through ONNX Runtime.
 /// Face models stay unloaded: faces come from Vision.
 pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> ModelStack {
     let pool_size = if runtime_available { resolve_pool_size(worker_count) } else { 1 };
-    let clip = crate::models::mobileclip::default_weights_path()
-        .ok()
-        .filter(|path| path.is_file())
-        .is_some_and(|path| {
-            crate::models::clip_space::load_verified(&[(&path, "mobileclip_s2", 0)], || {
-                if scan::load_clip(&path) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
-            })
-            .map_err(|error| tracing::warn!(model = "CLIP", %error, "MLX image tower not loaded"))
-            .is_ok()
-        });
+    let (adapters, adapter_hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
+        || {
+            let clip = crate::models::mobileclip::default_weights_path()
+                .ok()
+                .filter(|path| path.is_file())
+                .is_some_and(|path| {
+                    crate::models::clip_space::load_verified(&[(&path, "mobileclip_s2", 0)], || {
+                        if scan::load_clip(&path) { Ok(()) } else { anyhow::bail!("MLX CLIP unavailable") }
+                    })
+                    .map_err(|error| tracing::warn!(model = "CLIP", %error, "MLX image tower not loaded"))
+                    .is_ok()
+                });
+            let ram_plus = crate::models::ram_plus::default_tags_path()
+                .ok()
+                .and_then(|tags| tags.parent().map(Path::to_path_buf))
+                .filter(|dir| dir.join("ram_plus.onnx").is_file() && dir.join("ram_plus_tags.txt").is_file())
+                .is_some_and(|dir| scan::load_ram_plus(&dir));
+            (clip, ram_plus)
+        },
+        |(clip, ram_plus)| *clip || *ram_plus,
+        unload_adapters,
+    );
+    let (clip, ram_plus) = adapters;
     CLIP_READY.store(clip, Ordering::Release);
-    let ram_plus = crate::models::ram_plus::default_tags_path()
-        .ok()
-        .and_then(|tags| tags.parent().map(Path::to_path_buf))
-        .filter(|dir| dir.join("ram_plus.onnx").is_file() && dir.join("ram_plus_tags.txt").is_file())
-        .is_some_and(|dir| scan::load_ram_plus(&dir));
     RAM_PLUS_READY.store(ram_plus, Ordering::Release);
     tracing::info!(clip, ram_plus, "[TAGGING] Mac scan adapters (MLX)");
     let mobileclip_pool = (!clip && runtime_available)
@@ -78,6 +94,7 @@ pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> Model
         pool_size,
         apple_scan: true,
         apple_clip: clip,
+        adapter_hold,
         ..ModelStack::empty()
     }
 }
@@ -354,6 +371,13 @@ async fn pdf_row(row: &mut TaggedFile, file: &DiscoveredFile, text: Option<Strin
         row.has_text = read.text.is_some();
         row.ocr_handwritten = read.handwritten;
         row.ocr_text = read.text;
+        if read.careful_owed {
+            row.catch_up = Some(catch_up::Marker {
+                stages: catch_up::CAREFUL_TEXT_OWED | catch_up::TEXT_READ_AT_SCAN,
+                vision: None,
+                face_count: 0,
+            });
+        }
     }
     row.text_stage_done = true;
     row.doc_stage_ran = true;
@@ -396,7 +420,7 @@ async fn image_row(
         let ram = if ram_ready && !deferred { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
-        Some((pass, ram, read, image.dhash()))
+        Some((pass, ram, read, text_tags, image.dhash()))
     })
     .await
     .flatten();
@@ -404,7 +428,7 @@ async fn image_row(
     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
     let (clip, clip_elapsed) = clip_task.await.unwrap_or((None, Duration::ZERO));
     STATS_CLIP_US.fetch_add(clip_elapsed.as_micros() as u64, Ordering::Relaxed);
-    let Some((pass, ram, read, dhash)) = analysis else {
+    let Some((pass, ram, read, text_tags, dhash)) = analysis else {
         row.failed = true;
         row.error_message = Some(VISION_TIMEOUT.into());
         return;
@@ -438,12 +462,14 @@ async fn image_row(
     row.clip_embedding = clip;
     row.clip_ms = clip_elapsed.as_secs_f64() * 1000.0;
     let extras = extra_tags(created, info.camera_model.as_deref());
-    if deferred {
+    let owed = (if deferred { catch_up::TAGS_OWED } else { 0 }) | (if read.careful_owed { catch_up::CAREFUL_TEXT_OWED } else { 0 });
+    if owed != 0 {
         let confidences = pass.classify_confidences.iter().map(|(name, value)| (name.clone(), *value as f32));
         row.catch_up = Some(catch_up::Marker {
-            stages: catch_up::TAGS_OWED | if read.ran { catch_up::TEXT_READ_AT_SCAN } else { 0 },
+            stages: owed | if read.ran { catch_up::TEXT_READ_AT_SCAN } else { 0 },
             vision: catch_up::Context {
                 x: Some(extras.clone()),
+                t: (!deferred).then_some(text_tags),
                 ..catch_up::Context::from_classifier(&pass.classify_tags, confidences)
             }
             .encoded(),
@@ -456,12 +482,15 @@ async fn image_row(
 }
 
 /// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
-pub(super) struct CatchUp;
+/// Holds the stack so the adapter's RAM++ stays loaded until the catch-up ends.
+pub(super) struct CatchUp {
+    pub(super) _models: Arc<ModelStack>,
+}
 
 impl CatchUp {
     fn read(image: &scan::Image, classify: &[String], text_tags: &[String], has_camera: bool) -> catch_up::TextRead {
         let read = image.text_read(classify, text_tags, has_camera).unwrap_or_default();
-        catch_up::TextRead { ran: read.ran, text: read.text, handwritten: read.handwritten }
+        catch_up::TextRead { ran: read.ran, text: read.text, handwritten: read.handwritten, careful_owed: read.careful_owed }
     }
 }
 
@@ -477,10 +506,19 @@ impl catch_up::Analyzer for CatchUp {
         4
     }
 
+    fn ready_wait(&self, phase: catch_up::Phase) -> Duration {
+        let warming = std::env::var("FILEID_OCR_WARMUP").ok().is_none_or(|value| value != "0");
+        match phase {
+            catch_up::Phase::CarefulText if warming => Duration::from_secs(180),
+            _ => Duration::ZERO,
+        }
+    }
+
     fn analyse(&self, file: &catch_up::Pending, phase: catch_up::Phase, context: Option<&catch_up::Context>) -> catch_up::Outcome {
         use catch_up::Outcome;
         if file.kind == "pdf" {
             return match scan::pdf_ocr(&file.path) {
+                Some(read) if read.opened && read.careful_owed => Outcome::Blocked,
                 Some(read) if read.opened => Outcome::Done(catch_up::Update {
                     tags: None,
                     text: Some(catch_up::TextUpdate { handwritten: read.handwritten && read.text.is_some(), text: read.text }),
@@ -515,9 +553,9 @@ impl catch_up::Analyzer for CatchUp {
                     Self::read(&image, &context.k, text_tags, has_camera)
                 }))
             }
-            catch_up::Phase::CarefulText => Outcome::Done(catch_up::careful_update(file, context, |text_tags| {
+            catch_up::Phase::CarefulText => catch_up::careful_update(file, context, |text_tags| {
                 Self::read(&image, &context.k, text_tags, has_camera)
-            })),
+            }),
         }
     }
 }

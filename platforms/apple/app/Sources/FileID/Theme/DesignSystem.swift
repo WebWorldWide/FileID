@@ -98,7 +98,7 @@ struct VHairline: View {
 /// turns the system one off so a control never shows two.
 struct DSFocusRing: ViewModifier {
     var radius: CGFloat
-    @Environment(\.isFocused) private var focused
+    @Environment(\.dsControlFocused) private var focused
     func body(content: Content) -> some View {
         content.overlay {
             if focused {
@@ -112,13 +112,26 @@ extension View {
     func dsFocusRing(radius: CGFloat = Theme.Radius.s) -> some View { modifier(DSFocusRing(radius: radius)) }
 }
 
+/// Whether the control itself holds keyboard focus. `\.isFocused` is also true
+/// for everything inside a focused container (the preview sheet takes focus for
+/// its arrow keys), which ringed every button in it at once.
+private struct DSControlFocusedKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var dsControlFocused: Bool {
+        get { self[DSControlFocusedKey.self] }
+        set { self[DSControlFocusedKey.self] = newValue }
+    }
+}
+
 /// Hosts a visual ButtonStyle inside a real Button so the face can read
 /// focus, and so keyboard shortcuts, roles and disabled state pass through.
 private struct FocusHostedButton<Face: ButtonStyle>: View {
     let configuration: PrimitiveButtonStyleConfiguration
     let face: Face
+    @FocusState private var focused: Bool
     var body: some View {
-        Button(configuration).buttonStyle(face).focusEffectDisabled()
+        Button(configuration).buttonStyle(face).environment(\.dsControlFocused, focused).focused($focused).focusEffectDisabled()
     }
 }
 

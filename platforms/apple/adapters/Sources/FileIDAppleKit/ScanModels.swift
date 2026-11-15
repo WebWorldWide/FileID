@@ -68,6 +68,18 @@ final class ScanCLIP: @unchecked Sendable {
         return true
     }
 
+    /// Drop the batcher and its encoder. A request already queued keeps the old
+    /// batcher alive until it answers; later calls see no model and return nil.
+    @discardableResult
+    func unload() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let had = batcher != nil
+        batcher = nil
+        loadedPath = nil
+        return had
+    }
+
     func embed(_ image: CGImage) -> [Float]? {
         lock.lock()
         let batcher = batcher
@@ -126,6 +138,17 @@ final class ScanRamPlus: @unchecked Sendable {
         self.vocabulary = vocabulary
         loadedDir = directory
         return true
+    }
+
+    @discardableResult
+    func unload() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let had = batcher != nil
+        batcher = nil
+        vocabulary = nil
+        loadedDir = nil
+        return had
     }
 
     private static func loadVocabulary(_ dir: URL) -> Vocabulary? {
@@ -212,6 +235,15 @@ public func fileid_apple_clip_embed(_ image: UInt64, _ out: UnsafeMutablePointer
           let vector = autoreleasepool(invoking: { ScanCLIP.shared.embed(cgImage) }) else { return false }
     vector.withUnsafeBufferPointer { out.update(from: $0.baseAddress!, count: vector.count) }
     return true
+}
+
+/// Drop the MLX CLIP and RAM++ models, then return MLX's cached buffers. Safe
+/// with nothing loaded and while a description model is resident.
+@_cdecl("fileid_apple_scan_models_unload")
+public func fileid_apple_scan_models_unload() {
+    let freedClip = ScanCLIP.shared.unload()
+    let freedRam = ScanRamPlus.shared.unload()
+    if (freedClip || freedRam), ScanGPU.metallibPresent() { GPURequestBatcher.releaseCache() }
 }
 
 @_cdecl("fileid_apple_ramplus_load")

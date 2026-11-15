@@ -95,6 +95,7 @@ struct ScanAdapterTests {
         let read = try json(request.withCString { fileid_apple_text_read(image, $0) })
         #expect(read["ran"] as? Bool == true)
         #expect((read["text"] as? String)?.contains("OCR 12345") == true)
+        #expect((read["carefulOwed"] as? Bool ?? false) == !fileid_apple_ocr_ready(), "a careful read the cold reader could not run is reported as owed")
         let skipped = try json(#"{"classifyTags":[],"tags":[],"hasCamera":true}"#.withCString { fileid_apple_text_read(image, $0) })
         #expect(skipped["ran"] as? Bool == false)
         #expect(fileid_apple_vision_primary(0) == nil)
@@ -105,6 +106,7 @@ struct ScanAdapterTests {
         let read = try json(pdf.path.withCString { fileid_apple_pdf_ocr($0) })
         #expect(read["opened"] as? Bool == true)
         #expect((read["text"] as? String)?.contains("OCR 12345") == true)
+        #expect((read["carefulOwed"] as? Bool ?? false) == !fileid_apple_ocr_ready())
         let missing = try json("/nonexistent/scan.pdf".withCString { fileid_apple_pdf_ocr($0) })
         #expect(missing["opened"] as? Bool == false)
     }
@@ -141,6 +143,18 @@ struct ScanAdapterTests {
         #expect(image == 0)
     }
 
+    @Test func unloadWithNothingLoadedIsANoOpAndLoadsStillFailAfterIt() throws {
+        let dir = try folder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        fileid_apple_scan_models_unload()
+        fileid_apple_scan_models_unload()
+        #expect(!dir.appendingPathComponent("clip.onnx").path.withCString { fileid_apple_clip_load($0) })
+        #expect(!dir.path.withCString { fileid_apple_ramplus_load($0) })
+        fileid_apple_scan_models_unload()
+        #expect(!ScanCLIP.shared.unload())
+        #expect(!ScanRamPlus.shared.unload())
+    }
+
     @Test func modelsRefuseMissingWeightsAndUnloadedCalls() throws {
         let dir = try folder()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -154,6 +168,49 @@ struct ScanAdapterTests {
         var vector = [Float](repeating: 0, count: 512)
         #expect(!fileid_apple_clip_embed(image, &vector, vector.count))
         #expect("{}".withCString { fileid_apple_ramplus_tag(image, $0, 0) } == nil)
+    }
+
+    private final class ModelProbe: @unchecked Sendable {
+        let lock = NSLock()
+        private(set) var releasedOn: Thread?
+        private(set) var ranOn: Thread?
+        func ran() { lock.lock(); ranOn = Thread.current; lock.unlock() }
+        func released() { lock.lock(); releasedOn = Thread.current; lock.unlock() }
+    }
+
+    private final class ProbedModel: @unchecked Sendable {
+        let probe: ModelProbe
+        init(_ probe: ModelProbe) { self.probe = probe }
+        deinit { probe.released() }
+    }
+
+    private static func probedBatcher(_ probe: ModelProbe) -> GPURequestBatcher {
+        let model = ProbedModel(probe)
+        return GPURequestBatcher(label: "test.batcher", maxBatch: 4, gather: .milliseconds(2), usesMLX: false) { pixels, count in
+            model.probe.ran()
+            return (0..<count).map { [pixels[$0]] }
+        }
+    }
+
+    /// MLX keeps its compile cache per thread, so a compiled model's weights are
+    /// freed only if the model is dropped on the thread that ran it.
+    @Test func requestBatcherAnswersEveryRequestAndDropsItsModelOnItsOwnThread() {
+        let probe = ModelProbe()
+        var answers: [Float?] = []
+        do {
+            let batcher = Self.probedBatcher(probe)
+            let lock = NSLock()
+            var collected = [Float?](repeating: nil, count: 12)
+            DispatchQueue.concurrentPerform(iterations: 12) { i in
+                let answer = batcher.submit([Float(i)])?.first
+                lock.lock(); collected[i] = answer; lock.unlock()
+            }
+            answers = collected
+        }
+        #expect(answers == (0..<12).map { Float($0) })
+        #expect(probe.releasedOn != nil)
+        #expect(probe.releasedOn == probe.ranOn)
+        #expect(probe.releasedOn != Thread.current)
     }
 
     @Test func ramPlusRefineMatchesTheEngine() {

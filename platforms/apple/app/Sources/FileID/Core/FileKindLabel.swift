@@ -25,6 +25,14 @@ enum TagLabel {
 }
 
 enum PathText {
+    /// The last `parts` folder names of a folder path, the part that tells two copies apart
+    /// ("Lisbon 2022/Day 1"), where a middle-truncated full path would cut it off.
+    static func tail(_ folder: String, parts: Int = 2) -> String {
+        let names = folder.split(separator: "/").map(String.init)
+        guard names.count > parts else { return folder == "/" ? "/" : names.joined(separator: "/") }
+        return names.suffix(parts).joined(separator: "/")
+    }
+
     /// A path for display: the home folder reads as "~" so the account name doesn't fill
     /// every row (or every screenshot). The full path stays in tooltips and Finder.
     static func abbreviated(_ path: String) -> String {

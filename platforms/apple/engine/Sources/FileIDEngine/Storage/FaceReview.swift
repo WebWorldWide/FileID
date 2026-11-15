@@ -268,7 +268,7 @@ enum FaceReview {
         }
         for person in received.sorted() {
             try db.execute(sql: """
-                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?) WHERE id=?
+                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=? AND COALESCE(excluded,0)=0) WHERE id=?
                 """, arguments: [person, person])
         }
     }
@@ -423,7 +423,7 @@ enum FaceReview {
             if present { return try refused(requestID, "resolve", samePhotoMessage, db: db) }
             try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE id=?", arguments: [personID, faceID])
             try db.execute(sql: """
-                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+                UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0),
                     representative_face_id=COALESCE(representative_face_id, ?2)
                 WHERE id=?1
                 """, arguments: [personID, faceID])
@@ -608,7 +608,7 @@ enum FaceReview {
                                   acceptedFaceIDs: [], skippedFaceIDs: skipped)
         }
         try db.execute(sql: """
-            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0),
                 representative_face_id=COALESCE(representative_face_id, ?2) WHERE id=?1
             """, arguments: [personID, first])
         let operationID = UUID().uuidString.lowercased()
@@ -649,7 +649,7 @@ enum FaceReview {
     /// still belongs to the person (else the best embedded face).
     static func recount(_ db: GRDB.Database, personID: Int64) throws {
         try db.execute(sql: """
-            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1),
+            UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1 AND COALESCE(excluded,0)=0),
                 representative_face_id=CASE WHEN representative_face_id IS NOT NULL
                     AND EXISTS(SELECT 1 FROM face_prints WHERE id=persons.representative_face_id AND person_id=?1)
                   THEN representative_face_id ELSE COALESCE(
@@ -663,7 +663,7 @@ enum FaceReview {
     private static func recomputeAfterRemoval(_ db: GRDB.Database, personID: Int64, faceID: Int64) throws {
         try db.execute(sql: """
             UPDATE persons
-            SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+            SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0),
                 representative_face_id = CASE WHEN representative_face_id = ?2 THEN COALESCE(
                     (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                      ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),

@@ -49,19 +49,47 @@ enum CatalogTakeAuto {
 
     // MARK: - Suggested groups
 
-    private struct Row1 { let id: Int64; let path: String; let time: Double; let phash: UInt64?; let kind: String }
+    private struct Row1 { let id: Int64; let path: String; let time: Double; let phash: UInt64?; let kind: String; let content: Content? }
+
+    struct Content: Hashable { let hash: Data; let size: Int64 }
+
+    /// The one rule for "the same file" in every take path: stored hash and
+    /// size, only for files small enough to be hashed in full (larger files
+    /// store a sampled hash that two different files can share). Mirrors the
+    /// Rust `content_identity`.
+    static func contentIdentity(hash: Data?, size: Int64?) -> Content? {
+        guard let hash, let size, (0...Int64(ContentHash.fullHashMaxBytes)).contains(size) else { return nil }
+        return Content(hash: hash, size: size)
+    }
+
+    /// Copies of one file are one try: keep the lowest file id of each content
+    /// (stored hash and size, only for files small enough to be hashed in full,
+    /// the identity Duplicates verifies). Mirrors the Rust `distinct_contents`.
+    static func distinctContents<T>(_ members: [T], id: (T) -> Int64, content: (Int64) -> Content?) -> [T] {
+        var seen = Set<Content>()
+        var keep = Set<Int64>()
+        for member in members.sorted(by: { id($0) < id($1) }) {
+            if let c = content(id(member)), !seen.insert(c).inserted { continue }
+            keep.insert(id(member))
+        }
+        return members.filter { keep.contains(id($0)) }
+    }
 
     static func discover(_ db: GRDB.Database, limit: Int) throws -> [CatalogTakeAutoGroup] {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT f.id, f.path_text, f.created_at, f.phash, f.kind FROM files f
+            SELECT f.id, f.path_text, f.created_at, f.phash, f.kind, f.content_hash, f.size_bytes FROM files f
             WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
               AND f.id NOT IN (SELECT derived_id FROM catalog_assets)
               AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
             ORDER BY f.created_at, f.id
             """).map { row -> Row1 in
                 let phash: Int64? = row["phash"]
-                return Row1(id: row["id"], path: row["path_text"], time: row["created_at"], phash: phash.map { UInt64(bitPattern: $0) }, kind: row["kind"])
+                let hash: Data? = row["content_hash"]
+                let size: Int64? = row["size_bytes"]
+                let content = contentIdentity(hash: hash, size: size)
+                return Row1(id: row["id"], path: row["path_text"], time: row["created_at"], phash: phash.map { UInt64(bitPattern: $0) }, kind: row["kind"], content: content)
             }
+        let contents = Dictionary(uniqueKeysWithValues: rows.compactMap { row in row.content.map { (row.id, $0) } })
         var groups: [CatalogTakeAutoGroup] = []
         for (kind, thresholds) in [("image", NearDuplicateGrouping.Thresholds.takes), ("video", .clips)] {
             let subset = rows.filter { $0.kind == kind && $0.time.isFinite }
@@ -70,7 +98,7 @@ enum CatalogTakeAuto {
             let items = subset.map { NearDuplicateGrouping.Item(id: $0.id, path: $0.path, time: $0.time, phash: $0.phash, embedding: embeddings[$0.id]) }
             let aligned = Dictionary(uniqueKeysWithValues: NearDuplicateGrouping.alignSidecarTimes(items).map { ($0.id, $0) })
             for group in NearDuplicateGrouping.groups(items, thresholds: thresholds) {
-                let members = group.members.compactMap { aligned[$0] }
+                let members = distinctContents(group.members.compactMap { aligned[$0] }, id: \.id, content: { contents[$0] })
                 let shots = self.shots(members)
                 guard shots.count >= 2 else { continue }
                 let primaries = shots.compactMap { shot in aligned[shot.primaryFileID]?.embedding }

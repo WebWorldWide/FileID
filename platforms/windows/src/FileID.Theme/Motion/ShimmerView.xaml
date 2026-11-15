@@ -1,15 +1,17 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    ShimmerView — gold→lavender diagonal sweep over a placeholder surface.
-    1.6s linear loop, infinite. Disabled (frozen) under reduced-motion.
+    ShimmerView — gold→lavender diagonal band over a placeholder surface.
+    The band is static on purpose: it does not move. The Mac Library tiles
+    dropped their per-tile shimmer because of scroll cost, and animating
+    GradientStop.Offset would need a dependent animation, which WinUI only
+    runs with EnableDependentAnimation. Hidden when inactive or under
+    reduced-motion.
 
     Used as a loading-state overlay (thumbnail tiles, model installer
     cards, etc.).
 
-    The animation drives the GradientStop offsets across the full width
-    via a Storyboard so it composites on the GPU. The brush itself uses
-    GoldColor + AiColor from Theme.xaml, with a third stop matching the
-    underlying surface to give the band cleanly defined edges.
+    The brush uses GoldColor + AiColor from Theme.xaml, with transparent
+    end stops to give the band cleanly defined edges.
 -->
 <UserControl
     x:Class="FileID.Theme.Motion.ShimmerView"
@@ -26,9 +28,7 @@
                 Background="{ThemeResource SurfaceCardBrush}"
                 CornerRadius="{StaticResource CornerRadiusM}" />
 
-        <!-- The sweeping highlight. We animate Offset on stop[1] and stop[2]
-             from -0.3 → 1.3 / -0.1 → 1.5 to slide a diagonal band across.
-             EndPoint at (1,1) makes it a 45° angle. -->
+        <!-- The fixed highlight band. EndPoint at (1,1) makes it a 45° angle. -->
         <Border x:Name="Highlight"
                 CornerRadius="{StaticResource CornerRadiusM}"
                 IsHitTestVisible="False"
@@ -42,38 +42,5 @@
                 </LinearGradientBrush>
             </Border.Background>
         </Border>
-
-        <Grid.Resources>
-            <!-- Animation duration is loaded from Theme.xaml so a global
-                 retiming changes here propagate everywhere. -->
-            <Storyboard x:Name="ShimmerStoryboard"
-                        RepeatBehavior="Forever">
-                <DoubleAnimation
-                    Storyboard.TargetName="EdgeLeading"
-                    Storyboard.TargetProperty="Offset"
-                    From="-0.5" To="1.0"
-                    Duration="0:0:1.6" />
-                <DoubleAnimation
-                    Storyboard.TargetName="HighlightCore1"
-                    Storyboard.TargetProperty="Offset"
-                    From="-0.3" To="1.2"
-                    Duration="0:0:1.6" />
-                <DoubleAnimation
-                    Storyboard.TargetName="HighlightCore2"
-                    Storyboard.TargetProperty="Offset"
-                    From="-0.1" To="1.4"
-                    Duration="0:0:1.6" />
-                <DoubleAnimation
-                    Storyboard.TargetName="EdgeTrailing"
-                    Storyboard.TargetProperty="Offset"
-                    From="0.1" To="1.6"
-                    Duration="0:0:1.6" />
-                <DoubleAnimation
-                    Storyboard.TargetName="Highlight"
-                    Storyboard.TargetProperty="Opacity"
-                    From="0.6" To="0.6"
-                    Duration="0:0:1.6" />
-            </Storyboard>
-        </Grid.Resources>
     </Grid>
 </UserControl>

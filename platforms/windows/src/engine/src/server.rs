@@ -1076,6 +1076,7 @@ where
 fn bulk_rejection_event(action: &str, file_ids: &[i64], message: &str) -> IpcEvent {
     IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
         ipc::BulkActionResult {
+            command_id: None,
             action: action.into(),
             succeeded: 0,
             failed: file_ids.len().max(1).min(u32::MAX as usize) as u32,
@@ -1137,6 +1138,7 @@ fn idle_deep_analyze_rejection_event(
 type Writer = Arc<parking_lot::Mutex<rusqlite::Connection>>;
 type Flag = Arc<std::sync::atomic::AtomicBool>;
 
+#[derive(Clone)]
 struct Dispatcher {
     sink: Sink,
     shutdown: Arc<Notify>,
@@ -1158,6 +1160,11 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
+    /// This dispatcher with a sink that stamps `id` on every bulk result it sends.
+    fn for_command(&self, id: &str) -> Self {
+        Self { sink: self.sink.for_command(id), ..self.clone() }
+    }
+
     /// Bulk mutation answered by a `BulkActionResult`; `phrase` opens both rejection messages.
     async fn dispatch_mutation<P, F, Fut>(&self, action: &str, ids: &[i64], phrase: &str, payload: P, handler: F)
     where
@@ -1259,6 +1266,33 @@ impl Dispatcher {
 }
 
 async fn handle_line(d: &Dispatcher, line: &str) {
+    // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
+    // but legacy installs or third-party wrappers may push `EF BB BF` on the
+    // first byte of stdin. Trim before the deserializer sees it.
+    let line = line.trim_start_matches('\u{FEFF}').trim_start();
+    if line.is_empty() {
+        return;
+    }
+    let mut cmd: IpcCommand = match serde_json::from_str(line) {
+        Ok(c) => c,
+        Err(err) => {
+            // IPC parity with macOS: emit command_decode_failed so a
+            // slightly-newer app learns its command was dropped. The C#
+            // app classifies the kind as a non-fatal warning, so this
+            // never paints the red toast the old silencing avoided.
+            // serde's error carries position info, not the line content,
+            // so no user path can leak through the message.
+            tracing::warn!(%err, "ipc decode failed");
+            d.sink.send(EngineError::event(
+                "command_decode_failed",
+                "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
+            ))
+            .await;
+            return;
+        }
+    };
+    let scoped = d.for_command(&cmd.id);
+    let d = &scoped;
     let Dispatcher {
         sink,
         shutdown,
@@ -1279,31 +1313,6 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     } = d;
     let db = d.db.as_ref();
     let catalog_index = d.catalog_index.as_ref();
-    // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
-    // but legacy installs or third-party wrappers may push `EF BB BF` on the
-    // first byte of stdin. Trim before the deserializer sees it.
-    let line = line.trim_start_matches('\u{FEFF}').trim_start();
-    if line.is_empty() {
-        return;
-    }
-    let mut cmd: IpcCommand = match serde_json::from_str(line) {
-        Ok(c) => c,
-        Err(err) => {
-            // IPC parity with macOS: emit command_decode_failed so a
-            // slightly-newer app learns its command was dropped. The C#
-            // app classifies the kind as a non-fatal warning, so this
-            // never paints the red toast the old silencing avoided.
-            // serde's error carries position info, not the line content,
-            // so no user path can leak through the message.
-            tracing::warn!(%err, "ipc decode failed");
-            sink.send(EngineError::event(
-                "command_decode_failed",
-                "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
-            ))
-            .await;
-            return;
-        }
-    };
     if let Err(message) = ipc::normalize_and_validate_command(&mut cmd.payload) {
         tracing::warn!(%message, "IPC command rejected by semantic resource limits");
         let terminal = match &cmd.payload {
@@ -1462,6 +1471,17 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let db_c = db.clone();
             let state_c = scan_state.clone();
             let pending_cancel = scan_cancel_requested.clone();
+            let other_heavy_work: Arc<dyn Fn() -> bool + Send + Sync> = {
+                let (jobs, deep, faces, restructure) =
+                    (jobs.clone(), deep_analyze_active.clone(), face_cluster_active.clone(), restructure_active.clone());
+                Arc::new(move || {
+                    jobs.has_active_besides(JobCategory::Scan)
+                        || deep.load(std::sync::atomic::Ordering::Acquire)
+                        || faces.load(std::sync::atomic::Ordering::Acquire)
+                        || restructure.load(std::sync::atomic::Ordering::Acquire)
+                        || commands::prewarm::any_download_in_flight()
+                })
+            };
             spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _track = track;
                 commands::scan::handle_start_scan(
@@ -1471,6 +1491,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     payload,
                     pending_cancel,
                     Some(Box::new(active_guard)),
+                    Some(other_heavy_work),
                 )
                 .await;
             })
@@ -1708,6 +1729,95 @@ pub(crate) mod fuzz_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_dispatcher(db: Option<Writer>, sink: Sink) -> Dispatcher {
+        Dispatcher {
+            sink,
+            shutdown: Arc::new(Notify::new()),
+            command_shutdown_requested: Arc::default(),
+            db,
+            catalog_index: None,
+            db_path: std::path::PathBuf::new(),
+            scan_state: Arc::default(),
+            scan_active: Arc::default(),
+            scan_cancel_requested: Arc::default(),
+            deep_analyze_cancel: Arc::default(),
+            deep_analyze_active: Arc::default(),
+            face_cluster_active: Arc::default(),
+            restructure_cancellations: RestructureCancelRegistry::default(),
+            restructure_active: Arc::default(),
+            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            jobs: job_queue::JobQueue::new(),
+            http_client: crate::downloader::fail_closed_client(),
+        }
+    }
+
+    async fn bulk_results(
+        events: &mut tokio::sync::mpsc::Receiver<IpcEvent>,
+        wanted: usize,
+    ) -> Vec<ipc::BulkActionResult> {
+        let mut found = Vec::new();
+        while found.len() < wanted {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(20), events.recv())
+                .await
+                .expect("a bulk result arrives")
+                .expect("sink open");
+            if let EventPayload::BulkActionResult(result) = event.payload {
+                found.push(result.inner);
+            }
+        }
+        found
+    }
+
+    fn merge_line(id: &str) -> String {
+        format!(r#"{{"id":"{id}","payload":{{"mergeClusters":{{"sourcePersonID":1,"destinationPersonID":2}}}}}}"#)
+    }
+
+    #[tokio::test]
+    async fn a_refused_bulk_command_echoes_its_id() {
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(None, sink);
+        handle_line(&d, &merge_line("cmd-refused")).await;
+        let results = bulk_results(&mut events, 1).await;
+        assert!(results.iter().all(|r| r.command_id.as_deref() == Some("cmd-refused")), "{results:?}");
+        assert!(results.iter().all(|r| r.action == "mergeClusters" && r.succeeded == 0));
+    }
+
+    #[tokio::test]
+    async fn a_bulk_result_from_a_spawned_task_echoes_its_id() {
+        let dir = std::env::temp_dir().join(format!("fileid-command-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+        handle_line(&d, &merge_line("cmd-first")).await;
+        handle_line(&d, &merge_line("cmd-second")).await;
+        let mut results = bulk_results(&mut events, 2).await;
+        results.sort_by(|a, b| a.command_id.cmp(&b.command_id));
+        let ids: Vec<_> = results.iter().map(|r| r.command_id.as_deref()).collect();
+        assert_eq!(ids, [Some("cmd-first"), Some("cmd-second")]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_sink_keeps_a_result_id_it_already_has_and_leaves_other_events_alone() {
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let scoped = sink.for_command("outer");
+        let own = ipc::BulkActionResult {
+            action: "trashFiles".into(),
+            command_id: Some("inner".into()),
+            succeeded: 0,
+            failed: 0,
+            messages: vec![],
+        };
+        scoped.send(IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(own)))).await;
+        scoped.send(EngineError::event("probe", "probe")).await;
+        sink.send(bulk_rejection_event("trashFiles", &[1], "unscoped")).await;
+        let kept = bulk_results(&mut events, 1).await;
+        assert_eq!(kept[0].command_id.as_deref(), Some("inner"));
+        let unscoped = bulk_results(&mut events, 1).await;
+        assert_eq!(unscoped[0].command_id, None);
+    }
 
     #[test]
     fn a_fresh_restructure_operation_is_not_poisoned_by_an_old_cancel() {

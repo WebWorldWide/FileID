@@ -4,6 +4,8 @@ package enum DocumentKeywords {
     private static let maxTags = 8
     private static let minPhraseBytes = 3
     private static let maxPhraseBytes = 60
+    private static let maxPhraseWords = 4
+    private static let phraseJoiners: Set<Character> = [" ", "-", "'", "\u{2019}", "_"]
     private static let stopwords: Set<String> = [
         "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
         "her", "his", "i", "if", "in", "into", "is", "it", "its", "just", "of", "on", "or", "our",
@@ -76,19 +78,36 @@ package enum DocumentKeywords {
         var phrases: [[String]] = []
         var current: [String] = []
         func flush() {
-            guard !current.isEmpty else { return }
-            phrases.append(current)
+            if current.count > maxPhraseWords {
+                // A long unpunctuated run is a sentence fragment, not a noun phrase.
+                phrases.append(contentsOf: current.map { [$0] })
+            } else if !current.isEmpty {
+                phrases.append(current)
+            }
             current.removeAll(keepingCapacity: true)
         }
 
-        for raw in text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-            let word = asciiLowercased(raw)
+        var run = ""
+        func finishWord() {
+            guard !run.isEmpty else { return }
+            let word = asciiLowercased(Substring(run))
+            run = ""
             let startsWithASCIIDigit = word.first.map { $0.isASCII && $0.isNumber } ?? false
-            if word.isEmpty || stopwords.contains(word) || startsWithASCIIDigit {
+            if stopwords.contains(word) || startsWithASCIIDigit || word.unicodeScalars.count == 1 {
                 flush()
             } else {
                 current.append(word)
             }
+        }
+        for character in text + "\n" {
+            if character.isLetter || character.isNumber {
+                run.append(character)
+                continue
+            }
+            finishWord()
+            // Punctuation, a line break or a tab ends the phrase; spaces, hyphens,
+            // apostrophes and underscores stay inside it.
+            if !phraseJoiners.contains(character) { flush() }
         }
         flush()
         return phrases

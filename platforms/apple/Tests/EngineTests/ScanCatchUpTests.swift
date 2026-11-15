@@ -165,6 +165,98 @@ struct ScanCatchUpTests {
         #expect(try await Self.stages(db, path: url.path) == nil)
     }
 
+    @Test("v36 moves failure memory out of scan_catchup and leaves owed rows alone")
+    func v36MovesFailureMemory() throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let q = try DatabaseQueue(path: dir.appendingPathComponent("v35.sqlite").path)
+        try Database.migrator.migrate(q, upTo: "v35_foreign_key_indexes")
+        try q.write { db in
+            try db.execute(sql: """
+                INSERT INTO files (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES
+                  (1,'/a.jpg',1,100,0,'image','jpg',1),(2,'/b.jpg',2,200,0,'image','jpg',0),
+                  (3,'/c.jpg',3,300,0,'image','jpg',1),(4,'/d.jpg',4,400,0,'image','jpg',0);
+                INSERT INTO scan_catchup(file_id,stages,size_bytes,modified_at,vision,face_count,attempts,created_at) VALUES
+                  (1,4,100,10.5,'{"failedBy":"fileid-engine 1.2.3 apple"}',0,3,77.0),
+                  (2,1,200,20.0,'{"k":[],"c":[],"u":false}',2,1,5.0),
+                  (3,4,300,NULL,'not json',0,2,78.0),
+                  (4,6,400,40.0,NULL,0,0,6.0);
+                """)
+        }
+        try Database.migrator.migrate(q)
+        try q.read { db in
+            let failures = try Row.fetchAll(db, sql: "SELECT * FROM scan_failures ORDER BY file_id")
+            #expect(failures.count == 2)
+            // One typed value per check: a chain of untyped row subscripts in one
+            // #expect is more than the CI compiler type-checks in its time limit.
+            let first = failures[0], second = failures[1]
+            let firstID: Int64 = first["file_id"], firstSize: Int64 = first["size_bytes"]
+            let firstModified: Double = first["modified_at"], firstFailedAt: Double = first["failed_at"]
+            let firstBuild: String = first["engine_build"], firstAttempts: Int = first["attempts"]
+            #expect(firstID == 1)
+            #expect(firstSize == 100)
+            #expect(firstModified == 10.5)
+            #expect(firstBuild == "fileid-engine 1.2.3 apple")
+            #expect(firstAttempts == 3)
+            #expect(firstFailedAt == 77.0)
+            let secondID: Int64 = second["file_id"], secondBuild: String = second["engine_build"]
+            let secondAttempts: Int = second["attempts"]
+            #expect(secondID == 3)
+            #expect(secondBuild == "not json")
+            #expect(secondAttempts == 2)
+            let owed = try Row.fetchAll(db, sql: "SELECT file_id, stages FROM scan_catchup ORDER BY file_id")
+            #expect(owed.map { [$0["file_id"] as Int, $0["stages"] as Int] } == [[2, 1], [4, 6]])
+        }
+        try q.close()
+    }
+
+    @Test("a full analysis forgets a remembered failure")
+    func analysisClearsFailureMemory() async throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try Database(at: dir.appendingPathComponent("test.sqlite"))
+        let url = dir.appendingPathComponent("a.jpg")
+        try Self.writeImage(url, seed: 1)
+        var file = try Self.owingTags(url)
+        file.catchUp = nil
+        await Self.store([file], in: db)
+        try await db.pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO scan_failures(file_id,size_bytes,modified_at,engine_build,attempts,failed_at)
+                SELECT id,size_bytes,modified_at,'fileid-engine 1.0 apple',3,0 FROM files
+                """)
+        }
+        await Self.store([file], in: db, force: true)
+        let left = try await db.pool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM scan_failures") }
+        #expect(left == 0)
+    }
+
+    @Test("the rename-heal lookup searches by index, not by scanning files")
+    func healLookupUsesIndexes() throws {
+        let dir = try Self.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let q = try DatabaseQueue(path: dir.appendingPathComponent("heal.sqlite").path)
+        try Database.migrator.migrate(q)
+        try q.write { db in
+            try db.execute(sql: """
+                WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 20000)
+                INSERT INTO files (path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref,content_hash)
+                SELECT '/p/'||i||'.jpg', i, i, 0, 'image', 'jpg', CASE WHEN i % 10 = 0 THEN NULL ELSE i END, randomblob(32) FROM n;
+                ANALYZE;
+                """)
+            let plan = try Row.fetchAll(db, sql: """
+                EXPLAIN QUERY PLAN SELECT id, path_text,
+                       (?2 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4) AS by_ref
+                FROM files WHERE path_text != ?1
+                  AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
+                       OR (content_hash IS NOT NULL AND content_hash = ?3))
+                ORDER BY by_ref DESC LIMIT 32
+                """, arguments: ["/x", 5, Data(repeating: 0, count: 32), 5]).map { $0["detail"] as String }.joined(separator: " | ")
+            #expect(plan.contains("USING INDEX") && !plan.contains("SCAN files"), Comment(rawValue: plan))
+        }
+        try q.close()
+    }
+
     @Test("a copy made from an identical file inherits what the original is owed")
     func twinInheritsMarker() throws {
         var tagged = TaggedFile(

@@ -559,7 +559,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let sources = unique[1..].to_vec();
             let hits = person_files(conn, &sources)?;
             let files: i64 = conn.query_row(
-                "SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?1))",
+                "SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?1)) AND COALESCE(excluded,0)=0",
                 [serde_json::to_string(&sources)?],
                 |row| row.get(0),
             )?;
@@ -588,7 +588,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
 
 fn person_files(conn: &Connection, people: &[i64]) -> Result<Vec<CatalogHit>> {
     let mut statement = conn.prepare(
-        "SELECT DISTINCT f.id,f.path_text,f.kind FROM face_prints p JOIN files f ON f.id=p.file_id WHERE p.person_id IN (SELECT value FROM json_each(?1)) AND f.failed=0 ORDER BY f.id DESC LIMIT ?2",
+        "SELECT DISTINCT f.id,f.path_text,f.kind FROM face_prints p JOIN files f ON f.id=p.file_id WHERE p.person_id IN (SELECT value FROM json_each(?1)) AND COALESCE(p.excluded,0)=0 AND f.failed=0 ORDER BY f.id DESC LIMIT ?2",
     )?;
     let rows = statement.query_map(params![serde_json::to_string(people)?, SHOWN as i64], |row| {
         Ok(CatalogHit { file_id: row.get(0)?, path: row.get(1)?, kind: row.get(2)?, text: String::new(), evidence_id: None, start_seconds: None, page: None, selection_match: None })
@@ -874,5 +874,27 @@ mod tests {
         let merge = super::super::chat_intent::parse_intent("merge Kyle Smith into Kyle").unwrap();
         let merged = resolve(&conn, &merge, &none).unwrap();
         assert_eq!(merged.message, "More than one person is named Kyle. Merge them in People.");
+    }
+
+    #[test]
+    fn merge_counts_only_files_with_active_faces() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,first_name,created_at) VALUES(1,'Ann','Ann',0),(2,'Ben','Ben',0),(3,'Cy','Cy',0);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(10,'/a.jpg',10,1,0,'image','jpg'),(11,'/b.jpg',11,1,0,'image','jpg'),(12,'/c.jpg',12,1,0,'image','jpg');
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,excluded) VALUES
+               (1,10,2,X'00','[0,0,1,1]',0),(2,11,2,X'00','[0,0,1,1]',1),(3,12,3,X'00','[0,0,1,1]',1),(4,10,1,X'00','[0,0,1,1]',0);",
+        )
+        .unwrap();
+        let (people, events) = super::super::catalog_retrieval::known(&conn).unwrap();
+        let chat = ChatContext { person_ids: Some(vec![1, 2, 3]), ..ChatContext::default() };
+        let selected = context(Some(&chat), &people, &events, "merge these people");
+        let intent = super::super::chat_intent::parse_intent("merge these people").unwrap();
+        let merged = resolve(&conn, &intent, &selected).unwrap();
+        let proposed = &merged.actions[0];
+        assert_eq!(proposed.kind, "mergePeople");
+        assert_eq!(proposed.file_count, Some(1));
+        assert!(proposed.detail.contains("(1 file)"), "{}", proposed.detail);
+        assert_eq!(merged.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![10]);
     }
 }

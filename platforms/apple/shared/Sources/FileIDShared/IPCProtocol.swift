@@ -1173,12 +1173,16 @@ public struct BulkActionResult: Codable, Sendable {
     public let succeeded: Int
     public let failed: Int
     public let messages: [BulkActionItem]
+    /// Schema 1.28.0. The id of the command this result answers; nil from an
+    /// engine that does not echo it.
+    public var commandID: String?
 
-    public init(action: String, succeeded: Int, failed: Int, messages: [BulkActionItem]) {
+    public init(action: String, succeeded: Int, failed: Int, messages: [BulkActionItem], commandID: String? = nil) {
         self.action = action
         self.succeeded = succeeded
         self.failed = failed
         self.messages = messages
+        self.commandID = commandID
     }
 }
 

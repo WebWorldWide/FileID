@@ -91,4 +91,35 @@ struct VideoFrameWorkerTests {
         } catch is CancellationError {}
         #expect(!process.isRunning)
     }
+
+    /// A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and 518318480 ns.
+    /// Foundation's Date gives ...256674; the Rust engine and Python store ...256673.
+    @Test func sourceRevisionToleratesTheOtherEnginesRoundingOfTheSameModifiedTime() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDRevision-\(UUID().uuidString).bin")
+        try Data("clip".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let stamp = timespec(tv_sec: 1_794_731_299, tv_nsec: 518_318_480)
+        var times = [stamp, stamp]
+        #expect(utimensat(AT_FDCWD, file.path, &times, 0) == 0)
+        let onDisk = try VideoFrameWorker.currentRevision(file)
+        let swiftRevision = "4:4745314456662256674"
+        let rustRevision = "4:4745314456662256673"
+        #expect(onDisk == swiftRevision)
+        #expect(onDisk != rustRevision)
+        #expect(VideoFrameMetadata.sameSource(onDisk, rustRevision))
+        #expect(VideoFrameMetadata.sameSource(rustRevision, onDisk))
+        #expect(VideoFrameMetadata.sameSource(onDisk, onDisk))
+    }
+
+    @Test func sourceRevisionStillRejectsARealChange() {
+        let revision = "4:4745314456662256673"
+        let moved = Double(bitPattern: 4_745_314_456_662_256_673) + 0.001
+        let later = String(moved.bitPattern)
+        #expect(!VideoFrameMetadata.sameSource(revision, "5:4745314456662256673"))
+        #expect(!VideoFrameMetadata.sameSource(revision, "4:" + later))
+        #expect(!VideoFrameMetadata.sameSource(revision, "4:unknown"))
+        #expect(!VideoFrameMetadata.sameSource("4:unknown", revision))
+        #expect(VideoFrameMetadata.sameSource("4:unknown", "4:unknown"))
+        #expect(!VideoFrameMetadata.sameSource(revision, "garbage"))
+    }
 }

@@ -84,6 +84,12 @@ impl JobQueue {
         Some(next)
     }
 
+    /// True when a job of any category other than `category` is running or queued.
+    pub fn has_active_besides(&self, category: JobCategory) -> bool {
+        let inner = self.inner.lock();
+        inner.running.iter().chain(inner.pending.iter()).any(|job| job.category != category)
+    }
+
     /// Terminal bookkeeping for a job wherever it sits: a running job
     /// is completed and the next pending one promoted; a still-pending
     /// job is dropped. RAII guards call this on Drop so a panicking
