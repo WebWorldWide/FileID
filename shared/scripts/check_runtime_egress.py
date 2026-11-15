@@ -130,7 +130,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/native_process.rs": "3ad2cf599df1884712dd6630c53347ce219ecad0c6c68fe5636d472cc2f7e98d",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "a97815ccbeadd4f638cfb07ed11e2334210531904265384c1022f961b006f0bf",
   "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
-  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "dbc4fdce6ad469aca0ff5e18e2dfcb48dbc946667c92f36146ec734abe2a8d12",
+  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "61224908a917f143a8113c1fe8c1b6ac127e5d752737105d4cf69bc3b28d16a3",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "dee3eb62b6cb24b4fe4871d364e9e1c27b4f784d88ef60f0d3d6ac3f68ebe2d7",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "7376ca71ed759b10938d9efda6d90fc6753357275367e379ba93b9c176b830fe",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "920827e436849269069a2e5021d602f7478511c6bdcbccb8f30ed7b684067823",

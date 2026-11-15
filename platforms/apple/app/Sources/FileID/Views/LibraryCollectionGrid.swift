@@ -410,6 +410,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let unreadableGlyph = NSImageView()
     private let kindGlyph = NSImageView()
     private var findsSimilar = false
+    private var topLeftText = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
     private var hovering = false { didSet { updateRing() } }
@@ -477,7 +478,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.commit()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let metrics = TileTextMetrics(textSize)
-        badge.frame = CGRect(x: 6, y: b.height - 6 - metrics.badge, width: badge.textWidth + 12, height: metrics.badge)
+        badge.frame = CGRect(x: 6, y: topLeftText ? b.height - thumbHeight + 6 : b.height - 6 - metrics.badge, width: badge.textWidth + 12, height: metrics.badge)
         offlineBadge.frame = CGRect(x: badge.frame.maxX + 4, y: badge.frame.minY, width: offlineBadge.textWidth + 12, height: metrics.badge)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
@@ -512,6 +513,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         badge.text = row.failed ? "Unreadable" : FileKindLabel.title(row.kind)
         let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         name.text = row.url.lastPathComponent
+        topLeftText = PageThumbnail.showsTopLeft(kind: row.kind, hasText: row.hasText, tags: tags, fileName: row.url.lastPathComponent)
         findsSimilar = !row.failed && (row.kind == "image" || row.kind == "video")
         textGlyph.isHidden = !row.hasText
         unreadableGlyph.isHidden = !row.failed
@@ -550,7 +552,8 @@ final class LibraryTileItem: NSCollectionViewItem {
             guard let self, !Task.isCancelled, self.rowID == id else { return }
             let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
             let isPage = row.kind == "doc" || row.kind == "pdf"
-            let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) } : nil
+            let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) }
+                : (self.topLeftText ? cgImage.flatMap { PageThumbnail.topLeftCrop(width: $0.width, height: $0.height) } : nil)
             let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
             CATransaction.begin(); CATransaction.setDisableActions(true)
             self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))

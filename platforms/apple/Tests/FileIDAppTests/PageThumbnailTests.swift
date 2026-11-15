@@ -31,3 +31,27 @@ import CoreGraphics
         #expect(!PageThumbnail.isBlank(page(width: 314, height: 512, markTop: true), crop: crop))
     }
 }
+
+@Suite struct QuickLookRequestTests {
+    @Test func requestsStayUnderQuickLooksLimit() {
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 2) == 1536)
+        #expect(ThumbnailService.quickLookSide(size: 512, scale: 2) == 512)
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 1) == 2048)
+        #expect(ThumbnailService.quickLookSide(size: 2048, scale: 0) == 2048)
+    }
+}
+
+@Suite struct TopLeftCropTests {
+    @Test func wideScreenshotsKeepTheirLeftEdge() throws {
+        let crop = try #require(PageThumbnail.topLeftCrop(width: 1440, height: 900))
+        #expect(crop.minX == 0 && crop.height == 1 && crop.width < 1)
+        #expect(PageThumbnail.topLeftCrop(width: 800, height: 600) == nil)
+    }
+
+    @Test func onlyScreenshotsAndDocumentImagesQualify() {
+        #expect(PageThumbnail.showsTopLeft(kind: "image", hasText: false, tags: [], fileName: "Screenshot 2025-01-10 at 10.20.41.png"))
+        #expect(PageThumbnail.showsTopLeft(kind: "image", hasText: true, tags: ["Document", "Page"], fileName: "scan.png"))
+        #expect(!PageThumbnail.showsTopLeft(kind: "image", hasText: true, tags: ["Sky"], fileName: "IMG_1.jpg"))
+        #expect(!PageThumbnail.showsTopLeft(kind: "pdf", hasText: true, tags: ["Document"], fileName: "a.pdf"))
+    }
+}

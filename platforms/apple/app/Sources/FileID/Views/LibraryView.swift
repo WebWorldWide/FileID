@@ -56,6 +56,9 @@ struct LibraryView: View {
     @State private var similarSeed: FileRow? = nil
     @State private var visualSearchPending = false
     @State private var visualSummary: String?
+    @State private var hiddenWeaker = 0
+    @State private var showWeaker = false
+    @State private var shownQuery = ""
     @State private var searchProblem: SearchProblem?
     @State private var clipModelOnDisk = false
     /// Bumped whenever `rows` or `tagsByFile` is replaced, so the grid can tell
@@ -648,6 +651,14 @@ struct LibraryView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
 
+                if hiddenWeaker > 0, !rows.isEmpty {
+                    Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
+                        .buttonStyle(.plain)
+                        .font(Theme.Font.body(11.5, .semibold))
+                        .foregroundStyle(Theme.gold)
+                        .fixedSize()
+                }
+
                 Spacer(minLength: 8)
 
             // multi-select mode toggle. Tiles render with check-
@@ -913,11 +924,26 @@ struct LibraryView: View {
                                primaryAction: (label: "Choose a folder", run: pickFolder))
             }
         } else {
-            EmptyStateView(
-                icon: "magnifyingglass",
-                title: "No matches",
-                message: "Nothing matches this filter. Try other words, or choose All to see every file."
-            )
+            if hiddenWeaker > 0 {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches for \u{201C}\(shownQuery)\u{201D}",
+                    message: "Nothing has that in its name, tags or text, and no picture matches it well. \(hiddenWeaker) weaker look-alikes were set aside.",
+                    primaryAction: (label: "Show \(hiddenWeaker) weaker matches", run: { showWeaker = true; reload() })
+                )
+            } else if !shownQuery.isEmpty, visualSummary == "No matches" {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches for \u{201C}\(shownQuery)\u{201D}",
+                    message: "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
+                )
+            } else {
+                EmptyStateView(
+                    icon: "magnifyingglass",
+                    title: "No matches",
+                    message: "Nothing matches this filter. Try other words, or choose All to see every file."
+                )
+            }
         }
     }
 
@@ -952,6 +978,7 @@ struct LibraryView: View {
         // overwrite a newer one's results.
         let seed = similarSeed
         let query = searchText
+        if query.trimmingCharacters(in: .whitespacesAndNewlines) != shownQuery { showWeaker = false }
         let kind = kindFilter
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
@@ -966,6 +993,7 @@ struct LibraryView: View {
             var newRows: [FileRow]
             var pageable = false
             var summary: String?
+            var hidden = 0
             var problem: SearchProblem?
             if let seed {
                 visualSearchPending = true
@@ -990,9 +1018,22 @@ struct LibraryView: View {
                         let response = await catalogSearch(query: trimmed, vector: vector)
                         guard !Task.isCancelled else { return }
                         if let response, response.status == "ok" {
-                            newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            #if DEBUG
+                            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: search reply status=\(response.status) hits=\(response.hits.count) message=\(response.message ?? "nil")\n".utf8)) }
+                            #endif
+                            let keywordRows = newRows
+                            let decision = LibrarySearchOutcome.decide(message: response.message, keywordCount: keywordRows.count, showWeaker: showWeaker)
+                            let engineRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            switch decision.source {
+                            case .engine:
+                                let known = Set(engineRows.map(\.id))
+                                newRows = engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : [])
+                            case .keyword:
+                                newRows = keywordRows
+                            }
                             pageable = false
-                            summary = "Matches by name, text and what's in the picture"
+                            summary = decision.label
+                            hidden = decision.hiddenWeaker
                         } else {
                             problem = Self.searchProblem(response, similar: false)
                         }
@@ -1013,6 +1054,8 @@ struct LibraryView: View {
             rowsEpoch &+= 1
             canLoadMore = pageable
             visualSummary = summary
+            hiddenWeaker = hidden
+            shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
             listedQuery = seed == nil ? (query, kind) : nil
         }

@@ -8,7 +8,7 @@
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
-//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom];...   extra captures after the pages
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>];...   extra captures after the pages
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -21,6 +21,7 @@ struct SelfShotView: Equatable {
     var kind: String?
     var query: String?
     var scrollToBottom = false
+    var scrollOffset: Double?
 
     /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
     static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
@@ -39,7 +40,7 @@ struct SelfShotView: Equatable {
                     switch kv[0] {
                     case "kind": view.kind = value
                     case "query": view.query = value.isEmpty ? nil : value
-                    case "scroll": view.scrollToBottom = value == "bottom"
+                    case "scroll": view.scrollToBottom = value == "bottom"; view.scrollOffset = Double(value)
                     default: break
                     }
                 }
@@ -145,15 +146,15 @@ enum SelfShot {
                 if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 navigate(view.page)
                 try? await Task.sleep(for: .seconds(plan.settle))
-                if view.scrollToBottom { scrollContentToBottom(); try? await Task.sleep(for: .seconds(0.6)) }
+                if view.scrollToBottom || view.scrollOffset != nil { scrollContent(to: view.scrollOffset); try? await Task.sleep(for: .seconds(0.6)) }
                 write(name: view.name, plan: plan)
             }
             NSApp.terminate(nil)
         }
     }
 
-    /// Scrolls the tallest scroll view in the content area (right of the sidebar) to its end.
-    private static func scrollContentToBottom() {
+    /// Scrolls the largest visible scroll view in the content area (right of the sidebar) to `offset` points, or to its end.
+    private static func scrollContent(to offset: Double?) {
         guard let root = window()?.contentView else { return }
         var best: NSScrollView?
         func visit(_ view: NSView) {
@@ -167,7 +168,8 @@ enum SelfShot {
             FileHandle.standardError.write(Data("self-shot: no scroll view to scroll\n".utf8)); return
         }
         FileHandle.standardError.write(Data("self-shot: scrolling \(Int(document.frame.height)) tall document in \(Int(scroll.bounds.height)) pt view\n".utf8))
-        let y = document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0
+        let end = max(0, document.frame.height - scroll.contentView.bounds.height)
+        let y = document.isFlipped ? min(end, offset ?? end) : max(0, end - (offset ?? end))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
     }
