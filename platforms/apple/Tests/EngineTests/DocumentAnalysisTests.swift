@@ -36,6 +36,29 @@ struct DocumentKeywordTests {
         #expect(tags.allSatisfy { !$0.contains("02t09") })
     }
 
+    @Test("punctuation and line breaks end a phrase")
+    func punctuationEndsPhrases() {
+        let sentence = DocumentKeywords.extract("Bicycle repair checklist: brake pads, chain oil, tyre pressure.").map(\.label)
+        #expect(Set(sentence) == ["bicycle repair checklist", "brake pads", "chain oil", "tyre pressure"])
+        let lines = DocumentKeywords.extract("Receipts\nMeeting notes\nQuarterly budget review\nTravel plans").map(\.label)
+        #expect(lines == ["quarterly budget review", "meeting notes", "travel plans", "receipts"])
+    }
+
+    @Test("runs over four words become single keywords")
+    func longRunsAreSplit() {
+        let tags = DocumentKeywords.extract("recipe sourdough bread flour water salt starter bake").map(\.label)
+        #expect(tags.count == 8)
+        #expect(tags.allSatisfy { !$0.contains(" ") })
+        #expect(DocumentKeywords.extract("boarding pass flight lisbon").first?.label == "boarding pass flight lisbon")
+    }
+
+    @Test("one-letter tokens are not keywords")
+    func oneLetterTokens() {
+        let labels = DocumentKeywords.extract("Luis's budget, vitamin C intake").map(\.label)
+        #expect(labels.allSatisfy { $0.split(separator: " ").allSatisfy { $0.unicodeScalars.count > 1 } })
+        #expect(labels.contains("luis") && labels.contains("budget"))
+    }
+
     @Test("grounded filenames use only extracted words")
     func groundedFilename() {
         let text = "Quarterly revenue forecast for regional sales leaders and finance teams."

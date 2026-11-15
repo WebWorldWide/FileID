@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 const MAX_TAGS: usize = 8;
 const MIN_PHRASE_BYTES: usize = 3;
 const MAX_PHRASE_BYTES: usize = 60;
+const MAX_PHRASE_WORDS: usize = 4;
 
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
@@ -120,27 +121,39 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     let mut phrases = Vec::new();
     let mut cur: Vec<String> = Vec::new();
     let flush = |cur: &mut Vec<String>, dst: &mut Vec<Vec<String>>| {
-        if !cur.is_empty() {
+        if cur.len() > MAX_PHRASE_WORDS {
+            // A long unpunctuated run is a sentence fragment, not a noun phrase.
+            dst.extend(cur.drain(..).map(|word| vec![word]));
+        } else if !cur.is_empty() {
             dst.push(std::mem::take(cur));
         }
     };
-    for raw in text.split(|c: char| !c.is_alphanumeric()) {
-        let w = raw.trim().to_ascii_lowercase();
-        // Runs of separators ("checklist: brake") are one gap, not a phrase
-        // boundary, as in the Swift engine's `DocumentKeywords`.
-        if w.is_empty() {
+    let mut word = String::new();
+    for c in text.chars().chain(std::iter::once('\n')) {
+        if c.is_alphanumeric() {
+            word.push(c);
             continue;
         }
-        if stops.contains(w.as_str()) || starts_with_digit(&w) {
+        if !word.is_empty() {
+            let w = word.to_ascii_lowercase();
+            word.clear();
             // A digit-starting token (year, ID, ISO-8601 chunk like "02t09")
             // is never a useful keyword on its own AND, left in the stream,
             // chains adjacent digit-tokens into noise tags like
             // "2026 03 02t09 01 02 06 00" — observed on a syncthing folder
-            // marker .txt. Phrase boundary, same as a stopword.
-            flush(&mut cur, &mut phrases);
-            continue;
+            // marker .txt. A one-letter token ("s" of a possessive) is no keyword either.
+            // All of these are phrase boundaries, like a stopword.
+            if stops.contains(w.as_str()) || starts_with_digit(&w) || w.chars().count() == 1 {
+                flush(&mut cur, &mut phrases);
+            } else {
+                cur.push(w);
+            }
         }
-        cur.push(w);
+        // Punctuation, a line break or a tab ends the phrase; spaces, hyphens,
+        // apostrophes and underscores stay inside it.
+        if !matches!(c, ' ' | '-' | '\'' | '\u{2019}' | '_') {
+            flush(&mut cur, &mut phrases);
+        }
     }
     flush(&mut cur, &mut phrases);
     phrases
@@ -155,10 +168,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn punctuation_runs_do_not_split_phrases() {
+    fn punctuation_and_line_breaks_end_phrases() {
         let tags = extract("Bicycle repair checklist: brake pads, chain oil, tyre pressure.");
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].0, "bicycle repair checklist brake pads chain oil tyre pressure");
+        let labels: Vec<&str> = tags.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(labels.len(), 4);
+        for expected in ["bicycle repair checklist", "brake pads", "chain oil", "tyre pressure"] {
+            assert!(labels.contains(&expected), "{expected:?} missing from {labels:?}");
+        }
+        let lines = extract("Receipts\nMeeting notes\nQuarterly budget review\nTravel plans");
+        let labels: Vec<&str> = lines.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(labels, vec!["quarterly budget review", "meeting notes", "travel plans", "receipts"]);
+    }
+
+    #[test]
+    fn runs_over_four_words_become_single_keywords() {
+        let tags = extract("recipe sourdough bread flour water salt starter bake");
+        assert!(tags.iter().all(|t| !t.0.contains(' ')), "{tags:?}");
+        assert_eq!(tags.len(), 8);
+        let kept = extract("boarding pass flight lisbon");
+        assert_eq!(kept[0].0, "boarding pass flight lisbon");
+    }
+
+    #[test]
+    fn one_letter_tokens_are_not_keywords() {
+        let labels: Vec<String> = extract("Luis's budget, vitamin C intake").into_iter().map(|t| t.0).collect();
+        assert!(labels.iter().all(|l| l.split(' ').all(|w| w.chars().count() > 1)), "{labels:?}");
+        assert!(labels.contains(&"luis".to_string()) && labels.contains(&"budget".to_string()), "{labels:?}");
     }
 
     #[test]
