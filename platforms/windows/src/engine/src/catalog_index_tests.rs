@@ -982,3 +982,86 @@ fn change_files_round_trip_and_reject_damage() {
     assert!(snapshot::read_delta(&repeated[..], repeated.len() as u64, &clip_space::digest(&repeated), &shape).is_err());
     assert!(snapshot::read_delta(&bytes[..], written, &"0".repeat(64), &shape).is_err());
 }
+
+#[test]
+fn a_small_catalog_is_ranked_exactly_before_its_graph_is_built() {
+    let (_directory, index) = fixture();
+    index.exact_max.store(EXACT_SEARCH_MAX, Ordering::Relaxed);
+    assert!(index.state.lock().cache.is_none());
+    let first = index.search(&seed()).unwrap();
+    assert_eq!(first.status, "ok");
+    assert_eq!(first.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![2, 3], "failed and other-model rows stay out");
+    wait(&index);
+    assert_eq!(state(&index), "completed", "the graph is built behind the first answer");
+    index.state.lock().cache = None;
+    let hybrid = request(
+        serde_json::json!({"requestID":"hybrid","action":"search","searchMode":"hybrid","query":"birthday","queryVector":vector(0),"embeddingModel":clip_space::model_id()}),
+    );
+    let response = index.search(&hybrid).unwrap();
+    assert_eq!(response.status, "ok");
+    assert!(!response.message.as_deref().unwrap().contains("Keyword results only"), "{:?}", response.message);
+    assert_eq!(response.hits[0].file_id, 2);
+    assert!(response.hits.iter().any(|hit| hit.file_id == 1 || hit.file_id == 3));
+    wait(&index);
+    assert_eq!(state(&index), "completed");
+    let after = index.search(&seed()).unwrap();
+    assert_eq!(after.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![2, 3]);
+    index.shutdown();
+}
+
+#[test]
+fn a_catalog_past_the_exact_limit_still_answers_with_keyword_rows_while_the_graph_builds() {
+    let (_directory, index) = fixture();
+    index.exact_max.store(2, Ordering::Relaxed);
+    let hybrid = request(
+        serde_json::json!({"requestID":"hybrid","action":"search","searchMode":"hybrid","query":"birthday","queryVector":vector(0),"embeddingModel":clip_space::model_id()}),
+    );
+    let response = index.search(&hybrid).unwrap();
+    assert!(response.message.as_deref().unwrap().contains("Keyword results only"));
+    assert_eq!(index.search(&seed()).unwrap().status, "error");
+    index.shutdown();
+}
+
+/// Index build and exact-scan times on a generated catalog:
+/// `cargo test --release exact_scan_and_build_times -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing run on generated vectors"]
+fn exact_scan_and_build_times() {
+    for count in [454usize, 5_000, 20_000, 50_000] {
+        let (_directory, index) = fixture();
+        index.exact_max.store(EXACT_SEARCH_MAX * 10, Ordering::Relaxed);
+        {
+            let mut conn = index.writer.lock();
+            let tx = conn.transaction().unwrap();
+            for id in 100..100 + count as i64 {
+                tx.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,vlm_description,failed) VALUES(?1,?2,?1,100,10,0,'image','png','generated',0)", params![id, format!("/internal/{id}.png")]).unwrap();
+                let mut state = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                let mut vector: Vec<f32> = (0..512)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        (state % 2000) as f32 / 1000.0 - 1.0
+                    })
+                    .collect();
+                normalize(&mut vector);
+                let blob = vector.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+                tx.execute("INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, blob, clip_space::model_id()]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let hybrid = request(
+            serde_json::json!({"requestID":"hybrid","action":"search","searchMode":"hybrid","query":"generated","queryVector":vector(0),"embeddingModel":clip_space::model_id()}),
+        );
+        let started = std::time::Instant::now();
+        let cold = index.search(&hybrid).unwrap();
+        let exact = started.elapsed();
+        wait(&index);
+        let built = started.elapsed();
+        let started = std::time::Instant::now();
+        let warm = index.search(&hybrid).unwrap();
+        let graph = started.elapsed();
+        println!("{count} vectors: first search (exact) {exact:?}, build finished {built:?} after it started, search on the graph {graph:?}; hits {} / {}", cold.hits.len(), warm.hits.len());
+        index.shutdown();
+    }
+}

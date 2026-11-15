@@ -436,11 +436,11 @@ impl CatalogIndex {
                     response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
                     return Ok(Judged { response, weak: None });
                 };
-                if mode == "semantic" {
-                    _visual_lease = Some(self.scheduler.reserve(Demand { memory_mb: 32, cpu: 1, io: 1 }, Priority::Interactive, || false)?);
-                }
-                // The graph is built in the background for the next search; a
-                // paused or failed index job does not stop this answer.
+                // The graph is built in the background for the next search. The
+                // search's own lease goes first: a background build is not
+                // admitted beside it. A paused or failed index job does not
+                // stop this answer.
+                drop(retrieval_lease);
                 let _ = self.prepare();
                 exact
             }
