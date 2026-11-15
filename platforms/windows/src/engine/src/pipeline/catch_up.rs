@@ -382,10 +382,11 @@ fn scope(root: Option<&std::path::Path>) -> Option<(String, String)> {
     Some((lo, hi))
 }
 
-/// `(tags owed, careful reads owed)` under `root` (everywhere when `None`).
+/// `(tags owed, careful reads owed)` under `root` (everywhere when `None`). A row hidden as "no longer present" owes
+/// nothing: [`next_chunk`] never visits it, so counting it would leave the totals above zero for good.
 pub fn owed(conn: &rusqlite::Connection, root: Option<&std::path::Path>) -> (u64, u64) {
     let base = "SELECT COALESCE(SUM((c.stages & 1) != 0), 0), COALESCE(SUM((c.stages & 2) != 0), 0) \
-                FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE 1 = 1";
+                FROM scan_catchup c JOIN files f ON f.id = c.file_id WHERE f.failed = 0";
     let row = |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64));
     match scope(root) {
         Some((lo, hi)) => conn.query_row(
@@ -1209,6 +1210,24 @@ mod tests {
         let warm = |_: &[String]| TextRead { ran: true, text: Some("careful".into()), handwritten: false, careful_owed: false };
         let update = classifier_update(&Pending { stages: TAGS_OWED | CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, ..file }, &context, Vec::new(), Vec::new(), warm);
         assert_eq!(update.stages, TEXT_READ_AT_SCAN);
+    }
+
+    #[tokio::test]
+    async fn a_hidden_row_owes_nothing() {
+        let library = Library::new("hidden");
+        library.write(vec![owing(&library, "kept.png"), owing(&library, "gone.png")]).await;
+        assert_eq!(owed(&library.conn.lock(), None), (2, 0));
+        library
+            .conn
+            .lock()
+            .execute("UPDATE files SET failed = 1, error_message = 'File is no longer present under the completed scan root.' WHERE path_text LIKE '%gone.png'", [])
+            .unwrap();
+        assert_eq!(owed(&library.conn.lock(), None), (1, 0));
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (1, 0));
+        let analyzer = Counting { calls: AtomicUsize::new(0), fail: false };
+        let summary = run(&library.conn, Some(&library.dir), &analyzer, &|| false, &|| false, &|_| {});
+        assert_eq!((summary.owed_tags, summary.tagged), (1, 1));
+        assert_eq!(owed(&library.conn.lock(), None), (0, 0));
     }
 
     struct Counting {

@@ -1194,21 +1194,32 @@ class Soak:
             shutil.copy2(self.p(r), os.path.join(hl, f"{i}.jpg"))
         mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "heal-engine.log"), self.trash, self.models, self.a.no_trash, "heal")
         v = mk()
-        crash_seen = False
         try:
             k, res = v.scan(hl)
-            v.drain()
-            v.send("startScan", {"rootPath": hl, "rescan": True})
-            # The crash must leave a 'running' scan_sessions row: that row is what makes the next start an unclean one.
-            # Killing at the first phaseChanged raced the row's insert (it was absent in some runs), so poll for it.
-            end = time.time() + 30
-            while time.time() < end and v.alive() and not crash_seen:
-                with ro(v.db) as c:
-                    crash_seen = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0] > 0
-                time.sleep(0.01)
-            v.kill()
         finally:
-            v.raw.close()
+            v.close()
+        # The crash must leave a 'running' scan_sessions row: that row is what makes the next start an unclean one. A kill
+        # at the first phaseChanged raced the row's insert, and a kill after seeing the row can still land after the scan
+        # ended, so look for the row after the kill and try again when it is not there.
+        crash_seen = False
+        for attempt in range(6):
+            v = mk()
+            try:
+                v.drain()
+                v.send("startScan", {"rootPath": hl, "rescan": True})
+                end = time.time() + 30
+                while time.time() < end and v.alive():
+                    with ro(v.db) as c:
+                        if c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]:
+                            break
+                    time.sleep(0.005)
+                v.kill()
+            finally:
+                v.raw.close()
+            with ro(v.db) as c:
+                crash_seen = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0] > 0
+            if crash_seen:
+                break
         # What a kill leaves behind when it falls between a face batch's commit and its crop writes: face rows with no crop
         # file. The rescan above reprocesses nothing on an already scanned folder, and the Mac path writes crops after the
         # commit, so a real kill rarely lands in that window and the generated library has no faces; make the state explicit.
@@ -1232,7 +1243,7 @@ class Soak:
         try:
             with ro(v.db) as c:
                 faces = c.execute("SELECT count(DISTINCT file_id) FROM face_prints").fetchone()[0]
-            rec = dict(round=rnd, cancel_first=cancel_first, face_files=faces, injected_face_files=len(images), crash_row_seen=crash_seen)
+            rec = dict(round=rnd, cancel_first=cancel_first, face_files=faces, injected_face_files=len(images), crash_row_seen=crash_seen, kill_attempts=attempt + 1)
             if cancel_first:
                 v.send("startScan", {"rootPath": hl, "rescan": False})
                 time.sleep(0.05)
