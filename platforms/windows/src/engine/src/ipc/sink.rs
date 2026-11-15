@@ -84,6 +84,7 @@ pub fn route_events_to_stderr(logs_dir: &std::path::Path) -> std::io::Result<()>
 pub struct Sink {
     tx: mpsc::Sender<IpcEvent>,
     command_id: Option<std::sync::Arc<str>>,
+    before_terminal: Option<(fn(&super::EventPayload) -> bool, std::sync::Arc<dyn Fn() + Send + Sync>)>,
 }
 
 impl Sink {
@@ -109,7 +110,7 @@ impl Sink {
             }
         });
 
-        (Self { tx, command_id: None }, writer)
+        (Self { tx, command_id: None, before_terminal: None }, writer)
     }
 
     /// Send an event. Blocks the caller's task if the channel is full —
@@ -133,12 +134,28 @@ impl Sink {
     /// `BulkActionResult` it sends, so each reply, refusal and result from a
     /// spawned task carries the id of the command it answers (schema 1.28.0).
     pub fn for_command(&self, id: &str) -> Self {
-        Self { tx: self.tx.clone(), command_id: Some(id.into()) }
+        Self { command_id: Some(id.into()), ..self.clone() }
+    }
+
+    /// A handle that runs `release` before it queues a job's terminal event.
+    /// A client sends its next command as soon as it reads that event, which
+    /// can be before the task that sent it has returned.
+    pub(crate) fn releasing_before(
+        &self,
+        is_terminal: fn(&super::EventPayload) -> bool,
+        release: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self { before_terminal: Some((is_terminal, std::sync::Arc::new(release))), ..self.clone() }
     }
 
     fn stamped(&self, mut event: IpcEvent) -> IpcEvent {
         if let (Some(id), super::EventPayload::BulkActionResult(result)) = (&self.command_id, &mut event.payload) {
             result.inner.command_id.get_or_insert_with(|| id.to_string());
+        }
+        if let Some((is_terminal, release)) = &self.before_terminal
+            && is_terminal(&event.payload)
+        {
+            release();
         }
         event
     }
@@ -149,7 +166,7 @@ impl Sink {
     #[cfg(test)]
     pub(crate) fn channel_for_test(capacity: usize) -> (Self, mpsc::Receiver<IpcEvent>) {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
-        (Self { tx, command_id: None }, rx)
+        (Self { tx, command_id: None, before_terminal: None }, rx)
     }
 }
 
