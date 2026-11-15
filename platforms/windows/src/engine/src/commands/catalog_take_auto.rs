@@ -28,6 +28,16 @@ struct Row1 {
     content: Option<(Vec<u8>, i64)>,
 }
 
+/// The one rule for "the same file" in every take path: stored hash and size,
+/// only for files small enough to be hashed in full (larger files store a
+/// sampled hash that two different files can share).
+pub(super) fn content_identity(hash: Option<Vec<u8>>, size: Option<i64>) -> Option<(Vec<u8>, i64)> {
+    match (hash, size) {
+        (Some(hash), Some(size)) if (0..=FULL_HASH_MAX_BYTES as i64).contains(&size) => Some((hash, size)),
+        _ => None,
+    }
+}
+
 /// Copies of one file are one try: keep the lowest file id of each content
 /// (stored hash and size, only for files small enough to be hashed in full, the
 /// same identity Duplicates verifies). Swift `CatalogTakeAuto.distinctContents`
@@ -65,10 +75,7 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
                 time: r.get(2)?,
                 phash: r.get::<_, Option<i64>>(3)?.map(|p| p as u64),
                 kind: r.get(4)?,
-                content: match (r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<i64>>(6)?) {
-                    (Some(hash), Some(size)) if (0..=FULL_HASH_MAX_BYTES as i64).contains(&size) => Some((hash, size)),
-                    _ => None,
-                },
+                content: content_identity(r.get(5)?, r.get(6)?),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

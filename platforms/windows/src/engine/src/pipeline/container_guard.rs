@@ -157,7 +157,10 @@ fn bmff(src: &mut Source, start: u64, end: u64, parent: Parent, depth: u32, budg
         let Some(header) = src.exact::<8>(at) else { return false };
         let kind: [u8; 4] = [header[4], header[5], header[6], header[7]];
         let (size, header_len) = match be_u32(&header) {
-            0 => (end - at, 8),
+            // A size of 0 means "to the end of the file", which only the last top-level box may say;
+            // symphonia reads it inside a container as running past that container's end.
+            0 if parent == Parent::Root => (end - at, 8),
+            0 => return false,
             1 => match src.exact::<8>(at + 8) {
                 Some(large) => (u64::from_be_bytes(large), 16),
                 None => return false,
@@ -370,6 +373,25 @@ mod tests {
         body.extend_from_slice(&fmt);
         body.extend_from_slice(b"data\x04\0\0\0\0\0\0\0");
         [b"RIFF".to_vec(), (body.len() as u32).to_le_bytes().to_vec(), body].concat()
+    }
+
+    #[test]
+    fn a_nested_box_of_size_zero_is_refused_but_a_last_top_level_one_is_not() {
+        // The 204-byte input the decoder fuzzer (seed 5) found: an hdlr box of size 0 inside mdia.
+        let fuzz_case = hex_bytes(
+            "00000010667479704d34412000000000000000bc6d6f6f76000000557472616b0000004d6d6469610000000068646c72000000000000000000000000\
+             00000000000000000000000000000000246d697e660000001c7374626c000000147374636f0000000000000001000000010000005f75647461000000\
+             576d657461000000000000002168646c72000000000000000000000000000000000000000000000000000000002a696c737400000022a96e616d0000\
+             001a64617461000000010000000046757a7a205469746c65",
+        );
+        assert!(!symphonia_safe(Source::Bytes(&fuzz_case)));
+        let mut last_mdat = m4a(&title(b"\0\0\0\x01\0\0\0\0Song"), 1);
+        last_mdat.extend_from_slice(&[0, 0, 0, 0, b'm', b'd', b'a', b't', 1, 2, 3, 4]);
+        assert!(symphonia_safe(Source::Bytes(&last_mdat)));
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]

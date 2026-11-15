@@ -3601,6 +3601,24 @@ mod tests {
     }
 
     #[test]
+    fn trashing_one_copy_leaves_the_kept_byte_identical_copy_on_disk() {
+        let dir = unique_temp_dir("trash-copy-kept");
+        let kept = dir.join("kept.jpg");
+        let copy = dir.join("copy.jpg");
+        std::fs::write(&kept, b"same bytes").unwrap();
+        std::fs::write(&copy, b"same bytes").unwrap();
+        let victim = trash_candidate(&copy, 2);
+        let outcome = checked_trash_one_with(&victim, |staged, _, _| {
+            std::fs::remove_file(staged)?;
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Trashed));
+        assert!(!copy.exists());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"same bytes");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn trash_commit_failure_preserves_recovery_batch_and_reports_failure() {
         let result = trash_commit_failure_result(
             "batch-123".into(),
