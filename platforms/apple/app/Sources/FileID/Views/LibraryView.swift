@@ -1122,6 +1122,7 @@ private struct FilePreviewSheet: View {
     var onNearEnd: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
+    @State private var previewFailed = false
     @State private var tags: [String] = []
     @State private var people: [String] = []
     @State private var renaming = false
@@ -1262,6 +1263,7 @@ private struct FilePreviewSheet: View {
             // and after Deep Analyze updates the current row. Clear first so the
             // spinner shows and the prior preview never bleeds into the new state.
             preview = nil
+            previewFailed = false
             tags = []
             people = []
             // Read DB tags off the main actor (detached read doesn't inherit
@@ -1275,15 +1277,15 @@ private struct FilePreviewSheet: View {
             let loadedPeople = await Task.detached { [store] in store.personNames(forFileID: fileID) }.value
             guard !Task.isCancelled else { return }
             people = loadedPeople
-            let image = file.kind == "image"
-                ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400)
-                : await ThumbnailService.shared.thumbnail(for: file.url, size: 1600)
+            var image = file.kind == "image" ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
+            if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
             // drop it once `.task(id:)` superseded us, else it overwrites the current
             // file's image. Mirrors the FinderTagsEditor read guard.
             guard !Task.isCancelled else { return }
             preview = image
+            previewFailed = image == nil
         }
     }
 
@@ -1350,6 +1352,8 @@ private struct FilePreviewSheet: View {
                             .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
                             .padding(28)
                             .transition(.opacity)
+                    } else if previewFailed {
+                        Image(systemName: "photo").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                     } else {
                         ProgressView().controlSize(.small)
                     }
