@@ -109,6 +109,13 @@ struct CatalogWorkbench: View {
         } message: { chapter in
             Text("“\(chapter.title)” is removed from FileID. The video file is not changed. Undo last edit brings it back.")
         }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotFindMoments)) { _ in
+            guard let index = hits.firstIndex(where: { FileTypes.isVideo(path: $0.path) }) else { return }
+            select(hits[index], at: index)
+            send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [hits[index].fileID], timelineMode: timelineMode))
+        }
+        #endif
         .task(id: selected?.fileID) { await loadTimeline() }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
         .onChangeWhileActive(of: engine.catalogJobs) {

@@ -65,6 +65,9 @@ struct ChatWorkbench: View {
             control("history")
         }
         .onDisappear { player?.pause() }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotSendChat)) { _ in if isPage { send() } }
+        #endif
         // After the page stack has released the old page's focus.
         .onPageVisibility(shown: { DispatchQueue.main.async { inputFocused = true } },
                           hidden: { inputFocused = false; player?.pause() })
