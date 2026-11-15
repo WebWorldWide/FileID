@@ -119,7 +119,7 @@ actor TimelineAnalysis {
                 let first = try await sample(source: url, seconds: 0)
                 defer { try? FileManager.default.removeItem(at: first.url) }
                 let duration = first.metadata.duration
-                guard first.metadata.revision == source.1 else { throw SourceChanged() }
+                guard VideoFrameMetadata.sameSource(first.metadata.revision, source.1) else { throw SourceChanged() }
                 try await database.pool.write { db in
                     try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,0,?,'incomplete',?,?)", arguments: [id+"-"+String(fileID)+"-coverage",fileID,duration,source.1,job.version])
                 }
@@ -189,7 +189,7 @@ actor TimelineAnalysis {
                     if !exists {
                         let frame = seconds == 0 ? first : try await sample(source: url, seconds: seconds)
                         defer { if frame.url != first.url { try? FileManager.default.removeItem(at: frame.url) } }
-                        guard frame.metadata.revision == source.1 else { throw SourceChanged() }
+                        guard VideoFrameMetadata.sameSource(frame.metadata.revision, source.1) else { throw SourceChanged() }
                         try await requireRunning(id, database: database)
                         let temporary = frame.url
                         let result = await DeepAnalyze.shared.guardedAnalysis {
@@ -298,7 +298,7 @@ actor TimelineAnalysis {
                 times = picked.map(\.seconds)
             } else {
                 frames = try await sampleSequence(source: sourceURL, times: window.times)
-                guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
+                guard frames.allSatisfy({ VideoFrameMetadata.sameSource($0.metadata.revision, sourceRevision) }) else { throw SourceChanged() }
                 let distinct = try TimelineMomentAnalysis.distinctFrameIndices(times: frames.map { $0.metadata.seconds }, window: window)
                 urls = distinct.map { frames[$0].url }
                 times = distinct.map { frames[$0].metadata.seconds }
@@ -322,7 +322,7 @@ actor TimelineAnalysis {
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
                 let observation = try TakeOutcomeAnalysis.parse(result.description, frameCount: times.count)
                 let evidence = try TakeOutcomeAnalysis.evidence(observation, times: times, window: window)
-                guard (try? VideoFrameWorker.currentRevision(sourceURL)) == sourceRevision else { throw SourceChanged() }
+                guard let onDisk = try? VideoFrameWorker.currentRevision(sourceURL), VideoFrameMetadata.sameSource(onDisk, sourceRevision) else { throw SourceChanged() }
                 _ = try await database.pool.write { db in
                     guard try CatalogTakeEvidence.persist(db, evidence: evidence, goal: goal, fileID: fileID,
                                                           sourceRevision: sourceRevision, modelVersion: version,
@@ -373,7 +373,7 @@ actor TimelineAnalysis {
                     frames = try await sampleSequence(source: sourceURL, times: window.times)
                 }
                 try await requireRunning(jobID, database: database)
-                guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
+                guard frames.allSatisfy({ VideoFrameMetadata.sameSource($0.metadata.revision, sourceRevision) }) else { throw SourceChanged() }
                 let distinct = try TimelineMomentAnalysis.distinctFrameIndices(
                     times: frames.map { $0.metadata.seconds }, window: window
                 )
@@ -394,7 +394,7 @@ actor TimelineAnalysis {
                 guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
                       activeModel.rawValue == model else { throw ModelChanged() }
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
-                guard (try? VideoFrameWorker.currentRevision(sourceURL)) == sourceRevision else { throw SourceChanged() }
+                guard let onDisk = try? VideoFrameWorker.currentRevision(sourceURL), VideoFrameMetadata.sameSource(onDisk, sourceRevision) else { throw SourceChanged() }
                 let moments = try TimelineMomentAnalysis.parse(result.description, times: times)
                 let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: times, window: window,
                                                                fileID: fileID, sourceRevision: sourceRevision, modelVersion: version)
@@ -499,7 +499,7 @@ actor TimelineAnalysis {
             nextPool = (nextFileID, Task { try await VideoFrameWorker.samplePool(source: nextURL, durationHint: 3_600) })
         }
         defer { VideoFramePool.remove(pool) }
-        guard pool.manifest.revision == sourceRevision else { throw SourceChanged() }
+        guard VideoFrameMetadata.sameSource(pool.manifest.revision, sourceRevision) else { throw SourceChanged() }
         let decodeMs = VLMTiming.milliseconds(since: started)
         let embedStarted = ContinuousClock.now
         let frames = await Task.detached(priority: .userInitiated) { Self.poolFrames(pool) }.value
