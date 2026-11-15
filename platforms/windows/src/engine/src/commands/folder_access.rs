@@ -27,7 +27,7 @@ mod mac {
     pub(super) fn open(path: &str, bookmark: &str) -> Option<BookmarkLease> {
         let bytes = base64::engine::general_purpose::STANDARD.decode(bookmark.trim()).ok()?;
         let lease = BookmarkLease::open(&bytes)?;
-        (standardized(lease.path()) == standardized(Path::new(path))).then_some(lease)
+        (standardized(lease.path()) == standardized(Path::new(path)) && super::root_is_listable(path)).then_some(lease)
     }
 
     pub(super) fn replace_root(lease: BookmarkLease) {
@@ -76,9 +76,17 @@ pub(crate) struct ScanAccess {
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) fn scan_access(root_path: &str, bookmark: Option<&str>) -> Option<ScanAccess> {
     match bookmark {
-        None => Some(ScanAccess { _lease: None }),
+        None => root_is_listable(root_path).then_some(ScanAccess { _lease: None }),
         Some(bookmark) => mac::open(root_path, bookmark).map(|lease| ScanAccess { _lease: Some(lease) }),
     }
+}
+
+/// A root the process may not list (a sandboxed engine has no right to a folder
+/// without a bookmark that carries access, and TCC can refuse a protected one)
+/// is refused here; discovery would call it an empty folder.
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn root_is_listable(root_path: &str) -> bool {
+    !matches!(std::fs::read_dir(root_path), Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
@@ -93,6 +101,22 @@ mod tests {
     #[test]
     fn a_scan_without_a_bookmark_is_allowed() {
         assert!(scan_access("/tmp", None).is_some());
+    }
+
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[test]
+    fn a_root_that_cannot_be_listed_is_refused_without_a_bookmark() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fileid-root-access-{}", std::process::id()));
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = scan_access(locked.to_str().unwrap(), None).is_none();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused || unsafe { libc::geteuid() } == 0, "an unreadable root must be refused");
+        assert!(scan_access(locked.to_str().unwrap(), None).is_some());
+        assert!(scan_access(dir.join("missing").to_str().unwrap(), None).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
