@@ -521,6 +521,9 @@
             <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            <Button x:Name="ShowWeakerButton" Visibility="Collapsed" Click="OnShowWeakerClicked"
+                    ToolTipService.ToolTip="Also show the weaker look-alikes for this search"
+                    AutomationProperties.HelpText="Shows the pictures that only loosely resemble the search" />
         </StackPanel>
     </Grid>
 </UserControl>

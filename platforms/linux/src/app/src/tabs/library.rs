@@ -271,6 +271,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["pill", "gold-accent"])
         .build();
     title_row.append(&new_files);
+    let weaker_button = crate::v3::ghost("Show weaker matches");
+    weaker_button.set_visible(false);
+    title_row.append(&weaker_button);
     let select_all = crate::v3::ghost("Select all");
     select_all.set_tooltip_text(Some("Select every file shown (Ctrl+click adds one, Shift+click a range)"));
     select_all.connect_clicked(clone!(
@@ -320,6 +323,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             count_label: count_label.clone(),
             content_stack: content_stack.clone(),
             empty_page: empty_page.clone(),
+            weaker_button: weaker_button.clone(),
+            show_weaker: Cell::new(false),
+            weaker_query: RefCell::new(String::new()),
+            weaker_handler: RefCell::new(None),
             search_text: search_text.clone(),
             kind_filter: kind_filter.clone(),
             query_gen: query_gen.clone(),
@@ -470,6 +477,39 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             });
         }
     ));
+
+    // Dev-only: `FILEID_SELF_SEARCH=<text>` types a search after launch (for
+    // FILEID_SELF_SHOT captures); `FILEID_SELF_SEARCH_REVEAL_MS=<ms>` then
+    // activates the "Show N weaker matches" button, as a click would.
+    if let Ok(text) = std::env::var("FILEID_SELF_SEARCH") {
+        let delay = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|ms| ms.trim().parse::<u64>().ok()).unwrap_or(default)
+        };
+        let typed_at = delay("FILEID_SELF_SEARCH_DELAY_MS", 1500);
+        // The engine builds its visual index on the first search: a throwaway
+        // first search lets the real one run against a ready index.
+        let warm = delay("FILEID_SELF_SEARCH_WARM_MS", 0);
+        let typed_at = if warm > 0 {
+            let search = search.clone();
+            glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text("warm up"));
+            typed_at + warm
+        } else {
+            typed_at
+        };
+        let search = search.clone();
+        glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text(&text));
+        if std::env::var("FILEID_SELF_SEARCH_REVEAL_MS").is_ok() {
+            let reveal_at = typed_at + delay("FILEID_SELF_SEARCH_REVEAL_MS", 3000);
+            let (empty_page, weaker_button) = (empty_page.clone(), weaker_button.clone());
+            glib::timeout_add_local_once(Duration::from_millis(reveal_at), move || {
+                if let Some(button) = empty_page.child().and_downcast::<gtk::Button>() {
+                    button.emit_clicked();
+                } else if weaker_button.is_visible() {
+                    weaker_button.emit_clicked();
+                }
+            });
+        }
+    }
 
     let refresh_offline: Rc<dyn Fn()> = {
         let generation = Rc::new(Cell::new(0u64));
@@ -658,6 +698,12 @@ struct ReloadCtx {
     count_label: gtk::Label,
     content_stack: gtk::Stack,
     empty_page: adw::StatusPage,
+    /// Header action shown when weaker look-alikes are kept back behind keyword matches.
+    weaker_button: gtk::Button,
+    /// The user asked to see the weaker look-alikes of `weaker_query`.
+    show_weaker: Cell<bool>,
+    weaker_query: RefCell<String>,
+    weaker_handler: RefCell<Option<glib::SignalHandlerId>>,
     search_text: Rc<RefCell<String>>,
     kind_filter: Rc<RefCell<Option<String>>>,
     query_gen: Rc<Cell<u64>>,
@@ -696,6 +742,10 @@ fn run_reload(ctx: &Rc<ReloadCtx>, live: bool) {
         return;
     }
     let query = (ctx.search_text.borrow().trim().to_owned(), ctx.kind_filter.borrow().clone());
+    if *ctx.weaker_query.borrow() != query.0 {
+        ctx.show_weaker.set(false);
+        ctx.weaker_query.replace(query.0.clone());
+    }
     let same_query = ctx.last_query.borrow().as_ref() == Some(&query);
     let limit = reload_limit(same_query, ctx.model.n_items());
     ctx.last_query.replace(Some(query));
@@ -754,6 +804,115 @@ fn strength_label(message: Option<&str>) -> Option<String> {
     message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)
 }
 
+/// Good and weaker counts from exactly one of the engine's summary sentences.
+fn parse_strength(message: Option<&str>) -> Option<(u64, u64)> {
+    let text = message?.trim();
+    if text.chars().count() > 80 {
+        return None;
+    }
+    let count = |digits: &str| {
+        (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit())).then(|| digits.parse().ok()).flatten()
+    };
+    if text == "No matches." {
+        return Some((0, 0));
+    }
+    if let Some(weak) = text.strip_prefix("No good matches, ").and_then(|t| t.strip_suffix(" weaker.")) {
+        return Some((0, count(weak)?));
+    }
+    let body = text.strip_suffix('.')?;
+    let (head, weak) = match body.split_once(", ") {
+        Some((head, tail)) => (head, Some(tail.strip_suffix(" weaker")?)),
+        None => (body, None),
+    };
+    let good = head.strip_suffix(" good matches").or_else(|| head.strip_suffix(" good match"))?;
+    let weaker = match weak {
+        Some(digits) => count(digits)?,
+        None => 0,
+    };
+    Some((count(good)?, weaker))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SearchSource {
+    /// The engine's ranked list fills the grid.
+    Engine,
+    /// Only the name, tag and text matches already shown.
+    Keyword,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SearchDecision {
+    source: SearchSource,
+    /// Replaces the count; `None` keeps today's count.
+    label: Option<String>,
+    /// Weaker look-alikes kept back behind "Show N weaker matches".
+    hidden_weaker: u64,
+}
+
+/// How a search with the engine's summary is shown (Mac `LibrarySearchOutcome.decide`).
+fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool) -> SearchDecision {
+    let Some((good, weaker)) = parse_strength(message) else {
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0 };
+    };
+    if good > 0 || show_weaker {
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0 };
+    }
+    let label = if weaker == 0 {
+        "No matches".to_owned()
+    } else if keyword_count > 0 {
+        format!("{keyword_count} by name, tag or text")
+    } else {
+        "No good matches".to_owned()
+    };
+    SearchDecision { source: SearchSource::Keyword, label: Some(label), hidden_weaker: weaker }
+}
+
+fn weaker_label(count: u64) -> String {
+    format!("Show {count} weaker matches")
+}
+
+/// Keyword matches stay on screen with the weaker look-alikes behind a header
+/// action, or, with no keyword match, an empty state that says so.
+fn show_keyword_only(ctx: &Rc<ReloadCtx>, query: &str, decision: &SearchDecision, keyword_count: usize) {
+    let hidden = decision.hidden_weaker;
+    if let Some(label) = &decision.label {
+        ctx.count_label.set_text(label);
+    }
+    let reveal = || {
+        let ctx = ctx.clone();
+        move |_: &gtk::Button| {
+            ctx.show_weaker.set(true);
+            run_reload(&ctx, false);
+        }
+    };
+    if keyword_count > 0 {
+        if hidden > 0 {
+            ctx.weaker_button.set_label(&weaker_label(hidden));
+            ctx.weaker_button.set_visible(true);
+            if let Some(old) = ctx.weaker_handler.take() {
+                ctx.weaker_button.disconnect(old);
+            }
+            ctx.weaker_handler.replace(Some(ctx.weaker_button.connect_clicked(reveal())));
+        }
+        return;
+    }
+    ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
+    ctx.empty_page.set_title(&format!("No matches for \u{201C}{query}\u{201D}"));
+    if hidden > 0 {
+        ctx.empty_page.set_description(Some(&format!(
+            "Nothing has that in its name, tags or text, and no picture matches it well. {hidden} weaker look-alikes were set aside."
+        )));
+        let button = gtk::Button::builder().label(weaker_label(hidden)).halign(gtk::Align::Center).css_classes(["pill"]).build();
+        button.connect_clicked(reveal());
+        ctx.empty_page.set_child(Some(&button));
+    } else {
+        ctx.empty_page.set_description(Some(
+            "Nothing has that in its name, tags or text, and no picture matches it. Try other words.",
+        ));
+    }
+    ctx.content_stack.set_visible_child_name("empty");
+}
+
 /// Replaces the keyword rows with the engine's visual-search order (good
 /// matches first) and shows its summary. Any failure keeps the keyword rows.
 async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
@@ -796,6 +955,15 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     if ctx.query_gen.get() != generation {
         return;
     }
+    let keyword_count = ctx.model.n_items() as usize;
+    let decision = decide_search(response.message.as_deref(), keyword_count, ctx.show_weaker.get());
+    if std::env::var_os("FILEID_SELF_SEARCH").is_some() {
+        eprintln!("self-search: query={query:?} hits={} keyword={keyword_count} message={:?} decision={decision:?}", response.hits.len(), response.message);
+    }
+    if decision.source == SearchSource::Keyword {
+        show_keyword_only(ctx, &query, &decision, keyword_count);
+        return;
+    }
     let ids: Vec<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
     let kind = ctx.kind_filter.borrow().clone();
     let rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
@@ -814,6 +982,8 @@ fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str
     let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
     // Keep the same files selected (and the pane on them) across a refresh.
     let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
+    ctx.weaker_button.set_visible(false);
+    ctx.empty_page.set_child(None::<&gtk::Box>);
     ctx.restoring.set(true);
     ctx.model.splice(0, ctx.model.n_items(), &items);
     let positions = picking::restore(&selected, rows.iter().map(|row| row.id));
@@ -1929,6 +2099,61 @@ mod tests {
     fn no_summary_when_the_engine_sends_none() {
         assert_eq!(strength_label(None), None);
         assert_eq!(strength_label(Some("  ")), None);
+    }
+
+    fn decided(message: Option<&str>, keywords: usize, show_weaker: bool) -> SearchDecision {
+        decide_search(message, keywords, show_weaker)
+    }
+
+    #[test]
+    fn parses_the_engines_sentences() {
+        assert_eq!(parse_strength(Some("3 good matches, 1 weaker.")), Some((3, 1)));
+        assert_eq!(parse_strength(Some("1 good match.")), Some((1, 0)));
+        assert_eq!(parse_strength(Some("No good matches, 60 weaker.")), Some((0, 60)));
+        assert_eq!(parse_strength(Some("No matches.")), Some((0, 0)));
+        assert_eq!(parse_strength(Some("Matches by name, text and what's in the picture.")), None);
+        assert_eq!(parse_strength(Some("Visual similarity results.")), None);
+        assert_eq!(parse_strength(None), None);
+    }
+
+    #[test]
+    fn good_matches_show_the_engines_list_and_summary() {
+        let d = decided(Some("4 good matches, 20 weaker."), 2, false);
+        assert_eq!(d.source, SearchSource::Engine);
+        assert_eq!(d.hidden_weaker, 0);
+        assert_eq!(d.label.as_deref(), Some("4 good matches, 20 weaker."));
+    }
+
+    #[test]
+    fn keyword_matches_only_keep_weaker_behind_the_action() {
+        let d = decided(Some("No good matches, 60 weaker."), 3, false);
+        assert_eq!((d.source, d.hidden_weaker), (SearchSource::Keyword, 60));
+        assert_eq!(d.label.as_deref(), Some("3 by name, tag or text"));
+    }
+
+    #[test]
+    fn weaker_only_shows_nothing_until_asked() {
+        let d = decided(Some("No good matches, 60 weaker."), 0, false);
+        assert_eq!((d.source, d.hidden_weaker), (SearchSource::Keyword, 60));
+        assert_eq!(d.label.as_deref(), Some("No good matches"));
+        let shown = decided(Some("No good matches, 60 weaker."), 0, true);
+        assert_eq!((shown.source, shown.hidden_weaker), (SearchSource::Engine, 0));
+    }
+
+    #[test]
+    fn nothing_at_all() {
+        let d = decided(Some("No matches."), 0, false);
+        assert_eq!((d.source, d.hidden_weaker), (SearchSource::Keyword, 0));
+        assert_eq!(d.label.as_deref(), Some("No matches"));
+    }
+
+    #[test]
+    fn no_summary_keeps_todays_behaviour() {
+        let d = decided(Some("Matches by name, text and what's in the picture."), 0, false);
+        assert_eq!((d.source, d.hidden_weaker), (SearchSource::Engine, 0));
+        assert_eq!(d.label.as_deref(), Some("Matches by name, text and what's in the picture."));
+        let none = decided(None, 0, false);
+        assert_eq!((none.source, none.hidden_weaker, none.label), (SearchSource::Engine, 0, None));
     }
 
     #[test]
