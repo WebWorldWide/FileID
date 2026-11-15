@@ -164,6 +164,8 @@ enum SelfShot {
                 }
             }
             NSApp.terminate(nil)
+            try? await Task.sleep(for: .seconds(3))
+            exit(0)
         }
     }
 
