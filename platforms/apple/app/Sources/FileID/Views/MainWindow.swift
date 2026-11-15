@@ -115,7 +115,6 @@ struct MainWindow: View {
     static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
         jobs.contains { $0.state == "queued" || $0.state == "running" }
     }
-    static let jobRefreshLimit = 900
 
     private var aiActive: Bool {
         engine.deepAnalyzeInFlight || engine.faceClusteringInFlight || engine.catalogJobs.contains { $0.state == "running" }
@@ -219,7 +218,7 @@ struct MainWindow: View {
             // Guide the user through the workflow as each stage finishes.
             .task(id: Self.jobsNeedRefresh(engine.catalogJobs)) {
                 guard Self.jobsNeedRefresh(engine.catalogJobs) else { return }
-                for _ in 0..<Self.jobRefreshLimit {
+                while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))
                 }
