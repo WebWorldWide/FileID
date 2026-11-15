@@ -78,6 +78,8 @@ def kind(p):
 # reader leaves careful reads owed by design (scan_catchup stage bit 2), so "nothing is still owed" means the tagging
 # bit only. --warm-reader lets the reader warm and checks both bits.
 OWED_MASK = 1
+# A row hidden as "no longer present" (failed = 1) can owe nothing: its file is gone and no pass visits it, so the
+# owed counts below leave such rows out.
 
 
 class Engine:
@@ -934,7 +936,7 @@ class Soak:
 
     def owed(self, eng):
         with ro(eng.db) as c:
-            return c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0 AND file_id IN (SELECT id FROM files WHERE path_text LIKE ?)",
+            return c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0 AND file_id IN (SELECT id FROM files WHERE failed = 0 AND path_text LIKE ?)",
                              (self.lib + "/%",)).fetchone()[0]
 
     def step_real_first(self, eng):
@@ -1171,7 +1173,7 @@ class Soak:
             if stale or uncovered:
                 fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
             with ro(v.db) as c:
-                owed = c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0").fetchone()[0]
+                owed = c.execute(f"SELECT count(*) FROM scan_catchup WHERE (stages & {OWED_MASK}) != 0 AND file_id IN (SELECT id FROM files WHERE failed = 0)").fetchone()[0]
                 noemb = c.execute("SELECT count(*) FROM files f WHERE kind='image' AND failed=0 AND size_bytes>0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings e WHERE e.file_id=f.id)").fetchone()[0]
             if owed:
                 fail(rnd, f"nothing is still owed after the {phase} kill and two scans", owed)
