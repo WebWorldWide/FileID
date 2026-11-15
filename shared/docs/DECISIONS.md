@@ -5035,3 +5035,7 @@ Two ways to stop a rescan by the other engine from marking reviewed rows stale: 
 ## 2026-11-15 — Where the engines' Organize Folders rules differed, the Rust engine's are kept
 
 With the respect stage off the plans differed in three rules. In each the Rust engine matched `RESTRUCTURE.md` and the Swift engine did not, so Swift changed although it is the reference elsewhere: a photo of two people has no single owner (filing it under whoever sorts first is arbitrary); a folder that stays put keeps its files except the ones the semantic pass itself claimed (the promise is per folder, and one claimed file must not release its siblings); an all-digit folder that is not a year is an export artifact, not a place to file into. People who run with the default setting see no change: those plans were already identical.
+
+## 2026-11-15 — A folder that is not there is an error on both engines
+
+The 2026-11-10 entry kept one difference: the Rust engine refuses an Organize Folders plan for a root that does not exist (`plan_restructure_root`), the Swift engine returned an empty plan. An empty plan reads as "nothing to organize" when the truth is an unplugged drive, and the Mac app already had the right sentence for the error. The Swift engine now answers the same way, and GTK and WinUI show the same sentence, so the difference is gone. Only the plan command changed; apply and undo with a missing root already gave the same result on both engines.
