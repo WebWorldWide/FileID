@@ -4995,3 +4995,10 @@ The soak showed the shared engine never removes the row of a file that is gone: 
 ## 2026-11-14 — No per-page location chip
 
 NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since 2026-11-06 the title-bar location switcher scopes Library, Search & Moments and Chat on all three apps (Mac `CatalogWorkbench` and `ChatHandoff.rootID`, GTK `library_scope::current_id()`, WinUI `AppViewModel.Scope` and the `rootId` in `ChatContext`). A second control for the same choice on each page would let the page and the title bar disagree. Closed: one switcher, no chips.
+
+## 2026-11-14 — Catalog v36: failure memory gets a table; no new heal index
+
+- **Failure memory is a table, `scan_failures`, not columns on `scan_catchup`.** A file that keeps failing owes nothing, so it does not belong in the table of owed work; a separate table also lets `scan_catchup.stages` stay a pure bit set (1 tags, 2 careful read, 4 text read at scan). The row is keyed by file and dropped with it.
+- **No `files(file_ref)` index in v36.** It has existed since v8 (`idx_files_file_ref`, partial). The NEXT item asking for it was written without checking; the query plan was measured instead and pinned by a test in each engine.
+- **The careful-read marker needed no schema change.** Stage bit 2 was already in v34; only the hosted engine never set it. The adapter reports it in its JSON reply, so an older engine ignores it and the C interface is unchanged.
+
