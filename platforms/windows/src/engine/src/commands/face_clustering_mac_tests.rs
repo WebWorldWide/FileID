@@ -47,7 +47,7 @@ impl Catalog {
         let path = self.dir.0.join(format!("{id}.jpg"));
         std::fs::write(&path, format!("photo {id}")).unwrap();
         let metadata = std::fs::metadata(&path).unwrap();
-        let (size, modified) = (metadata.len() as i64, foundation_mtime(&metadata).unwrap());
+        let (size, modified) = (metadata.len() as i64, catalog_mtime(&metadata).unwrap());
         let revision = source_revision(size, modified);
         self.conn
             .execute(
@@ -83,17 +83,6 @@ impl Catalog {
         let outcome = super::run(&database, &space());
         let conn = Arc::try_unwrap(database).ok().unwrap().into_inner();
         (Self { conn, dir: self.dir }, outcome)
-    }
-}
-
-#[test]
-fn foundation_time_matches_the_swift_engine() {
-    for (seconds, nanos, stored) in [
-        (1_794_315_047_i64, 172_200_036_i64, 1_794_315_047.172_200_2_f64),
-        (1_794_315_049, 370_255_120, 1_794_315_049.370_255),
-        (1_794_315_049, 438_319_825, 1_794_315_049.438_319_7),
-    ] {
-        assert_eq!(foundation_time(seconds, nanos).to_bits(), stored.to_bits());
     }
 }
 

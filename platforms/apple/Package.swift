@@ -179,6 +179,7 @@ let package = Package(
         .target(
             name: "FileIDAppleKit",
             dependencies: [
+                "FileIDModelInfo",
                 "FileIDImaging",
                 "FileIDAppleVLM",
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm")

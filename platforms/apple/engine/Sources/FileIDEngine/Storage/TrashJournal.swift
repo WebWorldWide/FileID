@@ -187,7 +187,9 @@ enum TrashJournal {
             let rows = staleRows
             try? await database.pool.write { db in
                 for (id, path) in rows {
+                    let persons = try PersonCounts.persons(ofFiles: [id], db)
                     try db.execute(sql: "DELETE FROM files WHERE id = ? AND path_text = ?", arguments: [id, path])
+                    if db.changesCount > 0 { try FileIDEngineMain.reconcilePersons(persons, db: db) }
                 }
             }
         }

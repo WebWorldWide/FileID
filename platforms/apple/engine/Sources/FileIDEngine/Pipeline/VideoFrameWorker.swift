@@ -13,18 +13,8 @@ struct VideoFrameMetadata: Codable, Sendable, Equatable {
     let modifiedAt: Double
     var revision: String { "\(size):\(modifiedAt.bitPattern)" }
 
-    /// True when two revision strings name the same file state. The time is compared the way
-    /// the scanners compare it (within a microsecond), not bit for bit: the Swift engine stores
-    /// `Date.timeIntervalSince1970`, the Rust engine and other tools store seconds plus
-    /// nanoseconds, and the two differ in the last bit for about a quarter of all timestamps.
-    static func sameSource(_ lhs: String, _ rhs: String) -> Bool {
-        if lhs == rhs { return true }
-        let left = lhs.split(separator: ":", maxSplits: 1), right = rhs.split(separator: ":", maxSplits: 1)
-        guard left.count == 2, right.count == 2, left[0] == right[0],
-              let leftBits = UInt64(left[1]), let rightBits = UInt64(right[1]) else { return false }
-        let leftTime = Double(bitPattern: leftBits), rightTime = Double(bitPattern: rightBits)
-        return leftTime.isFinite && rightTime.isFinite && abs(leftTime - rightTime) < 0.000_001
-    }
+    /// True when two revision strings name the same file state, within a microsecond.
+    static func sameSource(_ lhs: String, _ rhs: String) -> Bool { SourceRevisionMatch.same(lhs, rhs) }
 }
 
 enum VideoFrameWorker {
@@ -362,9 +352,9 @@ enum VideoFrameWorker {
 
     private struct Attributes: Equatable { let size: Int64; let modified: Double }
     private static func attributes(_ source: URL) throws -> Attributes {
-        let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        guard let size = values.fileSize, let modified = values.contentModificationDate else { throw WorkerFailure() }
-        return Attributes(size: Int64(size), modified: modified.timeIntervalSince1970)
+        let values = try source.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize, let modified = FileModificationTime.unixSeconds(path: source.path) else { throw WorkerFailure() }
+        return Attributes(size: Int64(size), modified: modified)
     }
     struct WorkerFailure: LocalizedError { var errorDescription: String? { "The video worker could not decode a stable source frame." } }
     struct SourceRevisionChanged: LocalizedError { var errorDescription: String? { "The video changed while visual activity was being sampled." } }

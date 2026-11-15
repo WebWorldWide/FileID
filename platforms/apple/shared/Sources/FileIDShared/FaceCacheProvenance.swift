@@ -3,9 +3,9 @@ import Foundation
 public enum FaceCacheProvenance {
     public static func currentSourceRevision(path: String) -> String? {
         guard let values = try? URL(fileURLWithPath: path).resourceValues(
-            forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+            forKeys: [.isRegularFileKey, .fileSizeKey]),
             values.isRegularFile == true, let size = values.fileSize,
-            let modified = values.contentModificationDate?.timeIntervalSince1970,
+            let modified = FileModificationTime.unixSeconds(path: path),
             size >= 0, modified.isFinite else { return nil }
         return sourceRevision(size: Int64(size), modified: modified)
     }

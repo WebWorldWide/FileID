@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreMedia
+import FileIDModelInfo
 import Foundation
 
 /// AVFoundation facts about a media file, in the shape the Rust engine's
@@ -124,10 +125,10 @@ enum MediaInspect {
     }
 
     static func attributes(_ url: URL) throws -> Attributes {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        guard let size = values.fileSize, let modified = values.contentModificationDate else {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize, let modified = FileModificationTime.unixSeconds(path: url.path) else {
             throw MediaFailure("The video worker could not read the source attributes.")
         }
-        return Attributes(size: Int64(size), modified: modified.timeIntervalSince1970)
+        return Attributes(size: Int64(size), modified: modified)
     }
 }

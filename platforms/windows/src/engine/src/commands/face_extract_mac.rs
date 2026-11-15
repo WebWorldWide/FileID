@@ -189,11 +189,11 @@ pub trait Extractor: Sync {
     fn extract(&self, path: &Path, boxes: &[String]) -> Vec<Option<Embedded>>;
 }
 
-/// The photo's size, Foundation modification time and inode, so a file that
+/// The photo's size, catalog modification time and inode, so a file that
 /// changes while its faces are read is caught (`currentIdentity`).
 fn identity(path: &str) -> Option<(i64, f64, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
-    let modified = super::face_clustering_mac::foundation_mtime(&metadata)?;
+    let modified = super::face_clustering_mac::catalog_mtime(&metadata)?;
     #[cfg(unix)]
     let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
     #[cfg(not(unix))]
@@ -204,7 +204,7 @@ fn identity(path: &str) -> Option<(i64, f64, u64)> {
 fn current(rows: &[Input]) -> Option<(i64, f64, u64)> {
     let first = rows.first()?;
     let found = identity(&first.path)?;
-    rows.iter().all(|row| Some(found.0) == Some(row.size) && row.modified == Some(found.1)).then_some(found)
+    rows.iter().all(|row| found.0 == row.size && row.modified.is_some_and(|modified| crate::util::same_modified_time(modified, found.1))).then_some(found)
 }
 
 struct FileResult {
@@ -311,7 +311,7 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
             if !stopped {
                 let unavailable: HashSet<i64> = results.iter().filter(|f| f.unavailable).flat_map(|f| f.rows.iter().map(|r| r.id)).collect();
                 for input in batch.iter().filter(|input| !saved.contains(&input.id)) {
-                    let unreadable = unavailable.contains(&input.id) || identity(&input.path).is_none_or(|(size, modified, _)| size != input.size || Some(modified) != input.modified);
+                    let unreadable = unavailable.contains(&input.id) || identity(&input.path).is_none_or(|(size, modified, _)| size != input.size || !input.modified.is_some_and(|stored| crate::util::same_modified_time(stored, modified)));
                     let reason = if unreadable { "source_unavailable_or_changed" } else { "no_embedding" };
                     record_failure(&tx, input, &model, processing, reason, now)?;
                     failed += 1;

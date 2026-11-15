@@ -30,8 +30,9 @@ enum FaceAnalysisCache {
         func currentIdentity() -> ExactFileDigest.CacheKey? {
             let url = URL(fileURLWithPath: path)
             guard let modified, modified.isFinite,
-                  let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
-                  let currentSize = values.fileSize, Int64(currentSize) == size, values.contentModificationDate?.timeIntervalSince1970 == modified else { return nil }
+                  let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                  let currentSize = values.fileSize, Int64(currentSize) == size,
+                  let live = FileModificationTime.unixSeconds(path: path), abs(live - modified) < 0.000_001 else { return nil }
             return ExactFileDigest.cacheKey(url: url, expectedSize: size)
         }
     }

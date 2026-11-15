@@ -107,12 +107,12 @@ struct RestructureCascadeTests {
         let classified = Restructure.classifyFolders(moves)
         #expect(classified.contains { $0.classification == .anchor })
         let kept = Restructure.stripAnchorFolderMovesExcept(
-            moves, classified: classified, exempt: [])
+            moves, classified: classified, exemptFileIDs: [])
         #expect(kept.isEmpty, "anchor-folder moves must drop: \(kept)")
-        // Exempting the source folder (a semantic-claimed relocation) keeps them.
+        // Exempting a file (a semantic-claimed relocation) keeps only that file.
         let keptExempt = Restructure.stripAnchorFolderMovesExcept(
-            moves, classified: classified, exempt: ["/Library/Vacation2019"])
-        #expect(keptExempt.count == 3)
+            moves, classified: classified, exemptFileIDs: [1])
+        #expect(keptExempt.map(\.fileID) == [1])
     }
 
     @Test("Mixed-tier homogeneity is measured against the dominant person")
@@ -130,6 +130,34 @@ struct RestructureCascadeTests {
         let family = classified.first { $0.sourceFolder == "/Library/Family" }
         // 5/6 ≈ 0.83 ≥ 0.80 → Anchor (homogeneity measured against Alice, not Bob).
         #expect(family?.classification == .anchor)
+    }
+}
+
+@Suite("Restructure parity with the Rust engine")
+struct RestructureEngineParityTests {
+    @Test("A file belongs to a person only when every face is named and all are one person")
+    func personOwnershipNeedsOneNamedPerson() {
+        func owner(_ names: String?, _ faces: Int, _ named: Int, _ people: Int) -> String? {
+            Restructure.unambiguousPersonName(
+                names: names, faceCount: faces, namedFaceCount: named, namedPersonCount: people)
+        }
+        #expect(owner("Alice", 1, 1, 1) == "Alice")
+        #expect(owner("Alice", 2, 2, 1) == "Alice", "two faces of one person")
+        #expect(owner("Alice\u{1F}Bob", 2, 2, 2) == nil, "two named people")
+        #expect(owner("Alice", 2, 1, 1) == nil, "a named face beside an unnamed one")
+        #expect(owner(nil, 1, 0, 0) == nil)
+        #expect(owner("\u{1F}  ", 1, 0, 0) == nil)
+        #expect(owner("Alice", 0, 0, 0) == nil)
+    }
+
+    @Test("All-digit export folders are never learn-your-style targets; years are")
+    func digitFoldersAreJunkPrototypesExceptYears() {
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/20190412"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/332699"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/12345"))
+        #expect(!RestructureSemantic.isJunkPrototypeFolder("/lib/2019"))
+        #expect(RestructureSemantic.isJunkPrototypeFolder("/lib/1850"))
+        #expect(!RestructureSemantic.isJunkPrototypeFolder("/lib/2019 Trip"))
     }
 }
 

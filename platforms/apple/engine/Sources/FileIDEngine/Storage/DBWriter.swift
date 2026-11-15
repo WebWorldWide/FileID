@@ -23,6 +23,8 @@ public struct TaggedFile: Sendable {
     public let sizeBytes: Int64
     public let createdAt: Date?
     public let modifiedAt: Date?
+    /// The exact modification time to store when known; `modifiedAt` when not.
+    public let modifiedUnix: Double?
 
     /// Volume-local file identity (APFS/HFS inode, st_ino), propagated from
     /// `DiscoveredFile.fileRef`. Powers DBWriter's rename/move heal: a moved file
@@ -112,7 +114,7 @@ public struct TaggedFile: Sendable {
 
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
-        createdAt: Date?, modifiedAt: Date?,
+        createdAt: Date?, modifiedAt: Date?, modifiedUnix: Double? = nil,
         fileRef: UInt64? = nil,
         visionTags: [String] = [], tagScores: [String: Double]? = nil, phash: UInt64? = nil,
         contentHash: Data? = nil,
@@ -138,6 +140,7 @@ public struct TaggedFile: Sendable {
         self.sizeBytes = sizeBytes
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
+        self.modifiedUnix = modifiedUnix ?? modifiedAt?.timeIntervalSince1970
         self.fileRef = fileRef
         self.visionTags = visionTags
         self.tagScores = tagScores
@@ -578,7 +581,15 @@ public actor DBWriter {
             return
         }
 
-        let newModified = file.modifiedAt?.timeIntervalSince1970
+        // A time within a microsecond of the stored one is the same time, stored by an engine
+        // that rounded its last bit differently: keep the stored number, so the row's revision
+        // strings and the catalog's stale-on-change trigger see no change.
+        let oldStoredModified: Double? = existing?["modified_at"]
+        let newModified: Double? = {
+            let current = file.modifiedUnix
+            if let oldStoredModified, let current, abs(oldStoredModified - current) < 0.000_001 { return oldStoredModified }
+            return current
+        }()
         // "Unchanged" only when this isn't a forced rescan, the prior scan
         // succeeded, this scan succeeded, and both size and mtime match. A
         // previously-failed file is always reprocessed.

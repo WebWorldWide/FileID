@@ -125,7 +125,8 @@ public enum FaceClustering {
                 if let revision = FaceCacheProvenance.currentSourceRevision(path: path) { revisions[path] = revision }
                 else { unavailableSources.insert(path) }
             }
-            guard let actual = revisions[path], actual == row["source_revision"] as String? else { deferred += 1; continue }
+            guard let actual = revisions[path], let stored: String = row["source_revision"],
+                  SourceRevisionMatch.same(actual, stored) else { deferred += 1; continue }
             guard rows.count < limit else { deferred += 1; overflowed = true; continue }
             let excluded: Int = row["excluded"] ?? 0
             rows.append(.init(id: id, arcFace: embedding!, quality: quality, held: excluded != 0))

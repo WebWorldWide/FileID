@@ -444,5 +444,298 @@
         }
       }
     ]
+  },
+  {
+    "name": "restructure-names-files-from-reviewed-evidence",
+    "description": "Organize Folders names a file from a reviewed chapter title in place of the stored model name (file 1). A draft chapter (file 2) and a stale chapter (file 3) are not reviewed evidence, so the stored model name stays; files 4 and 5 keep their own names.",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "tree": [
+      {
+        "path": "Downloads/DSC00001.JPG",
+        "content": "dsc1",
+        "mtime": 1000000000,
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108000,
+          "vlm_proposed_name": "sunset-over-the-bay"
+        }
+      },
+      {
+        "path": "Downloads/DSC00002.JPG",
+        "content": "dsc2",
+        "mtime": 1000000000,
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1788516000,
+          "vlm_proposed_name": "beach-day"
+        }
+      },
+      {
+        "path": "Downloads/DSC00003.JPG",
+        "content": "dsc3",
+        "mtime": 1000000000,
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1785924000,
+          "vlm_proposed_name": "stale-model-name"
+        }
+      },
+      {
+        "path": "Downloads/DSC00004.JPG",
+        "content": "dsc4",
+        "mtime": 1000000000,
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 1783332000
+        }
+      },
+      {
+        "path": "Downloads/DSC00005.JPG",
+        "content": "dsc5",
+        "mtime": 1000000000,
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 1780740000
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,source_revision,model_version,confidence,user_edited,stale) VALUES('reviewed',1,0,1,'Maya hits a home run','4:4741671816366391296','user',1,1,0),('draft',2,0,1,'Draft Chapter Title','4:4741671816366391296','user',1,0,0),('stale',3,0,1,'Birthday Gift Party','4:4741671816366391296','user',1,1,1)"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 1,
+                "source": "{path:Downloads/DSC00001.JPG}",
+                "destination": "{path:Photos/2026/October/Maya Hits A Home Run.JPG}"
+              },
+              {
+                "fileID": 2,
+                "source": "{path:Downloads/DSC00002.JPG}",
+                "destination": "{path:Photos/2026/September/beach-day.JPG}"
+              },
+              {
+                "fileID": 3,
+                "source": "{path:Downloads/DSC00003.JPG}",
+                "destination": "{path:Photos/2026/August/stale-model-name.JPG}"
+              },
+              {
+                "fileID": 4,
+                "source": "{path:Downloads/DSC00004.JPG}",
+                "destination": "{path:Photos/2026/July/DSC00004.JPG}"
+              },
+              {
+                "fileID": 5,
+                "source": "{path:Downloads/DSC00005.JPG}",
+                "destination": "{path:Photos/2026/June/DSC00005.JPG}"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "restructure-photo-of-several-people-has-no-single-owner",
+    "description": "With FILEID_RESTRUCTURE_RESPECT=0 a file is filed under a person only when every face in it is named and they are all one person. A photo of two named people, and a photo of a named person with an unnamed face, go to the dated photo folder instead.",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "tree": [
+      {
+        "path": "Inbox/solo.jpg",
+        "content": "solo",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Inbox/pair.jpg",
+        "content": "pair",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1791108060
+        }
+      },
+      {
+        "path": "Inbox/stranger.jpg",
+        "content": "stranger",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1791108120
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO persons(id,name,created_at,file_count) VALUES(1,'Alice',0,3),(2,'Bob',0,1)",
+      "INSERT INTO face_prints(file_id,person_id,print_data,bbox) VALUES(1,1,X'00','[0,0,1,1]'),(2,1,X'00','[0,0,1,1]'),(2,2,X'00','[0.5,0,1,1]'),(3,1,X'00','[0,0,1,1]'),(3,NULL,X'00','[0.5,0,1,1]')"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 1,
+                "source": "{path:Inbox/solo.jpg}",
+                "destination": "{path:People/Alice/2026/solo.jpg}",
+                "category": "People/Alice",
+                "reason": "Named person: Alice"
+              },
+              {
+                "fileID": 2,
+                "source": "{path:Inbox/pair.jpg}",
+                "destination": "{path:Photos/2026/October/pair.jpg}",
+                "category": "photo"
+              },
+              {
+                "fileID": 3,
+                "source": "{path:Inbox/stranger.jpg}",
+                "destination": "{path:Photos/2026/October/stranger.jpg}",
+                "category": "photo"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "restructure-anchor-strip-exempts-only-claimed-files",
+    "description": "With FILEID_RESTRUCTURE_RESPECT=0 an all-digit export folder (not a year) is never a learn-your-style target, so four photos of it with a content embedding form a new group and move. A fifth photo in that folder, which the content pass never saw, belongs to a folder that classifies as Anchor and stays put: only the claimed files are exempt from the anchor strip.",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "tree": [
+      {
+        "path": "20190412/p1.jpg",
+        "content": "p1",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108060
+        }
+      },
+      {
+        "path": "20190412/p2.jpg",
+        "content": "p2",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1791108120
+        }
+      },
+      {
+        "path": "20190412/p3.jpg",
+        "content": "p3",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1791108180
+        }
+      },
+      {
+        "path": "20190412/p4.jpg",
+        "content": "p4",
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 1791108240
+        }
+      },
+      {
+        "path": "20190412/p5.jpg",
+        "content": "p5",
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 1791108300
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES (1,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(2,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(3,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f'||zeroblob(2044) AS BLOB),'{clip_model}')"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 1,
+                "source": "{path:20190412/p1.jpg}",
+                "destination": "{path:October 2026/p1.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 2,
+                "source": "{path:20190412/p2.jpg}",
+                "destination": "{path:October 2026/p2.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 3,
+                "source": "{path:20190412/p3.jpg}",
+                "destination": "{path:October 2026/p3.jpg}",
+                "category": "October 2026"
+              },
+              {
+                "fileID": 4,
+                "source": "{path:20190412/p4.jpg}",
+                "destination": "{path:October 2026/p4.jpg}",
+                "category": "October 2026"
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]

@@ -66,7 +66,7 @@ public enum Tagging {
         if discovered.movedFromKnownRow {
             var moved = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
-                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                 fileRef: discovered.fileRef)
             moved.healOnly = true
             return moved
@@ -90,7 +90,7 @@ public enum Tagging {
         case .other:
             tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
-                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                 visionTags: [discovered.kind.rawValue.capitalized],
                 perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
                 tagsEvaluated: true
@@ -153,7 +153,7 @@ public enum Tagging {
         }
         return TaggedFile(
             url: url, kind: "audio", extension: ext, sizeBytes: discovered.sizeBytes,
-            createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+            createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
             visionTags: tags,
             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
             tagsEvaluated: true
@@ -195,7 +195,7 @@ public enum Tagging {
                 let ext = url.pathExtension.lowercased()
                 var tagged = TaggedFile(
                     url: url, kind: "model", extension: ext, sizeBytes: discovered.sizeBytes,
-                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                     visionTags: ["3D Model"],
                     tagsEvaluated: true
                 )
@@ -486,7 +486,7 @@ public enum Tagging {
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
-                            modifiedAt: discovered.modificationDate,
+                            modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                             contentHash: knownHash,
                             failed: true,
                             errorMessage: "Could not decode image",
@@ -536,7 +536,7 @@ public enum Tagging {
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
-                            modifiedAt: discovered.modificationDate,
+                            modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                             contentHash: hashBox.get() ?? nil,
                             failed: true,
                             errorMessage: FileIDEngineMain.visionTimeoutMessage,
@@ -614,7 +614,7 @@ public enum Tagging {
                         url: url, kind: "image", extension: ext,
                         sizeBytes: discovered.sizeBytes,
                         createdAt: exif.capturedAt ?? discovered.creationDate,
-                        modifiedAt: discovered.modificationDate,
+                        modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                         visionTags: dedupedTags,
                         tagScores: tagScores,
                         phash: phash,
@@ -684,7 +684,7 @@ public enum Tagging {
                     url: url, kind: "video", extension: url.pathExtension.lowercased(),
                     sizeBytes: discovered.sizeBytes,
                     createdAt: discovered.creationDate,
-                    modifiedAt: discovered.modificationDate,
+                    modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                     visionTags: ["Video"],
                     tagsEvaluated: true
                 )
@@ -754,7 +754,7 @@ public enum Tagging {
                 var tagged = TaggedFile(
                     url: url, kind: "doc", extension: url.pathExtension.lowercased(),
                     sizeBytes: discovered.sizeBytes,
-                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                     visionTags: ["Doc"],
                     tagsEvaluated: true
                 )
@@ -815,7 +815,7 @@ public enum Tagging {
                 url: url, kind: "pdf", extension: "pdf",
                 sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate,
-                modifiedAt: discovered.modificationDate,
+                modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                 visionTags: ["PDF", "Large_Document"],
                 perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
                 tagsEvaluated: true
@@ -839,7 +839,7 @@ public enum Tagging {
                             url: url, kind: "pdf", extension: "pdf",
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
-                            modifiedAt: discovered.modificationDate,
+                            modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                             visionTags: ["PDF"] + keywords.map(\.label),
                             tagScores: Dictionary(
                                 uniqueKeysWithValues: keywords.map { ($0.label, $0.score) }
@@ -863,7 +863,7 @@ public enum Tagging {
                             url: url, kind: "pdf", extension: "pdf",
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
-                            modifiedAt: discovered.modificationDate,
+                            modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                             failed: true,
                             errorMessage: "Could not open PDF (will retry next scan)",
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -876,7 +876,7 @@ public enum Tagging {
                         url: url, kind: "pdf", extension: "pdf",
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
-                        modifiedAt: discovered.modificationDate,
+                        modifiedAt: discovered.modificationDate, modifiedUnix: discovered.modifiedUnix,
                         visionTags: ["PDF"],
                         ocrText: read.text,
                         perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,

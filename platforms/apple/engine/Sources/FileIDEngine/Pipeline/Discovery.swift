@@ -30,6 +30,9 @@ public struct DiscoveredFile: Sendable {
     public let sizeBytes: Int64
     public let creationDate: Date?
     public let modificationDate: Date?
+    /// The modification time as the catalog stores it (`FileModificationTime`). `modificationDate`
+    /// rounds the last bit of times before 2001, so the stored number is never read back from it.
+    public var modifiedUnix: Double? = nil
     public let kind: Kind
     /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
     /// the Windows NTFS MFT file_ref. Propagated to TaggedFile so DBWriter's
@@ -251,7 +254,7 @@ public actor Discovery {
     ) async -> Int {
         let resourceKeys: [URLResourceKey] = [
             .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
-            .fileSizeKey, .creationDateKey, .contentModificationDateKey
+            .fileSizeKey, .creationDateKey
         ]
         // Without an errorHandler the enumerator SILENTLY drops any entry it
         // can't read (permission denied, a NAS share that drops mid-scan, a file
@@ -325,10 +328,13 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row; a lookup miss
             // fails safe (the file is processed).
+            // One stat gives the inode, the cloud flag and the modification time as the
+            // catalog stores it (seconds plus nanoseconds, not a Date's rounding).
+            let identity = Self.identity(of: url)
             if let skip, let entry = skip[PathFingerprint(url.path)],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
-                   currentModified: values?.contentModificationDate?.timeIntervalSince1970,
+                   currentModified: identity.modified,
                    currentSize: size) {
                 // The file is PRESENT (just unchanged) — record it
                 // so its row's `scanned_at` is refreshed; otherwise the orphan
@@ -340,7 +346,6 @@ public actor Discovery {
                 }
                 continue
             }
-            let identity = Self.identity(of: url)
             // Reading a cloud-only file makes macOS download it. Leave it out
             // (keeping any row it already has) until it is on this Mac.
             if identity.cloudOnly {
@@ -352,14 +357,15 @@ public actor Discovery {
                 url: url,
                 sizeBytes: size,
                 creationDate: values?.creationDate,
-                modificationDate: values?.contentModificationDate,
+                modificationDate: identity.modified.map { Date(timeIntervalSince1970: $0) },
+                modifiedUnix: identity.modified,
                 kind: fileKind,
                 fileRef: identity.inode
             )
             if libraryHasRows, let inode = identity.inode, let database,
                await Self.isMoveOfKnownRow(
                    path: url.path, inode: inode, size: size,
-                   modified: values?.contentModificationDate?.timeIntervalSince1970, database: database) {
+                   modified: identity.modified, database: database) {
                 discovered.movedFromKnownRow = true
                 movedCount += 1
             }
@@ -447,14 +453,16 @@ public actor Discovery {
 
     /// One `stat` for both the inode and SF_DATALESS, the flag macOS sets on a
     /// file whose contents live only in iCloud (or another file provider).
-    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool) {
+    /// `modified` is the Rust engine's value, including 0 for a time before 1970 (its discovery
+    /// stores 0 there); it is nil only when the stat fails.
+    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool, modified: Double?) {
         var st = stat()
         let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
             guard let rep else { return false }
             return stat(rep, &st) == 0
         }
-        guard ok else { return (nil, false) }
-        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0)
+        guard ok else { return (nil, false, nil) }
+        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0, FileModificationTime.unixSeconds(st) ?? 0)
     }
 
     /// True when no row sits at `path` yet and a successfully scanned row with the

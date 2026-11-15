@@ -283,9 +283,10 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             {
                 // No good match: only the name, tag and text matches show, and
                 // the helper's weaker look-alikes wait behind a button.
+                IReadOnlyList<FileRow>? keyword = null;
                 if (!showWeaker && SearchStrengthPolicy.Counts(ranking.Message) is { Good: 0 })
                 {
-                    var keyword = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+                    keyword = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
                     var decision = SearchStrengthPolicy.Decide(query, ranking.Message, keyword.Count, showWeaker);
                     if (decision.KeywordOnly)
                     {
@@ -295,10 +296,15 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
                     }
                 }
                 var engineRows = await _store.RowsByIdsAsync(ranking.Ids, ct).ConfigureAwait(false);
-                if (engineRows.Count > 0)
+                // The helper's rows keep their order; the keyword page (the same
+                // query the keyword-only case runs) adds the matches it lacks.
+                // The result is not pageable, so "load more" never fetches a copy.
+                keyword ??= await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+                var combined = SearchStrengthPolicy.AppendKeywordRows(engineRows, keyword, row => row.Id);
+                if (combined.Count > 0)
                 {
                     onSummary?.Invoke(SearchStrengthPolicy.Label(query, ranking.Message));
-                    return engineRows;
+                    return combined;
                 }
             }
             var ranked = await _store.SemanticSearchAsync(embed, limit, ct, kind).ConfigureAwait(false);

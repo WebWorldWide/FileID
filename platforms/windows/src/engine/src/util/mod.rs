@@ -23,38 +23,88 @@ pub(crate) mod model_memory;
 pub(crate) mod qos;
 pub(crate) mod vector_math;
 
-/// File timestamps as catalog seconds since 1970. The app-hosted Mac engine
-/// shares its catalog with the Swift engine, which compares stored mtimes
-/// exactly against Foundation's `Date` (seconds since 2001 plus nanoseconds,
-/// then shifted to 1970); rounding the same way keeps those rows current.
+/// File timestamps as catalog seconds since 1970: whole seconds plus nanoseconds
+/// divided by 1e9. The Swift engine stores the same number (`FileModificationTime`);
+/// Foundation's `Date.timeIntervalSince1970` rounds the last bit differently for
+/// about a quarter of timestamps. A time before 1970 has no value.
 pub(crate) fn catalog_unix_seconds(time: std::time::SystemTime) -> Option<f64> {
-    let since = time.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        foundation_unix_seconds(since)
-    } else {
-        since.as_secs_f64()
-    })
+    Some(time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
 }
 
-const FOUNDATION_REFERENCE_DATE: f64 = 978_307_200.0;
+/// Two stored modification times name the same instant when they are within a
+/// microsecond: the scanners' rule, which also covers catalogs written before the
+/// engines stored one number.
+pub(crate) fn same_modified_time(left: f64, right: f64) -> bool {
+    left.is_finite() && right.is_finite() && (left - right).abs() < 0.000_001
+}
 
-fn foundation_unix_seconds(since: std::time::Duration) -> f64 {
-    since.as_secs() as f64 - FOUNDATION_REFERENCE_DATE + 1.0e-9 * f64::from(since.subsec_nanos())
-        + FOUNDATION_REFERENCE_DATE
+/// Revisions are `"<size>:<IEEE bits of modified_at>"`; two revisions are the same file
+/// state when the size is equal and the times are the same instant.
+pub(crate) fn same_source_revision(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some((left_size, left_bits)), Some((right_size, right_bits))) = (left.split_once(':'), right.split_once(':')) else {
+        return false;
+    };
+    let (Ok(left_bits), Ok(right_bits)) = (left_bits.parse::<u64>(), right_bits.parse::<u64>()) else { return false };
+    left_size == right_size && same_modified_time(f64::from_bits(left_bits), f64::from_bits(right_bits))
 }
 
 #[cfg(test)]
 mod catalog_time_tests {
-    use super::foundation_unix_seconds;
-    use std::time::Duration;
+    use super::{catalog_unix_seconds, same_modified_time, same_source_revision};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// (seconds, nanoseconds, bits of the stored double). The Swift engine's
+    /// `FileModificationTimeTests` pins the same table; most rows are timestamps
+    /// whose double `Date.timeIntervalSince1970` rounds one bit differently.
+    const TABLE: [(u64, u32, u64); 13] = [
+        (1_724_989_629, 833_179_165, 0x41d9_b450_2f75_52cf),
+        (1_603_520_313, 785_102_536, 0x41d7_e4f1_ce72_3f1f),
+        (1_704_538_783, 171_373_719, 0x41d9_664c_a7ca_f7c9),
+        (1_700_000_000, 0, 0x41d9_54fc_4000_0000),
+        (1_719_409_671, 136_042_265, 0x41d9_9f07_01c8_b4eb),
+        (1_635_498_135, 1_905_740, 0x41d8_5eee_25c0_1f39),
+        (1_794_374_740, 262_792_743, 0x41da_bcff_1510_d199),
+        (1_794_731_299, 518_318_480, 0x41da_be5b_48e1_2c21),
+        (0, 0, 0),
+        (0, 1, 0x3e11_2e0b_e826_d695),
+        (1, 999_999_999, 0x3fff_ffff_ffbb_47d0),
+        (2_147_483_648, 500_000_000, 0x41e0_0000_0010_0000),
+        (4_102_444_800, 123_456_789, 0x41ee_90ca_e003_f35c),
+    ];
 
     #[test]
-    fn foundation_rounding_matches_the_swift_engine_values() {
-        // Values the Swift engine stored for copied Sony files whose plain
-        // `as_secs_f64` differs in the last bit.
-        let swift = 1_794_374_740.262_792_6_f64.to_bits();
-        let time = Duration::new(1_794_374_740, 262_792_743);
-        assert_eq!(foundation_unix_seconds(time).to_bits(), swift);
-        assert_ne!(time.as_secs_f64().to_bits(), swift);
+    fn catalog_time_is_seconds_plus_nanoseconds_over_a_billion() {
+        for (seconds, nanos, bits) in TABLE {
+            let since = Duration::new(seconds, nanos);
+            assert_eq!(since.as_secs_f64().to_bits(), bits, "{seconds}.{nanos:09}");
+            // Windows keeps a `SystemTime` in 100 ns ticks, so only a whole tick
+            // survives the trip through one there.
+            if cfg!(unix) || nanos.is_multiple_of(100) {
+                assert_eq!(catalog_unix_seconds(UNIX_EPOCH + since).unwrap().to_bits(), bits, "{seconds}.{nanos:09}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_time_before_1970_has_no_catalog_value() {
+        assert_eq!(catalog_unix_seconds(UNIX_EPOCH - Duration::new(1, 500_000_000)), None);
+    }
+
+    #[test]
+    fn times_a_bit_apart_are_the_same_instant() {
+        let plain = f64::from_bits(4_745_314_456_662_256_673);
+        let foundation = f64::from_bits(4_745_314_456_662_256_674);
+        assert!(same_modified_time(plain, foundation));
+        assert!(!same_modified_time(plain, plain + 0.001));
+        assert!(!same_modified_time(plain, f64::NAN));
+        let (left, right) = (format!("100:{}", plain.to_bits()), format!("100:{}", foundation.to_bits()));
+        assert!(same_source_revision(&left, &right));
+        assert!(!same_source_revision(&left, &format!("101:{}", foundation.to_bits())));
+        assert!(!same_source_revision(&left, &format!("100:{}", (plain + 0.001).to_bits())));
+        assert!(same_source_revision("100:unknown", "100:unknown"));
+        assert!(!same_source_revision("100:unknown", &left));
     }
 }

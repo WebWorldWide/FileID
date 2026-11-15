@@ -145,7 +145,9 @@ pub(crate) fn load(
         .optional()?;
     let Some((path, size, modified)) = row else { return Err(SourceChanged.into()) };
     let revision = source_revision(size, modified);
-    let valid_stat = size >= 0 && modified.is_some_and(f64::is_finite) && live_revision(&path).as_deref() == Some(&revision);
+    let valid_stat = size >= 0
+        && modified.is_some_and(f64::is_finite)
+        && live_revision(&path).is_some_and(|live| crate::util::same_source_revision(&live, &revision));
     if !valid_stat {
         return Err(SourceChanged.into());
     }
@@ -241,6 +243,41 @@ impl NamingContext {
             _ => Err(EvidenceChanged.into()),
         }
     }
+}
+
+/// Organize Folders: a file whose reviewed label gives a name uses it in place of
+/// the stored model name; any load failure or abstention keeps the stored name
+/// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
+pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
+    let labelled = match labelled_files(conn, files) {
+        Ok(ids) if !ids.is_empty() => ids,
+        _ => return,
+    };
+    let (model, processing) = selected_space();
+    for file in files.iter_mut().filter(|file| labelled.contains(&file.file_id)) {
+        if let Some(name) = load(conn, file.file_id, model.as_deref(), processing).ok().and_then(|c| c.proposed_name()) {
+            file.vlm_proposed = Some(name);
+        }
+    }
+}
+
+/// Files in `files`' id range that can have a reviewed label at all. `load`
+/// reads the file from disk and runs several queries, so a plan over a large
+/// library asks it only about these; the set is wider than `load` accepts.
+fn labelled_files(
+    conn: &Connection,
+    files: &[crate::pipeline::restructure::FileForClassify],
+) -> rusqlite::Result<std::collections::HashSet<i64>> {
+    let ids = || files.iter().map(|file| file.file_id);
+    let (Some(first), Some(last)) = (ids().min(), ids().max()) else { return Ok(std::collections::HashSet::new()) };
+    conn.prepare_cached(
+        "SELECT file_id FROM catalog_chapters WHERE user_edited=1 AND file_id BETWEEN ?1 AND ?2
+         UNION
+         SELECT ef.file_id FROM catalog_event_files ef JOIN catalog_events e ON e.id=ef.event_id
+         WHERE e.user_edited=1 AND ef.file_id BETWEEN ?1 AND ?2",
+    )?
+    .query_map(params![first, last], |row| row.get(0))?
+    .collect()
 }
 
 /// The selected face space: the installed weights' identity and this
@@ -376,6 +413,42 @@ mod tests {
     }
 
     #[test]
+    fn organize_folders_prefers_the_reviewed_name_and_keeps_the_stored_one_otherwise() {
+        let f = fixture("restructure");
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        let file = |stored: Option<&str>| crate::pipeline::restructure::FileForClassify {
+            file_id: 1,
+            source: f.source.clone(),
+            kind: crate::pipeline::discovery::FileKind::Image,
+            modified_unix: 0.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+            vlm_proposed: stored.map(str::to_owned),
+            identity: None,
+        };
+        let mut files = [file(Some("sunset-over-the-bay")), file(None)];
+        let reviewed = context(&f, None).unwrap().proposed_name();
+        apply_reviewed_names(&f.conn, &mut files);
+        assert!(reviewed.is_some());
+        assert_eq!(files[0].vlm_proposed, reviewed);
+        assert_eq!(files[1].vlm_proposed, reviewed);
+
+        f.conn.execute("UPDATE catalog_chapters SET user_edited=0", []).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"));
+
+        chapter(&f, "Birthday gift", "other", true, false);
+        std::fs::write(&f.source, [1u8, 2]).unwrap();
+        let mut files = [file(Some("sunset-over-the-bay"))];
+        apply_reviewed_names(&f.conn, &mut files);
+        assert_eq!(files[0].vlm_proposed.as_deref(), Some("sunset-over-the-bay"), "a changed source keeps the stored name");
+    }
+
+    #[test]
     fn a_label_that_only_repeats_the_file_name_abstains() {
         let f = fixture("same-name");
         chapter(&f, "IMG 001", "chapter", true, false);
@@ -406,6 +479,18 @@ mod tests {
             let error = held.validate(&f.conn).unwrap_err();
             assert!(error.is::<EvidenceChanged>(), "{fault}");
         }
+    }
+
+    #[test]
+    fn a_catalog_that_stored_the_other_engines_rounding_of_the_time_still_loads() {
+        let mut f = fixture("rounding");
+        let (size, bits) = f.revision.split_once(':').unwrap();
+        let stored = f64::from_bits(bits.parse::<u64>().unwrap() + 1);
+        f.revision = format!("{size}:{}", stored.to_bits());
+        f.conn.execute("UPDATE files SET modified_at=?1", [stored]).unwrap();
+        f.conn.execute("UPDATE catalog_revisions SET revision=?1", [&f.revision]).unwrap();
+        chapter(&f, "Maya hits a home run", "chapter", true, false);
+        assert!(context(&f, None).unwrap().proposed_name().is_some());
     }
 
     #[test]

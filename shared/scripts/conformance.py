@@ -36,6 +36,7 @@ A case may reuse another case's tree, sql and env with "extends". Tree paths exp
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
 also checks "symlinks".
 A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
+A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
 A case with "appHosted": true runs only when every engine it uses (the one under
@@ -590,6 +591,9 @@ def build_tree(ctx, entries):
             target.write_bytes(data)
         if "mtime" in entry:
             os.utime(target, (entry["mtime"], entry["mtime"]))
+        if "mtimeNs" in entry:
+            seconds, nanoseconds = entry["mtimeNs"]
+            os.utime(target, ns=(seconds * 1_000_000_000 + nanoseconds,) * 2)
         if "row" in entry:
             rows.append((target, entry["row"]))
     return rows

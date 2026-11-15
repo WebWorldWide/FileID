@@ -709,7 +709,9 @@ fn plan_large_library_in_with_cancel(
                     ],
                     plan_row_to_file,
                 )?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
+                let mut chunk = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                crate::pipeline::naming_context::apply_reviewed_names(&source, &mut chunk);
+                chunk
             };
             if chunk.is_empty() {
                 break;
@@ -1111,6 +1113,7 @@ pub(crate) async fn handle_plan_restructure(
                 }
                 files.push(row?);
             }
+            crate::pipeline::naming_context::apply_reviewed_names(&conn, &mut files);
             Ok(files)
         })
         .await
