@@ -523,7 +523,8 @@ impl ScanSession {
                     // nothing to say) so the single-shot flag is only CLAIMED
                     // when a notice is actually delivered. (audit R3-21)
                     let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick);
+                    let reachable = count != 0 || scan_root_reachable(Path::new(&root_for_tick));
+                    let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick, reachable);
                     if let Some(err) = notice {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
@@ -722,7 +723,8 @@ impl ScanSession {
             let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
             let root_display = root.to_string_lossy().into_owned();
             let cloud_only = discovered_cloud_only.load(std::sync::atomic::Ordering::Relaxed);
-            let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_display);
+            let reachable = count != 0 || scan_root_reachable(Path::new(&root_display));
+            let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_display, reachable);
             if let Some(err) = notice {
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
                     .await;
@@ -764,6 +766,17 @@ impl ScanSession {
                 capture_dates_current,
             });
         }
+        // A root that is gone, empty or an unmounted drive's leftover folder lists nothing,
+        // which a walk cannot tell from a library whose files were all deleted. Hiding rows
+        // (and later deleting the hidden ones) on that evidence would wipe the library of an
+        // unplugged drive; the Swift engine's `ScanRootGuard.isReachable` keeps them too.
+        let clean_walk = clean_walk && {
+            let reachable = scan_root_reachable(root);
+            if !reachable {
+                tracing::warn!("[SCAN] scan root is missing, empty or unmounted; catalog rows kept");
+            }
+            reachable
+        };
         if clean_walk {
             {
                 let mut seen = discovered_seen_paths.lock();
@@ -1160,6 +1173,7 @@ fn discovery_notice(
     errs: u64,
     cloud_only: u64,
     root: &str,
+    root_reachable: bool,
 ) -> Option<crate::ipc::EngineError> {
     let (kind, message) = if cloud_only > 0 {
         // The Swift engine's `Discovery.shortfallNotice`, word for word.
@@ -1176,6 +1190,13 @@ fn discovery_notice(
             if cloud_only == 1 { "it was" } else { "they were" }
         ));
         ("discovery_partial", format!("{}. Everything else was scanned.", parts.join("; ")))
+    } else if count == 0 && skip_count > 0 && !root_reachable {
+        (
+            "empty_folder",
+            "This folder looks disconnected or empty, so FileID kept your library as it was. \
+             Reconnect the drive and scan again."
+                .to_string(),
+        )
     } else if count == 0 && skip_count > 0 {
         (
             "rescan_no_changes",
@@ -1508,6 +1529,49 @@ fn should_reconcile_missing_rows(
     test_file_cap: u64,
 ) -> bool {
     !cancelled && !gpu_dead && discovery_done && discovery_errors == 0 && test_file_cap == 0
+}
+
+/// False when the scan root cannot be trusted to reflect the library: missing, not a
+/// directory, empty or unreadable, or (macOS) a leftover `/Volumes/<name>` folder on the
+/// boot volume after the drive was unplugged. Port of the Swift `ScanRootGuard.isReachable`.
+pub(crate) fn scan_root_reachable(root: &Path) -> bool {
+    root_is_trustworthy(root, &device_of)
+}
+
+#[cfg(target_os = "macos")]
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| meta.dev())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device_of(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// `device_of` is the seam for the mount-point check (see [`is_unmounted_volume_stub`]).
+fn root_is_trustworthy(root: &Path, device_of: &dyn Fn(&Path) -> Option<u64>) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    if !std::fs::read_dir(root).is_ok_and(|mut entries| entries.next().is_some()) {
+        return false;
+    }
+    !(cfg!(target_os = "macos") && is_unmounted_volume_stub(root, device_of))
+}
+
+/// A folder under `/Volumes` that sits on the same device as `/Volumes` itself is not a
+/// mounted drive: macOS leaves it behind when a drive is unplugged. A symlink there (the
+/// boot volume's own entry) is not a stub.
+fn is_unmounted_volume_stub(root: &Path, device_of: &dyn Fn(&Path) -> Option<u64>) -> bool {
+    let volumes = Path::new("/Volumes");
+    if root == volumes || !root.starts_with(volumes) {
+        return false;
+    }
+    if std::fs::canonicalize(root).is_ok_and(|resolved| resolved != root) {
+        return false;
+    }
+    matches!((device_of(root), device_of(volumes)), (Some(here), Some(there)) if here == there)
 }
 
 pub(crate) fn root_descendant_prefix(root: &Path) -> String {
@@ -1850,21 +1914,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_scan_root_must_exist_be_a_folder_and_list_something() {
+        let dir = std::env::temp_dir().join(format!("fileid-root-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let no_device = |_: &Path| None;
+        assert!(!root_is_trustworthy(&dir.join("missing"), &no_device), "missing");
+        let file = dir.join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!root_is_trustworthy(&file, &no_device), "a file");
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(!root_is_trustworthy(&empty, &no_device), "empty");
+        assert!(root_is_trustworthy(&dir, &no_device), "a folder with entries");
+        assert!(scan_root_reachable(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_leftover_volumes_folder_on_the_boot_device_is_a_stub() {
+        let same = |_: &Path| Some(7);
+        let mounted = |path: &Path| Some(if path == Path::new("/Volumes") { 7 } else { 9 });
+        let root = Path::new("/Volumes/Stub/Photos");
+        assert!(is_unmounted_volume_stub(root, &same));
+        assert!(!is_unmounted_volume_stub(root, &mounted), "a mounted drive has its own device");
+        assert!(!is_unmounted_volume_stub(Path::new("/Users/me/Photos"), &same), "only /Volumes");
+        assert!(!is_unmounted_volume_stub(Path::new("/Volumes"), &same));
+        assert!(!is_unmounted_volume_stub(root, &|_: &Path| None), "no device: do not guess");
+    }
+
+    #[test]
+    fn an_unreachable_root_keeps_the_notice_for_a_disconnected_drive() {
+        let notice = discovery_notice(0, 40, 0, 0, "/lib", false).unwrap();
+        assert_eq!(notice.kind, "empty_folder");
+        assert!(notice.message.contains("disconnected"));
+        assert_eq!(discovery_notice(0, 0, 0, 0, "/lib", false).unwrap().kind, "empty_folder");
+    }
+
+    #[test]
     fn cloud_only_files_are_reported_in_the_swift_engines_words() {
-        let one = discovery_notice(12, 0, 0, 1, "/lib").unwrap();
+        let one = discovery_notice(12, 0, 0, 1, "/lib", true).unwrap();
         assert_eq!(one.kind, "discovery_partial");
         assert_eq!(
             one.message,
             "1 file is stored in iCloud and not downloaded to this Mac, so it was left out. Everything else was scanned."
         );
-        let many = discovery_notice(0, 40, 2, 3, "/lib").unwrap();
+        let many = discovery_notice(0, 40, 2, 3, "/lib", true).unwrap();
         assert_eq!(many.kind, "discovery_partial");
         assert_eq!(
             many.message,
             "2 items couldn't be opened (no permission, or removed during the scan); 3 files are stored in iCloud and not downloaded to this Mac, so they were left out. Everything else was scanned."
         );
-        assert_eq!(discovery_notice(0, 40, 0, 0, "/lib").unwrap().kind, "rescan_no_changes");
-        assert!(discovery_notice(5, 0, 0, 0, "/lib").is_none());
+        assert_eq!(discovery_notice(0, 40, 0, 0, "/lib", true).unwrap().kind, "rescan_no_changes");
+        assert!(discovery_notice(5, 0, 0, 0, "/lib", true).is_none());
     }
 
     #[test]

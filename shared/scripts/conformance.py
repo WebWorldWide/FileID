@@ -35,7 +35,8 @@ A catalog step with "until": seconds resends its request until "expect" matches 
 time runs out, for durable jobs that finish after their reply.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
-also checks "symlinks".
+also checks "symlinks", empties folders ("emptyDir") and writes tree entries ("tree") before
+its checks.
 A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
@@ -706,6 +707,11 @@ def run_step(engine, ctx, step, binaries):
         actual = db_rows(ctx, step["db"])
     elif "fs" in step:
         spec = ctx.expand(step["fs"])
+        for relative in spec.get("emptyDir", []):
+            for child in Path(ctx.path(relative)).iterdir():
+                shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+        if "tree" in spec:
+            build_tree(ctx, spec["tree"])
         for relative in spec.get("exists", []):
             if not Path(ctx.path(relative)).exists():
                 raise Failure(f"expected {relative} to exist")
