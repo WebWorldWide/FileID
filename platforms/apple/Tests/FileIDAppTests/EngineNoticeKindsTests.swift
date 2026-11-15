@@ -30,6 +30,8 @@ struct EngineNoticeKindsTests {
         }
         #expect(Sidebar.errorTitle("plan_restructure_root") == "This folder isn't available")
         #expect(Sidebar.errorText(kind: "plan_restructure_root", message: "") == "Reconnect it, then try again.")
+        #expect(Sidebar.errorTitle("face_cluster_no_model") == "Faces can't be grouped yet")
+        #expect(Sidebar.errorTitle("face_cluster_embedder_load_failed") == "Faces can't be grouped yet")
         #expect(Sidebar.errorTitle("never_heard_of_it") == "Something went wrong")
     }
 }
