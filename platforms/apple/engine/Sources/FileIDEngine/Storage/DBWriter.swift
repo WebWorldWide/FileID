@@ -330,6 +330,9 @@ public actor DBWriter {
             self.failedTotal    += insertedFailed
             self.consecutiveCommitFailures = 0
             await self.coordinator.bumpProcessed(by: insertedOK)
+            await self.coordinator.bumpMediaAnalyzed(by: batchFiles.filter {
+                !$0.failed && !$0.healOnly && ($0.kind == "image" || $0.kind == "video")
+            }.count)
             await self.coordinator.bumpFailed(by: insertedFailed)
         } catch {
             // A write failure is serious — surface as an event, log to JSONL,

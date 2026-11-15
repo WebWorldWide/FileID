@@ -106,6 +106,26 @@ struct CatalogTakeGroupingTests {
         #expect(try await database.pool.read { db in try Grouping.plan(db).dirty.isEmpty })
     }
 
+    @Test func largeFilesWithOneSampledHashStayTwoTriesWhileSmallCopiesCollapse() async throws {
+        let (database, directory) = try makeDatabase()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let big = Int64(ContentHash.fullHashMaxBytes) + 1
+        try await database.pool.write { db in
+            try file(db, id: 1, path: "/shoot/a1.jpg", time: 1000, camera: "Phone A", vector: (1, 0))
+            try file(db, id: 2, path: "/shoot/a2.jpg", time: 1030, camera: "Phone A", vector: (0.96, 0.28))
+            try file(db, id: 3, path: "/shoot/a3.jpg", time: 1060, camera: "Phone A", vector: (0.96, 0.28))
+            try file(db, id: 4, path: "/shoot/a4.jpg", time: 1090, camera: "Phone A", vector: (0.96, 0.28))
+            try db.execute(sql: "UPDATE files SET size_bytes=?, content_hash=x'aa' WHERE id IN (1,2)", arguments: [big])
+            try db.execute(sql: "UPDATE files SET content_hash=x'bb' WHERE id IN (3,4)")
+            for (id, vector) in [(1, (Float(1), Float(0))), (2, (0.96, 0.28)), (3, (0.96, 0.28)), (4, (0.96, 0.28))] as [(Int64, (Float, Float))] {
+                try db.execute(sql: "INSERT OR REPLACE INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)",
+                               arguments: [id, blob(vector), CLIPEmbeddingSpace.modelID])
+            }
+        }
+        try await rerun(database)
+        #expect(try await stored(database).map(\.1) == ["[1,2,3]"])
+    }
+
     private func makeDatabase() throws -> (FileIDEngine.Database, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))

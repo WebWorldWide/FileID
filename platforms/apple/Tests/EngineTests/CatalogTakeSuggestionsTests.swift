@@ -34,6 +34,24 @@ struct CatalogTakeSuggestionsTests {
         #expect(events.events?.isEmpty == true)
     }
 
+    @Test func largeFilesWithOneSampledHashAreDifferentTriesSmallCopiesAreOne() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        let big = Int64(ContentHash.fullHashMaxBytes) + 1
+        try await database.pool.write { db in
+            for (id, time, size, hash) in [(1, 1_000.0, big, 1), (2, 1_010.0, big, 1), (3, 1_020.0, Int64(100), 3), (4, 1_030.0, Int64(100), 3)] as [(Int, Double, Int64, Int)] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension,content_hash) VALUES(?,?,?,?,?,?,?,'video','mov',?)",
+                               arguments: [id, "/internal/\(id).mov", id, size, time, time, 0, Data([UInt8(hash)])])
+                try db.execute(sql: "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)",
+                               arguments: [id, blob([1, 0]), CLIPEmbeddingSpace.modelID])
+            }
+        }
+        let request = CatalogRequest(requestID: "suggest", action: "suggestTakeGroups", fileIDs: [1, 2, 3, 4])
+        let response = await CatalogStore.handle(request, database: database)
+        #expect(response.suggestedTakeGroups?.first?.members.map(\.fileID) == [1, 2, 3])
+    }
+
     private func blob(_ leading: [Float]) -> Data {
         var vector = [Float](repeating: 0, count: CLIPEmbeddingSpace.dimension)
         for (index, value) in leading.enumerated() { vector[index] = value }

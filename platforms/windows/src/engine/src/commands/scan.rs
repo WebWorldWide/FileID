@@ -244,6 +244,7 @@ pub(crate) async fn handle_start_scan(
     payload: ipc::StartScanPayload,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     slot: Option<Box<dyn Send>>,
+    other_heavy_work: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
@@ -256,6 +257,8 @@ pub(crate) async fn handle_start_scan(
     // (#20). If anyone else reaches here while we hold the slot, they bounce
     // with `scan_already_running`.
     let coord = ScanCoordinator::new();
+    let finished_scan = coord.clone();
+    let after_scan_db = db.clone();
     let already_running = {
         let mut guard = scan_state.lock();
         if guard.is_some() {
@@ -488,6 +491,14 @@ pub(crate) async fn handle_start_scan(
         elapsed_seconds = result.elapsed_seconds,
         "[SCAN] handle_start_scan exiting normally"
     );
+
+    if let Some(busy) = other_heavy_work
+        && !finished_scan.is_cancelled()
+        && !finished_scan.is_gpu_dead()
+        && finished_scan.media_analyzed() > 0
+    {
+        super::take_grouping::start_after_scan(sink, after_scan_db, busy);
+    }
 }
 
 /// `purgeExcluded` handler — immediately remove cataloged rows under the
@@ -554,6 +565,7 @@ mod tests {
             scan_state.clone(),
             payload,
             cancel_requested,
+            None,
             None,
         )
         .await;
