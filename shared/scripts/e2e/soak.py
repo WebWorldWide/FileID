@@ -488,7 +488,7 @@ class Soak:
                 continue
             os.rename(self.p(r), self.p(new)); self.model[new] = self.model.pop(r); moved.append((r, new))
         for r in picks[80:110]:
-            t = time.time() + rng.randint(5, 500)
+            t = time.time() - rng.randint(5, 500)  # not in the future: a file dated ahead is re-stamped on every scan until its date passes
             os.utime(self.p(r), (t, t)); touched.append(r)
         for r in picks[110:135]:
             if r.endswith((".txt", ".md", ".csv", ".html")):
