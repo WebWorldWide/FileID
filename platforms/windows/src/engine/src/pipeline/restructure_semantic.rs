@@ -47,6 +47,11 @@ pub struct Profile {
     pub review_cohesion: f32,
     pub min_margin: f32,
     pub auto_min_members: usize,
+    /// The representative is a multi-hot bag of words, whose pairwise similarities take a handful of
+    /// values. An HNSW graph cannot prune among ties and visits nearly every node on every insert
+    /// (5,021 files: 37 s to build against 0.9 s for exact search), so these vectors always use the
+    /// exact search, which the Swift-lockstep result also matches exactly.
+    pub quantized_vectors: bool,
 }
 
 /// Image pass — representative is the L2-normalized 512-d CLIP image embedding.
@@ -68,6 +73,7 @@ pub fn image_profile() -> Profile {
         review_cohesion: env_f32("FILEID_RESTRUCTURE_IMG_REVIEW_COH", 0.70),
         min_margin: 0.05,
         auto_min_members: 4,
+        quantized_vectors: false,
     }
 }
 
@@ -104,6 +110,7 @@ fn non_image_profile() -> Profile {
         review_cohesion: env_f32("FILEID_RESTRUCTURE_NI_REVIEW_COH", 0.55),
         min_margin: 0.08,
         auto_min_members: 4,
+        quantized_vectors: true,
     }
 }
 
@@ -337,7 +344,7 @@ fn semantic_classify_profiled(
     let global_freq = tag_frequencies(files);
     let vocab = vocab_from_freq(&global_freq, TAG_VOCAB_CAP);
     let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab, profile)).collect();
-    let cluster_ids = cluster(&fused, hp);
+    let cluster_ids = cluster(&fused, hp, profile.quantized_vectors);
 
     // Group file indices by cluster id.
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -626,6 +633,7 @@ fn doc_profile() -> Profile {
         review_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.70),
         min_margin: 0.05,
         auto_min_members: 4,
+        quantized_vectors: false,
     }
 }
 
@@ -856,18 +864,14 @@ fn time_features(time_unix: f64) -> [f32; 5] {
 
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
-fn cluster(fused: &[Vec<f32>], params: Hyperparameters) -> Vec<usize> {
+fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
     const HNSW_MIN: usize = 5_000;
     let n = fused.len();
     // Can't request more neighbors than other points exist; k_nn >= n made the kNN
     // over an all-tied set arch-sensitive (see non_image_signatures). (lockstep)
     let k = params.k_nn.min(n.saturating_sub(1).max(1));
 
-    let hnsw = (n >= HNSW_MIN).then(|| {
-        let points: Vec<(Vec<f32>, usize)> =
-            fused.iter().enumerate().map(|(i, e)| (e.clone(), i)).collect();
-        crate::util::hnsw_index::build(points)
-    });
+    let hnsw = (n >= HNSW_MIN && !exact_only).then(|| crate::util::hnsw_index::DedupIndex::build(fused));
 
     // Bounded top-k: O(n) partition instead of an O(n log n) full sort of all n-1
     // neighbors when only k are used; sort just the k kept.
@@ -911,10 +915,8 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters) -> Vec<usize> {
             // Reuse one Search scratch across the sweep (a fresh one re-zeros an
             // n-byte visited set per query — an O(n²) term over the pass).
             (None, Some(idx)) => top_k(
-                knn_search
-                    .top_k(idx, &fused[i], k + 1)
+                idx.neighbours(&mut knn_search, fused, i, k)
                     .into_iter()
-                    .filter(|(j, _)| *j != i)
                     .map(|(j, d)| Neighbor { idx: j, similarity: 1.0 - d / 2.0 })
                     .collect(),
             ),
@@ -1074,6 +1076,56 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lcg(state: &mut u64) -> f32 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+    }
+
+    /// Past the HNSW threshold, byte-identical vectors (copies of one file) must cluster together.
+    #[test]
+    fn identical_vectors_past_the_hnsw_threshold_share_a_cluster() {
+        let _counting = crate::util::hnsw_index::tests::COUNTING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = 7u64;
+        let mut fused: Vec<Vec<f32>> = (0..3_500).map(|_| unit((0..37).map(|_| lcg(&mut state)).collect())).collect();
+        for i in 0..1_700 {
+            fused.push(fused[i % 40].clone());
+        }
+        let ids = cluster(&fused, file_hyperparams(), false);
+        assert_eq!(ids.len(), fused.len());
+        assert!(ids[..40].iter().zip(&ids[3_500..3_540]).all(|(a, b)| a == b), "identical vectors share a cluster");
+    }
+
+    /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold
+    /// they must not build a graph at all: counts HNSW distance evaluations (not time, so a loaded machine
+    /// cannot flip it). Building the graph for this shape took about 7 evaluations per pair of vectors.
+    #[test]
+    fn quantized_vectors_past_the_hnsw_threshold_build_no_graph() {
+        use crate::util::hnsw_index::tests::{COUNTED_DIM, COUNTING, EVALUATIONS};
+        let _counting = COUNTING.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(non_image_profile().quantized_vectors && !image_profile().quantized_vectors && !doc_profile().quantized_vectors);
+        let mut state = 3u64;
+        let n = 5_200usize;
+        let fused: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                let mut v = vec![0f32; COUNTED_DIM];
+                v[0] = 1.0; // every file shares one token
+                for _ in 0..4 {
+                    v[1 + ((lcg(&mut state) + 0.5) * 36.0) as usize % 36] = 1.0;
+                }
+                unit(v)
+            })
+            .collect();
+        EVALUATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let ids = cluster(&fused, file_hyperparams(), true);
+        assert_eq!(ids.len(), n);
+        assert_eq!(EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed), 0, "the exact search builds no HNSW graph");
+        EVALUATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = cluster(&fused, file_hyperparams(), false);
+        let graph = EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("QUANTIZED graph evaluations {graph} for n={n} (n*n={})", (n * n));
+        assert!(graph > (n * n) as u64 / 2, "this shape is the one that degenerates the graph ({graph} evaluations)");
+    }
 
     fn unit(v: Vec<f32>) -> Vec<f32> {
         l2_normalized(&v)
