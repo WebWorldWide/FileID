@@ -78,8 +78,13 @@ mod catalog_time_tests {
     #[test]
     fn catalog_time_is_seconds_plus_nanoseconds_over_a_billion() {
         for (seconds, nanos, bits) in TABLE {
-            let value = catalog_unix_seconds(UNIX_EPOCH + Duration::new(seconds, nanos)).unwrap();
-            assert_eq!(value.to_bits(), bits, "{seconds}.{nanos:09}");
+            let since = Duration::new(seconds, nanos);
+            assert_eq!(since.as_secs_f64().to_bits(), bits, "{seconds}.{nanos:09}");
+            // Windows keeps a `SystemTime` in 100 ns ticks, so only a whole tick
+            // survives the trip through one there.
+            if cfg!(unix) || nanos.is_multiple_of(100) {
+                assert_eq!(catalog_unix_seconds(UNIX_EPOCH + since).unwrap().to_bits(), bits, "{seconds}.{nanos:09}");
+            }
         }
     }
 
