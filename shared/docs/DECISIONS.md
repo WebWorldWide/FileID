@@ -5013,3 +5013,7 @@ NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since
 
 A chain like `stuff/old/new/final/really final` gets no suggestion because `old`, `new` and `final` are not on the generic-name list, so the folders count as the person's own organisation (RESTRUCTURE.md, 2026-10-15 rule 1). A wider rule (generic when every word is a throwaway word) was tried in a scratch build: on the capture library the plan grew from 22 to 46 moves, and all 24 new moves were automatic, date-only moves of scans out of a folder the person had named. Not adopted: a wrong move costs more than a missing suggestion, and "final" or "old" is often a real label. If this is revisited it should be a reviewed suggestion to flatten the chain, never an automatic move.
 
+## 2026-11-14 — No crop-publication recovery at engine startup
+
+NEXT and MAC_FINISH asked for recovery of an interrupted face-crop publication when the shared engine starts, "as the Swift engine does". Reading both engines: neither has a publication journal. The Swift engine writes a crop atomically and replays nothing; the Rust engine writes a temporary file and renames it after the database commit; the journal protocol existed only in the Rust slice dropped on 2026-10-15. Recovery with no journal has nothing to recover, and the case it was for (a crash between the commit and the crop write) is already handled by the scan's crash repair, which reprocesses face-bearing files whose crop is missing after an unclean shutdown (made once-per-finished-scan today). Not built; the item is closed.
+
