@@ -4990,3 +4990,7 @@ The soak showed the shared engine never removes the row of a file that is gone: 
 ## 2026-11-14 — MLX models are owned by one thread
 
 `GPURequestBatcher` runs each model on its own dedicated thread, which also drops the model, instead of a serial dispatch queue. A serial queue guarantees order, not a thread, and MLX's compile cache is per thread: a compiled model dropped on a different thread than the one that compiled it leaves its weights in that thread's cache for the life of the process. `compile` is kept (without it RAM++ ran about 12 % slower in the reproduction). `roll` is avoided inside compiled graphs: it leaked intermediates in 139 of 150 cycles of a synthetic compiled function, and the same function without it in 0 of 450; why is not known, the evidence is behavioural. Rule for new MLX code here: a model is created, used and released on its batcher's thread, and a new graph is checked with the load/run/unload reproduction (`~/FileIDDev/scratch/mlx-residue`) before it ships.
+
+## 2026-11-14 — No per-page location chip
+
+NEXT carried "the root filter chip in Search/Chat/Moments" without a date. Since 2026-11-06 the title-bar location switcher scopes Library, Search & Moments and Chat on all three apps (Mac `CatalogWorkbench` and `ChatHandoff.rootID`, GTK `library_scope::current_id()`, WinUI `AppViewModel.Scope` and the `rootId` in `ChatContext`). A second control for the same choice on each page would let the page and the title bar disagree. Closed: one switcher, no chips.
