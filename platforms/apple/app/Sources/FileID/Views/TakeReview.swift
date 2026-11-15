@@ -606,7 +606,8 @@ private struct FilmstripTile: View {
                 .stroke(focused ? Theme.text1 : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
             .scaleEffect(focused ? 1.04 : 1)
         }
-        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         .focusable(false)
         .simultaneousGesture(TapGesture(count: 2).onEnded { onToggleKeep() })
         .help(URL(fileURLWithPath: quality.path).lastPathComponent + (quality.reasons.isEmpty ? "" : " · " + quality.reasons.joined(separator: ", ")))
