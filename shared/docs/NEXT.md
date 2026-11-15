@@ -28,7 +28,6 @@ Everything between the current tree and a release, in one list, grouped by who o
 - [ ] **CUDA pack distribution:** the pack is about 1 GB and the engine's only egress is Hugging Face. Approve hosting the CI artifact on `Web-World-Wide/...`, then add the registry entry and the `ort_cuda_x64` install path (removed in #213). Also fix the old CUDA-pack hosting/doc wording.
 - [ ] **Optional: host the CI-built ONNX Runtime DLLs** (for example on Hugging Face beside the OpenVINO pack) and pin their SHA-256 in `fetch-runtime-deps.ps1`, so packaging does not depend on the Actions cache. A later `ort` crate (rc.15 ships ORT 1.31 Windows `directml` sets) is another route, but it is a dependency upgrade.
 - [ ] **Decisions waiting:**
-  - A retention rule for hidden rows of files that are gone (see F, soak findings).
   - Spotlight indexing default (on, with a switch).
   - The RAM++ threshold cap: capping per-class thresholds at 0.75 raises held-out subject recall 0.420 → 0.442 and F1 0.548 → 0.558 but costs precision 0.789 → 0.757 (DECISIONS 2026-11-12). Not applied; the owner has asked for cleaner tags twice.
   - Catalog v35 means an older installed app refuses a library this build has opened.
@@ -134,10 +133,10 @@ Load must stay below 2 for timings; most numbers recorded so far were taken at l
 
 ### F. Code an agent can do now
 
-- [ ] **Soak findings (shared Rust engine):**
-  - Organize Folders planning took 40–86 s at just over 5,000 files and under 2 s just below, on the library the soak left behind (a fresh 5,400-file library takes 0.7 s). 5,000 is where clustering switches to HNSW (`restructure_semantic.rs`). Reproduce with `shared/scripts/e2e/soak_plan_cliff.py`.
-  - A 204-byte malformed m4a (`hdlr` box of size 0 inside `mdia`) makes the audio library panic; the scan catches it and catalogs the file. Add the guard in `container_guard`.
-  - Rows for files that are gone are hidden and never removed, with their tags and text: 6,128 hidden rows beside about 5,050 live after 208 rounds, catalog 3.7 → 22 MB. Needs the owner's retention rule (group A).
+- [ ] **Soak findings:**
+  - Hidden rows of files that are gone (shared Rust engine): implement the retention rule decided 2026-11-14 (DECISIONS): removed at the end of a complete clean walk once the file was last seen more than 30 days ago. Being built.
+  - Organize Folders past 5,000 files: fixed in the Rust engine 2026-11-14 (42.5 s → 0.6 s on the soaked library; the filename/tag pass is exact, identical vectors share one graph node). The Swift engine builds its own HNSW index over all vectors at 5,000 or more with no such guard; from reading it is bounded, but it was not measured: time a Swift plan on `~/FileIDDev/scratch/soak-rust/keep-soaked-lib`. Plans for libraries already past 5,000 files can differ from before on the Rust engine; check one on a real library.
+  - Face clustering got the same identical-vector guard, unit-tested only; time it on a real library with copied photos.
   - Swift engine: nine `scan_already_queued` errors in a 57-round soak that the driver did not cause on purpose; not reproduced.
 - [ ] **Mac memory after scan models unload:** in most runs about 655 MB of MLX arrays stays live (IOAccelerator memory; `Memory.activeMemory` 655 MB with the cache at 0). Suspected, not proven: MLX's compile cache keeps RAM++'s weights as constants (`RamPlusMLX` builds its forward pass with `compile`); a second cache clear and a 30 s wait do not help. An MLX VLM load should evict the resident scan stack.
 - [ ] **Swift engine idle release:** it keeps CLIP and RAM++ for the life of the process (`MobileCLIPService`, `RamPlusService` have no unload). Port the same idle release, or leave it to the engine's retirement.
