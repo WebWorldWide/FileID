@@ -110,6 +110,17 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
 }
 
 pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
+    queue_job(conn)?;
+    let mut response = super::catalog::response(
+        &request.request_id,
+        "ok",
+        Some("Looking for related tries across the library. Suggestions never change, move or hide files.".into()),
+    );
+    response.jobs = jobs(conn)?;
+    Ok(response)
+}
+
+fn queue_job(conn: &Connection) -> Result<()> {
     let stamp = now();
     let recipe = serde_json::json!({"version": VERSION, "model": model()}).to_string();
     conn.execute(
@@ -120,13 +131,89 @@ pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest) -> Result<Cat
         "UPDATE catalog_jobs SET state='queued',progress=0,error=NULL,checkpoint_json='{}',recipe_json=?1,updated_at=?2 WHERE id=?3 AND kind=?4 AND state IN ('completed','cancelled','failed','paused')",
         params![recipe, stamp, JOB_ID, JOB_KIND],
     )?;
-    let mut response = super::catalog::response(
-        &request.request_id,
-        "ok",
-        Some("Looking for related tries across the library. Suggestions never change, move or hide files.".into()),
-    );
-    response.jobs = jobs(conn)?;
-    Ok(response)
+    Ok(())
+}
+
+/// A job that is already queued, running or paused (the user stopped it) is
+/// left alone; only a finished, cancelled or failed one is started again.
+fn may_start_after_scan(conn: &Connection) -> Result<bool> {
+    let state: Option<String> = conn
+        .query_row("SELECT state FROM catalog_jobs WHERE id=?1 AND kind=?2", params![JOB_ID, JOB_KIND], |r| r.get(0))
+        .optional()?;
+    Ok(!matches!(state.as_deref(), Some("queued" | "running" | "paused")))
+}
+
+fn other_catalog_job_active(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM catalog_jobs WHERE kind != ?1 AND state IN ('queued','running'))",
+        [JOB_KIND],
+        |r| r.get(0),
+    )?)
+}
+
+static WAITING: AtomicBool = AtomicBool::new(false);
+const IDLE_POLL: Duration = Duration::from_secs(5);
+const IDLE_ATTEMPTS: usize = 120;
+
+struct WaitingGuard;
+
+impl Drop for WaitingGuard {
+    fn drop(&mut self) {
+        WAITING.store(false, Ordering::Release);
+    }
+}
+
+/// Starts the job once after a scan that stored new or changed images or
+/// videos, but only while nothing else heavy is running or queued (`busy` covers
+/// Describe Files, face clustering, Organize Folders and model downloads; other
+/// catalog jobs are read from the catalog). It waits for them, bounded, then
+/// queues the job that `schedule` runs. A job the user paused or one already
+/// queued is left alone.
+pub(crate) fn start_after_scan(
+    sink: Sink,
+    database: Arc<Mutex<Connection>>,
+    busy: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    start_after_scan_with(sink, database, busy, IDLE_POLL, IDLE_ATTEMPTS)
+}
+
+fn start_after_scan_with(
+    sink: Sink,
+    database: Arc<Mutex<Connection>>,
+    busy: Arc<dyn Fn() -> bool + Send + Sync>,
+    poll: Duration,
+    attempts: usize,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if WAITING.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let _waiting = WaitingGuard;
+        let mut idle = false;
+        for _ in 0..attempts {
+            let others = super::timeline::with_db(&database, |conn| other_catalog_job_active(conn)).await.unwrap_or(true);
+            if !others && !busy() {
+                idle = true;
+                break;
+            }
+            tokio::time::sleep(poll).await;
+        }
+        if !idle {
+            return;
+        }
+        let queued = super::timeline::with_db(&database, |conn| {
+            if may_start_after_scan(conn)? {
+                queue_job(conn)?;
+                return Ok(true);
+            }
+            Ok(false)
+        })
+        .await;
+        if matches!(queued, Ok(true)) {
+            tracing::info!("[TAKES] library-wide grouping queued after a scan");
+            schedule(sink, database);
+        }
+    }))
 }
 
 pub(crate) fn proposals(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {

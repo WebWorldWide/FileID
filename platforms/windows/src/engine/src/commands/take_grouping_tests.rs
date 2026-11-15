@@ -193,3 +193,67 @@ fn large_files_with_one_sampled_hash_stay_two_tries_while_small_copies_collapse(
     let ids: Vec<String> = stored(&conn).into_iter().map(|row| row.1).collect();
     assert_eq!(ids, vec!["[1,2,3]".to_string()]);
 }
+
+#[test]
+fn only_a_finished_job_may_start_again_after_a_scan() {
+    let conn = crate::db::test_support::memory_db();
+    assert!(may_start_after_scan(&conn).unwrap());
+    for (state, allowed) in
+        [("queued", false), ("running", false), ("paused", false), ("completed", true), ("cancelled", true), ("failed", true)]
+    {
+        conn.execute("DELETE FROM catalog_jobs", []).unwrap();
+        queue_job(&conn).unwrap();
+        conn.execute("UPDATE catalog_jobs SET state=?1", [state]).unwrap();
+        assert_eq!(may_start_after_scan(&conn).unwrap(), allowed, "{state}");
+    }
+}
+
+#[test]
+fn another_catalog_job_that_is_running_or_queued_counts_as_busy() {
+    let conn = crate::db::test_support::memory_db();
+    assert!(!other_catalog_job_active(&conn).unwrap());
+    queue_job(&conn).unwrap();
+    assert!(!other_catalog_job_active(&conn).unwrap());
+    conn.execute(
+        "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES('t','timelineSample','[]','{}','running',0,0,0)",
+        [],
+    )
+    .unwrap();
+    assert!(other_catalog_job_active(&conn).unwrap());
+    conn.execute("UPDATE catalog_jobs SET state='completed' WHERE id='t'", []).unwrap();
+    assert!(!other_catalog_job_active(&conn).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_job_starts_by_itself_once_everything_else_is_idle() {
+    let database = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+    let (sink, _events) = Sink::channel_for_test(64);
+    let busy = Arc::new(AtomicBool::new(true));
+    let probe = {
+        let busy = busy.clone();
+        Arc::new(move || busy.load(Ordering::Acquire)) as Arc<dyn Fn() -> bool + Send + Sync>
+    };
+
+    let waiting = start_after_scan_with(sink.clone(), database.clone(), probe.clone(), Duration::from_millis(10), 5).unwrap();
+    assert!(start_after_scan_with(sink.clone(), database.clone(), probe.clone(), Duration::from_millis(10), 5).is_none());
+    waiting.await.unwrap();
+    assert_eq!(database.lock().query_row("SELECT COUNT(*) FROM catalog_jobs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+
+    busy.store(false, Ordering::Release);
+    start_after_scan_with(sink.clone(), database.clone(), probe.clone(), Duration::from_millis(10), 5).unwrap().await.unwrap();
+    let mut state = String::new();
+    for _ in 0..200 {
+        state = database.lock().query_row("SELECT state FROM catalog_jobs WHERE id=?1", [JOB_ID], |r| r.get(0)).unwrap_or_default();
+        if state == "completed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(state, "completed");
+
+    database.lock().execute("UPDATE catalog_jobs SET state='paused'", []).unwrap();
+    start_after_scan_with(sink, database.clone(), probe, Duration::from_millis(10), 5).unwrap().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let state: String = database.lock().query_row("SELECT state FROM catalog_jobs", [], |r| r.get(0)).unwrap();
+    assert_eq!(state, "paused");
+}

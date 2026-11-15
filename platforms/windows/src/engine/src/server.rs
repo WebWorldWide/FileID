@@ -1471,6 +1471,17 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let db_c = db.clone();
             let state_c = scan_state.clone();
             let pending_cancel = scan_cancel_requested.clone();
+            let other_heavy_work: Arc<dyn Fn() -> bool + Send + Sync> = {
+                let (jobs, deep, faces, restructure) =
+                    (jobs.clone(), deep_analyze_active.clone(), face_cluster_active.clone(), restructure_active.clone());
+                Arc::new(move || {
+                    jobs.has_active_besides(JobCategory::Scan)
+                        || deep.load(std::sync::atomic::Ordering::Acquire)
+                        || faces.load(std::sync::atomic::Ordering::Acquire)
+                        || restructure.load(std::sync::atomic::Ordering::Acquire)
+                        || commands::prewarm::any_download_in_flight()
+                })
+            };
             spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _track = track;
                 commands::scan::handle_start_scan(
@@ -1480,6 +1491,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     payload,
                     pending_cancel,
                     Some(Box::new(active_guard)),
+                    Some(other_heavy_work),
                 )
                 .await;
             })
