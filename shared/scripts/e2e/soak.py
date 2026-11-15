@@ -971,6 +971,12 @@ class Soak:
             for mode, kw in (("semantic", dict(queryVector=vec, embeddingModel=model)), ("hybrid", dict(query=word, queryVector=vec, embeddingModel=model)),
                              ("semantic", dict(fileID=fid))):
                 res = eng.catalog("search", searchMode=mode, limit=20, **kw)
+                for _ in range(60):
+                    # the first similarity request after new embeddings starts the index job and is answered "preparing"
+                    if "Preparing the local visual search index" not in str(res.get("message")):
+                        break
+                    time.sleep(2)
+                    res = eng.catalog("search", searchMode=mode, limit=20, **kw)
                 tag = f"{mode}{'-seed' if 'fileID' in kw else ''}"
                 if res.get("status") != "ok":
                     if mode == "hybrid" and "ONNX Runtime" in str(res.get("message")):
