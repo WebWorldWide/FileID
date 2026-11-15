@@ -471,8 +471,41 @@ class Soak:
         if self.a.flavor == "swift" and k == "scanComplete" and v.get("processedFiles"):
             changed.append(f"processedFiles={v.get('processedFiles')}")
         if k != "scanComplete" or changed:
+            self.gate_report(rnd, eng, changed)
             fail(rnd, "rescan analyses nothing new", f"{k} reprocessed={len(changed)} {v}")
         return round(time.time() - t, 1)
+
+    def gate_report(self, rnd, eng, changed_ids):
+        """Which skip-set gate keeps each re-analysed row out of the skip set (the gate clauses of scan_session.rs), counted by
+        kind and extension, from a copy of the catalog."""
+        gates = {
+            "content_hash": "(content_hash IS NULL AND kind IN ('image','video','pdf','doc','audio'))",
+            "text_embed": "(kind IN ('doc','pdf') AND text_stage_done = 0 AND NOT EXISTS (SELECT 1 FROM text_embeddings WHERE text_embeddings.file_id = files.id))",
+            "model_clip": "(kind = 'model' AND extension = 'obj' AND text_stage_done = 0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))",
+            "image_clip": "(kind = 'image' AND NOT EXISTS (SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))",
+            "video_clip": "(kind = 'video' AND NOT EXISTS (SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))",
+        }
+        rep = {"round": rnd, "changed": len(changed_ids)}
+        try:
+            copy = os.path.join(self.work, "gate-copy.sqlite")
+            if os.path.exists(copy):
+                os.remove(copy)
+            with ro(eng.db) as src, sqlite3.connect(copy) as dst:
+                src.backup(dst)
+            with sqlite3.connect(copy) as c:
+                ids = [i for i in changed_ids if isinstance(i, int)]
+                marks = ",".join("?" * len(ids)) or "NULL"
+                rep["changed_by_kind_ext"] = c.execute(f"SELECT kind, extension, count(*) FROM files WHERE id IN ({marks}) GROUP BY 1,2", ids).fetchall()
+                for name, cond in gates.items():
+                    rep[name] = {"all_rows": c.execute(f"SELECT count(*) FROM files WHERE failed=0 AND {cond}").fetchone()[0],
+                                 "of_changed": c.execute(f"SELECT count(*) FROM files WHERE id IN ({marks}) AND {cond}", ids).fetchone()[0]}
+                rep["changed_failed0_in_no_gate"] = c.execute(
+                    f"SELECT kind, extension, count(*) FROM files WHERE id IN ({marks}) AND NOT ({' OR '.join(gates.values())}) GROUP BY 1,2", ids).fetchall()
+            os.remove(copy)
+        except Exception as exc:
+            rep["error"] = repr(exc)
+        self.notes.setdefault("gate_reports", []).append(rep)
+        log("skip-set gate report:", json.dumps(rep))
 
     def mutate(self, rnd, eng):
         """Change the disk, update the model, rescan and verify the catalog follows."""
