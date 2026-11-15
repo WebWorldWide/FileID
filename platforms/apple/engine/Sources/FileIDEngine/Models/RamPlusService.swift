@@ -66,6 +66,9 @@ public final class RamPlusService: @unchecked Sendable {
     private var gpuModel: RamPlusMLX?
     private var gpuBatcher: GPURequestBatcher?
     private var gpuFailed = false
+    /// The MLX model was freed after an idle period; the next tag reloads it.
+    private var gpuParked = false
+    private var residencyRegistered = false
     private static let gpuMaxBatch = 8
     // Match ArcFace's ANE-thrash cap: defaults to 4, raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
     private static let inferenceConcurrency: Int =
@@ -131,7 +134,11 @@ public final class RamPlusService: @unchecked Sendable {
             lock.lock()
             gpuModel = model
             gpuBatcher = batcher
+            gpuParked = false
+            let register = !residencyRegistered
+            residencyRegistered = true
             lock.unlock()
+            if register { ScanModelResidency.shared.register { RamPlusService.shared.unloadGPU() } }
             JSONLog.shared.info(ev: "ramplus_model_loaded",
                                 extra: ["backend": AnyCodable("mlx"), "classes": AnyCodable(model.classCount),
                                         "ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000)])
@@ -273,7 +280,34 @@ public final class RamPlusService: @unchecked Sendable {
 
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
-        return !tags.isEmpty && (session != nil || gpuBatcher != nil)
+        return !tags.isEmpty && (session != nil || gpuBatcher != nil || gpuParked)
+    }
+
+    /// Frees the MLX model and its batcher, then returns MLX's cached buffers.
+    func unloadGPU() {
+        lock.lock()
+        let held = gpuBatcher != nil || gpuModel != nil
+        var old: (GPURequestBatcher?, RamPlusMLX?) = (gpuBatcher, gpuModel)
+        gpuBatcher = nil
+        gpuModel = nil
+        if held { gpuParked = true }
+        lock.unlock()
+        old = (nil, nil)
+        if held {
+            JSONLog.shared.info(ev: "ramplus_model_parked")
+            GPURequestBatcher.releaseCache()
+        }
+    }
+
+    private func reloadIfParked() {
+        lock.lock(); let parked = gpuParked && gpuBatcher == nil; lock.unlock()
+        guard parked else { return }
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        lock.lock(); let still = gpuParked && gpuBatcher == nil; lock.unlock()
+        if still, !loadGPU() {
+            lock.lock(); gpuParked = false; lock.unlock()
+        }
     }
 
     // MARK: - Inference
@@ -281,11 +315,13 @@ public final class RamPlusService: @unchecked Sendable {
     /// Tag an image. Returns (tag, sigmoid-probability) pairs, suppressed-filtered,
     /// thresholded, sorted desc, capped at maxTags. Empty if not loaded / on error.
     public func tag(_ image: CGImage) -> [(tag: String, score: Float)] {
+        reloadIfParked()
         lock.lock()
         let batcher = gpuBatcher
         let tagCount = tags.count
         lock.unlock()
         guard tagCount > 0, let tensor = Self.imageTensor(image) else { return [] }
+        if batcher != nil { ScanModelResidency.shared.touch() }
         let output = if let batcher { batcher.submit(tensor) } else { onnxLogits(tensor) }
         guard let logits = output else { return [] }
         guard logits.count == tagCount else {

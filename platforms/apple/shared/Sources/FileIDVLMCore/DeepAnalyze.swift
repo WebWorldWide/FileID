@@ -401,6 +401,7 @@ public actor DeepAnalyze {
         let lease = try await residencyGate.acquire()
         defer { Task { await self.releaseResidency(lease) } }
         try Task.checkCancellation()
+        ScanModelResidency.shared.releaseForOtherModel()
         let totalMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
         let requestedMB = UInt64((kind.ramBudgetGB * 1024).rounded(.up))
         if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: totalMB, requestedMB: requestedMB) {

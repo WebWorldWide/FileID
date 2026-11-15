@@ -1917,6 +1917,8 @@ struct FileIDEngineMain {
         // system doesn't suspend mid-tag overnight. Released in defer.
         SleepGuard.shared.begin(reason: "Scanning \(url.lastPathComponent)")
         defer { SleepGuard.shared.end() }
+        ScanModelResidency.shared.begin()
+        defer { ScanModelResidency.shared.end() }
 
         let effectiveExcludedPaths = Discovery.resolvedExclusionPaths(
             root: url, rawPaths: excludedPaths)
