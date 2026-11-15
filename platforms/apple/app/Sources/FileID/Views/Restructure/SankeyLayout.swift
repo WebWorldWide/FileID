@@ -25,6 +25,11 @@ extension SankeyFlowView {
         var rollupDestBuckets: [String]
         var isPopulated: Bool
 
+        /// Folders in a column: the "+ N more" rollup node stands for N folders, not one.
+        static func folderCount(nodes: Int, rolledUp: Int) -> Int { rolledUp == 0 ? nodes : nodes - 1 + rolledUp }
+        var sourceFolderCount: Int { Self.folderCount(nodes: sources.count, rolledUp: rollupSourceFolders.count) }
+        var destinationFolderCount: Int { Self.folderCount(nodes: destinations.count, rolledUp: rollupDestBuckets.count) }
+
         static let empty = Layout(
             sources: [], destinations: [], flows: [],
             flowsByID: [:], srcSlots: [:], dstSlots: [:],
