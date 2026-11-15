@@ -13,7 +13,11 @@ import FileIDShared
 struct ScanCancellationTests {
 
     private static var engineBinary: URL {
-        if let override = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] {
+        // CI points FILEID_TEST_ENGINE_PATH at the last release build, which is the
+        // App Store sandbox variant: it will not scan a folder it holds no bookmark
+        // for, so this test needs its own plain engine there.
+        let environment = ProcessInfo.processInfo.environment
+        if let override = environment["FILEID_TEST_SCAN_ENGINE_PATH"] ?? environment["FILEID_TEST_ENGINE_PATH"] {
             return URL(fileURLWithPath: override)
         }
         // …/platforms/apple/Tests/EngineTests/ScanCancellationTests.swift
@@ -143,8 +147,11 @@ struct ScanCancellationTests {
             + #"","rootDisplay":null,"rescan":false}}}"#)
 
         // Cancel once the scan is visibly under way: its first phase or progress event.
-        #expect(await waitFor("\"phaseChanged\"", "\"progress\""),
-                "scan must start emitting before we cancel")
+        guard await waitFor("\"phaseChanged\"", "\"progress\"") else {
+            let tail = collector.snapshot().suffix(12).map { String($0.prefix(300)) }.joined(separator: "\n")
+            Issue.record("the scan never reported a phase or progress; the engine's last lines:\n\(tail)")
+            return
+        }
         try send(#"{"id":"c","payload":{"cancelScan":{}}}"#)
 
         // The C1 deadlock manifested here: no terminal event, ever.
