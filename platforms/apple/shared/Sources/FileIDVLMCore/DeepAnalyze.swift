@@ -277,6 +277,9 @@ public actor DeepAnalyze {
 
     var activePrewarmCount: Int { prewarmTasks.count }
 
+    /// True while a model download or prewarm is running.
+    public var hasActivePrewarm: Bool { !prewarmTasks.isEmpty }
+
     /// Idefics3 and SmolVLM tile images at a fixed size and crash on any other.
     nonisolated static func acceptsResize(_ context: ModelContext) -> Bool {
         acceptsResize(architecture: MLXModelCatalog.entry(forRepo: context.configuration.name)?.architecture)

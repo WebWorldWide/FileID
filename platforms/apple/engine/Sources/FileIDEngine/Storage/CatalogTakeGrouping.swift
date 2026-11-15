@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import GRDB
 import FileIDShared
+import FileIDVLMCore
 
 /// Library-wide related-take proposals: a durable `takeGrouping` catalog job
 /// that groups tries by capture session, CLIP similarity and user-named
@@ -81,10 +82,65 @@ actor CatalogTakeGrouping {
         return result
     }
 
-    private func schedule(database: Database, sink: IPCSink) {
+    private func schedule(database: Database, sink: IPCSink, priority: TaskPriority? = nil) {
         guard !active else { return }
         active = true
-        Task { await self.drive(database: database, sink: sink) }
+        Task(priority: priority) { await self.drive(database: database, sink: sink) }
+    }
+
+    private var waitingForIdle = false
+    static let idlePollInterval: Duration = .seconds(5)
+    static let idleWaitLimit = 120
+
+    /// Starts the job once after a scan that stored new or changed images or
+    /// videos, but only when nothing else heavy is running or queued: it waits
+    /// for them (bounded) and then enqueues at the lowest priority. A job the
+    /// user paused, or one already queued or running, is left alone.
+    @discardableResult
+    func startAfterScan(database: Database, sink: IPCSink,
+                        poll: Duration = CatalogTakeGrouping.idlePollInterval,
+                        attempts: Int = CatalogTakeGrouping.idleWaitLimit) -> Task<Void, Never>? {
+        guard !waitingForIdle else { return nil }
+        waitingForIdle = true
+        return Task(priority: .background) {
+            await self.waitAndStart(database: database, sink: sink, poll: poll, attempts: attempts)
+        }
+    }
+
+    private func waitAndStart(database: Database, sink: IPCSink, poll: Duration, attempts: Int) async {
+        defer { waitingForIdle = false }
+        for _ in 0..<attempts {
+            if Task.isCancelled || ScanCoordinator.isShuttingDownSync() { return }
+            if await Self.otherHeavyWork(database: database) == false { break }
+            try? await Task.sleep(for: poll)
+        }
+        guard await Self.otherHeavyWork(database: database) == false else { return }
+        let queued = (try? await database.pool.write { db -> Bool in
+            guard try Self.mayStartAfterScan(db) else { return false }
+            _ = try Self.enqueue(db, requestID: "auto-after-scan")
+            return true
+        }) ?? false
+        guard queued else { return }
+        JSONLog.shared.info(ev: "auto_take_grouping_enqueued")
+        schedule(database: database, sink: sink, priority: .background)
+    }
+
+    /// Describe Files, timelines, face clustering, a model download, or any other
+    /// catalog job that is running or queued.
+    static func otherHeavyWork(database: Database) async -> Bool {
+        if await JobQueue.shared.hasActive(category: .deepAnalyze) { return true }
+        if await JobQueue.shared.hasActive(category: .faceCluster) { return true }
+        if await DeepAnalyze.shared.hasActivePrewarm { return true }
+        return (try? await database.pool.read { db in try otherCatalogJobActive(db) }) ?? true
+    }
+
+    static func otherCatalogJobActive(_ db: GRDB.Database) throws -> Bool {
+        try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM catalog_jobs WHERE kind != ? AND state IN ('queued','running'))", arguments: [kind]) ?? true
+    }
+
+    static func mayStartAfterScan(_ db: GRDB.Database) throws -> Bool {
+        let state = try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=? AND kind=?", arguments: [jobID, kind])
+        return !["queued", "running", "paused"].contains(state ?? "")
     }
 
     private func drive(database: Database, sink: IPCSink) async {

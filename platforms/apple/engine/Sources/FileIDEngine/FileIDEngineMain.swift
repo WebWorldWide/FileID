@@ -2207,9 +2207,14 @@ struct FileIDEngineMain {
         }
 
         let totalDur = Date().timeIntervalSince(scanStart)
+        let cancelledScan = await coordinator.isCancelled
+        let mediaAnalyzed = await coordinator.mediaAnalyzed
         await markSessionFinal(database: database, session: session,
                                 coordinator: coordinator, sink: sink,
                                 totalSeconds: totalDur)
+        if !cancelledScan, mediaAnalyzed > 0 {
+            await CatalogTakeGrouping.shared.startAfterScan(database: database, sink: sink)
+        }
     }
 
     static let visionTimeoutMessage = "Vision pass timed out (will retry next scan)"
