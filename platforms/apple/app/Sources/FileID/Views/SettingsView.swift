@@ -276,9 +276,7 @@ struct SettingsTab: View {
     }
 
     static var modelsFolderURL: URL { AppSupportPath.models }
-    static var scanLogURL: URL {
-        AppSupportPath.fileID.appendingPathComponent("logs/scan.jsonl")
-    }
+    static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
     static var appLogURL: URL {
         AppSupportPath.fileID.appendingPathComponent("logs/app.log")
     }

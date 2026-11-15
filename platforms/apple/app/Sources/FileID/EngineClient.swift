@@ -634,6 +634,16 @@ public final class EngineClient {
 
     /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
     /// (an engine that exits at once is the Rust-to-Swift fallback case).
+    /// Error kinds that are a notice, not a failure: the user's own Cancel, a repeated Scan click (Swift sends
+    /// `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    nonisolated static func isQuietNotice(_ kind: String) -> Bool {
+        switch kind {
+        case "prewarm_cancelled", "scan_already_queued", "scan_already_running", "rescan_no_changes",
+             "model_license_not_accepted": return true
+        default: return false
+        }
+    }
+
     nonisolated static func refuseSigpipe(on pipe: Pipe) {
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
@@ -786,7 +796,7 @@ public final class EngineClient {
             }
             // The user's own Cancel, a repeated click and a declined license
             // are not failures; the request they belong to already told them.
-            if e.kind == "prewarm_cancelled" || e.kind == "scan_already_queued" || e.kind == "model_license_not_accepted" {
+            if Self.isQuietNotice(e.kind) {
                 Self.debug("engine notice (user-initiated): \(e.kind)")
                 return
             }
@@ -1291,7 +1301,7 @@ public final class EngineClient {
         }
     }
 
-    /// Deletes the SQLite library + WAL/SHM siblings + scan log.
+    /// Deletes the SQLite library + WAL/SHM siblings + the engine and app logs.
     /// Safe to call only when the engine isn't running — SQLite
     /// holds the lock otherwise.
     private static func deleteLibraryFiles() {
@@ -1300,10 +1310,8 @@ public final class EngineClient {
         let candidates = [
             "fileid.sqlite",
             "fileid.sqlite-wal",
-            "fileid.sqlite-shm",
-            "logs/scan.jsonl",
-            "logs/app.log"
-        ]
+            "fileid.sqlite-shm"
+        ] + EngineLogFiles.removableNames(in: root.appendingPathComponent("logs", isDirectory: true)).map { "logs/" + $0 }
         for name in candidates {
             let url = root.appendingPathComponent(name)
             if (try? ReadOnlyLocations.requireWritable(url)) != nil {
