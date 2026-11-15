@@ -12,6 +12,7 @@ pub fn title(kind: &str) -> &'static str {
         "folder_access_denied" | "bookmark_unavailable" => "FileID can't reach that folder",
         "command_decode_failed" => "FileID couldn't do that",
         "plan_restructure_failed" => "The folder plan didn't finish",
+        "plan_restructure_root" => "This folder isn't available",
         "orphan_sweep_failed" | "purge_excluded_failed" => "Cleaning up the library didn't finish",
         "model_load_failed" => "An AI model didn't load",
         "restructure_busy" | "restructure_already_running" => "A folder move is already running",
@@ -32,6 +33,7 @@ pub fn text(kind: &str, message: &str) -> String {
         "db_newer_than_engine" => "This library was made by a newer FileID. Update FileID.",
         "folder_access_denied" | "bookmark_unavailable" => "Choose the folder again so FileID can open it.",
         "command_decode_failed" => "Try again. If it keeps happening, quit and reopen FileID.",
+        "plan_restructure_root" => "Reconnect it, then try again.",
         "plan_restructure_failed" => "Open Organize Folders and try again, or pick a smaller folder.",
         "orphan_sweep_failed" | "purge_excluded_failed" => "Nothing was lost. Scan again to finish tidying up.",
         "model_load_failed" | "prewarm_failed" | "unknown_model" => "Open Settings and install the model again.",
@@ -95,6 +97,14 @@ mod tests {
         assert_eq!(title("restructure_busy"), "A folder move is already running");
         assert_eq!(text("model_load_failed", "x"), "Open Settings and install the model again.");
         assert_eq!(title("no_such_kind"), "Something went wrong");
+    }
+
+    #[test]
+    fn a_missing_organize_folders_root_reads_like_the_mac() {
+        assert_eq!(
+            sentence("plan_restructure_root", "Organize Folders can't find that folder. Choose the folder again."),
+            "This folder isn't available. Reconnect it, then try again."
+        );
     }
 
     #[test]

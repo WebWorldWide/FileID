@@ -737,5 +737,16 @@
         }
       }
     ]
+  },
+  {
+    "name": "restructure-plan-for-a-missing-folder-says-so",
+    "description": "Organize Folders asked for a folder that is not there (an unplugged drive, a deleted folder, or a path that is a file) answers with the error plan_restructure_root and no plan, so the app can say the folder is unavailable instead of that there is nothing to organize.",
+    "tree": [
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}}
+    ],
+    "steps": [
+      {"label": "missing folder", "command": {"planRestructure": {"libraryRoot": "{state}/no-such-folder"}}, "await": "error", "filter": {"kind": "plan_restructure_root"}, "timeout": 60, "expect": {"kind": "plan_restructure_root", "message": "Organize Folders can't find that folder. Choose the folder again."}},
+      {"label": "a file is not a folder", "command": {"planRestructure": {"libraryRoot": "{path:DCIM/100MSDCF/DSC00001.JPG}"}}, "await": "error", "filter": {"kind": "plan_restructure_root"}, "timeout": 60, "expect": {"kind": "plan_restructure_root"}}
+    ]
   }
 ]

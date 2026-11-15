@@ -817,6 +817,16 @@ struct FileIDEngineMain {
                 defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
+                var rootIsDirectory: ObjCBool = false
+                guard libraryRoot.hasPrefix("/"),
+                      FileManager.default.fileExists(atPath: libraryRoot, isDirectory: &rootIsDirectory),
+                      rootIsDirectory.boolValue else {
+                    await sink.emit(.error(EngineError(
+                        kind: "plan_restructure_root",
+                        message: "Organize Folders can't find that folder. Choose the folder again.")))
+                    await coordinator.finishRestructure(token: restructureToken)
+                    return
+                }
                 do {
                     let plan: RestructurePlan
                     if supportsPagedPlans == true,
