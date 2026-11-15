@@ -816,6 +816,9 @@ public final class EngineClient {
         case .deepAnalyzeProgress(let p):
             deepAnalyzeProgress = p
             deepAnalyzeInFlight = true
+            // A describe run's model load reports progress below 1.0 and never a final 1.0,
+            // so the bar would stay as "Downloading 99%" for good once the model works.
+            clearModelDownloadProgress(forModelKind: p.modelKind)
             beginDeepAnalyzeActivity()
             // First per-file progress arrived — clear the "Starting…"
             // card so the progress card can take over without overlap.
@@ -830,6 +833,7 @@ public final class EngineClient {
             }
         case .deepAnalyzeComplete(let c):
             deepAnalyzeComplete = c
+            clearModelDownloadProgress(forModelKind: c.modelKind)
             deepAnalyzeInFlight = false
             endDeepAnalyzeActivity()
             lastTerminalEventAt = Date()

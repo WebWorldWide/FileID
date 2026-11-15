@@ -210,6 +210,20 @@ struct EngineQueryRepliesTests {
         #expect(replies.waiting == 0)
     }
 
+    @Test(.timeLimit(.minutes(1))) func aModelLoadBarEndsWhenDescribingStartsOrFinishes() {
+        let engine = EngineClient()
+        func load(_ kind: String) { engine.handleEvent(IPCEvent(payload: .modelDownloadProgress(ModelDownloadProgress(modelKind: kind, fraction: 0.99, message: "Loading")))) }
+        load("qwen3_vl_2b")
+        #expect(engine.modelDownloadProgress != nil)
+        engine.handleEvent(IPCEvent(payload: .deepAnalyzeProgress(DeepAnalyzeProgress(processed: 0, total: 5, etaSeconds: nil, currentPath: nil, modelKind: "other_model"))))
+        #expect(engine.modelDownloadProgress != nil)
+        engine.handleEvent(IPCEvent(payload: .deepAnalyzeProgress(DeepAnalyzeProgress(processed: 1, total: 5, etaSeconds: nil, currentPath: nil, modelKind: "qwen3_vl_2b"))))
+        #expect(engine.modelDownloadProgress == nil)
+        load("qwen3_vl_2b")
+        engine.handleEvent(IPCEvent(payload: .deepAnalyzeComplete(DeepAnalyzeComplete(processed: 5, failed: 0, totalSeconds: 1, modelKind: "qwen3_vl_2b", cancelled: false))))
+        #expect(engine.modelDownloadProgress == nil)
+    }
+
     @Test(.timeLimit(.minutes(1))) func aCatalogReplyResumesItsWaiterWithoutPolling() async {
         let engine = EngineClient()
         let pending = Task { await engine.catalogResponse(for: "r1", timeout: .seconds(30)) }

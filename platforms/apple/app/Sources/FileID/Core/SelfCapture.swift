@@ -12,6 +12,7 @@
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
 //   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
 //   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
+//   FILEID_SELF_SHOT_MODEL=<kind>  makes this the active description model before the Describe, Chat and Moments steps (for example qwen3_vl_2b)
 //   FILEID_SELF_SHOT_CHAT=<q>|<q>  after that, ask each question in Chat (the composer's send) and capture the answer
 //   FILEID_SELF_SHOT_CHAT_SCOPED=<q>  one more question attached to the first FILEID_SELF_SHOT_CHAT_SCOPE_N (default 6) photos, the selection check
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
@@ -208,6 +209,7 @@ enum SelfShot {
 
     /// Describe, Chat, Moments and File Tools runs, each through the call its button makes.
     private static func runExtras(engine: EngineClient, store: ReadStore, navigate: @escaping (String) -> Void, plan: SelfShotPlan) async {
+        if let raw = env("FILEID_SELF_SHOT_MODEL"), let kind = AIModelKind(rawValue: raw) { DeepAnalyzeSettings.shared.activeKind = kind }
         let photos = store.files(limit: 2000).filter { FileTypes.images.contains(URL(fileURLWithPath: $0.pathText).pathExtension.lowercased()) }
         if let n = env("FILEID_SELF_SHOT_DESCRIBE").flatMap(Int.init), n > 0 {
             navigate(MainWindow.Tab.deep.rawValue)
@@ -256,7 +258,7 @@ enum SelfShot {
             NotificationCenter.default.post(name: .selfShotFindMoments, object: nil)
             try? await Task.sleep(for: .seconds(2))
             write(name: "moments-queued", plan: plan)
-            await waitUntil(timeout: 900) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
             note("timeline jobs: \(engine.catalogJobs.map { "\($0.kind) \($0.state)" }.joined(separator: ", "))")
             try? await Task.sleep(for: .seconds(3))
             write(name: "moments-timeline", plan: plan)
