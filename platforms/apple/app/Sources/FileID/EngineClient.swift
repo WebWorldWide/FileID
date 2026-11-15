@@ -502,6 +502,7 @@ public final class EngineClient {
         }
         proc.environment = env
         let inPipe = Pipe()
+        Self.refuseSigpipe(on: inPipe)
         let outPipe = Pipe()
         let errPipe = Pipe()
         proc.standardInput = inPipe
@@ -631,6 +632,12 @@ public final class EngineClient {
         return nil
     }
 
+    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
+    /// (an engine that exits at once is the Rust-to-Swift fallback case).
+    nonisolated static func refuseSigpipe(on pipe: Pipe) {
+        _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    }
+
     /// Frame samples can carry full user paths in JSON values (e.g. a
     /// torn deepAnalyzeProgress `currentPath`) — scrub home and volume
     /// prefixes before they persist in app.log. External-volume paths
@@ -741,8 +748,14 @@ public final class EngineClient {
             case .completed, .cancelled, .failed: endScanActivity()
             case .idle, .discovering, .tagging, .postScan: break
             }
-        case .phaseChanged:
-            break  // phase is encoded in lastProgress.phase
+        case .phaseChanged(let phase):
+            // The Swift engine ends a scan with a terminal progress snapshot; the shared
+            // engine announces it with this event alone, so the snapshot keeps its
+            // post-scan phase (a scan that never finishes) unless the event settles it.
+            if let settled = lastProgress?.settled(by: phase) {
+                lastProgress = settled
+                endScanActivity()
+            }
         case .discoveryComplete:
             break
         case .fileDone:
@@ -1493,6 +1506,21 @@ public final class EngineClient {
 }
 
 extension ScanProgress {
+    /// This snapshot with a terminal `phase`, when the phase event says the scan ended and the snapshot still shows it running.
+    func settled(by phase: ScanPhase) -> ScanProgress? {
+        switch phase {
+        case .completed, .cancelled, .failed: break
+        case .idle, .discovering, .tagging, .postScan: return nil
+        }
+        switch self.phase {
+        case .discovering, .tagging, .postScan:
+            return ScanProgress(sessionID: sessionID, phase: phase, total: total, discovered: discovered,
+                                processed: processed, failed: failed, filesPerSecond: 0, etaSeconds: nil,
+                                residentMB: residentMB, availableMB: availableMB)
+        case .completed, .cancelled, .failed, .idle: return nil
+        }
+    }
+
     func settledAfterEngineExit() -> ScanProgress {
         switch phase {
         case .completed, .cancelled, .failed, .idle: return self
