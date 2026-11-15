@@ -11,6 +11,11 @@
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
 //   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
+//   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
+//   FILEID_SELF_SHOT_CHAT=<q>|<q>  after that, ask each question in Chat (the composer's send) and capture the answer
+//   FILEID_SELF_SHOT_CHAT_SCOPED=<q>  one more question attached to the first FILEID_SELF_SHOT_CHAT_SCOPE_N (default 6) photos, the selection check
+//   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
+//   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -111,6 +116,8 @@ struct SelfShotPlan: Equatable {
 
 extension Notification.Name {
     static let selfShotOpenPreview = Notification.Name("FileID.selfShotOpenPreview")
+    static let selfShotSendChat = Notification.Name("FileID.selfShotSendChat")
+    static let selfShotFindMoments = Notification.Name("FileID.selfShotFindMoments")
 }
 
 @MainActor
@@ -184,10 +191,121 @@ enum SelfShot {
                     write(name: view.name, plan: plan)
                 }
             }
+            await runExtras(engine: engine, store: store, navigate: navigate, plan: plan)
             NSApp.terminate(nil)
             try? await Task.sleep(for: .seconds(3))
             exit(0)
         }
+    }
+
+    private static func env(_ key: String) -> String? {
+        ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func note(_ text: String) {
+        FileHandle.standardError.write(Data("self-shot: \(text)\n".utf8))
+    }
+
+    /// Describe, Chat, Moments and File Tools runs, each through the call its button makes.
+    private static func runExtras(engine: EngineClient, store: ReadStore, navigate: @escaping (String) -> Void, plan: SelfShotPlan) async {
+        let photos = store.files(limit: 2000).filter { FileTypes.images.contains(URL(fileURLWithPath: $0.pathText).pathExtension.lowercased()) }
+        if let n = env("FILEID_SELF_SHOT_DESCRIBE").flatMap(Int.init), n > 0 {
+            navigate(MainWindow.Tab.deep.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            write(name: "describe-before", plan: plan)
+            let kind = DeepAnalyzeSettings.shared.activeKind.rawValue
+            let ids = photos.prefix(n).map(\.id)
+            let started = engine.deepAnalyzeSelection(fileIDs: Array(ids), modelKind: kind)
+            note("describe started \(started) for \(ids.count) files with \(kind)")
+            await waitUntil(timeout: 300) { engine.deepAnalyzeProgress != nil || !engine.deepAnalyzeInFlight }
+            try? await Task.sleep(for: .seconds(1))
+            write(name: "describe-running", plan: plan)
+            var shots = 1
+            let deadline = Date().addingTimeInterval(900)
+            while engine.deepAnalyzeInFlight, Date() < deadline {
+                try? await Task.sleep(for: .seconds(1))
+                if engine.deepAnalyzeInFlight, let d = engine.deepAnalyzeProgress, d.processed >= shots, shots < 3 { shots += 1; write(name: "describe-running-\(shots)", plan: plan) }
+            }
+            try? await Task.sleep(for: .seconds(1.5))
+            note("describe ended; complete \(engine.deepAnalyzeComplete.map { "\($0.processed)" } ?? "none")")
+            write(name: "describe-done", plan: plan)
+            navigate(MainWindow.Tab.library.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            write(name: "describe-library", plan: plan)
+        }
+        if let raw = env("FILEID_SELF_SHOT_CHAT") {
+            navigate(MainWindow.Tab.chat.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            write(name: "chat-empty", plan: plan)
+            for (i, question) in raw.split(separator: "|").enumerated() {
+                await askChat(String(question), name: "chat-answer-\(i + 1)", engine: engine, plan: plan)
+            }
+        }
+        if let question = env("FILEID_SELF_SHOT_CHAT_SCOPED") {
+            let count = env("FILEID_SELF_SHOT_CHAT_SCOPE_N").flatMap(Int.init) ?? 6
+            let ids = Array(photos.prefix(count).map(\.id))
+            ChatHandoff.shared.chatScope = ChatScope.selected(ids, kinds: ids.map { _ in "image" })
+            navigate(MainWindow.Tab.chat.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            await askChat(question, name: "chat-selection", engine: engine, plan: plan)
+        }
+        if let name = env("FILEID_SELF_SHOT_MOMENTS_VIDEO") {
+            ChatHandoff.shared.momentsQuery = name
+            navigate(MainWindow.Tab.moments.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            NotificationCenter.default.post(name: .selfShotFindMoments, object: nil)
+            try? await Task.sleep(for: .seconds(2))
+            write(name: "moments-queued", plan: plan)
+            await waitUntil(timeout: 900) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            note("timeline jobs: \(engine.catalogJobs.map { "\($0.kind) \($0.state)" }.joined(separator: ", "))")
+            try? await Task.sleep(for: .seconds(3))
+            write(name: "moments-timeline", plan: plan)
+        }
+        if let query = env("FILEID_SELF_SHOT_TOOLS"), let session = ChatHandoff.shared.toolsSession {
+            navigate(MainWindow.Tab.tools.rawValue)
+            try? await Task.sleep(for: .seconds(plan.settle))
+            write(name: "tools-empty", plan: plan)
+            session.kind = env("FILEID_SELF_SHOT_TOOLS_KIND") ?? "photo"
+            session.query = query
+            session.searchID = UUID().uuidString
+            _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: query)))
+            await waitUntil(timeout: 30) { !session.allHits.isEmpty }
+            try? await Task.sleep(for: .seconds(1))
+            let n = env("FILEID_SELF_SHOT_TOOLS_N").flatMap(Int.init) ?? 2
+            session.selection = Set(session.hits.prefix(n).map(\.fileID))
+            session.destination = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
+            try? await Task.sleep(for: .seconds(1))
+            write(name: "tools-selected", plan: plan)
+            let request = ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(),
+                                      destination: session.destination, recipe: session.recipe, destinationBookmark: nil)
+            session.pending = request.requestID; session.pendingAction = request.action
+            session.pendingEngineGeneration = engine.engineResetSignal
+            _ = engine.send(.toolRequest(request: request))
+            await waitUntil(timeout: 60) { session.pending.isEmpty }
+            try? await Task.sleep(for: .seconds(2))
+            note("tools preview: \(session.message) outputs \(session.outputs.count)")
+            write(name: "tools-preview", plan: plan)
+        }
+        await waitUntil(timeout: 120) {
+            !engine.deepAnalyzeInFlight && !engine.faceClusteringInFlight && !engine.catalogJobs.contains { $0.state == "running" || $0.state == "queued" }
+        }
+        navigate(MainWindow.Tab.library.rawValue)
+        try? await Task.sleep(for: .seconds(plan.settle + 3))
+        write(name: "final-idle", plan: plan)
+    }
+
+    private static func askChat(_ question: String, name: String, engine: EngineClient, plan: SelfShotPlan) async {
+        UserDefaults.standard.set(question, forKey: "chatDraft")
+        try? await Task.sleep(for: .seconds(0.5))
+        NotificationCenter.default.post(name: .selfShotSendChat, object: nil)
+        try? await Task.sleep(for: .seconds(1))
+        await waitUntil(timeout: 600) {
+            guard let r = engine.latestChatResponse else { return false }
+            return !["retrieving", "queued", "streaming"].contains(r.status)
+        }
+        try? await Task.sleep(for: .seconds(2))
+        note("chat answer status \(engine.latestChatResponse?.status ?? "none")")
+        write(name: name, plan: plan)
     }
 
     /// Scrolls the largest visible scroll view in the content area (right of the sidebar) to `offset` points, or to its end.
