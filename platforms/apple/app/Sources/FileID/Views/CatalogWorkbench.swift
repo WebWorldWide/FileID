@@ -346,7 +346,7 @@ struct CatalogWorkbench: View {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(DurationText.clock(chapter.startSeconds))
                         .font(Theme.Font.mono(12, .medium)).foregroundStyle(current ? Theme.gold : Theme.text2)
-                        .frame(width: 56, alignment: .leading)
+                        .frame(width: Theme.Font.scaled(56), alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(chapter.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
                         if !chapter.summary.isEmpty {

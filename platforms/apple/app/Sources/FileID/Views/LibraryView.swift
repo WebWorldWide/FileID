@@ -1459,7 +1459,7 @@ private struct DetailRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
+                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(70), alignment: .leading)
                     Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
                     Spacer(minLength: 0)
                 }
@@ -1724,7 +1724,7 @@ private struct PDFPreview: View {
         .task(id: url) {
             // Off the main thread — PDFDocument open + page render can
             // cost real time on a big PDF.
-            if let data = await Task.detached(priority: .userInitiated) { () -> Data? in
+            if let data = await Task.detached(priority: .userInitiated, operation: { () -> Data? in
                 guard let doc = PDFDocument(url: url),
                       let page = doc.page(at: 0) else { return nil }
                 let bounds = page.bounds(for: .mediaBox)
@@ -1735,7 +1735,7 @@ private struct PDFPreview: View {
                     height: bounds.height * scale
                 ), for: .mediaBox)
                 return img.tiffRepresentation
-            }.value {
+            }).value {
                 pageImage = NSImage(data: data)
             }
         }

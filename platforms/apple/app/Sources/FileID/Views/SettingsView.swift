@@ -176,8 +176,7 @@ struct SettingsTab: View {
                                 } label: {
                                     Text("Factory Reset & Quit")
                                 }
-                                .buttonStyle(.dsPrimary)
-                                .tint(Theme.danger)
+                                .buttonStyle(.dsDanger)
                                 .confirmationDialog(
                                     "Are you sure you want to completely erase FileID?",
                                     isPresented: $confirmFactoryReset,
@@ -268,7 +267,7 @@ struct SettingsTab: View {
     @ViewBuilder
     private func infoRow(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {
-            Text(k).foregroundStyle(Theme.text3).frame(width: 130, alignment: .leading)
+            Text(k).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(130), alignment: .leading)
             Text(v).font(Theme.Font.mono(12.5)).textSelection(.enabled)
             Spacer()
         }

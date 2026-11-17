@@ -498,7 +498,7 @@ struct ToolsWorkbench: View {
     private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: alignment, spacing: 12) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: Theme.Font.scaled(92), alignment: .leading)
                 .padding(.top, alignment == .top ? 6 : 0)
                 .accessibilityHidden(label.isEmpty)
             content()
