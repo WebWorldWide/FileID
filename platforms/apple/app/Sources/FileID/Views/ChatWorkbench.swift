@@ -515,7 +515,7 @@ private struct SourceRow: View {
         let meta = sourceMeta(hit)
         RailRow(selected: selected, action: action) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("[\(index)]").font(Theme.Font.mono(11.5, .semibold)).foregroundStyle(Theme.gold).frame(width: 30, alignment: .leading)
+                Text("[\(index)]").font(Theme.Font.mono(11.5, .semibold)).foregroundStyle(Theme.gold).fixedSize().frame(minWidth: Theme.Font.scaled(30), alignment: .leading)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(name).font(Theme.Font.mono(12, .medium)).foregroundStyle(Theme.text1).lineLimit(1).truncationMode(.middle)
                     if !meta.isEmpty {

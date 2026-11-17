@@ -267,7 +267,7 @@ struct SettingsTab: View {
     @ViewBuilder
     private func infoRow(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {
-            Text(k).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(130), alignment: .leading)
+            Text(k).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(160), alignment: .leading)
             Text(v).font(Theme.Font.mono(12.5)).textSelection(.enabled)
             Spacer()
         }
