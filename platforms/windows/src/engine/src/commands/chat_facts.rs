@@ -2,7 +2,7 @@
 //! `ChatFacts.swift`. No model ever writes SQL: every predicate below is a
 //! constant with bound parameters.
 
-use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question};
+use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question, MONTH_NAMES};
 use super::roots::RootScope;
 use crate::ipc::CatalogHit;
 use anyhow::Result;
@@ -448,12 +448,116 @@ fn library_answer(conn: &Connection, question: &Question, root: Option<&RootScop
     Ok((message, hits))
 }
 
+struct PersonGroup {
+    id: i64,
+    name: Option<String>,
+    files: i64,
+}
+
+/// Face groups with a counted face on an active file. A group is named when
+/// it has a name or a first or last name.
+fn person_groups(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<PersonGroup>> {
+    let within = super::roots::clause("f.path_text", "?1");
+    let mut statement = conn.prepare(&format!(
+        "SELECT p.id,p.name,p.first_name,p.last_name,COUNT(DISTINCT fp.file_id) AS n FROM persons p \
+         JOIN face_prints fp ON fp.person_id=p.id AND COALESCE(fp.excluded,0)=0 \
+         JOIN files f ON f.id=fp.file_id AND f.failed=0 \
+         WHERE COALESCE(p.is_unknown,0)=0 AND {within} GROUP BY p.id ORDER BY n DESC,p.id ASC"
+    ))?;
+    let rows = statement.query_map([root.map(RootScope::param)], |row| {
+        let name: Option<String> = row.get(1)?;
+        let first: Option<String> = row.get(2)?;
+        let last: Option<String> = row.get(3)?;
+        let composed = [first, last].into_iter().flatten().map(|part| part.trim().to_owned()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+        let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).or((!composed.is_empty()).then_some(composed));
+        Ok(PersonGroup { id: row.get(0)?, name, files: row.get(4)? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// "How many people are in my library?" and "who is in my photos?": answered
+/// from the face groups, never from the word "people". Files with a counted
+/// face are listed.
+pub(crate) fn people_answer(conn: &Connection, question: &Question, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let groups = person_groups(conn, root)?;
+    if groups.is_empty() {
+        return Ok(("No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups.".into(), vec![]));
+    }
+    let within = super::roots::clause("f.path_text", "?1");
+    let files: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN persons p ON p.id=fp.person_id AND COALESCE(p.is_unknown,0)=0 \
+             JOIN files f ON f.id=fp.file_id AND f.failed=0 WHERE COALESCE(fp.excluded,0)=0 AND {within}"
+        ),
+        [root.map(RootScope::param)],
+        |row| row.get(0),
+    )?;
+    let filter = Filter { person_ids: groups.iter().map(|group| group.id).collect(), root: root.cloned(), ..Filter::default() };
+    let hits = listed(conn, &filter, "newest", SHOWN, files)?;
+    let named: Vec<&PersonGroup> = groups.iter().filter(|group| group.name.is_some()).collect();
+    let unnamed = groups.len() - named.len();
+    let plural = |count: usize, one: &str, many: &str| format!("{} {}", count_label(count as i64), if count == 1 { one } else { many });
+    let in_files = plural(files as usize, "file", "files");
+    let message = if named.is_empty() {
+        format!("Your library has {} of people in {in_files}, but none are named yet. Open People to name them.", plural(groups.len(), "group", "groups"))
+    } else if question.people.as_deref() == Some("who") {
+        let names: Vec<String> =
+            named.iter().take(8).map(|group| format!("{} ({})", group.name.as_deref().unwrap_or_default(), plural(group.files as usize, "file", "files"))).collect();
+        let more = if named.len() > 8 { format!(" and {} more", named.len() - 8) } else { String::new() };
+        let rest = if unnamed == 0 { String::new() } else { format!(" {} not named yet; open People to name them.", plural(unnamed, "more group is", "more groups are")) };
+        format!("People in your library: {}{more}.{rest}", names.join(", "))
+    } else {
+        let names: Vec<&str> = named.iter().take(5).filter_map(|group| group.name.as_deref()).collect();
+        let more = if named.len() > 5 { format!(" and {} more", named.len() - 5) } else { String::new() };
+        let rest = if unnamed == 0 { String::new() } else { format!(", {unnamed} not named yet. Open People to name the rest") };
+        format!(
+            "Your library has {} of people in {in_files}: {} named ({}{more}){rest}.",
+            plural(groups.len(), "group", "groups"),
+            count_label(named.len() as i64),
+            names.join(", ")
+        )
+    };
+    Ok((message, hits))
+}
+
+fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &str, unit: &str, noun_phrase: &str) -> String {
+    let by_size = question.measure == "size";
+    let metric = |group: &(Option<String>, i64, i64)| if by_size { group.2 } else { group.1 };
+    let dated: Vec<(&str, i64)> = groups.iter().filter_map(|group| group.0.as_deref().map(|label| (label, metric(group)))).collect();
+    let target = if peak == "least" { dated.iter().map(|group| group.1).min() } else { dated.iter().map(|group| group.1).max() };
+    let Some(target) = target else {
+        return format!("None of these files has a capture date, so I can't rank them by {unit}.");
+    };
+    let label = |text: &str| match (unit, text.split_once('-')) {
+        ("month", Some((year, month))) => month.parse::<usize>().ok().and_then(|n| MONTH_NAMES.get(n.wrapping_sub(1))).map_or_else(|| text.to_owned(), |name| format!("{name} {year}")),
+        _ => text.to_owned(),
+    };
+    let winners: Vec<String> = dated.iter().filter(|group| group.1 == target).map(|group| label(group.0)).collect();
+    let extreme = match (peak, by_size) {
+        ("least", true) => "the least",
+        ("least", false) => "the fewest",
+        _ => "the most",
+    };
+    let amount = if by_size { bytes_label(target) } else { count_label(target) };
+    let what = if by_size { "space".to_owned() } else { noun_phrase.to_owned() };
+    match winners.as_slice() {
+        [only] => format!("{only} {} {extreme} {what} ({amount}).", if by_size { "uses" } else { "has" }),
+        [head @ .., last] => format!("{} and {last} are tied for {extreme} {what} ({amount} each).", head.join(", ")),
+        [] => String::new(),
+    }
+}
+
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
     if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
         return library_answer(conn, question, filter.root.as_ref());
     }
     let qualifiers = filter.qualifiers();
+    if let (Some(unit), Some(_)) = (&question.breakdown, &question.peak)
+        && !["year", "month"].contains(&unit.as_str())
+    {
+        return Ok((format!("I can't rank {} by {unit} yet. I can count them by year or month, for example “which month has the most {}?”", noun(&filter.kinds, 2), noun(&filter.kinds, 2)), vec![]));
+    }
     if question.duplicates {
         let extras = extras(conn, filter, SHOWN)?;
         let message = if question.measure == "size" && extras.count > 0 {
@@ -505,7 +609,8 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
             })
             .collect();
         let more = if groups.len() > 24 { format!(" and {} more", groups.len() - 24) } else { String::new() };
-        return Ok((format!("{}{qualifiers} by {unit}: {}{more}.", capitalized(&noun(&kinds, 2)), parts.join(", ")), hits));
+        let lead = question.peak.as_deref().map(|peak| format!("{} ", peak_lead(&groups, question, peak, unit, &noun(&kinds, 2)))).unwrap_or_default();
+        return Ok((format!("{lead}{}{qualifiers} by {unit}: {}{more}.", capitalized(&noun(&kinds, 2)), parts.join(", ")), hits));
     }
     let message = match question.measure.as_str() {
         "size" => {

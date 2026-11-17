@@ -964,6 +964,11 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         let Resolution { message, hits, actions } = chat_actions::resolve(conn, &intent, &context)?;
         return Ok(Prepared { text, message, hits, actions, summarize: false });
     }
+    let question = parse_question(&text);
+    if question.people.is_some() {
+        let (message, hits) = chat_facts::people_answer(conn, &question, root.as_ref())?;
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+    }
     let previous = {
         let mut statement = conn.prepare("SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=?1 AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid")?;
         let messages = statement
@@ -1290,6 +1295,95 @@ mod tests {
         );
         assert_eq!(time_label(65.4), "1:05");
         assert_eq!(time_label(3_600.0), "60:00");
+    }
+
+    fn ask(conn: &mut Connection, text: &str) -> ChatResponse {
+        let request = ChatRequest {
+            request_id: "r".into(),
+            conversation_id: text.into(),
+            action: "send".into(),
+            text: Some(text.into()),
+            use_model: Some(false),
+            model_kind: None,
+            ..Default::default()
+        };
+        execute(conn, &request).unwrap()
+    }
+
+    #[test]
+    fn this_library_and_our_collection_are_not_subjects() {
+        let mut conn = crate::db::test_support::memory_db();
+        for (id, kind, ext) in [(1, "video", "mp4"), (2, "video", "mov"), (3, "image", "jpg"), (4, "image", "jpg"), (5, "image", "jpg")] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,10,0,?3,?4)",
+                rusqlite::params![id, format!("/p/{id}.{ext}"), kind, ext],
+            )
+            .unwrap();
+        }
+        let message = |conn: &mut Connection, text: &str| ask(conn, text).message;
+        assert_eq!(message(&mut conn, "How many videos are in this library?"), "Found 2 videos, using 20 bytes.");
+        assert_eq!(message(&mut conn, "count the videos in our library"), "Found 2 videos, using 20 bytes.");
+        assert_eq!(message(&mut conn, "how many photos are in our collection"), "Found 3 photos, using 30 bytes.");
+        assert_eq!(message(&mut conn, "how many photos of this dog"), "No photos matching “this dog”.");
+    }
+
+    #[test]
+    fn people_questions_answer_from_face_groups_not_the_people_tag() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES (1,'/p/1.jpg',1,1,0,'image','jpg'),(2,'/p/2.jpg',2,1,0,'image','jpg'),(3,'/p/3.jpg',3,1,0,'image','jpg'),(4,'/p/4.jpg',4,1,0,'image','jpg');\
+             INSERT INTO tags(file_id,tag,source,score) VALUES (3,'people','auto',0.9),(4,'people','auto',0.9);\
+             INSERT INTO persons(id,name,created_at,is_unknown) VALUES (1,NULL,0,0),(2,NULL,0,0),(3,'Hidden',0,1),(4,NULL,0,0);\
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES (1,1,x'00','',0),(2,1,x'00','',0),(2,2,x'00','',0),(4,3,x'00','',0),(3,4,x'00','',1);",
+        )
+        .unwrap();
+        let none_named = "Your library has 2 groups of people in 2 files, but none are named yet. Open People to name them.";
+        for text in ["how many people are in my library?", "who is in my photos?", "show me the people in my photos"] {
+            let result = ask(&mut conn, text);
+            assert_eq!(result.message, none_named, "{text}");
+            assert_eq!(result.hits.iter().map(|hit| hit.file_id).collect::<std::collections::BTreeSet<_>>(), [1, 2].into(), "{text}");
+        }
+        conn.execute("UPDATE persons SET name='Kyle' WHERE id=1", []).unwrap();
+        assert_eq!(
+            ask(&mut conn, "How many people do I have?").message,
+            "Your library has 2 groups of people in 2 files: 1 named (Kyle), 1 not named yet. Open People to name the rest."
+        );
+        assert_eq!(
+            ask(&mut conn, "who's in my library?").message,
+            "People in your library: Kyle (2 files). 1 more group is not named yet; open People to name them."
+        );
+        let named = ask(&mut conn, "show me photos of Kyle");
+        assert!(named.message.starts_with("Found 2 matches"), "{}", named.message);
+        assert_eq!(named.hits.iter().map(|hit| hit.file_id).collect::<std::collections::BTreeSet<_>>(), [1, 2].into());
+        conn.execute("DELETE FROM face_prints", []).unwrap();
+        assert_eq!(
+            ask(&mut conn, "how many people are in my library?").message,
+            "No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups."
+        );
+    }
+
+    #[test]
+    fn peak_questions_answer_by_year_or_month_or_say_they_cannot() {
+        let mut conn = crate::db::test_support::memory_db();
+        for (id, taken) in [(1, 1_718_452_800_i64), (2, 1_749_988_800), (3, 1_752_580_800), (4, 1_781_524_800), (5, 1_781_524_900), (6, 1_781_525_000)] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,10,0,'image','jpg',?3)",
+                rusqlite::params![id, format!("/p/{id}.jpg"), taken],
+            )
+            .unwrap();
+        }
+        let message = |conn: &mut Connection, text: &str| ask(conn, text).message;
+        assert_eq!(message(&mut conn, "Which year has the most photos?"), "2026 has the most photos (3). Photos by year: 2026: 3, 2025: 2, 2024: 1.");
+        assert_eq!(message(&mut conn, "in which year did I take the fewest photos?"), "2024 has the fewest photos (1). Photos by year: 2026: 3, 2025: 2, 2024: 1.");
+        assert!(message(&mut conn, "which month has the most photos?").starts_with("June 2026 has the most photos (3). Photos by month: 2026-06: 3,"));
+        assert!(message(&mut conn, "what was my busiest month?").starts_with("June 2026 has the most files (3)."));
+        assert!(message(&mut conn, "which month has the fewest photos?").starts_with("July 2025, June 2025 and June 2024 are tied for the fewest photos (1 each)."));
+        assert_eq!(
+            message(&mut conn, "which day has the most photos?"),
+            "I can't rank photos by day yet. I can count them by year or month, for example “which month has the most photos?”"
+        );
+        let space = message(&mut conn, "which year uses the most space?");
+        assert!(space.starts_with("2026 uses the most space (30 bytes)."), "{space}");
     }
 
     #[test]
