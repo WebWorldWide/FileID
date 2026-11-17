@@ -223,14 +223,14 @@ public final class ReadStore: @unchecked Sendable {
         let scope = self.scope
         do {
             return try q.read { db -> CounterResult in
-                let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
+                let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL)") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
                 var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
                     let within = LibraryScope.sql("path_text")
-                    scoped = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(within)", arguments: [scope.param]) ?? 0,
+                    scoped = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(within)", arguments: [scope.param]) ?? 0,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0 AND \(within)", arguments: [scope.param]) ?? 0)
                 }
@@ -314,7 +314,17 @@ public final class ReadStore: @unchecked Sendable {
     /// `kindFilter` value that lists the files the scan could not read.
     public static let unreadableFilter = "unreadable"
     /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
-    static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%'"
+    static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// The two `failed = 1` reasons the Rust engine writes for a row that is not a broken file: one removed from
+    /// its folder (kept 30 days so a returning file re-binds) and an empty one. Same exact strings as
+    /// `scan_session.rs` `HIDDEN_ROW_MESSAGE` and `db/zero_byte.rs` `ZERO_BYTE_REASON`.
+    nonisolated static let engineHiddenMessages = [
+        "File is no longer present under the completed scan root.",
+        "File is zero bytes and has no indexable content.",
+    ]
+    /// SQL fragment that keeps a row out of totals and the Unreadable list when the engine hid it.
+    nonisolated static let notEngineHiddenSQL =
+        "COALESCE(error_message, '') NOT IN (\(engineHiddenMessages.map { "'" + $0 + "'" }.joined(separator: ", ")))"
 
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",

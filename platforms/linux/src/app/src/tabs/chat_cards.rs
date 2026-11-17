@@ -780,7 +780,7 @@ impl Runner {
                 }
                 if rules::is_folder_error(kind) {
                     while let Some(pending) = self.take(|wait| matches!(wait, Wait::Plan { .. } | Wait::Move { .. })) {
-                        self.fail(&pending.action, rules::folder_error_text(kind));
+                        self.fail(&pending.action, &rules::folder_error_text(kind, message));
                     }
                 }
             }

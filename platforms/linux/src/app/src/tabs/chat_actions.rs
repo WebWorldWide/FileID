@@ -520,11 +520,11 @@ pub(super) fn is_folder_error(kind: &str) -> bool {
     kind.contains("restructure") || kind == "db_unavailable"
 }
 
-pub(super) fn folder_error_text(kind: &str) -> &'static str {
-    if kind == "restructure_busy" {
-        "Another folder job is already running. Wait for it to finish, then try again."
-    } else {
-        "This didn't finish. Check Organize Folders to see what changed, then try again."
+pub(super) fn folder_error_text(kind: &str, message: &str) -> String {
+    match kind {
+        "restructure_busy" => "Another folder job is already running. Wait for it to finish, then try again.".to_owned(),
+        "plan_restructure_root" => crate::engine_errors::sentence(kind, message),
+        _ => "This didn't finish. Check Organize Folders to see what changed, then try again.".to_owned(),
     }
 }
 
@@ -535,6 +535,17 @@ pub(super) const RESTARTED: &str =
 mod tests {
     use super::*;
     use fileid_engine::ipc::{ChatRename, RestructureConfidenceCounts};
+
+    #[test]
+    fn a_plan_for_a_missing_folder_gets_the_restructure_tabs_sentence() {
+        assert!(is_folder_error("plan_restructure_root"));
+        assert_eq!(
+            folder_error_text("plan_restructure_root", "root not found"),
+            "This folder isn't available. Reconnect it, then try again."
+        );
+        assert!(folder_error_text("plan_restructure_failed", "").starts_with("This didn't finish."));
+        assert!(folder_error_text("restructure_busy", "").starts_with("Another folder job"));
+    }
 
     fn action(kind: &str) -> ChatAction {
         ChatAction {

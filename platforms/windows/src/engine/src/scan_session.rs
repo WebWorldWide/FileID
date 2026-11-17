@@ -899,6 +899,15 @@ impl ScanSession {
             ))
             .await;
             on_phase(SessionPhase::Failed);
+            sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(terminal_progress(
+                &session_id,
+                ScanPhase::Failed,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                total + self.carried.0,
+                failed + self.carried.1,
+            )))))
+            .await;
             // Terminal Failed phase via the guaranteed (backpressuring)
             // path — a drop here would render the TDR-aborted scan as Completed
             // and auto-fire face clustering on a half-scanned library.
@@ -912,6 +921,15 @@ impl ScanSession {
             emit_phase_guaranteed(&sink, SessionPhase::Failed).await;
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
+            sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(terminal_progress(
+                &session_id,
+                ScanPhase::Cancelled,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                total + self.carried.0,
+                failed + self.carried.1,
+            )))))
+            .await;
             // Terminal Cancelled phase via the guaranteed path — a drop
             // makes the app treat a cancelled scan as Completed.
             emit_phase_guaranteed(&sink, SessionPhase::Cancelled).await;
@@ -940,6 +958,15 @@ impl ScanSession {
                 emit_phase(SessionPhase::PostScan);
             }
             on_phase(SessionPhase::Completed);
+            sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(terminal_progress(
+                &session_id,
+                ScanPhase::Completed,
+                total + self.carried.0,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                total + self.carried.0,
+                failed + self.carried.1,
+            )))))
+            .await;
             // Terminal Completed phase via the guaranteed path so the
             // app's terminal state can never be lost under backpressure.
             emit_phase_guaranteed(&sink, SessionPhase::Completed).await;
@@ -1004,6 +1031,23 @@ impl CatchUpProgress {
             resident_mb: crate::platform::process_memory_mb(),
             available_mb: 0,
         }))));
+    }
+}
+
+/// The last progress snapshot of a scan, sent before its terminal events as the
+/// Swift engine does: the terminal phase and the final counts, no rate, no ETA.
+fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered: u64, processed: u64, failed: u64) -> ScanProgress {
+    ScanProgress {
+        session_id: session_id.into(),
+        phase,
+        total,
+        discovered,
+        processed,
+        failed,
+        files_per_second: 0.0,
+        eta_seconds: None,
+        resident_mb: crate::platform::process_memory_mb(),
+        available_mb: 0,
     }
 }
 
@@ -1896,6 +1940,17 @@ mod tests {
         assert_eq!(catch_up_counters(100, 100, 40, 99), (140, 140));
         // A rescan that found nothing new but still owes an earlier scan's files.
         assert_eq!(catch_up_counters(0, 0, 12, 4), (12, 4));
+    }
+
+    #[test]
+    fn the_last_snapshot_carries_the_terminal_phase_and_the_final_counts() {
+        for phase in [ScanPhase::Completed, ScanPhase::Cancelled, ScanPhase::Failed] {
+            let progress = terminal_progress("s1", phase, 959, 959, 930, 2);
+            assert_eq!(progress.phase, phase);
+            assert_eq!((progress.total, progress.discovered, progress.processed, progress.failed), (959, 959, 930, 2));
+            assert_eq!(progress.files_per_second.to_bits(), 0.0f64.to_bits());
+            assert!(progress.eta_seconds.is_none());
+        }
     }
 
     #[test]
