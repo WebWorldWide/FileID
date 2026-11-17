@@ -4,7 +4,7 @@ import FileIDShared
 
 /// Undo for engine-side Trash moves. Each `trashFiles` batch records where
 /// every file landed in the Trash plus a snapshot of its catalog rows (file,
-/// CLIP vector, tags, take signals), so `restoreFromTrash` puts the file back
+/// CLIP vector, tags, take signals, faces), so `restoreFromTrash` puts the file back
 /// and the catalog exactly as it was: a restored burst regroups at once
 /// instead of waiting for a rescan.
 enum TrashJournal {
@@ -33,7 +33,7 @@ enum TrashJournal {
         var items: [Item]
     }
 
-    static let snapshotTables = ["files": "id", "clip_embeddings": "file_id", "tags": "file_id", "take_quality": "file_id"]
+    static let snapshotTables = ["files": "id", "clip_embeddings": "file_id", "tags": "file_id", "take_quality": "file_id", "face_prints": "file_id"]
     static let maxBatches = 50
     private static let lock = NSLock()
 
@@ -41,7 +41,7 @@ enum TrashJournal {
 
     static func snapshot(_ db: GRDB.Database, fileID: Int64) throws -> [TableRow] {
         var out: [TableRow] = []
-        for table in ["files", "clip_embeddings", "tags", "take_quality"] {
+        for table in ["files", "clip_embeddings", "tags", "take_quality", "face_prints"] {
             guard let key = snapshotTables[table], try db.tableExists(table) else { continue }
             for row in try Row.fetchAll(db, sql: "SELECT * FROM \(table) WHERE \(key)=?", arguments: [fileID]) {
                 var columns: [String: Value] = [:]
@@ -60,14 +60,24 @@ enum TrashJournal {
         return out
     }
 
-    static func restoreRows(_ db: GRDB.Database, _ rows: [TableRow]) throws {
+    /// Re-inserts the snapshot rows of file `fileID`. A face whose person was deleted since
+    /// returns unassigned; the persons that got a face back are recounted.
+    static func restoreRows(_ db: GRDB.Database, _ rows: [TableRow], fileID: Int64) throws {
+        var restoredPersons = Set<Int64>()
         for row in rows {
-            guard snapshotTables[row.table] != nil, try db.tableExists(row.table) else { continue }
+            guard let key = snapshotTables[row.table], try db.tableExists(row.table) else { continue }
+            guard row.columns[key]?.int == fileID else { throw TrashRestoreError.rowOfAnotherFile(row.table) }
             let existing = Set(try db.columns(in: row.table).map(\.name))
             let names = row.columns.keys.filter { existing.contains($0) }.sorted()
             guard !names.isEmpty else { continue }
-            let values: [DatabaseValueConvertible?] = names.map { name in
+            var facePerson: Int64?
+            let values: [DatabaseValueConvertible?] = try names.map { name in
                 let v = row.columns[name]!
+                if row.table == "face_prints", name == "person_id", let person = v.int {
+                    guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?)", arguments: [person]) == true else { return nil }
+                    facePerson = person
+                    return person
+                }
                 if let i = v.int { return i }
                 if let r = v.real { return r }
                 if let t = v.text { return t }
@@ -77,8 +87,12 @@ enum TrashJournal {
             let columns = names.map { "\"\($0)\"" }.joined(separator: ",")
             let marks = names.map { _ in "?" }.joined(separator: ",")
             try db.execute(sql: "INSERT OR IGNORE INTO \(row.table)(\(columns)) VALUES(\(marks))", arguments: StatementArguments(values))
+            if db.changesCount > 0, let person = facePerson { restoredPersons.insert(person) }
         }
+        try FileIDEngineMain.reconcilePersons(restoredPersons, db: db)
     }
+
+    enum TrashRestoreError: Error { case rowOfAnotherFile(String) }
 
     static func load(at url: URL = defaultURL) -> [Batch] {
         guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
@@ -255,7 +269,7 @@ enum TrashJournal {
                 try await database.pool.write { db in
                     let taken = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM files WHERE path_text=? OR id=?)",
                                                   arguments: [item.originalPath, item.fileID]) ?? false
-                    if !taken { try restoreRows(db, item.rows) }
+                    if !taken { try restoreRows(db, item.rows, fileID: item.fileID) }
                 }
                 messages.append(BulkActionItem(fileID: item.fileID, ok: true, message: item.originalPath))
             } catch {

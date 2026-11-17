@@ -1052,6 +1052,11 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
     });
     window.add_action(&navigate);
 
+    let pick_folder = gtk::gio::SimpleAction::new("pick-folder", None);
+    let pick = act.clone();
+    pick_folder.connect_activate(move |_, _| pick(Action::PickFolder));
+    window.add_action(&pick_folder);
+
     let hand_offs: [(&str, fn(String) -> Action); 3] = [
         ("library-query", Action::LibraryQuery),
         ("moments-query", Action::MomentsQuery),

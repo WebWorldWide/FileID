@@ -121,6 +121,12 @@ impl ScanSession {
         }
     }
 
+    /// Runs under the id the app was already shown (the baseline progress and a follow-up pass use the same one).
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
     /// The incremental pass that follows a pass during which files changed.
     pub fn follow_up(mut self, previous: &SessionResult) -> Self {
         self.rescan = false;
@@ -176,8 +182,9 @@ impl ScanSession {
             }
         };
 
+        // `handle_start_scan` announces Discovering before the models load; announcing it again here
+        // would show the app two phase changes for one scan.
         on_phase(SessionPhase::Discovering);
-        emit_phase(SessionPhase::Discovering);
 
         // Persist a scan_sessions row so Settings → Recent scans can list
         // past scans + offer Re-scan. Uses the engine's single-writer
@@ -844,21 +851,27 @@ impl ScanSession {
         let mut post_scan_announced = false;
         if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
             let (owed_tags, owed_careful) = crate::pipeline::catch_up::owed(&self.db_conn.lock(), Some(root));
-            if owed_tags + owed_careful > 0 {
+            let reader_deferred = owed_tags == 0 && crate::pipeline::catch_up::careful_reader_deferred();
+            if reader_deferred {
+                tracing::info!(owed_careful, "[SCAN] careful text reads stay owed: the reader stopped answering recently");
+            }
+            if owed_tags + owed_careful > 0 && !reader_deferred {
                 on_phase(SessionPhase::PostScan);
                 emit_phase(SessionPhase::PostScan);
                 post_scan_announced = true;
                 match self.models.get().await {
                     Some(stack) => {
                         let analyzer = crate::pipeline::tagging::catch_up_analyzer(stack, self.coordinator.clone());
-                        let report = CatchUpProgress {
+                        let report = Arc::new(CatchUpProgress {
                             sink: sink.clone(),
                             session_id: session_id.clone(),
                             discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
                             processed: total,
                             failed,
                             state: Mutex::new((0, 0, Instant::now())),
-                        };
+                        });
+                        let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
+                        let report_pass = report.clone();
                         let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
                         let pass = tokio::task::spawn_blocking(move || {
                             crate::pipeline::catch_up::run(
@@ -867,10 +880,12 @@ impl ScanSession {
                                 analyzer.as_ref(),
                                 &|| coordinator.is_cancelled(),
                                 &|| coordinator.is_paused(),
-                                &|event| report.report(event),
+                                &|event| report_pass.report(event),
                             )
                         });
-                        if let Err(error) = pass.await {
+                        let finished = pass.await;
+                        heartbeat.abort();
+                        if let Err(error) = finished {
                             tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
                         }
                     }
@@ -1022,16 +1037,35 @@ struct CatchUpProgress {
     state: Mutex<(u64, u64, Instant)>,
 }
 
+/// How often the post-scan phase repeats its progress while a read is slow, so the app never sees a silent minute.
+const CATCH_UP_HEARTBEAT: Duration = Duration::from_secs(1);
+
 impl CatchUpProgress {
     fn report(&self, event: crate::pipeline::catch_up::Progress) {
-        let (owed, done, started) = {
+        {
             let mut state = self.state.lock();
             match event {
-                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.1),
+                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.0).max(state.1),
                 crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
             }
-            *state
-        };
+        }
+        self.send_snapshot();
+    }
+
+    fn spawn_heartbeat(self: Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(every);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                self.send_snapshot();
+            }
+        })
+    }
+
+    fn send_snapshot(&self) {
+        let (owed, done, started) = *self.state.lock();
         let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
         let seconds = started.elapsed().as_secs_f64();
         let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
@@ -2864,6 +2898,47 @@ mod tests {
         assert!(!skip.contains("/v/frameless.mov"));
         assert!(skip.contains("/v/embedded.mov"));
         assert!(skip.contains("/a/song.m4a"));
+    }
+
+    fn post_scan_progress(event: IpcEvent) -> ScanProgress {
+        match event.payload {
+            EventPayload::Progress(progress) => progress.inner,
+            other => panic!("expected progress, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_repeats_its_progress_while_a_read_is_slow() {
+        let (sink, mut events) = Sink::channel_for_test(256);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 100,
+            processed: 100,
+            failed: 2,
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(20));
+        report.report(crate::pipeline::catch_up::Progress::Total(30));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        report.report(crate::pipeline::catch_up::Progress::Advance(10));
+        report.report(crate::pipeline::catch_up::Progress::Total(25));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        heartbeat.abort();
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(post_scan_progress(event));
+        }
+        assert!(seen.len() >= 8, "a progress event about every tick, got {}", seen.len());
+        assert!(seen.iter().all(|p| p.session_id == "one-session" && p.phase == ScanPhase::PostScan && p.failed == 2 && p.discovered == 100));
+        for pair in seen.windows(2) {
+            assert!(pair[1].total >= pair[0].total, "total never shrinks: {} then {}", pair[0].total, pair[1].total);
+            assert!(pair[1].processed >= pair[0].processed, "processed never shrinks: {} then {}", pair[0].processed, pair[1].processed);
+        }
+        let last = seen.last().unwrap();
+        assert_eq!((last.total, last.processed), (130, 110), "a smaller later estimate does not shrink the total");
+        assert!(seen.iter().all(|p| p.processed <= p.total));
     }
 }
 

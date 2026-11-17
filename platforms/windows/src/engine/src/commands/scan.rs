@@ -384,9 +384,9 @@ pub(crate) async fn handle_start_scan(
     // immediately. Without it, if no file ever reaches DBWriter (empty
     // folder, all-filtered, or a downstream stall), every stat row stays
     // at "—" indefinitely — identical to "scan did nothing".
-    let session_id_baseline = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
     sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
-        session_id: session_id_baseline.clone(),
+        session_id: session_id.clone(),
         phase: ScanPhase::Discovering,
         total: 0,
         discovered: 0,
@@ -435,7 +435,8 @@ pub(crate) async fn handle_start_scan(
         models.clone(),
         payload.rescan,
         payload.excluded_paths.clone().unwrap_or_default(),
-    );
+    )
+    .with_session_id(session_id.clone());
     let root = PathBuf::from(payload.root_path.clone());
 
     let models_for_keep = models.clone();
@@ -450,6 +451,7 @@ pub(crate) async fn handle_start_scan(
                 false,
                 payload.excluded_paths.clone().unwrap_or_default(),
             )
+            .with_session_id(session_id)
             .follow_up(&first)
             .run(&root, |_| {})
             .await
@@ -612,6 +614,60 @@ mod tests {
             })
         ));
         assert!(scan_state.lock().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_scan_is_one_session_and_one_discovering_phase() {
+        let folder = std::env::temp_dir().join(format!("fileid-one-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        for name in ["a.txt", "b.txt", "sub/c.txt"] {
+            std::fs::write(folder.join(name), name).unwrap();
+        }
+        let db = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let scan_state = Arc::new(Mutex::new(None));
+        let (sink, mut events) = Sink::channel_for_test(4096);
+        let payload = ipc::StartScanPayload {
+            root_path: folder.to_string_lossy().into_owned(),
+            root_bookmark: None,
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
+        };
+
+        let completed = handle_start_scan(sink, db, scan_state, payload, Arc::new(AtomicBool::new(false)), None, None).await;
+        assert!(completed);
+
+        let mut discovering = 0;
+        let mut session_ids = std::collections::BTreeSet::new();
+        let mut progress: Vec<ScanProgress> = Vec::new();
+        let mut completed_session = None;
+        while let Ok(event) = events.try_recv() {
+            match event.payload {
+                EventPayload::PhaseChanged(Wrap { inner: ScanPhase::Discovering }) => discovering += 1,
+                EventPayload::Progress(Wrap { inner }) => {
+                    session_ids.insert(inner.session_id.clone());
+                    progress.push(inner);
+                }
+                EventPayload::ScanComplete(Wrap { inner }) => {
+                    session_ids.insert(inner.session_id.clone());
+                    completed_session = Some(inner.session_id);
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert_eq!(discovering, 1, "phaseChanged(discovering) once per scan");
+        assert!(completed_session.is_some(), "scanComplete was sent");
+        assert_eq!(session_ids.len(), 1, "one session id for every event of the scan: {session_ids:?}");
+        assert!(!progress.is_empty());
+        let mut floor = (0, 0);
+        for p in &progress {
+            assert!(p.total >= floor.0 && p.processed >= floor.1, "counters only grow: {floor:?} then ({}, {})", p.total, p.processed);
+            floor = (p.total, p.processed);
+        }
+        assert_eq!(progress.last().unwrap().phase, ScanPhase::Completed);
     }
 
     #[tokio::test]

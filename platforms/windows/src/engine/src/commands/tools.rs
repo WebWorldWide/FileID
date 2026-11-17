@@ -842,6 +842,10 @@ fn run_action(
     Ok(result)
 }
 
+/// Camera originals reach ~61 MP; 100 MP is the ceiling because decode holds the
+/// RGB8 frame (300 MB) next to its RGBA copy, inside the decoder's 512 MiB allocation limit.
+const PHOTO_MAX_PIXELS: u64 = 100_000_000;
+
 fn validate_image(path: &Path) -> Result<()> {
     let format = ImageReader::open(path)?
         .with_guessed_format()?
@@ -874,8 +878,8 @@ fn validate_image(path: &Path) -> Result<()> {
     }
     let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
     let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 32_000_000 {
-        bail!("This adapter currently limits input images to 32 megapixels")
+    if u64::from(width) * u64::from(height) > PHOTO_MAX_PIXELS {
+        bail!("This adapter currently limits input images to 100 megapixels")
     }
     if decoder.icc_profile()?.is_some() {
         bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")
@@ -1097,6 +1101,36 @@ mod tests {
         })
         .unwrap();
         assert_eq!(undone.outputs[0].state, "undone");
+    }
+
+    fn write_gray_jpeg(path: &Path, width: u32, height: u32) {
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+            .encode(&vec![128u8; width as usize * height as usize], width, height, image::ExtendedColorType::L8)
+            .unwrap();
+        fs::write(path, encoded).unwrap();
+    }
+
+    #[test]
+    fn a_7008_by_4672_camera_photo_is_exported() {
+        let mut fixture = Fixture::new();
+        write_gray_jpeg(&fixture.source, 7008, 4672);
+        let request = fixture.request("jpeg");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        assert_eq!(preview.status, "ok", "{}", preview.message);
+        let done = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(done.status, "ok", "{}", done.message);
+        let output = image::ImageReader::open(&done.outputs[0].output_path).unwrap().with_guessed_format().unwrap();
+        assert_eq!(output.into_dimensions().unwrap(), (16, 11));
+    }
+
+    #[test]
+    fn a_photo_over_100_megapixels_is_refused() {
+        let mut fixture = Fixture::new();
+        write_gray_jpeg(&fixture.source, 12_000, 8_400);
+        let request = fixture.request("jpeg");
+        let message = execute(&mut fixture.conn, &request).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("100 megapixels"), "{message}");
     }
 
     #[test]
