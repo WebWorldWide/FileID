@@ -67,6 +67,27 @@ struct CatalogTextSearchTests {
                 "plural questions match singular scan tags")
     }
 
+    @Test func aPartialNameFindsTheFileAfterWholeWordMatches() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, name) in [(1, "IMG_4181.jpg"), (2, "IMG_41.jpg"), (3, "IMG_4200.jpg"), (4, "notes 41.txt"), (5, "IMG_4182.jpg")] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,100,0,'image','jpg')",
+                               arguments: [id, "/internal/\(name)", id])
+            }
+        }
+        func ids(_ query: String) async throws -> [Int64] {
+            try await database.pool.read { try CatalogStore.search($0, query: query) }.map(\.fileID)
+        }
+        #expect(try await ids("IMG_4181") == [1])
+        let partial = try await ids("IMG_41")
+        #expect(partial.first == 2, "the whole-word match stays first")
+        #expect(Set(partial.dropFirst()) == [1, 5])
+        #expect(try await ids("4").isEmpty, "one-character terms stay whole words")
+        #expect(Set(try await ids("img_41 jp")) == [1, 2, 5], "every term may be a prefix")
+    }
+
     @Test func pluralWordForms() {
         #expect(CatalogStore.wordForms("dogs") == ["dogs", "dog"])
         #expect(CatalogStore.wordForms("puppies") == ["puppies", "puppy"])
