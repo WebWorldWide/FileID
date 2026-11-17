@@ -549,8 +549,8 @@ pub fn run(
 
 /// How long the careful text reader is left alone after it stopped answering.
 /// Each further failure doubles it, up to the cap, and one good pass resets it.
-const READER_BACKOFF_FIRST: std::time::Duration = std::time::Duration::from_secs(60);
-const READER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const READER_BACKOFF_FIRST: std::time::Duration = std::time::Duration::from_mins(1);
+const READER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_mins(15);
 /// After a failure, the pass that tries the reader again waits this long for it, not the full warm-up wait.
 const READER_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
