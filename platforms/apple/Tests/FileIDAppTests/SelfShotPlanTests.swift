@@ -20,6 +20,8 @@ struct SelfShotPlanTests {
     @Test func no_scan_is_opt_in() {
         #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x"], available: all)?.openOnly == false)
         #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_NO_SCAN": "1"], available: all)?.openOnly == true)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x"], available: all)?.scanSettle == 1)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_SCAN_SETTLE": "6"], available: all)?.scanSettle == 6)
     }
 
     @Test func slugs() {

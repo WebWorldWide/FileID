@@ -8,6 +8,7 @@
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
 //   FILEID_SELF_SHOT_NO_SCAN=1     open FILEID_SELF_SHOT_FOLDER without scanning it (a folder chosen but not yet read)
+//   FILEID_SELF_SHOT_SCAN_SETTLE=1 seconds into a scan before the "-scanning" capture (at most SETTLE)
 //   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
@@ -71,6 +72,7 @@ struct SelfShotPlan: Equatable {
     var moreFolders: [URL] = []
     var openOnly = false
     var settle: Double
+    var scanSettle: Double = 1
     var windowSize: CGSize?
     var query: String?
     var clusterFaces = false
@@ -88,6 +90,7 @@ struct SelfShotPlan: Equatable {
                             moreFolders: (environment["FILEID_SELF_SHOT_MORE_FOLDERS"] ?? "").split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) },
                             openOnly: environment["FILEID_SELF_SHOT_NO_SCAN"] == "1",
                             settle: settle,
+                            scanSettle: environment["FILEID_SELF_SHOT_SCAN_SETTLE"].flatMap(Double.init).map { max(0, $0) } ?? 1,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
                             query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
                             clusterFaces: environment["FILEID_SELF_SHOT_CLUSTER"] == "1",
@@ -156,7 +159,7 @@ enum SelfShot {
                 if needsScan {
                     await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
                     navigate(plan.pages.first ?? MainWindow.Tab.library.rawValue)
-                    try? await Task.sleep(for: .seconds(min(plan.settle, 1.0)))
+                    try? await Task.sleep(for: .seconds(min(plan.settle, plan.scanSettle)))
                     let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
                     write(name: "\(SelfShotPlan.slug(plan.pages.first ?? "library"))-scanning\(scanning ? "" : "-finished")", plan: plan)
                     await waitUntil(timeout: 600) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
