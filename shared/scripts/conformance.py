@@ -33,6 +33,7 @@ so a later "expect" can require an engine to echo it (bulkActionResult.commandID
 
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
+A step {"schemaOf": "<fixture>"} requires the catalog to have that fixture's schema objects and columns.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
 also checks "symlinks", empties folders ("emptyDir") and writes tree entries ("tree") before
@@ -724,6 +725,9 @@ def run_step(engine, ctx, step, binaries):
         actual = chat_until_done(engine, request, seen)
     elif "db" in step:
         actual = db_rows(ctx, step["db"])
+    elif "schemaOf" in step:
+        same_schema_as(ctx, step["schemaOf"])
+        return engine
     elif "fs" in step:
         spec = ctx.expand(step["fs"])
         for relative in spec.get("emptyDir", []):
@@ -1195,6 +1199,40 @@ def seed_fixture(ctx, name, omit=(), drop_lines=None):
     ctx.saved.update(ctx.expand(meta["vars"]))
     ctx.conversation = meta["conversation"]
     return meta
+
+
+def schema_image(path):
+    """The objects (type, name, table) and, per table, the columns (name, type, not null, key) of a catalog."""
+    with tempfile.TemporaryDirectory(prefix="FileIDSchema-") as temporary:
+        copy = Path(temporary) / "c.sqlite"
+        for suffix in ("", "-wal", "-shm"):
+            if Path(str(path) + suffix).exists():
+                shutil.copy2(str(path) + suffix, str(copy) + suffix)
+        connection = sqlite3.connect(copy)
+        try:
+            objects = connection.execute("SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
+            tables = {name: connection.execute("SELECT name,type,\"notnull\",pk FROM pragma_table_info(?)", (name,)).fetchall()
+                      for kind, name, _ in objects if kind == "table"}
+            return {"objects": [list(row) for row in objects], "columns": tables}
+        finally:
+            connection.close()
+
+
+def same_schema_as(ctx, name):
+    """Fail unless this run's catalog has the objects and columns of the catalog in fixture `name`."""
+    with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=ctx.state.parent.parent) as temporary:
+        other = Context({"name": name}, ctx.flavor, ctx.os, Path(temporary))
+        seed_fixture(other, name)
+        wanted, actual = schema_image(other.database), schema_image(ctx.database)
+    problems = []
+    wanted_objects, actual_objects = {tuple(o) for o in wanted["objects"]}, {tuple(o) for o in actual["objects"]}
+    problems += [f"missing {kind} {object_name}" for kind, object_name, _ in sorted(wanted_objects - actual_objects)]
+    problems += [f"extra {kind} {object_name}" for kind, object_name, _ in sorted(actual_objects - wanted_objects)]
+    for table, columns in wanted["columns"].items():
+        if table in actual["columns"] and [list(c) for c in columns] != [list(c) for c in actual["columns"][table]]:
+            problems.append(f"table {table} has other columns")
+    if problems:
+        raise Failure(f"the catalog is not the {name} schema: " + "; ".join(problems[:12]))
 
 
 def fixture_tree(path):

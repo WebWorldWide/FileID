@@ -1833,5 +1833,900 @@
     }
    }
   ]
+ },
+ {
+  "name": "swift-written-older-catalog-v20",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v20 (v0.1.0, the oldest build released) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v20",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": []
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": []
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v21",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v21 (the first catalog schema) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v21",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": []
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v28",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v28 (mid-chain) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v28",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": [
+     [
+      1,
+      "generated"
+     ]
+    ]
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v35",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v35 (the version before the current one) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v35",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "Generated library",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": [
+     [
+      1,
+      "generated"
+     ]
+    ]
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ]
  }
 ]
