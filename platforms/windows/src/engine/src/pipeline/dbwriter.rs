@@ -3513,4 +3513,33 @@ mod rescan_preservation_tests {
         assert_eq!(healed.1, vec!["keepme:user".to_string(), "sunset:auto".to_string()], "automatic tags are replaced, the user's stay");
         assert_eq!(healed.3, vec!["charlie".to_string()]);
     }
+
+    #[test]
+    #[ignore = "finding: the Rust writer stores a failed row for a file deleted after discovery (the Swift writer skips it)"]
+    fn a_file_deleted_after_discovery_gets_no_failed_row_but_a_broken_one_does() {
+        let dir = std::env::temp_dir().join(format!("fileid-vanish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (gone, broken) = (dir.join("deleted.jpg"), dir.join("broken.jpg"));
+        std::fs::write(&broken, b"not a jpeg").unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let failure = |path: &PathBuf| {
+            let mut file = scan(1_700_000_000.0);
+            file.path = path.clone();
+            file.failed = true;
+            file.error_message = Some("Could not decode image".to_string());
+            file
+        };
+        writer.flush(&mut vec![failure(&gone), failure(&broken)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let paths: Vec<String> = conn
+            .lock()
+            .prepare("SELECT path_text FROM files")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(paths, vec![broken.to_string_lossy().into_owned()]);
+    }
 }
