@@ -850,6 +850,9 @@ impl ScanSession {
         // rest stays owed.
         let mut post_scan_announced = false;
         if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            if self.rescan {
+                crate::pipeline::catch_up::forget_careful_reader_failures();
+            }
             let (owed_tags, owed_careful) = crate::pipeline::catch_up::owed(&self.db_conn.lock(), Some(root));
             let reader_deferred = owed_tags == 0 && crate::pipeline::catch_up::careful_reader_deferred();
             if reader_deferred {
@@ -885,6 +888,7 @@ impl ScanSession {
                         });
                         let finished = pass.await;
                         heartbeat.abort();
+                        let _ = heartbeat.await;
                         if let Err(error) = finished {
                             tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
                         }
@@ -1042,14 +1046,12 @@ const CATCH_UP_HEARTBEAT: Duration = Duration::from_secs(1);
 
 impl CatchUpProgress {
     fn report(&self, event: crate::pipeline::catch_up::Progress) {
-        {
-            let mut state = self.state.lock();
-            match event {
-                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.0).max(state.1),
-                crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
-            }
+        let mut state = self.state.lock();
+        match event {
+            crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.0).max(state.1),
+            crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
         }
-        self.send_snapshot();
+        self.send_snapshot(&state);
     }
 
     fn spawn_heartbeat(self: Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
@@ -1059,13 +1061,14 @@ impl CatchUpProgress {
             ticks.tick().await;
             loop {
                 ticks.tick().await;
-                self.send_snapshot();
+                self.send_snapshot(&self.state.lock());
             }
         })
     }
 
-    fn send_snapshot(&self) {
-        let (owed, done, started) = *self.state.lock();
+    /// Sent while the caller holds the state lock, so a snapshot never overtakes a newer one.
+    fn send_snapshot(&self, state: &(u64, u64, Instant)) {
+        let (owed, done, started) = *state;
         let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
         let seconds = started.elapsed().as_secs_f64();
         let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
@@ -2925,6 +2928,7 @@ mod tests {
         report.report(crate::pipeline::catch_up::Progress::Total(25));
         tokio::time::sleep(Duration::from_millis(100)).await;
         heartbeat.abort();
+        let _ = heartbeat.await;
 
         let mut seen = Vec::new();
         while let Ok(event) = events.try_recv() {
@@ -2940,5 +2944,65 @@ mod tests {
         assert_eq!((last.total, last.processed), (130, 110), "a smaller later estimate does not shrink the total");
         assert!(seen.iter().all(|p| p.processed <= p.total));
     }
-}
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn catch_up_snapshots_from_the_pass_and_the_heartbeat_never_go_backwards() {
+        let (sink, mut events) = Sink::channel_for_test(1 << 16);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
+        report.report(crate::pipeline::catch_up::Progress::Total(2000));
+        let passes: Vec<_> = (0..4)
+            .map(|_| {
+                let report = report.clone();
+                tokio::task::spawn_blocking(move || {
+                    for _ in 0..400 {
+                        report.report(crate::pipeline::catch_up::Progress::Advance(1));
+                    }
+                })
+            })
+            .collect();
+        for pass in passes {
+            pass.await.unwrap();
+        }
+        heartbeat.abort();
+        let _ = heartbeat.await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(post_scan_progress(event));
+        }
+        assert!(seen.len() >= 1600);
+        for pair in seen.windows(2) {
+            assert!(pair[1].processed >= pair[0].processed, "processed went back: {} then {}", pair[0].processed, pair[1].processed);
+            assert!(pair[1].total >= pair[0].total);
+        }
+        assert_eq!(seen.last().unwrap().processed, 10 + 1600);
+    }
+
+    #[tokio::test]
+    async fn no_catch_up_progress_follows_an_awaited_heartbeat_abort() {
+        let (sink, mut events) = Sink::channel_for_test(1 << 12);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        while events.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(events.try_recv().is_err(), "the heartbeat stopped before the terminal event");
+    }
+}

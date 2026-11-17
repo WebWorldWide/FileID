@@ -594,6 +594,11 @@ pub fn careful_reader_deferred() -> bool {
     CAREFUL_READER.lock().deferred_for(std::time::Instant::now()).is_some()
 }
 
+/// A user who asked for a rescan, or installed a model, wants the careful reader asked again now.
+pub fn forget_careful_reader_failures() {
+    CAREFUL_READER.lock().recovered();
+}
+
 pub fn run_with_health(
     conn: &Mutex<rusqlite::Connection>,
     root: Option<&std::path::Path>,
@@ -612,7 +617,8 @@ pub fn run_with_health(
     summary.owed_careful = owed_careful;
     let started = std::time::Instant::now();
     tracing::info!(tags = owed_tags, careful_text = owed_careful, "[CATCH-UP] started");
-    progress(Progress::Total(owed_tags + owed_careful));
+    let reader_waiting = reader.lock().deferred_for(std::time::Instant::now()).is_some();
+    progress(Progress::Total(owed_tags + if reader_waiting { 0 } else { owed_careful }));
 
     let mut visited = 0;
     if owed_tags > 0 {
@@ -624,11 +630,11 @@ pub fn run_with_health(
     }
     let careful = owed(&conn.lock(), root).1;
     if careful > 0 && !summary.cancelled && !is_cancelled() {
-        progress(Progress::Total(visited + careful));
         let deferred = reader.lock().deferred_for(std::time::Instant::now());
         if let Some(left) = deferred {
             tracing::info!(owed = careful, retry_in_seconds = left.as_secs(), "[CATCH-UP] careful text skipped: the careful reader stopped answering recently");
         } else {
+            progress(Progress::Total(visited + careful));
             let wait = reader.lock().wait_for(analyzer.ready_wait(Phase::CarefulText));
             let deadline = std::time::Instant::now() + wait;
             while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
@@ -1521,6 +1527,61 @@ mod tests {
         assert_eq!(summary.owed_careful, 1);
         assert_eq!(silent.ready_checks.load(Ordering::SeqCst), waits_before, "the reader was not even asked");
         assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 1), "the read stays owed");
+    }
+
+    #[tokio::test]
+    async fn forgetting_the_reader_failures_asks_it_again_at_once() {
+        let library = Library::new("reader-forgotten");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1);
+        assert!(reader.lock().deferred_for(std::time::Instant::now()).is_some());
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1, "inside the window the reader is left alone");
+
+        reader.lock().recovered();
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 2, "a rescan or an install asks the reader again");
+
+        forget_careful_reader_failures();
+        assert!(!careful_reader_deferred());
+    }
+
+    #[tokio::test]
+    async fn a_skipped_careful_pass_does_not_promise_its_files_in_the_progress_total() {
+        let library = Library::new("reader-skipped-total");
+        library.write(vec![owing_careful_text(&library, "a.png"), owing_careful_text(&library, "b.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        reader.lock().failed(std::time::Instant::now());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+        let totals = Mutex::new(Vec::new());
+        let summary = run_with_health(
+            &library.conn,
+            Some(&library.dir),
+            &silent,
+            &|| false,
+            &|| false,
+            &|event| {
+                if let Progress::Total(total) = event {
+                    totals.lock().push(total);
+                }
+            },
+            &reader,
+        );
+        assert_eq!((summary.owed_careful, summary.text_read, silent.calls.load(Ordering::SeqCst)), (2, 0, 0));
+        assert_eq!(*totals.lock(), vec![0], "nothing is promised that the pass will not do");
+
+        reader.lock().recovered();
+        totals.lock().clear();
+        run_with_health(&library.conn, Some(&library.dir), &silent, &|| false, &|| false, &|event| {
+            if let Progress::Total(total) = event {
+                totals.lock().push(total);
+            }
+        }, &reader);
+        assert_eq!(*totals.lock(), vec![2, 2]);
     }
 
     #[tokio::test]
