@@ -29,7 +29,14 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # chrono declared unmaintained (2026-11-17), an informational notice, not a
+    # vulnerability. The engine uses it directly, through rusqlite's `chrono`
+    # feature and through pdfium-render. Moving to `time` or `jiff` is a
+    # dependency change that needs the owner (NEXT.md, group A); remove this
+    # entry when chrono is gone from Cargo.lock.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained notice; migration is a dependency change awaiting the owner" },
+]
 
 [licenses]
 # SPDX expressions only. Anything else is unknown = deny.
