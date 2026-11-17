@@ -80,10 +80,14 @@ struct ChatIntent: Codable, Equatable, Sendable {
         var maxBytes: Int64?
         /// "per year" / "by month": counts grouped by "year" or "month".
         var breakdown: String?
+        /// "which year has the most photos": "most" or "least" over the breakdown groups.
+        var peak: String?
+        /// "how many people are in my library" is "count"; "who is in my photos" is "who".
+        var people: String?
 
         var structured: Bool {
             measure != "list" || explicitOrder || date != nil || folder != nil || duplicates || undescribed || formats != nil
-                || limit != nil || minBytes != nil || maxBytes != nil || breakdown != nil
+                || limit != nil || minBytes != nil || maxBytes != nil || breakdown != nil || people != nil
         }
     }
 
@@ -376,6 +380,68 @@ struct ChatIntent: Codable, Equatable, Sendable {
 
     // MARK: - Questions
 
+    private static let placeWords: Set<String> = ["photos", "pictures", "images", "library", "collection", "files"]
+    private static let countPeopleTail: Set<String> = [
+        "in", "on", "of", "my", "our", "the", "this", "that", "whole", "entire", "library", "collection", "photos", "pictures", "images", "photo", "files",
+        "there", "are", "is", "do", "i", "we", "have", "has", "got", "altogether", "overall", "total", "all", "so", "far",
+        "named", "unnamed", "grouped", "identified", "recognized", "recognised", "yet"
+    ]
+    private static let whoWords: Set<String> = [
+        "who", "whos", "is", "are", "in", "on", "my", "our", "the", "this", "all", "photos", "pictures", "images", "library", "collection", "files",
+        "there", "here", "appear", "appears", "appearing", "featured", "shown", "do", "i", "we", "have", "got", "people", "persons", "everyone", "anyone"
+    ]
+    private static let listLeads: Set<String> = ["which", "what", "whats", "list", "show", "give", "tell"]
+
+    /// "how many people are in my library?" is "count"; "who is in my photos?" and
+    /// "show me the people" are "who". Anything with another filter or subject is
+    /// not a people question and keeps its normal parse. Mirrors Rust `people_ask`.
+    static func peopleAsk(_ all: [String]) -> String? {
+        let words = all.filter { !$0.isEmpty }
+        let isPeople: (String) -> Bool = { $0 == "people" || $0 == "persons" }
+        var start: Int?
+        for index in words.indices.dropLast() where (words[index] == "how" && words[index + 1] == "many") || (words[index] == "number" && words[index + 1] == "of") {
+            start = index + 2
+            break
+        }
+        if start == nil, words.first == "count" { start = 1 }
+        if var at = start {
+            while at < words.count, ["different", "unique", "distinct", "named", "unnamed", "separate", "total", "the", "my", "all", "of"].contains(words[at]) { at += 1 }
+            guard at < words.count, isPeople(words[at]) else { return nil }
+            return words[(at + 1)...].allSatisfy({ countPeopleTail.contains($0) }) ? "count" : nil
+        }
+        let place = words.contains(where: { placeWords.contains($0) }) || words.contains(where: { $0 == "everyone" || $0 == "anyone" })
+        if words.contains(where: { ["who", "whos", "everyone", "anyone"].contains($0) }), place, words.allSatisfy({ whoWords.contains($0) }) { return "who" }
+        guard let noun = words.firstIndex(where: isPeople) else { return nil }
+        let leads = words.first.map { listLeads.contains($0) } ?? false
+        let aboutPhotos = words.indices.contains(noun + 1) && ["photos", "pictures", "images", "files", "videos"].contains(words[noun + 1])
+        let allowed = words.allSatisfy { whoWords.contains($0) || listLeads.contains($0) || ["me", "a", "any"].contains($0) }
+        return leads && !aboutPhotos && allowed ? "who" : nil
+    }
+
+    /// "which year has the most photos", "what was my busiest month": the group
+    /// unit, the extreme asked for and the words it consumed. Mirrors Rust `peak_unit`.
+    static func peakUnit(_ words: [String]) -> (String, String, Set<Int>)? {
+        guard let peak = words.firstIndex(where: { ["most", "busiest", "highest", "fewest", "least", "lowest"].contains($0) }) else { return nil }
+        if words.indices.contains(peak + 1), ["recent", "recently", "common", "commonly"].contains(words[peak + 1]) { return nil }
+        let units = ["year", "years", "month", "months", "day", "days", "week", "weeks", "hour", "hours"]
+        guard let unitAt = words.indices.first(where: { index in
+            guard units.contains(words[index]), index > 0 else { return false }
+            return ["which", "what", "whats", "busiest", "highest", "fewest", "lowest"].contains(words[index - 1])
+        }) else { return nil }
+        let unit: String
+        switch words[unitAt] {
+        case "year", "years": unit = "year"
+        case "month", "months": unit = "month"
+        case "day", "days": unit = "day"
+        case "week", "weeks": unit = "week"
+        default: unit = "hour"
+        }
+        let extreme = ["fewest", "least", "lowest"].contains(words[peak]) ? "least" : "most"
+        var range: Set<Int> = [peak, unitAt]
+        if ["busiest", "highest", "fewest", "lowest"].contains(words[unitAt - 1]) { range.insert(unitAt - 1) }
+        return (extreme, unit, range)
+    }
+
     /// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
     /// bounds and the words they used. Decimal units, as sizes are shown.
     static func sizeBounds(_ words: [String]) -> (Int64?, Int64?, Set<Int>)? {
@@ -419,6 +485,11 @@ struct ChatIntent: Codable, Equatable, Sendable {
         let raw = split(text)
         let words = raw.map { clean($0).replacingOccurrences(of: "'", with: "") }
         var question = Question()
+        if let ask = peopleAsk(words) {
+            question.measure = ask == "count" ? "count" : "list"
+            question.people = ask
+            return question
+        }
         if let measure = libraryMeasure(words) {
             question.measure = measure.name
             question.order = measure.order
@@ -491,6 +562,12 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 if question.measure == "list" { question.measure = "count" }
                 used.formUnion([index, index + 1])
             }
+        }
+        if let (peak, unit, range) = peakUnit(words) {
+            question.peak = peak
+            question.breakdown = unit
+            if question.measure == "list" { question.measure = "count" }
+            used.formUnion(range)
         }
         if words.contains(where: { ["yearly", "annually"].contains($0) }) {
             question.breakdown = "year"
@@ -611,7 +688,7 @@ struct ChatIntent: Codable, Equatable, Sendable {
         "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
         "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
     ]
-    private static let monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    static let monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
     private static func month(_ word: String) -> Int? { months[word] }
 
