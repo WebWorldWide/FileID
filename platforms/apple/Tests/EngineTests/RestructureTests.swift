@@ -481,6 +481,13 @@ struct RestructureApplyTests {
         #expect(throws: Error.self) { try Restructure.moveWithoutOverwrite(from: source, to: destination, fm: fm) }
         #expect(try String(contentsOfFile: destination, encoding: .utf8) == "x", "nothing is overwritten")
         #expect(Restructure.uniquePath(destination, claimed: [], fm: fm).hasSuffix(" (2).pdf"))
+        // A volume without exclusive rename (exFAT, FAT, a network share) or another
+        // volume falls back to FileManager's move; a real failure does not.
+        #expect(Restructure.fallsBackToFileManagerMove(ENOTSUP))
+        #expect(Restructure.fallsBackToFileManagerMove(EXDEV))
+        #expect(!Restructure.fallsBackToFileManagerMove(EEXIST))
+        #expect(!Restructure.fallsBackToFileManagerMove(ENOENT))
+        #expect(!Restructure.fallsBackToFileManagerMove(EACCES))
     }
 
     @Test("An unavailable undo journal prevents every move")

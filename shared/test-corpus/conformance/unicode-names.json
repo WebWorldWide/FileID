@@ -255,6 +255,28 @@
         ]
       },
       {
+        "label": "rescan after apply",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180
+      },
+      {
+        "label": "a rescan finds the moved files as the same rows",
+        "db": "SELECT count(*), coalesce(sum(failed),0), min(id), max(id) FROM files",
+        "expect": [
+          [
+            16,
+            0,
+            10,
+            37
+          ]
+        ]
+      },
+      {
         "label": "undo",
         "command": {
           "undoRestructure": {
@@ -512,6 +534,28 @@
             ]
           }
         }
+      },
+      {
+        "label": "rescan after apply",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180
+      },
+      {
+        "label": "a rescan finds the moved files as the same rows",
+        "db": "SELECT count(*), coalesce(sum(failed),0), min(id), max(id) FROM files",
+        "expect": [
+          [
+            10,
+            0,
+            1,
+            15
+          ]
+        ]
       },
       {
         "label": "undo",

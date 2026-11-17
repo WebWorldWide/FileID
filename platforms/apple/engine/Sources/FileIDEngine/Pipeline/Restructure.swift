@@ -2065,13 +2065,18 @@ public enum Restructure {
         }
     }
 
-    /// Moves a file without replacing anything at `to`, writing the name exactly as given;
-    /// across volumes it falls back to FileManager's copy.
+    /// Moves a file without replacing anything at `to`, writing the name exactly as given.
+    /// Across volumes, and on a volume that has no exclusive rename (exFAT, FAT, most network
+    /// shares), it falls back to FileManager's move, which does not overwrite either.
     static func moveWithoutOverwrite(from: String, to: String, fm: FileManager) throws {
         if renamex_np(from, to, UInt32(RENAME_EXCL)) == 0 { return }
         let code = errno
-        guard code == EXDEV else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+        guard Self.fallsBackToFileManagerMove(code) else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
         try fm.moveItem(at: URL(fileURLWithPath: from), to: URL(fileURLWithPath: to))
+    }
+
+    static func fallsBackToFileManagerMove(_ code: Int32) -> Bool {
+        code == EXDEV || code == ENOTSUP || code == EINVAL
     }
 
     /// Path equality tolerant of symlink and case-only aliases without treating
