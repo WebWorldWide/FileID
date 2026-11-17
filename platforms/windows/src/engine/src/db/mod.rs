@@ -888,6 +888,42 @@ mod tests {
     }
 
     #[test]
+    fn wipe_all_empties_every_data_table_and_leaves_foreign_keys_on() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (1, '/lib/a.jpg', 1, 1, 0, 'image', 'jpg'); \
+             INSERT INTO tags (file_id, tag, source) VALUES (1, 'beach', 'auto'), (1, 'mine', 'user'); \
+             INSERT INTO ocr_text (file_id, text) VALUES (1, 'alpha'); \
+             INSERT INTO doc_text (file_id, text) VALUES (1, 'bravo'); \
+             INSERT INTO persons (id, name, file_count, created_at) VALUES (1, 'Kim', 1, 0); \
+             INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES (1, 1, x'00', '{}'); \
+             INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (1, x'00', 'm');",
+        )
+        .unwrap();
+        wipe_all(&conn).expect("wipe");
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE TABLE%' \
+                 AND name NOT LIKE 'sqlite_%' AND name NOT IN ('grdb_migrations', 'catalog_vector_state')",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(tables.len() > 10, "the catalog has many data tables");
+        for table in tables.iter().filter(|name| !name.contains("_fts_")) {
+            let rows: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0, "{table} is empty after a wipe");
+        }
+        let migrations: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
+        assert!(migrations > 0, "the schema version survives");
+        let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(foreign_keys, 1, "the writer keeps enforcing foreign keys afterwards");
+    }
+
+    #[test]
     fn wipe_all_empties_every_fts_kind() {
         let conn = crate::db::test_support::memory_db();
         conn.execute_batch(

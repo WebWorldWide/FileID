@@ -200,3 +200,96 @@ fn held_faces_are_only_ever_uncertain() {
     let unknown_first = vec![Scored { person: 3, score: 0.9, unknown: true }, Scored { person: 1, score: 0.8, unknown: false }];
     assert_eq!(decide(&unknown_first, &HashSet::new(), false).outcome, "unmatched");
 }
+
+/// Two people whose faces are the same identity (axis 0), four faces each, so the only thing that can keep
+/// them apart is what the user has said about them.
+fn twin_people(first: (Option<&str>, bool), second: (Option<&str>, bool), verdict: Option<bool>) -> (Catalog, usize) {
+    let catalog = Catalog::new();
+    catalog.person(10, first.0, first.1);
+    catalog.person(20, second.0, second.1);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    if let Some(same) = verdict {
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) VALUES(10,20,?1,1,'user',0,1,5)",
+                [i64::from(same)],
+            )
+            .unwrap();
+    }
+    let mut conn = catalog.conn;
+    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    (Catalog { conn, dir: catalog.dir }, absorbed)
+}
+
+fn owners(catalog: &Catalog) -> Vec<Option<i64>> {
+    catalog.assignments().into_iter().map(|(_, person)| person).collect()
+}
+
+#[test]
+fn auto_merge_joins_two_unnamed_people_who_are_the_same_identity() {
+    let (catalog, absorbed) = twin_people((None, false), (None, false), None);
+    assert_eq!(absorbed, 1);
+    let owners = owners(&catalog);
+    assert!(owners.iter().all(|owner| *owner == owners[0] && owner.is_some()), "{owners:?}");
+}
+
+#[test]
+fn auto_merge_folds_an_unnamed_person_into_the_named_one_and_never_the_other_way() {
+    let (catalog, absorbed) = twin_people((None, false), (Some("Alex"), false), None);
+    assert_eq!(absorbed, 1);
+    assert!(owners(&catalog).iter().all(|owner| *owner == Some(20)), "the named person keeps every face");
+    let name: String = catalog.conn.query_row("SELECT name FROM persons WHERE id=20", [], |row| row.get(0)).unwrap();
+    assert_eq!(name, "Alex");
+}
+
+#[test]
+fn auto_merge_never_joins_two_named_people() {
+    let (catalog, absorbed) = twin_people((Some("Alex"), false), (Some("Sam"), false), None);
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
+
+#[test]
+fn auto_merge_never_joins_a_person_marked_unknown() {
+    let (catalog, absorbed) = twin_people((None, false), (None, true), None);
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
+
+#[test]
+fn auto_merge_never_joins_two_people_the_user_said_are_different() {
+    let (catalog, absorbed) = twin_people((None, false), (None, false), Some(false));
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+    let verdicts: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM face_verifications", [], |row| row.get(0)).unwrap();
+    assert_eq!(verdicts, 1, "the verdict is kept");
+}
+
+#[test]
+fn auto_merge_does_not_join_people_who_share_a_photo() {
+    let catalog = Catalog::new();
+    catalog.person(10, None, false);
+    catalog.person(20, None, false);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    // Face 5 is a second face in photo 1: two people in one photo are two people.
+    catalog
+        .conn
+        .execute("UPDATE face_prints SET file_id=1, source_revision=(SELECT revision FROM catalog_revisions WHERE file_id=1) WHERE id=5", [])
+        .unwrap();
+    let mut conn = catalog.conn;
+    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    assert_eq!(absorbed, 0);
+    let people: Vec<Option<i64>> = Catalog { conn, dir: catalog.dir }.assignments().into_iter().map(|(_, person)| person).collect();
+    assert_eq!(people, vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
