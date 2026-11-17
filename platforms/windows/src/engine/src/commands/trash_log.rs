@@ -63,11 +63,12 @@ impl TrashLogItem {
 
 /// Catalog tables a Trash snapshot keeps, with the column naming the file.
 /// `files` comes first so the other rows' foreign keys resolve on restore.
-pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 4] = [
+pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 5] = [
     ("files", "id"),
     ("clip_embeddings", "file_id"),
     ("tags", "file_id"),
     ("take_quality", "file_id"),
+    ("face_prints", "file_id"),
 ];
 
 /// One SQLite value. Same JSON shape as the Swift engine's `TrashJournal.Value`
@@ -178,6 +179,7 @@ pub(crate) fn restore_snapshot(
         return Ok(false);
     }
     let mut inserted_file = false;
+    let mut restored_persons = Vec::new();
     for row in rows {
         let Some((table, key)) = SNAPSHOT_TABLES.iter().find(|(table, _)| *table == row.table) else {
             continue;
@@ -190,10 +192,26 @@ pub(crate) fn restore_snapshot(
         if names.is_empty() {
             continue;
         }
-        let values = names
+        let mut values = names
             .iter()
             .map(|name| row.columns[*name].to_sql())
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut face_person = None;
+        if *table == "face_prints"
+            && let Some(slot) = names.iter().position(|name| name.as_str() == "person_id")
+            && let rusqlite::types::Value::Integer(person) = values[slot]
+        {
+            let person_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+                [person],
+                |row| row.get(0),
+            )?;
+            if person_exists {
+                face_person = Some(person);
+            } else {
+                values[slot] = rusqlite::types::Value::Null;
+            }
+        }
         let columns = names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(",");
         let marks = vec!["?"; names.len()].join(",");
         let changed = conn.execute(
@@ -206,7 +224,13 @@ pub(crate) fn restore_snapshot(
                 return Ok(false);
             }
         }
+        if changed == 1 && let Some(person) = face_person {
+            restored_persons.push(person);
+        }
     }
+    restored_persons.sort_unstable();
+    restored_persons.dedup();
+    crate::db::person_counts::reconcile(conn, &restored_persons)?;
     Ok(inserted_file)
 }
 
@@ -571,6 +595,36 @@ mod tests {
         }
     }
 
+    /// A row a killed trashFiles left behind is dropped at startup and its
+    /// people are recounted.
+    #[test]
+    fn a_dropped_trashed_row_recounts_its_people() {
+        let gone = std::env::temp_dir().join(format!("fileid-gone-{}", uuid::Uuid::new_v4())).join("face.jpg");
+        let gone_path = gone.to_string_lossy().into_owned();
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 9_001, &gone_path, "image");
+        crate::db::test_support::insert_file(&conn, 9_002, "/kept/other.jpg", "image");
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,9001,1,X'00','[]'),(2,9002,1,X'00','[]'),(3,9001,2,X'00','[]');",
+        )
+        .unwrap();
+        let mut entry = make_entry(&format!("recount-{}", uuid::Uuid::new_v4()));
+        entry.items[0].file_id = 9_001;
+        entry.items[0].original_path = gone_path.clone();
+        append(&entry).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        let dropped = reconcile_trashed_rows(&db, |item| (item.original_path == gone_path).then(|| std::path::PathBuf::from("/Trash/face.jpg")));
+
+        assert_eq!(dropped, 1);
+        let conn = db.lock();
+        let mut stmt = conn.prepare("SELECT id,file_count,representative_face_id FROM persons ORDER BY id").unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
     #[test]
     fn entry_serde_round_trip() {
         let mut entry = make_entry("batch-1");
@@ -680,5 +734,83 @@ mod tests {
         // A batch that was never appended is NOT findable — the bulk path must
         // therefore guarantee the append before claiming the trash succeeded.
         assert!(find_batch_in(raw.as_bytes(), &key, "never-written").is_none());
+    }
+
+    fn trashed_faces_catalog() -> rusqlite::Connection {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        crate::db::test_support::insert_file(&conn, 1, "/photos/a.jpg", "image");
+        crate::db::test_support::insert_file(&conn, 2, "/photos/b.jpg", "image");
+        conn.execute_batch(
+            "UPDATE files SET has_faces = 1;
+             INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,face_quality,excluded)
+               VALUES(1,1,1,X'00','[0,0,1,1]',0.9,0),(2,2,1,X'00','[0,0,1,1]',0.8,0),(3,1,2,X'00','[0,0,1,1]',0.7,1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn face_rows(conn: &rusqlite::Connection) -> Vec<(i64, i64, Option<i64>, Option<f64>, i64)> {
+        let mut stmt = conn
+            .prepare("SELECT id,file_id,person_id,face_quality,COALESCE(excluded,0) FROM face_prints ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn person_counts(conn: &rusqlite::Connection) -> Vec<(i64, i64, Option<i64>)> {
+        let mut stmt = conn.prepare("SELECT id,file_count,representative_face_id FROM persons ORDER BY id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_files_faces_and_put_back_restores_them() {
+        let conn = trashed_faces_catalog();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.table == "face_prints").count(), 2);
+        let persons = crate::db::person_counts::persons_of_files(&conn, &[1]).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        crate::db::person_counts::reconcile(&conn, &persons).unwrap();
+        assert_eq!(face_rows(&conn).len(), 1);
+        assert_eq!(person_counts(&conn), vec![(1, 1, Some(2)), (2, 0, None)]);
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(
+            face_rows(&conn),
+            vec![(1, 1, Some(1), Some(0.9), 0), (2, 2, Some(1), Some(0.8), 0), (3, 1, Some(2), Some(0.7), 1)]
+        );
+        assert_eq!(person_counts(&conn), vec![(1, 2, Some(2)), (2, 0, Some(3))]);
+    }
+
+    #[test]
+    fn put_back_leaves_a_face_unassigned_when_its_person_is_gone() {
+        let conn = trashed_faces_catalog();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        conn.execute("UPDATE face_prints SET person_id = NULL WHERE person_id = 2", []).unwrap();
+        conn.execute("DELETE FROM persons WHERE id = 2", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(face_rows(&conn)[2], (3, 1, None, Some(0.7), 1));
+        assert_eq!(person_counts(&conn), vec![(1, 2, Some(1))]);
+    }
+
+    #[test]
+    fn a_journal_from_before_faces_were_snapshotted_still_restores() {
+        let conn = trashed_faces_catalog();
+        let rows: Vec<SnapshotRow> =
+            snapshot_rows(&conn, 1).unwrap().into_iter().filter(|row| row.table != "face_prints").collect();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(face_rows(&conn).len(), 1);
+        let restored: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(restored, 1);
     }
 }

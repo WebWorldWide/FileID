@@ -179,7 +179,7 @@ fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-#[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
+#[cfg(all(target_os = "macos", not(feature = "apple-adapters"), not(test)))]
 fn default_models_dir() -> Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         let app_models =
@@ -190,6 +190,12 @@ fn default_models_dir() -> Result<PathBuf> {
     }
     Ok(root()?.join("Models"))
 }
+
+/// Unit tests never load the owner's installed models: with weights there and
+/// no ONNX Runtime, every model path would panic inside `ort`.
+#[cfg(all(target_os = "macos", not(feature = "apple-adapters"), test))]
+fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
+
 /// ONNX weights the Mac app installs under other names: same manifest
 /// artifact, same SHA-256. Rust-layout path first, Swift-layout path second,
 /// both relative to the models folder.

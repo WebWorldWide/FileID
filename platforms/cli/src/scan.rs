@@ -1081,6 +1081,54 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_file_drops_its_faces_and_recounts_its_people() {
+        let (temp, root, ctx) = test_layout("changed-faces");
+        let photo = root.join("photo.jpg");
+        std::fs::write(&photo, b"edited photo").unwrap();
+        let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        conn.execute(
+            "INSERT INTO files(id, path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES (1, ?1, 1, 5, 1, 'image', 'jpg'), (2, '/elsewhere/other.jpg', 2, 5, 1, 'image', 'jpg')",
+            params![stored_path(&photo)],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[]'),(2,2,1,X'00','[]'),(3,1,2,X'00','[]');",
+        )
+        .unwrap();
+        let path_text = stored_path(&photo);
+        let mut batch = vec![ScanRecord::Changed {
+            path_hash: stable_path_hash(&path_text),
+            path_text,
+            size: 12,
+            created: None,
+            modified: 3.0,
+            kind: "image",
+            extension: "jpg".into(),
+            authoritative_text: false,
+            text: None,
+            file_ref: fileid_engine::platform::file_ref(&photo),
+            invalidate_derived: true,
+        }];
+
+        commit_batch(&mut conn, &mut batch, 2.0).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT id, file_count, representative_face_id FROM persons ORDER BY id")
+            .unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+        drop(stmt);
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn zero_and_regular_records_share_one_transaction() {
         let (temp, root, ctx) = test_layout("zero-byte-atomic");
         let zero = root.join("zero.txt");

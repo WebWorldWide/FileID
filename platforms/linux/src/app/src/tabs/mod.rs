@@ -4,6 +4,7 @@ pub mod chat;
 mod chat_actions;
 mod chat_cards;
 mod chat_handoff;
+mod chat_scan_first;
 mod chat_selection;
 pub mod cleanup;
 pub mod deep_analyze;

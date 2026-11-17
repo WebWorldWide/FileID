@@ -1090,6 +1090,55 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_copy_recounts_the_people_on_it() {
+        let keeper = temp_file("recount-keeper", b"original");
+        let victim_path = temp_file("recount-victim", b"original");
+        let hash = exact_file_sha256(&keeper, 8).unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files \
+             (id, path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension) \
+             VALUES (1, ?1, 1, 8, 0, 0, 'image', 'jpg'), (2, ?2, 2, 8, 0, 0, 'image', 'jpg')",
+            params![keeper.to_string_lossy(), victim_path.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,2,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[]'),(2,2,1,X'00','[]'),(3,2,2,X'00','[]');",
+        )
+        .unwrap();
+        let groups = vec![VictimGroup {
+            exact_guard: Some(ExactGroupGuard {
+                keeper_path: keeper.to_string_lossy().into_owned(),
+                size: 8,
+                hash,
+            }),
+            similar_guard: None,
+            victims: vec![Victim {
+                id: 2,
+                path: victim_path.to_string_lossy().into_owned(),
+                size: 8,
+                planned_phash: None,
+            }],
+        }];
+
+        let result = remove_victim_groups(&mut conn, &groups, true).unwrap();
+
+        assert_eq!(result.removed, 1);
+        let mut stmt = conn
+            .prepare("SELECT id, file_count, representative_face_id FROM persons ORDER BY id")
+            .unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(persons, vec![(1, 1, Some(1)), (2, 0, None)]);
+        let _ = std::fs::remove_file(keeper);
+    }
+
+    #[test]
     fn similar_apply_changed_keeper_removes_nothing_and_keeps_db_row() {
         let bytes = bmp_gradient(false);
         let keeper = temp_file("similar-apply-keeper", &bytes);
