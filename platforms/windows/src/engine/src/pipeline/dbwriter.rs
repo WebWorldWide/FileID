@@ -2613,6 +2613,26 @@ mod tests {
         assert_eq!(rows, 200);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_writer_commits_every_row_across_more_than_two_batches_and_the_tail() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let n = current_batch_size() * 2 + 7;
+        let (tx, rx) = mpsc::channel(n + 1);
+        for i in 0..n {
+            tx.send(fixture(&format!("/lib/many/{i}.jpg"))).await.unwrap();
+        }
+        drop(tx);
+        let mut batches = 0u32;
+        let (total, failed) = writer.run(rx, |_| batches += 1).await.unwrap();
+        assert_eq!((total, failed), (n as u64, 0));
+        assert!(batches >= 3, "two full batches and the tail are three commits, got {batches}");
+        let rows: i64 = conn.lock().query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows as usize, n, "no row is lost between batches or in the final partial batch");
+        let distinct: i64 = conn.lock().query_row("SELECT COUNT(DISTINCT path_hash) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(distinct as usize, n);
+    }
+
     #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
         let dir = unique_tmp_dir("overcap_legacy");
