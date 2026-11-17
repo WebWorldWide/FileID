@@ -188,7 +188,7 @@ enum ScanCatchUp {
                 fastRead: { worker.ocrFast($0) },
                 carefulRead: { worker.ocrAccurateIfAvailable($0) },
                 carefulReady: { AccurateOCRWarmup.shared.isReady && AccurateOCRBreaker.shared.allowed },
-                carefulWaitSeconds: AccurateOCRWarmup.isEnabled ? 180 : 0)
+                carefulWaitSeconds: AccurateOCRWarmup.isEnabled && !AccurateOCRWarmup.shared.isReady ? 180 : 0)
         }
     }
 
