@@ -120,8 +120,8 @@
     ]
   }
   ,{
-    "name": "files-trash-put-back-loses-faces",
-    "description": "KNOWN DEFECT, pinned as measured on the Rust engine: the Trash snapshot keeps files, tags, CLIP and take rows but not face_prints, so Trash drops the file's faces (foreign-key cascade) and put back restores files.has_faces=1 with no face rows. Its people lose the file and the faces are not detected again until the file changes. Fixing it means adding face_prints to both engines' Trash snapshot, then this case flips to the faces coming back.",
+    "name": "files-trash-put-back-restores-faces",
+    "description": "Trash snapshot keeps the file's face_prints rows, so put back restores the faces with their people assignment and recounts persons.file_count; Swift joins once its snapshot carries face_prints.",
     "engines": ["rust"],
     "requiresTestTrashRoot": ["darwin"],
     "tree": [
@@ -137,9 +137,9 @@
     "steps": [
       {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}},
       {"label": "restore", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
-      {"label": "faces after put back", "db": "SELECT id,file_id,person_id FROM face_prints ORDER BY id", "expect": [[2, 2, 1]]},
+      {"label": "faces after put back", "db": "SELECT id,file_id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1, 1], [2, 2, 1], [3, 1, 2]]},
       {"label": "files after put back", "db": "SELECT id,has_faces FROM files ORDER BY id", "expect": [[1, 1], [2, 1]]},
-      {"label": "people after put back", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 1, 2], [2, 0, null]]}
+      {"label": "people after put back", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 2, 2], [2, 1, 3]]}
     ]
   }
 ]
