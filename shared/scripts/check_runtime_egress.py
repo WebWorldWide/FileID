@@ -176,7 +176,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/tags.rs": "5ab33e5ca6ed86bf8a7c719568443c502347ff093cb1e7d3374b7719a778fe39",
   "platforms/windows/src/engine/src/shell/trash.rs": "959c0063983706ee8503970196a2748648b3ce8176887c6aa0fe73302d797caa",
   "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "bf6e988aab84643529fe0d0bf5f0b2e3a014a4b6635ef3e37f33ff26a22ccaad",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "dea6647ac9c7528286b47297c534439a825190a8fc4a81fcf5db56c157243c86",
   "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
   "platforms/windows/src/engine/src/apple/ffi.rs": "15dfe29cc3e019448c866bca1dccb1f8f58714e110bbf48fc66958601fe6b6ef",
 }
