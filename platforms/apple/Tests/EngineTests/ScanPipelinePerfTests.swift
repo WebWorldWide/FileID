@@ -108,8 +108,7 @@ struct ScanPipelinePerfTests {
         let sizeByName = sizeByNameBuild
         let modByName = modByNameBuild
 
-        // scanned_at far in the future: proves the touch fired (it bumps
-        // scanned_at DOWN to the current scan time for the skipped row).
+        // scanned_at far in the future: proves the skipped row is not rewritten.
         let future = Date().timeIntervalSince1970 + 1_000_000
         func insert(name: String, size: Int64, modified: Double?, failed: Int) throws {
             try db.pool.write { d in
@@ -144,15 +143,14 @@ struct ScanPipelinePerfTests {
         let got = Set(incremental.map { $0.url.lastPathComponent })
         #expect(got == ["b.jpg", "c.jpg", "d.jpg"], "only the genuinely-current file is skipped")
 
-        // The skipped row's scanned_at must be bumped to the current scan
-        // time (touched down from `future`), so the post-scan orphan sweep —
-        // which treats `scanned_at < scanStart` as deleted — counts it present.
-        let touchedA = try await db.pool.read { d in
+        // The skipped row is not rewritten, but the walk reports its file as present so the
+        // post-scan orphan sweep does not take it for a deletion.
+        let untouchedA = try await db.pool.read { d in
             try Double.fetchOne(d, sql: "SELECT scanned_at FROM files WHERE path_text = ?",
                                 arguments: [pathByName["a.jpg"]!])
         }
-        #expect((touchedA ?? .greatestFiniteMagnitude) < future,
-                "skipped file's scanned_at was bumped to the scan time, not left stale")
+        #expect(untouchedA == future, "a skipped file's row is left as it was")
+        #expect(await discovery.presentUnchanged == [Discovery.PathFingerprint(pathByName["a.jpg"]!)])
 
         // forceReprocess empties the skip set: every file flows through again.
         let forced = await discovery.walk(root: root, database: db, forceReprocess: true)
