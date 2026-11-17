@@ -10,23 +10,20 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use fileid_engine::ipc::{
-    CatalogHit, CatalogNameEdit, CatalogNaming, CatalogRequest, CatalogRequestPayload,
-    CommandPayload, RenameEntry, RenameFilesPayload,
+    CatalogHit, CatalogNameEdit, CatalogNaming, CatalogRequest, CatalogRequestPayload, CommandPayload,
+    RenameEntry, RenameFilesPayload,
 };
 use gtk::glib;
 
 use super::chat_handoff;
 use super::util::glass_card;
-use super::workbench_state::{Requests, catalog_request};
+use super::workbench_state::{catalog_request, Requests};
 use crate::app_settings::{self, NamingSettings};
 use crate::engine_client::{EngineClient, EngineState};
-use crate::spring::{Spring, animate_with, animations_enabled};
+use crate::spring::{animate_with, animations_enabled, Spring};
 
-pub(super) const STYLES: [(&str, &str); 3] = [
-    ("short", "Short"),
-    ("descriptive", "Descriptive"),
-    ("dateFirst", "Date first"),
-];
+pub(super) const STYLES: [(&str, &str); 3] =
+    [("short", "Short"), ("descriptive", "Descriptive"), ("dateFirst", "Date first")];
 pub(super) const MIN_LENGTH: u32 = 4;
 pub(super) const MAX_LENGTH: u32 = 120;
 pub(super) const MAX_FILES: usize = 1_000;
@@ -57,11 +54,7 @@ pub(super) fn naming(settings: &NamingSettings) -> CatalogNaming {
 /// The Library selection when there is one, otherwise `fallback`;
 /// deduplicated and capped at the engine's 1,000.
 pub(super) fn file_ids(selection: &[i64], fallback: &[i64]) -> Vec<i64> {
-    let source = if selection.is_empty() {
-        fallback
-    } else {
-        selection
-    };
+    let source = if selection.is_empty() { fallback } else { selection };
     let mut seen = HashSet::new();
     source
         .iter()
@@ -103,24 +96,16 @@ const LEARNED_MARKER: &str = "|learned:";
 /// off a reason that `parse_reason` returned.
 pub(super) fn split_learned(reason: &str) -> (String, Vec<String>) {
     match reason.split_once(LEARNED_MARKER) {
-        Some((plain, keys)) => (
-            plain.to_owned(),
-            keys.split(',')
-                .filter(|key| !key.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        ),
+        Some((plain, keys)) => {
+            (plain.to_owned(), keys.split(',').filter(|key| !key.is_empty()).map(str::to_owned).collect())
+        }
         None => (reason.to_owned(), Vec::new()),
     }
 }
 
 pub(super) fn reason_chip(row: &Row) -> String {
     let label = reason_label(&row.reason);
-    if row.learned.is_empty() {
-        label.to_owned()
-    } else {
-        format!("{label} · your style")
-    }
+    if row.learned.is_empty() { label.to_owned() } else { format!("{label} · your style") }
 }
 
 /// What the learned preferences named in a proposeNames reason did to this name.
@@ -155,12 +140,7 @@ pub(super) fn preference_label(key: &str, value: &str) -> Option<String> {
         ("dateFormat", "dotted") => "dates like 2023.07.04",
         ("dateFormat", "month") => "dates like 2023-07",
         ("people", _) => "no people's names",
-        ("words", _) => {
-            return Some(format!(
-                "at most {value} {}",
-                if value == "1" { "word" } else { "words" }
-            ));
-        }
+        ("words", _) => return Some(format!("at most {value} {}", if value == "1" { "word" } else { "words" })),
         ("dropWords", _) => return Some(format!("without \u{201C}{value}\u{201D}")),
         _ => return None,
     };
@@ -170,31 +150,18 @@ pub(super) fn preference_label(key: &str, value: &str) -> Option<String> {
 /// The Name style card's line about what FileID learned, from a
 /// learnNames/namePreferences reply.
 pub(super) fn learned_summary(hits: &[CatalogHit], enabled: bool) -> (String, u64) {
-    let samples: u64 = hits
-        .iter()
-        .find(|hit| hit.kind == "nameSamples")
-        .and_then(|hit| hit.text.parse().ok())
-        .unwrap_or(0);
+    let samples: u64 = hits.iter().find(|hit| hit.kind == "nameSamples").and_then(|hit| hit.text.parse().ok()).unwrap_or(0);
     if !enabled {
         return ("Names follow the style above only.".to_owned(), samples);
     }
     if samples == 0 {
-        return (
-            "Edit names before you rename them and FileID will follow your style.".to_owned(),
-            0,
-        );
+        return ("Edit names before you rename them and FileID will follow your style.".to_owned(), 0);
     }
-    let count = format!(
-        "{} {}",
-        crate::shell::grouped(samples),
-        if samples == 1 { "rename" } else { "renames" }
-    );
+    let count = format!("{} {}", crate::shell::grouped(samples), if samples == 1 { "rename" } else { "renames" });
     let items: Vec<String> = hits
         .iter()
         .filter(|hit| hit.kind == "namePreference")
-        .filter_map(|hit| {
-            preference_label(hit.evidence_id.as_deref().unwrap_or_default(), &hit.text)
-        })
+        .filter_map(|hit| preference_label(hit.evidence_id.as_deref().unwrap_or_default(), &hit.text))
         .collect();
     let text = if items.is_empty() {
         format!("No clear preference yet from {count}.")
@@ -208,9 +175,7 @@ pub(super) fn learned_summary(hits: &[CatalogHit], enabled: bool) -> (String, u6
 /// group leaders, never followers, whose rename landed.
 pub(super) fn edits(rows: &[Row], renamed: &HashSet<i64>) -> Vec<CatalogNameEdit> {
     rows.iter()
-        .filter(|row| {
-            row.checked && row.can_check() && !row.is_follower() && renamed.contains(&row.file_id)
-        })
+        .filter(|row| row.checked && row.can_check() && !row.is_follower() && renamed.contains(&row.file_id))
         .filter_map(|row| {
             valid_name(&row.edited).map(|applied| CatalogNameEdit {
                 file_id: row.file_id,
@@ -231,15 +196,8 @@ pub(super) fn learn_request(edits: Vec<CatalogNameEdit>, naming: CatalogNaming) 
 
 /// After an Undo puts names back, the learned samples to forget: the edits
 /// whose file was renamed back, or None when there are none.
-pub(super) fn unlearn_request(
-    edits: &[CatalogNameEdit],
-    put_back: &HashSet<i64>,
-) -> Option<CatalogRequest> {
-    let undone: Vec<CatalogNameEdit> = edits
-        .iter()
-        .filter(|edit| put_back.contains(&edit.file_id))
-        .cloned()
-        .collect();
+pub(super) fn unlearn_request(edits: &[CatalogNameEdit], put_back: &HashSet<i64>) -> Option<CatalogRequest> {
+    let undone: Vec<CatalogNameEdit> = edits.iter().filter(|edit| put_back.contains(&edit.file_id)).cloned().collect();
     if undone.is_empty() {
         return None;
     }
@@ -250,11 +208,7 @@ pub(super) fn unlearn_request(
 }
 
 pub(super) fn preferences_request(reset: bool) -> CatalogRequest {
-    let mut request = catalog_request(if reset {
-        "resetNamePreferences"
-    } else {
-        "namePreferences"
-    });
+    let mut request = catalog_request(if reset { "resetNamePreferences" } else { "namePreferences" });
     request.limit = None;
     request
 }
@@ -343,11 +297,7 @@ pub(super) fn rows(hits: &[CatalogHit], previous: &[Row]) -> Vec<Row> {
         .collect();
     for row in &mut rows {
         if let Some(leader_stem) = row.group.and_then(|group| leader_stems.get(&group)) {
-            row.suffix = row
-                .proposed
-                .strip_prefix(leader_stem.as_str())
-                .unwrap_or_default()
-                .to_owned();
+            row.suffix = row.proposed.strip_prefix(leader_stem.as_str()).unwrap_or_default().to_owned();
         }
     }
     rows
@@ -356,13 +306,7 @@ pub(super) fn rows(hits: &[CatalogHit], previous: &[Row]) -> Vec<Row> {
 /// Ticking any member of a companion group ticks the whole group; returns
 /// the indices changed.
 pub(super) fn set_checked(rows: &mut [Row], file_id: i64, checked: bool) -> Vec<usize> {
-    let Some(key) = rows
-        .iter()
-        .find(|row| row.file_id == file_id)
-        .map(Row::group_key)
-    else {
-        return Vec::new();
-    };
+    let Some(key) = rows.iter().find(|row| row.file_id == file_id).map(Row::group_key) else { return Vec::new() };
     let mut changed = Vec::new();
     for (index, row) in rows.iter_mut().enumerate() {
         if row.group_key() == key && row.can_check() {
@@ -376,12 +320,7 @@ pub(super) fn set_checked(rows: &mut [Row], file_id: i64, checked: bool) -> Vec<
 /// Editing the leader's name gives every companion the same stem; returns
 /// the follower indices changed.
 pub(super) fn edit(rows: &mut [Row], file_id: i64, text: &str) -> Vec<usize> {
-    let Some(at) = rows
-        .iter()
-        .position(|row| row.file_id == file_id && !row.is_follower())
-    else {
-        return Vec::new();
-    };
+    let Some(at) = rows.iter().position(|row| row.file_id == file_id && !row.is_follower()) else { return Vec::new() };
     rows[at].edited = text.to_owned();
     if !rows[at].is_leader() {
         return Vec::new();
@@ -407,9 +346,7 @@ pub(super) fn companion_chip(row: &Row, rows: &[Row]) -> Option<String> {
         .filter(|other| other.is_follower() && other.group == Some(row.file_id))
         .map(|other| {
             let name = other.current_name();
-            name.get(stem(name).len() + 1..)
-                .unwrap_or_default()
-                .to_uppercase()
+            name.get(stem(name).len() + 1..).unwrap_or_default().to_uppercase()
         })
         .collect();
     (!extensions.is_empty()).then(|| format!("+ {}", extensions.join(", ")))
@@ -417,8 +354,7 @@ pub(super) fn companion_chip(row: &Row, rows: &[Row]) -> Option<String> {
 
 pub(super) fn valid_name(text: &str) -> Option<String> {
     let name = text.trim();
-    (!name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0']))
-        .then(|| name.to_owned())
+    (!name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])).then(|| name.to_owned())
 }
 
 /// Ticked renames in row order, as one batch. A companion group goes whole
@@ -426,22 +362,14 @@ pub(super) fn valid_name(text: &str) -> Option<String> {
 pub(super) fn renames(rows: &[Row]) -> Vec<RenameEntry> {
     let blocked: HashSet<i64> = rows
         .iter()
-        .filter(|row| {
-            row.group.is_some()
-                && row.checked
-                && row.can_check()
-                && valid_name(&row.edited).is_none()
-        })
+        .filter(|row| row.group.is_some() && row.checked && row.can_check() && valid_name(&row.edited).is_none())
         .map(Row::group_key)
         .collect();
     rows.iter()
         .filter(|row| row.checked && row.can_check() && !blocked.contains(&row.group_key()))
         .filter_map(|row| {
             let name = valid_name(&row.edited)?;
-            (name != row.current_name()).then_some(RenameEntry {
-                file_id: row.file_id,
-                new_name: name,
-            })
+            (name != row.current_name()).then_some(RenameEntry { file_id: row.file_id, new_name: name })
         })
         .collect()
 }
@@ -457,22 +385,11 @@ pub(super) fn accessible_label(row: &Row, rows: &[Row]) -> String {
             .collect(),
         None => Vec::new(),
     };
-    let together = if others.is_empty() {
-        String::new()
-    } else {
-        format!(", together with {}", others.join(", "))
-    };
+    let together = if others.is_empty() { String::new() } else { format!(", together with {}", others.join(", ")) };
     if row.can_check() {
-        format!(
-            "{}, rename to {}, {because}{together}",
-            row.current_name(),
-            row.edited.trim()
-        )
+        format!("{}, rename to {}, {because}{together}", row.current_name(), row.edited.trim())
     } else {
-        format!(
-            "{}, keeps its name, {because}{together}",
-            row.current_name()
-        )
+        format!("{}, keeps its name, {because}{together}", row.current_name())
     }
 }
 
@@ -531,25 +448,14 @@ fn new_ui(
     let style = adw::ComboRow::builder()
         .title("Style")
         .model(&gtk::StringList::new(&titles))
-        .selected(
-            STYLES
-                .iter()
-                .position(|(id, _)| *id == saved.style)
-                .unwrap_or(0) as u32,
-        )
+        .selected(STYLES.iter().position(|(id, _)| *id == saved.style).unwrap_or(0) as u32)
         .build();
     let length = adw::SpinRow::with_range(f64::from(MIN_LENGTH), f64::from(MAX_LENGTH), 1.0);
     length.set_title("Longest name");
     length.set_value(f64::from(saved.max_length));
     length.set_subtitle(&format!("{} characters", saved.max_length));
-    let people = adw::SwitchRow::builder()
-        .title("Add confirmed people")
-        .active(saved.include_people)
-        .build();
-    let event = adw::SwitchRow::builder()
-        .title("Add event")
-        .active(saved.include_event)
-        .build();
+    let people = adw::SwitchRow::builder().title("Add confirmed people").active(saved.include_people).build();
+    let event = adw::SwitchRow::builder().title("Add event").active(saved.include_event).build();
     let date = adw::SwitchRow::builder()
         .title("Add date")
         .active(saved.include_date)
@@ -569,11 +475,7 @@ fn new_ui(
     reset.update_property(&[gtk::accessible::Property::Label("Reset learned name style")]);
     let learned = adw::ActionRow::builder()
         .title("Learned style")
-        .subtitle(if saved.learn {
-            "Edit names before you rename them and FileID will follow your style."
-        } else {
-            "Names follow the style above only."
-        })
+        .subtitle(if saved.learn { "Edit names before you rename them and FileID will follow your style." } else { "Names follow the style above only." })
         .subtitle_lines(3)
         .build();
     learned.add_suffix(&reset);
@@ -598,23 +500,11 @@ fn new_ui(
         .css_classes(["gold-button"])
         .tooltip_text("Show the new names before anything is renamed")
         .build();
-    let apply = gtk::Button::builder()
-        .label("Rename")
-        .css_classes(["pill"])
-        .sensitive(false)
-        .build();
-    let actions = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(10)
-        .build();
+    let apply = gtk::Button::builder().label("Rename").css_classes(["pill"]).sensitive(false).build();
+    let actions = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(10).build();
     actions.append(&preview);
     actions.append(&apply);
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label"])
-        .visible(false)
-        .build();
+    let status = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).visible(false).build();
 
     let store = gtk::gio::ListStore::new::<glib::BoxedAnyObject>();
     let view = gtk::ColumnView::builder()
@@ -669,10 +559,7 @@ fn new_ui(
 
 fn settings(ui: &NamingUi) -> NamingSettings {
     NamingSettings {
-        style: STYLES
-            .get(ui.style.selected() as usize)
-            .map_or("short", |(id, _)| id)
-            .to_owned(),
+        style: STYLES.get(ui.style.selected() as usize).map_or("short", |(id, _)| id).to_owned(),
         max_length: (ui.length.value().round() as u32).clamp(MIN_LENGTH, MAX_LENGTH),
         include_people: ui.people.is_active(),
         include_event: ui.event.is_active(),
@@ -726,15 +613,11 @@ fn wire(ui: &Rc<NamingUi>, preview: &gtk::Button) {
 }
 
 fn send_learned(ui: &Rc<NamingUi>, request: CatalogRequest) -> bool {
-    ui.requests
-        .borrow_mut()
-        .begin(LEARNED_SLOT, &request.request_id);
+    ui.requests.borrow_mut().begin(LEARNED_SLOT, &request.request_id);
     let sent = ui
         .engine
         .borrow_mut()
-        .send(CommandPayload::CatalogRequest(Box::new(
-            CatalogRequestPayload { request },
-        )));
+        .send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request })));
     if sent.is_err() {
         ui.requests.borrow_mut().forget(LEARNED_SLOT);
     }
@@ -758,8 +641,7 @@ fn style_changed(ui: &Rc<NamingUi>) {
     }
     let current = settings(ui);
     ui.date.set_sensitive(date_toggle_enabled(&current.style));
-    ui.length
-        .set_subtitle(&format!("{} characters", current.max_length));
+    ui.length.set_subtitle(&format!("{} characters", current.max_length));
     app_settings::remember_naming(&current);
     if !ui.shown.get() {
         return;
@@ -785,10 +667,7 @@ fn run_preview(ui: &Rc<NamingUi>) {
     ui.shown.set(true);
     let ids = file_ids(&chat_handoff::selected_files(), &(ui.fallback)());
     if ids.is_empty() {
-        set_status(
-            ui,
-            "Choose files in Library first, or describe some files so they have suggested names.",
-        );
+        set_status(ui, "Choose files in Library first, or describe some files so they have suggested names.");
         return;
     }
     let request = request(ids, naming(&settings(ui)));
@@ -797,9 +676,7 @@ fn run_preview(ui: &Rc<NamingUi>) {
     let sent = ui
         .engine
         .borrow_mut()
-        .send(CommandPayload::CatalogRequest(Box::new(
-            CatalogRequestPayload { request },
-        )));
+        .send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request })));
     if sent.is_err() {
         ui.requests.borrow_mut().forget(SLOT);
         set_status(ui, NOT_READY);
@@ -816,16 +693,9 @@ fn show_rows(ui: &Rc<NamingUi>, hits: &[CatalogHit]) {
     let items: Vec<glib::BoxedAnyObject> = (0..count).map(glib::BoxedAnyObject::new).collect();
     ui.store.splice(0, ui.store.n_items(), &items);
     ui.view.set_visible(count > 0);
-    let mut text = format!(
-        "{} new {}",
-        crate::shell::grouped(ready as u64),
-        if ready == 1 { "name" } else { "names" }
-    );
+    let mut text = format!("{} new {}", crate::shell::grouped(ready as u64), if ready == 1 { "name" } else { "names" });
     if keep > 0 {
-        text.push_str(&format!(
-            " · {} keep their names",
-            crate::shell::grouped(keep as u64)
-        ));
+        text.push_str(&format!(" · {} keep their names", crate::shell::grouped(keep as u64)));
     }
     set_status(ui, &format!("{text}."));
     sync_apply(ui);
@@ -833,8 +703,7 @@ fn show_rows(ui: &Rc<NamingUi>, hits: &[CatalogHit]) {
 
 fn sync_apply(ui: &NamingUi) {
     let count = renames(&ui.rows.borrow()).len();
-    ui.apply
-        .set_sensitive(count > 0 && ui.pending.borrow().is_none());
+    ui.apply.set_sensitive(count > 0 && ui.pending.borrow().is_none());
     ui.apply.set_label(&match count {
         0 => "Rename".to_owned(),
         1 => "Rename 1 file".to_owned(),
@@ -851,23 +720,9 @@ fn apply(ui: &Rc<NamingUi>) {
     if entries.is_empty() {
         return;
     }
-    let old = rows
-        .iter()
-        .map(|row| (row.file_id, row.current_name().to_owned()))
-        .collect();
+    let old = rows.iter().map(|row| (row.file_id, row.current_name().to_owned())).collect();
     let ids = entries.iter().map(|entry| entry.file_id).collect();
-    send_renames(
-        ui,
-        entries,
-        PendingRename {
-            ids,
-            old,
-            undoing: false,
-            rows,
-            learned: Vec::new(),
-            entry: None,
-        },
-    );
+    send_renames(ui, entries, PendingRename { ids, old, undoing: false, rows, learned: Vec::new(), entry: None });
 }
 
 fn send_renames(ui: &Rc<NamingUi>, renames: Vec<RenameEntry>, pending: PendingRename) {
@@ -879,24 +734,13 @@ fn send_renames(ui: &Rc<NamingUi>, renames: Vec<RenameEntry>, pending: PendingRe
         set_status(ui, NOT_READY);
         return;
     }
-    set_status(
-        ui,
-        if pending.undoing {
-            "Putting names back…"
-        } else {
-            "Renaming…"
-        },
-    );
+    set_status(ui, if pending.undoing { "Putting names back…" } else { "Renaming…" });
     ui.pending.replace(Some(pending));
     sync_apply(ui);
 }
 
 fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
-    let reported: HashSet<i64> = result
-        .messages
-        .iter()
-        .filter_map(|item| item.file_id)
-        .collect();
+    let reported: HashSet<i64> = result.messages.iter().filter_map(|item| item.file_id).collect();
     let matches = ui
         .pending
         .borrow()
@@ -905,9 +749,7 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
     if !matches {
         return;
     }
-    let Some(pending) = ui.pending.take() else {
-        return;
-    };
+    let Some(pending) = ui.pending.take() else { return };
     let done: Vec<i64> = result
         .messages
         .iter()
@@ -919,23 +761,12 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
     if pending.undoing {
         crate::changes::settle(pending.entry, failed as u64, "name");
     }
-    let first_error = result
-        .messages
-        .iter()
-        .find(|item| !item.ok)
-        .and_then(|item| item.message.clone());
+    let first_error = result.messages.iter().find(|item| !item.ok).and_then(|item| item.message.clone());
     let landed: HashSet<i64> = done.iter().copied().collect();
-    let samples = if pending.undoing || !ui.learn.is_active() {
-        Vec::new()
-    } else {
-        edits(&pending.rows, &landed)
-    };
+    let samples = if pending.undoing || !ui.learn.is_active() { Vec::new() } else { edits(&pending.rows, &landed) };
     let toast = if pending.undoing {
         adw::Toast::builder()
-            .title(format!(
-                "Put back {} names.",
-                crate::shell::grouped(done.len() as u64)
-            ))
+            .title(format!("Put back {} names.", crate::shell::grouped(done.len() as u64)))
             .use_markup(false)
             .build()
     } else {
@@ -945,28 +776,16 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
             if done.len() == 1 { "file" } else { "files" }
         );
         if failed > 0 {
-            title.push_str(&format!(
-                " · {} couldn't be renamed",
-                crate::shell::grouped(failed as u64)
-            ));
+            title.push_str(&format!(" · {} couldn't be renamed", crate::shell::grouped(failed as u64)));
             if let Some(error) = &first_error {
                 title.push_str(&format!(": {error}"));
             }
         }
         let back: Vec<RenameEntry> = done
             .iter()
-            .filter_map(|id| {
-                pending.old.get(id).map(|name| RenameEntry {
-                    file_id: *id,
-                    new_name: name.clone(),
-                })
-            })
+            .filter_map(|id| pending.old.get(id).map(|name| RenameEntry { file_id: *id, new_name: name.clone() }))
             .collect();
-        let toast = adw::Toast::builder()
-            .title(title)
-            .use_markup(false)
-            .timeout(10)
-            .build();
+        let toast = adw::Toast::builder().title(title).use_markup(false).timeout(10).build();
         if !back.is_empty() {
             toast.set_button_label(Some("Undo"));
             let learned = samples.clone();
@@ -981,14 +800,7 @@ fn renamed(ui: &Rc<NamingUi>, result: &fileid_engine::ipc::BulkActionResult) {
                     send_renames(
                         ui,
                         back.clone(),
-                        PendingRename {
-                            ids,
-                            old: HashMap::new(),
-                            undoing: true,
-                            rows: Vec::new(),
-                            learned: learned.clone(),
-                            entry,
-                        },
+                        PendingRename { ids, old: HashMap::new(), undoing: true, rows: Vec::new(), learned: learned.clone(), entry },
                     );
                     ui.pending.borrow().is_some()
                 }
@@ -1109,23 +921,15 @@ fn column(
     let factory = gtk::SignalListItemFactory::new();
     let weak = Rc::downgrade(ui);
     factory.connect_setup(move |_, item| {
-        let (Some(ui), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else {
-            return;
-        };
+        let (Some(ui), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
         let widget = setup(&ui, item);
         item.set_child(Some(&widget));
     });
     let weak = Rc::downgrade(ui);
     factory.connect_bind(move |_, item| {
-        let (Some(ui), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else {
-            return;
-        };
-        let (Some(index), Some(widget)) = (item_index(item), item.child()) else {
-            return;
-        };
-        let Some(row) = ui.rows.borrow().get(index).cloned() else {
-            return;
-        };
+        let (Some(ui), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+        let (Some(index), Some(widget)) = (item_index(item), item.child()) else { return };
+        let Some(row) = ui.rows.borrow().get(index).cloned() else { return };
         ui.syncing.set(true);
         bind(&ui, &row, &widget);
         ui.syncing.set(false);
@@ -1159,9 +963,7 @@ fn add_columns(ui: &Rc<NamingUi>) {
                 .upcast()
         },
         |_, row, widget| {
-            let Some(label) = widget.downcast_ref::<gtk::Label>() else {
-                return;
-            };
+            let Some(label) = widget.downcast_ref::<gtk::Label>() else { return };
             if row.is_follower() {
                 label.set_label(&format!("\u{21B3} {}", row.current_name()));
                 label.set_margin_start(16);
@@ -1182,24 +984,14 @@ fn add_columns(ui: &Rc<NamingUi>) {
             let weak = Rc::downgrade(ui);
             let item = item.downgrade();
             editable.connect_text_notify(move |editable| {
-                let (Some(ui), Some(item)) = (weak.upgrade(), item.upgrade()) else {
-                    return;
-                };
+                let (Some(ui), Some(item)) = (weak.upgrade(), item.upgrade()) else { return };
                 if ui.syncing.get() {
                     return;
                 }
-                let Some(index) = item_index(&item) else {
-                    return;
-                };
+                let Some(index) = item_index(&item) else { return };
                 let (followers, label) = {
                     let mut rows = ui.rows.borrow_mut();
-                    let Some(file_id) = rows
-                        .get(index)
-                        .filter(|row| row.can_check())
-                        .map(|row| row.file_id)
-                    else {
-                        return;
-                    };
+                    let Some(file_id) = rows.get(index).filter(|row| row.can_check()).map(|row| row.file_id) else { return };
                     let followers = edit(&mut rows, file_id, &editable.text());
                     (followers, accessible_label(&rows[index], &rows))
                 };
@@ -1210,9 +1002,7 @@ fn add_columns(ui: &Rc<NamingUi>) {
             editable.upcast()
         },
         |ui, row, widget| {
-            let Some(editable) = widget.downcast_ref::<gtk::EditableLabel>() else {
-                return;
-            };
+            let Some(editable) = widget.downcast_ref::<gtk::EditableLabel>() else { return };
             if row.can_check() {
                 editable.set_text(&row.edited);
                 editable.set_editable(!row.is_follower());
@@ -1237,27 +1027,18 @@ fn add_columns(ui: &Rc<NamingUi>) {
         "Reason",
         false,
         |_, _| {
-            let chips = gtk::Box::builder()
-                .orientation(gtk::Orientation::Horizontal)
-                .spacing(6)
-                .build();
+            let chips = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
             let companions = gtk::Label::builder()
                 .css_classes(["chip", "gold-accent"])
                 .tooltip_text("Renamed together with this file")
                 .visible(false)
                 .build();
             chips.append(&companions);
-            chips.append(
-                &gtk::Label::builder()
-                    .css_classes(["chip", "reason-chip"])
-                    .build(),
-            );
+            chips.append(&gtk::Label::builder().css_classes(["chip", "reason-chip"]).build());
             chips.upcast()
         },
         |ui, row, widget| {
-            let Some(companions) = widget.first_child().and_downcast::<gtk::Label>() else {
-                return;
-            };
+            let Some(companions) = widget.first_child().and_downcast::<gtk::Label>() else { return };
             let chip = companion_chip(row, &ui.rows.borrow());
             companions.set_visible(chip.is_some());
             companions.set_label(chip.as_deref().unwrap_or_default());
@@ -1272,34 +1053,19 @@ fn add_columns(ui: &Rc<NamingUi>) {
         "Rename",
         false,
         |ui, item| {
-            let check = gtk::CheckButton::builder()
-                .halign(gtk::Align::Center)
-                .build();
+            let check = gtk::CheckButton::builder().halign(gtk::Align::Center).build();
             let weak = Rc::downgrade(ui);
             let item = item.downgrade();
             check.connect_toggled(move |check| {
-                let (Some(ui), Some(item)) = (weak.upgrade(), item.upgrade()) else {
-                    return;
-                };
+                let (Some(ui), Some(item)) = (weak.upgrade(), item.upgrade()) else { return };
                 if ui.syncing.get() {
                     return;
                 }
-                let Some(index) = item_index(&item) else {
-                    return;
-                };
+                let Some(index) = item_index(&item) else { return };
                 let others: Vec<usize> = {
                     let mut rows = ui.rows.borrow_mut();
-                    let Some(file_id) = rows
-                        .get(index)
-                        .filter(|row| row.can_check())
-                        .map(|row| row.file_id)
-                    else {
-                        return;
-                    };
-                    set_checked(&mut rows, file_id, check.is_active())
-                        .into_iter()
-                        .filter(|i| *i != index)
-                        .collect()
+                    let Some(file_id) = rows.get(index).filter(|row| row.can_check()).map(|row| row.file_id) else { return };
+                    set_checked(&mut rows, file_id, check.is_active()).into_iter().filter(|i| *i != index).collect()
                 };
                 refresh_rows(&ui, &others);
                 sync_apply(&ui);
@@ -1307,15 +1073,10 @@ fn add_columns(ui: &Rc<NamingUi>) {
             check.upcast()
         },
         |ui, row, widget| {
-            let Some(check) = widget.downcast_ref::<gtk::CheckButton>() else {
-                return;
-            };
+            let Some(check) = widget.downcast_ref::<gtk::CheckButton>() else { return };
             check.set_active(row.checked);
             check.set_sensitive(row.can_check());
-            check.update_property(&[gtk::accessible::Property::Label(&accessible_label(
-                row,
-                &ui.rows.borrow(),
-            ))]);
+            check.update_property(&[gtk::accessible::Property::Label(&accessible_label(row, &ui.rows.borrow()))]);
         },
     );
 }
@@ -1356,14 +1117,10 @@ mod tests {
         }
         let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../../shared/test-corpus/naming/style-cases.json");
-        let cases: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(corpus).unwrap()).unwrap();
+        let cases: serde_json::Value = serde_json::from_slice(&std::fs::read(corpus).unwrap()).unwrap();
         for case in cases.as_array().unwrap() {
             let reason = case["reason"].as_str().unwrap();
-            assert!(
-                expected.iter().any(|(known, _)| *known == reason),
-                "{reason}"
-            );
+            assert!(expected.iter().any(|(known, _)| *known == reason), "{reason}");
         }
     }
 
@@ -1381,15 +1138,8 @@ mod tests {
                 learn: true
             }
         );
-        let loud = NamingSettings {
-            style: "loud".into(),
-            max_length: 900,
-            ..defaults
-        };
-        assert_eq!(
-            (naming(&loud).style.as_str(), naming(&loud).max_length),
-            ("short", 120)
-        );
+        let loud = NamingSettings { style: "loud".into(), max_length: 900, ..defaults };
+        assert_eq!((naming(&loud).style.as_str(), naming(&loud).max_length), ("short", 120));
         let request = request(vec![3, 4], naming(&NamingSettings::default()));
         assert_eq!(request.action, "proposeNames");
         assert_eq!(request.file_ids, Some(vec![3, 4]));
@@ -1404,11 +1154,7 @@ mod tests {
     fn date_first_disables_add_date() {
         assert!(!date_toggle_enabled("dateFirst"));
         assert!(date_toggle_enabled("short") && date_toggle_enabled("descriptive"));
-        let date_first = NamingSettings {
-            style: "dateFirst".into(),
-            include_date: true,
-            ..NamingSettings::default()
-        };
+        let date_first = NamingSettings { style: "dateFirst".into(), include_date: true, ..NamingSettings::default() };
         assert!(!naming(&date_first).include_date);
     }
 
@@ -1416,26 +1162,16 @@ mod tests {
     fn file_ids_prefer_the_selection_and_cap_at_one_thousand() {
         assert_eq!(file_ids(&[5, 5, 0, 6], &[9]), vec![5, 6]);
         assert_eq!(file_ids(&[], &[9, 8]), vec![9, 8]);
-        assert_eq!(
-            file_ids(&(1..=1_500).collect::<Vec<_>>(), &[]).len(),
-            MAX_FILES
-        );
+        assert_eq!(file_ids(&(1..=1_500).collect::<Vec<_>>(), &[]).len(), MAX_FILES);
     }
 
     #[test]
     fn only_rows_with_text_can_be_checked_and_unticked_rows_stay_unticked() {
         let mut keyword = hit(3, "x", "nope", "tags");
         keyword.kind = "keyword".into();
-        let hits = [
-            hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"),
-            hit(2, "Beach.jpg", "", "unchanged"),
-            keyword,
-        ];
+        let hits = [hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"), hit(2, "Beach.jpg", "", "unchanged"), keyword];
         let mut first = rows(&hits, &[]);
-        assert_eq!(
-            first.iter().map(|row| row.file_id).collect::<Vec<_>>(),
-            vec![1, 2]
-        );
+        assert_eq!(first.iter().map(|row| row.file_id).collect::<Vec<_>>(), vec![1, 2]);
         assert!(first[0].can_check() && first[0].checked);
         assert!(!first[1].can_check() && !first[1].checked);
         first[0].checked = false;
@@ -1461,10 +1197,7 @@ mod tests {
         list[4].edited = "IMG_0005.jpg".into();
         let sent = renames(&list);
         assert_eq!(sent.len(), 1);
-        assert_eq!(
-            (sent[0].file_id, sent[0].new_name.as_str()),
-            (1, "sam-home-run.jpg")
-        );
+        assert_eq!((sent[0].file_id, sent[0].new_name.as_str()), (1, "sam-home-run.jpg"));
     }
 
     #[test]
@@ -1473,24 +1206,14 @@ mod tests {
         adw::init().unwrap();
         let engine = Rc::new(RefCell::new(EngineClient::new()));
         let (card, ui) = new_ui(engine, adw::ToastOverlay::new(), Vec::new);
-        let window = gtk::Window::builder()
-            .child(&card)
-            .default_width(720)
-            .default_height(600)
-            .build();
+        let window = gtk::Window::builder().child(&card).default_width(720).default_height(600).build();
         window.present();
         assert!(!ui.date.is_sensitive() || date_toggle_enabled(&settings(&ui).style));
         ui.style.set_selected(2);
         assert!(!ui.date.is_sensitive());
         ui.style.set_selected(0);
         assert!(ui.date.is_sensitive());
-        show_rows(
-            &ui,
-            &[
-                hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"),
-                hit(2, "Beach.jpg", "", "unchanged"),
-            ],
-        );
+        show_rows(&ui, &[hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"), hit(2, "Beach.jpg", "", "unchanged")]);
         assert_eq!(ui.store.n_items(), 2);
         assert_eq!(ui.view.columns().n_items(), 4);
         assert_eq!(ui.apply.label().as_deref(), Some("Rename 1 file"));
@@ -1503,43 +1226,16 @@ mod tests {
 
     #[test]
     fn accessible_label_reads_name_target_and_reason() {
-        let list = rows(
-            &[
-                hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"),
-                hit(2, "Beach.jpg", "", "unchanged"),
-            ],
-            &[],
-        );
-        assert_eq!(
-            accessible_label(&list[0], &list),
-            "IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name"
-        );
-        assert_eq!(
-            accessible_label(&list[1], &list),
-            "Beach.jpg, keeps its name, already well named"
-        );
+        let list = rows(&[hit(1, "IMG_0001.jpg", "sam-baseball-hit.jpg", "proposedName"), hit(2, "Beach.jpg", "", "unchanged")], &[]);
+        assert_eq!(accessible_label(&list[0], &list), "IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name");
+        assert_eq!(accessible_label(&list[1], &list), "Beach.jpg, keeps its name, already well named");
     }
 
     fn pair() -> Vec<CatalogHit> {
         vec![
-            hit(
-                11,
-                "DSC_1.JPG",
-                "beach-sunset_2.JPG",
-                "proposedName|group:11",
-            ),
-            hit(
-                10,
-                "DSC_1.ARW",
-                "beach-sunset_2.ARW",
-                "proposedName|group:11",
-            ),
-            hit(
-                12,
-                "DSC_1.ARW.xmp",
-                "beach-sunset_2.ARW.xmp",
-                "proposedName|group:11",
-            ),
+            hit(11, "DSC_1.JPG", "beach-sunset_2.JPG", "proposedName|group:11"),
+            hit(10, "DSC_1.ARW", "beach-sunset_2.ARW", "proposedName|group:11"),
+            hit(12, "DSC_1.ARW.xmp", "beach-sunset_2.ARW.xmp", "proposedName|group:11"),
             hit(14, "DSC_3.ARW", "lone-hill.ARW", "proposedName"),
         ]
     }
@@ -1547,40 +1243,18 @@ mod tests {
     #[test]
     fn companions_arrive_together_leader_first() {
         let list = rows(&pair(), &[]);
-        assert_eq!(
-            list.iter().map(|row| row.file_id).collect::<Vec<_>>(),
-            vec![11, 10, 12, 14]
-        );
+        assert_eq!(list.iter().map(|row| row.file_id).collect::<Vec<_>>(), vec![11, 10, 12, 14]);
         assert!(list.iter().all(|row| row.reason == "proposedName"));
-        assert!(
-            list[0].is_leader()
-                && list[1].is_follower()
-                && list[2].is_follower()
-                && list[3].group.is_none()
-        );
-        assert_eq!(
-            list.iter()
-                .map(|row| row.suffix.as_str())
-                .collect::<Vec<_>>(),
-            vec![".JPG", ".ARW", ".ARW.xmp", ""]
-        );
-        assert_eq!(
-            companion_chip(&list[0], &list).as_deref(),
-            Some("+ ARW, XMP")
-        );
+        assert!(list[0].is_leader() && list[1].is_follower() && list[2].is_follower() && list[3].group.is_none());
+        assert_eq!(list.iter().map(|row| row.suffix.as_str()).collect::<Vec<_>>(), vec![".JPG", ".ARW", ".ARW.xmp", ""]);
+        assert_eq!(companion_chip(&list[0], &list).as_deref(), Some("+ ARW, XMP"));
         assert_eq!(companion_chip(&list[1], &list), None);
-        assert_eq!(
-            reason_label("unscannedCompanion"),
-            "Its partner file isn't scanned yet"
-        );
+        assert_eq!(reason_label("unscannedCompanion"), "Its partner file isn't scanned yet");
         assert_eq!(
             accessible_label(&list[1], &list),
             "DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp"
         );
-        assert_eq!(
-            parse_reason(Some("collision|group:30")),
-            ("collision".to_owned(), Some(30))
-        );
+        assert_eq!(parse_reason(Some("collision|group:30")), ("collision".to_owned(), Some(30)));
         assert_eq!(parse_reason(None), ("noEvidence".to_owned(), None));
     }
 
@@ -1588,17 +1262,8 @@ mod tests {
     fn ticking_the_leader_ticks_the_whole_group_and_stays_unticked() {
         let mut list = rows(&pair(), &[]);
         assert_eq!(set_checked(&mut list, 11, false), vec![0, 1, 2]);
-        assert_eq!(
-            list.iter().map(|row| row.checked).collect::<Vec<_>>(),
-            vec![false, false, false, true]
-        );
-        assert_eq!(
-            rows(&pair(), &list)
-                .iter()
-                .map(|row| row.checked)
-                .collect::<Vec<_>>(),
-            vec![false, false, false, true]
-        );
+        assert_eq!(list.iter().map(|row| row.checked).collect::<Vec<_>>(), vec![false, false, false, true]);
+        assert_eq!(rows(&pair(), &list).iter().map(|row| row.checked).collect::<Vec<_>>(), vec![false, false, false, true]);
         set_checked(&mut list, 10, true);
         assert!(list.iter().all(|row| row.checked));
     }
@@ -1608,22 +1273,12 @@ mod tests {
         let mut list = rows(&pair(), &[]);
         assert_eq!(edit(&mut list, 11, " sunset-walk.JPG "), vec![1, 2]);
         assert_eq!(
-            list.iter()
-                .map(|row| row.edited.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                " sunset-walk.JPG ",
-                "sunset-walk.ARW",
-                "sunset-walk.ARW.xmp",
-                "lone-hill.ARW"
-            ]
+            list.iter().map(|row| row.edited.as_str()).collect::<Vec<_>>(),
+            vec![" sunset-walk.JPG ", "sunset-walk.ARW", "sunset-walk.ARW.xmp", "lone-hill.ARW"]
         );
         assert!(edit(&mut list, 10, "rogue.ARW").is_empty());
         assert_eq!(list[1].edited, "sunset-walk.ARW");
-        let sent: Vec<(i64, String)> = renames(&list)
-            .into_iter()
-            .map(|entry| (entry.file_id, entry.new_name))
-            .collect();
+        let sent: Vec<(i64, String)> = renames(&list).into_iter().map(|entry| (entry.file_id, entry.new_name)).collect();
         assert_eq!(
             sent,
             vec![
@@ -1634,47 +1289,19 @@ mod tests {
             ]
         );
         edit(&mut list, 11, "bad/name.JPG");
-        assert_eq!(
-            renames(&list)
-                .into_iter()
-                .map(|entry| entry.file_id)
-                .collect::<Vec<_>>(),
-            vec![14]
-        );
+        assert_eq!(renames(&list).into_iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![14]);
     }
 
     #[test]
     fn learned_reasons_summary_and_edits() {
         let hits = [
-            hit(
-                1,
-                "IMG_1.jpg",
-                "Kids_Soccer.jpg",
-                "proposedName|learned:separator,case",
-            ),
-            hit(
-                3,
-                "DSC_1.JPG",
-                "Red_Barn.JPG",
-                "proposedName|learned:case|group:3",
-            ),
-            hit(
-                2,
-                "DSC_1.ARW",
-                "Red_Barn.ARW",
-                "proposedName|learned:case|group:3",
-            ),
+            hit(1, "IMG_1.jpg", "Kids_Soccer.jpg", "proposedName|learned:separator,case"),
+            hit(3, "DSC_1.JPG", "Red_Barn.JPG", "proposedName|learned:case|group:3"),
+            hit(2, "DSC_1.ARW", "Red_Barn.ARW", "proposedName|learned:case|group:3"),
             hit(4, "IMG_4.jpg", "beach.jpg", "tags"),
         ];
         let mut list = rows(&hits, &[]);
-        assert_eq!(
-            list.iter().map(|r| r.reason.as_str()).collect::<Vec<_>>(),
-            ["proposedName"; 3]
-                .iter()
-                .copied()
-                .chain(["tags"])
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(list.iter().map(|r| r.reason.as_str()).collect::<Vec<_>>(), ["proposedName"; 3].iter().copied().chain(["tags"]).collect::<Vec<_>>());
         assert_eq!(list[0].learned, ["separator", "case"]);
         assert_eq!((list[2].group, list[2].suffix.as_str()), (Some(3), ".ARW"));
         assert_eq!(reason_chip(&list[0]), "From the AI name · your style");
@@ -1687,42 +1314,24 @@ mod tests {
         edit(&mut list, 1, "Kids Soccer Final.jpg");
         let landed: HashSet<i64> = [1, 2, 3].into_iter().collect();
         let samples = edits(&list, &landed);
-        let got: Vec<(i64, &str, &str)> = samples
-            .iter()
-            .map(|e| (e.file_id, e.proposed.as_str(), e.applied.as_str()))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                (1, "Kids_Soccer.jpg", "Kids Soccer Final.jpg"),
-                (3, "Red_Barn.JPG", "Red_Barn.JPG")
-            ]
-        );
+        let got: Vec<(i64, &str, &str)> =
+            samples.iter().map(|e| (e.file_id, e.proposed.as_str(), e.applied.as_str())).collect();
+        assert_eq!(got, [(1, "Kids_Soccer.jpg", "Kids Soccer Final.jpg"), (3, "Red_Barn.JPG", "Red_Barn.JPG")]);
         let learn = learn_request(samples, naming(&NamingSettings::default()));
         assert_eq!(learn.action, "learnNames");
         assert_eq!(learn.name_edits.as_ref().map(Vec::len), Some(2));
         assert_eq!(preferences_request(true).action, "resetNamePreferences");
-        let wire =
-            serde_json::to_value(request(vec![1], naming(&NamingSettings::default()))).unwrap();
+        let wire = serde_json::to_value(request(vec![1], naming(&NamingSettings::default()))).unwrap();
         assert_eq!(wire["naming"]["learn"], true);
     }
 
     #[test]
     fn undo_forgets_only_the_renames_put_back() {
-        let edit = |file_id: i64, applied: &str| CatalogNameEdit {
-            file_id,
-            proposed: "x.jpg".into(),
-            applied: applied.into(),
-        };
+        let edit = |file_id: i64, applied: &str| CatalogNameEdit { file_id, proposed: "x.jpg".into(), applied: applied.into() };
         let edits = [edit(1, "A.jpg"), edit(3, "B.jpg")];
         let request = unlearn_request(&edits, &HashSet::from([3, 9])).unwrap();
         assert_eq!(request.action, "unlearnNames");
-        let sent: Vec<(i64, String)> = request
-            .name_edits
-            .iter()
-            .flatten()
-            .map(|e| (e.file_id, e.applied.clone()))
-            .collect();
+        let sent: Vec<(i64, String)> = request.name_edits.iter().flatten().map(|e| (e.file_id, e.applied.clone())).collect();
         assert_eq!(sent, [(3, "B.jpg".to_owned())]);
         assert!(request.naming.is_none() && request.limit.is_none());
         assert!(unlearn_request(&edits, &HashSet::new()).is_none());
@@ -1741,19 +1350,8 @@ mod tests {
             page: None,
             selection_match: None,
         };
-        let count = |n: &str| CatalogHit {
-            kind: "nameSamples".into(),
-            evidence_id: None,
-            ..pref("", n)
-        };
-        let hits = [
-            pref("separator", "_"),
-            pref("leadingDate", "end"),
-            pref("dateFormat", "compact"),
-            pref("words", "2"),
-            pref("dropWords", "outdoor"),
-            count("12"),
-        ];
+        let count = |n: &str| CatalogHit { kind: "nameSamples".into(), evidence_id: None, ..pref("", n) };
+        let hits = [pref("separator", "_"), pref("leadingDate", "end"), pref("dateFormat", "compact"), pref("words", "2"), pref("dropWords", "outdoor"), count("12")];
         assert_eq!(
             learned_summary(&hits, true),
             (
@@ -1761,20 +1359,8 @@ mod tests {
                 12
             )
         );
-        assert_eq!(
-            learned_summary(&[count("2")], true).0,
-            "No clear preference yet from 2 renames."
-        );
-        assert_eq!(
-            learned_summary(&hits, false).0,
-            "Names follow the style above only."
-        );
-        assert_eq!(
-            learned_summary(&[], true),
-            (
-                "Edit names before you rename them and FileID will follow your style.".to_owned(),
-                0
-            )
-        );
+        assert_eq!(learned_summary(&[count("2")], true).0, "No clear preference yet from 2 renames.");
+        assert_eq!(learned_summary(&hits, false).0, "Names follow the style above only.");
+        assert_eq!(learned_summary(&[], true), ("Edit names before you rename them and FileID will follow your style.".to_owned(), 0));
     }
 }

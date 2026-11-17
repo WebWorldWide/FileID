@@ -52,12 +52,8 @@ impl Proposals {
         header.set_hexpand(true);
         header_row.append(&header);
         let find = v3::accent("Find related tries", Tone::Gold, false);
-        find.set_tooltip_text(Some(
-            "Look through the whole library for related tries. Runs on this computer.",
-        ));
-        find.update_property(&[gtk::accessible::Property::Label(
-            "Find related tries across the library",
-        )]);
+        find.set_tooltip_text(Some("Look through the whole library for related tries. Runs on this computer."));
+        find.update_property(&[gtk::accessible::Property::Label("Find related tries across the library")]);
         header_row.append(&find);
         top.append(&header_row);
         top.append(&v3::wrapped(
@@ -84,9 +80,7 @@ impl Proposals {
         relation.set_visible(false);
         let intro = v3::wrapped("", &["v3-meta", "v3-meta-13"]);
         let save = v3::accent("Save as group", Tone::Gold, false);
-        save.set_tooltip_text(Some(
-            "Keep these together as a group with a name and a goal",
-        ));
+        save.set_tooltip_text(Some("Keep these together as a group with a name and a goal"));
         save.set_visible(false);
         Self {
             groups: RefCell::new(vec![]),
@@ -119,15 +113,9 @@ impl Proposals {
         let weak = Rc::downgrade(ui);
         ui.proposals.save.connect_clicked(move |_| {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(group) = ui.current.borrow().clone() else {
-                return;
-            };
+            let Some(group) = ui.current.borrow().clone() else { return };
             if ui.proposals.is_open(&group.group_key) {
-                ui.manual.review_hits(
-                    &ui,
-                    proposals::save_hits(&group),
-                    &date_text(group.captured_at),
-                );
+                ui.manual.review_hits(&ui, proposals::save_hits(&group), &date_text(group.captured_at));
             }
         });
     }
@@ -195,12 +183,7 @@ impl Proposals {
 
     /// Marks `key` resolved so the reload opens the proposal that followed it.
     pub(super) fn resolve(&self, key: &str) {
-        let position = self
-            .groups
-            .borrow()
-            .iter()
-            .position(|group| group.group_key == key)
-            .unwrap_or(0);
+        let position = self.groups.borrow().iter().position(|group| group.group_key == key).unwrap_or(0);
         *self.resolved.borrow_mut() = Some((key.to_owned(), position));
     }
 
@@ -212,16 +195,13 @@ impl Proposals {
     fn render(&self, ui: &Rc<Ui>, groups: Vec<CatalogTakeAutoGroup>) {
         self.loaded.set(true);
         v3::clear(&self.list);
-        self.fan_token
-            .borrow()
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.fan_token.borrow().store(true, std::sync::atomic::Ordering::Release);
         *self.fan_token.borrow_mut() = CancelToken::default();
         self.header.set_text(&proposals::header(&groups));
         let job = self.job.borrow().clone();
         self.empty.set_text(proposals::empty_text(job.as_ref()));
-        self.empty.set_visible(
-            groups.is_empty() && job.as_ref().is_none_or(|job| job.state != "running"),
-        );
+        self.empty
+            .set_visible(groups.is_empty() && job.as_ref().is_none_or(|job| job.state != "running"));
         let current = self.key.borrow().clone();
         let resolved = self.resolved.borrow_mut().take();
         let target = match (&current, &resolved) {
@@ -254,8 +234,7 @@ impl Proposals {
         *self.groups.borrow_mut() = groups;
         load_in_order(&ui.engine, fans, self.fan_token.borrow().clone());
         let Some(current) = current else { return };
-        let target_key =
-            target.and_then(|index| self.groups.borrow().get(index).map(|g| g.group_key.clone()));
+        let target_key = target.and_then(|index| self.groups.borrow().get(index).map(|g| g.group_key.clone()));
         match target_key {
             Some(key) if key == current => {
                 if let Some(index) = target {
@@ -295,33 +274,23 @@ impl Proposals {
             self.job_box.set_visible(false);
             return;
         };
-        let panel = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .css_classes(["v3-panel"])
-            .build();
+        let panel = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["v3-panel"]).build();
         let row = v3::vbox(6);
         row.add_css_class("v3-job-row");
         let head = v3::hbox(8);
-        let title = v3::label(
-            super::super::moments::job_title(&job.kind),
-            &["v3-title-13"],
-        );
+        let title = v3::label(super::super::moments::job_title(&job.kind), &["v3-title-13"]);
         title.set_hexpand(true);
         head.append(&title);
         let (state, tone) = super::super::moments::job_state(&job.state);
         head.append(&v3::label(state, &["v3-state", tone.css()]));
-        head.append(&v3::mono(
-            &format!("{:.0}%", job.progress.clamp(0.0, 1.0) * 100.0),
-            "s115",
-        ));
+        head.append(&v3::mono(&format!("{:.0}%", job.progress.clamp(0.0, 1.0) * 100.0), "s115"));
         row.append(&head);
         if let Some(error) = &job.error {
             row.append(&v3::wrapped(error, &["v3-meta"]));
         }
         let bar = crate::shell::GrainBar::new(true);
         bar.set(job.progress, tone);
-        bar.bar
-            .update_property(&[gtk::accessible::Property::Label("Related tries progress")]);
+        bar.bar.update_property(&[gtk::accessible::Property::Label("Related tries progress")]);
         row.append(&bar.bar);
         let controls = v3::hbox(6);
         for (action, name) in proposals::controls(&job) {
@@ -330,9 +299,7 @@ impl Proposals {
                 "Cancel" => v3::ghost(name),
                 _ => v3::secondary(name, false),
             };
-            button.update_property(&[gtk::accessible::Property::Label(&format!(
-                "{name} finding related tries"
-            ))]);
+            button.update_property(&[gtk::accessible::Property::Label(&format!("{name} finding related tries"))]);
             let weak = Rc::downgrade(ui);
             let job = job.clone();
             button.connect_clicked(move |_| {
@@ -346,9 +313,7 @@ impl Proposals {
             row.append(&controls);
         }
         panel.append(&row);
-        panel.update_property(&[gtk::accessible::Property::Label(&format!(
-            "Related tries, {state}"
-        ))]);
+        panel.update_property(&[gtk::accessible::Property::Label(&format!("Related tries, {state}"))]);
         self.job_box.append(&panel);
         self.job_box.set_visible(true);
         if !was_visible {
@@ -365,8 +330,7 @@ impl Proposals {
                 for tone in RELATION_TONES {
                     self.relation.remove_css_class(tone.css());
                 }
-                self.relation
-                    .add_css_class(proposals::relation_tone(relation).css());
+                self.relation.add_css_class(proposals::relation_tone(relation).css());
                 let help = proposals::relation_help(relation).unwrap_or_default();
                 self.relation.set_tooltip_text(Some(help));
                 self.relation.update_property(&[
@@ -381,11 +345,10 @@ impl Proposals {
         let open = self.is_open(&group.group_key);
         self.save.set_visible(open);
         self.save.set_sensitive(open && !trashing);
-        self.save
-            .update_property(&[gtk::accessible::Property::Label(&format!(
-                "Save these {} as a group",
-                model::noun(group, 2)
-            ))]);
+        self.save.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Save these {} as a group",
+            model::noun(group, 2)
+        ))]);
     }
 }
 
@@ -421,27 +384,18 @@ fn row(group: &CatalogTakeAutoGroup) -> (gtk::Button, Vec<(String, bool, i32, Sh
     text.append(&top);
     let date = date_text(group.captured_at);
     let meta = v3::label(
-        &if model::is_open(group) {
-            date.clone()
-        } else {
-            format!("{date} · Skipped")
-        },
+        &if model::is_open(group) { date.clone() } else { format!("{date} · Skipped") },
         &["v3-meta-115"],
     );
     meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
     text.append(&meta);
-    let evidence = v3::wrapped(
-        &proposals::evidence_text(group.evidence.as_deref()),
-        &["v3-meta-115", "tone-text2"],
-    );
+    let evidence = v3::wrapped(&proposals::evidence_text(group.evidence.as_deref()), &["v3-meta-115", "tone-text2"]);
     evidence.set_lines(2);
     evidence.set_ellipsize(gtk::pango::EllipsizeMode::End);
     text.append(&evidence);
     row.append(&text);
     let button = v3::rail_row(&row);
-    button.update_property(&[gtk::accessible::Property::Label(&proposals::spoken(
-        group, &date,
-    ))]);
+    button.update_property(&[gtk::accessible::Property::Label(&proposals::spoken(group, &date))]);
     (button, views)
 }
 

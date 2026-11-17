@@ -25,27 +25,20 @@ fn bundled_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("FILEID_FONTS_DIR").filter(|dir| !dir.is_empty()) {
         candidates.push(PathBuf::from(dir));
     }
-    if let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-    {
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
         candidates.push(exe_dir.join("fonts"));
         candidates.push(exe_dir.join("../share/fileid/fonts"));
     }
     if cfg!(debug_assertions) {
         candidates.push(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../apple/app/Sources/FileID/Resources/Fonts"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apple/app/Sources/FileID/Resources/Fonts"),
         );
     }
     candidates.into_iter().find(|dir| has_fonts(dir))
 }
 
 fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 fn config_xml(system_config: &Path, fonts_dir: &Path) -> String {
@@ -70,15 +63,8 @@ pub fn register() {
     };
     let system_config = std::env::var_os("FONTCONFIG_FILE")
         .map(PathBuf::from)
-        .or_else(|| {
-            SYSTEM_CONFIGS
-                .iter()
-                .map(PathBuf::from)
-                .find(|path| path.is_file())
-        });
-    let Some(system_config) = system_config else {
-        return;
-    };
+        .or_else(|| SYSTEM_CONFIGS.iter().map(PathBuf::from).find(|path| path.is_file()));
+    let Some(system_config) = system_config else { return };
     let config_dir = gtk::glib::user_cache_dir().join("fileid");
     let config_path = config_dir.join("fonts.conf");
     let written = std::fs::create_dir_all(&config_dir)
@@ -96,10 +82,7 @@ mod tests {
 
     #[test]
     fn config_includes_the_system_fonts_and_adds_the_bundle() {
-        let xml = config_xml(
-            Path::new("/etc/fonts/fonts.conf"),
-            Path::new("/opt/File & ID/fonts"),
-        );
+        let xml = config_xml(Path::new("/etc/fonts/fonts.conf"), Path::new("/opt/File & ID/fonts"));
         assert!(xml.contains("<include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>"));
         assert!(xml.contains("<dir>/opt/File &amp; ID/fonts</dir>"));
     }

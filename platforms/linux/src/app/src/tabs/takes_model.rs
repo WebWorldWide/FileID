@@ -300,16 +300,8 @@ pub fn filmstrip_header(
 /// some are kept, otherwise every try; and its label.
 pub fn ask_targets(qualities: &[CatalogTakeQuality], keep: &BTreeSet<i64>) -> (Vec<i64>, String) {
     let subset = !keep.is_empty() && keep.len() < qualities.len();
-    let ids: Vec<i64> = qualities
-        .iter()
-        .map(|q| q.primary_file_id)
-        .filter(|id| !subset || keep.contains(id))
-        .collect();
-    let label = if subset {
-        format!("Ask about {} kept", ids.len())
-    } else {
-        format!("Ask about all {}", ids.len())
-    };
+    let ids: Vec<i64> = qualities.iter().map(|q| q.primary_file_id).filter(|id| !subset || keep.contains(id)).collect();
+    let label = if subset { format!("Ask about {} kept", ids.len()) } else { format!("Ask about all {}", ids.len()) };
     (ids, label)
 }
 
@@ -411,10 +403,7 @@ pub const GOAL_FAILED: &str = "The goal check didn't finish. The ranking stays o
 pub fn goal_order(qualities: &[CatalogTakeQuality]) -> Vec<i64> {
     let mut sorted: Vec<&CatalogTakeQuality> = qualities.iter().collect();
     sorted.sort_by_key(|quality| quality.rank);
-    sorted
-        .iter()
-        .map(|quality| quality.primary_file_id)
-        .collect()
+    sorted.iter().map(|quality| quality.primary_file_id).collect()
 }
 
 /// A goal can be ranked when it has text and there are at least two tries.
@@ -451,20 +440,14 @@ pub fn adopt_goal(
         return None;
     }
     let best = *ranking.order.first()?;
-    let focus = qualities
-        .iter()
-        .position(|quality| quality.primary_file_id == best)?;
+    let focus = qualities.iter().position(|quality| quality.primary_file_id == best)?;
     let previous: BTreeSet<i64> = qualities
         .iter()
         .find(|quality| quality.recommended)
         .map(|quality| quality.primary_file_id)
         .into_iter()
         .collect();
-    let keep = if *keep == previous {
-        BTreeSet::from([best])
-    } else {
-        keep.clone()
-    };
+    let keep = if *keep == previous { BTreeSet::from([best]) } else { keep.clone() };
     Some((keep, focus))
 }
 
@@ -591,15 +574,9 @@ mod tests {
 
     #[test]
     fn goal_marks_and_adoption() {
-        let mut tries = vec![
-            quality(1, 1, true, &[1]),
-            quality(2, 2, false, &[2]),
-            quality(3, 3, false, &[3]),
-        ];
+        let mut tries = vec![quality(1, 1, true, &[1]), quality(2, 2, false, &[2]), quality(3, 3, false, &[3])];
         assert_eq!(goal_order(&tries), vec![1, 2, 3]);
-        assert!(
-            can_rank(" hit ", &tries) && !can_rank("  ", &tries) && !can_rank("hit", &tries[..1])
-        );
+        assert!(can_rank(" hit ", &tries) && !can_rank("  ", &tries) && !can_rank("hit", &tries[..1]));
         let answer = ranking("ranked", &[2, 3, 1], &[3]);
         mark_goal(&mut tries, Some(&answer));
         assert_eq!(tries[1].reasons, vec!["Closest to the goal"]);

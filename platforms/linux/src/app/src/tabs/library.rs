@@ -19,19 +19,18 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
-use gtk::glib::BoxedAnyObject;
 use gtk::glib::clone;
+use gtk::glib::BoxedAnyObject;
 
 use super::library_bulk::BulkBar;
 use super::library_pane::SelectedPane;
 use super::library_selection::{self as picking, PaneView};
 use super::offline_roots::{self, OfflineRoots};
 use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
-use crate::engine_client::{
-    CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
-    texture_from_decoded,
-};
 use fileid_engine::util::display::file_size_i64;
+use crate::engine_client::{
+    texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
+};
 use std::sync::atomic::Ordering;
 
 const QUERY_LIMIT: i64 = 600;
@@ -177,13 +176,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     return;
                 };
                 let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
-                open_preview(
-                    &engine,
-                    &grid,
-                    snapshot_rows(&selection),
-                    pos as usize,
-                    query,
-                );
+                open_preview(&engine, &grid, snapshot_rows(&selection), pos as usize, query);
             }
         ));
         let on_close: Rc<dyn Fn()> = Rc::new(clone!(
@@ -208,13 +201,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 similar_hook.borrow()();
             }
         ));
-        SelectedPane::new(
-            engine.clone(),
-            offline.clone(),
-            on_preview,
-            on_close,
-            on_similar,
-        )
+        SelectedPane::new(engine.clone(), offline.clone(), on_preview, on_close, on_similar)
     };
     let bulk_hook: Rc<RefCell<Box<dyn Fn(usize)>>> = Rc::new(RefCell::new(Box::new(|_| {})));
     selection.connect_selection_changed(clone!(
@@ -288,9 +275,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     weaker_button.set_visible(false);
     title_row.append(&weaker_button);
     let select_all = crate::v3::ghost("Select all");
-    select_all.set_tooltip_text(Some(
-        "Select every file shown (Ctrl+click adds one, Shift+click a range)",
-    ));
+    select_all.set_tooltip_text(Some("Select every file shown (Ctrl+click adds one, Shift+click a range)"));
     select_all.connect_clicked(clone!(
         #[strong]
         selection,
@@ -405,10 +390,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         Rc::new(clone!(
             #[strong]
             selection,
-            move || selected_rows(&selection)
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect()
+            move || selected_rows(&selection).into_iter().map(|(_, row)| row).collect()
         )),
         reload.clone(),
         Rc::new(clone!(
@@ -434,9 +416,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let banner_text = crate::v3::vbox(1);
     banner_text.set_hexpand(true);
     banner_text.append(&banner_title);
-    banner_text.append(&crate::v3::meta(
-        "Most similar first. Clear to see every file again.",
-    ));
+    banner_text.append(&crate::v3::meta("Most similar first. Clear to see every file again."));
     let banner_clear = crate::v3::secondary("Clear", false);
     let banner = crate::v3::hbox(10);
     banner.add_css_class("glass-card");
@@ -446,12 +426,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     banner.set_visible(false);
     header.append(&banner);
     {
-        let (similar, reload, banner, banner_title) = (
-            similar.clone(),
-            reload.clone(),
-            banner.clone(),
-            banner_title.clone(),
-        );
+        let (similar, reload, banner, banner_title) =
+            (similar.clone(), reload.clone(), banner.clone(), banner_title.clone());
         let _ = similar_hook.replace(Box::new(move || {
             let seed = similar.borrow().clone();
             banner.set_visible(seed.is_some());
@@ -507,10 +483,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // activates the "Show N weaker matches" button, as a click would.
     if let Ok(text) = std::env::var("FILEID_SELF_SEARCH") {
         let delay = |name: &str, default: u64| {
-            std::env::var(name)
-                .ok()
-                .and_then(|ms| ms.trim().parse::<u64>().ok())
-                .unwrap_or(default)
+            std::env::var(name).ok().and_then(|ms| ms.trim().parse::<u64>().ok()).unwrap_or(default)
         };
         let typed_at = delay("FILEID_SELF_SEARCH_DELAY_MS", 1500);
         // The engine builds its visual index on the first search: a throwaway
@@ -518,17 +491,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let warm = delay("FILEID_SELF_SEARCH_WARM_MS", 0);
         let typed_at = if warm > 0 {
             let search = search.clone();
-            glib::timeout_add_local_once(Duration::from_millis(typed_at), move || {
-                search.set_text("warm up")
-            });
+            glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text("warm up"));
             typed_at + warm
         } else {
             typed_at
         };
         let search = search.clone();
-        glib::timeout_add_local_once(Duration::from_millis(typed_at), move || {
-            search.set_text(&text)
-        });
+        glib::timeout_add_local_once(Duration::from_millis(typed_at), move || search.set_text(&text));
         if std::env::var("FILEID_SELF_SEARCH_REVEAL_MS").is_ok() {
             let reveal_at = typed_at + delay("FILEID_SELF_SEARCH_REVEAL_MS", 3000);
             let (empty_page, weaker_button) = (empty_page.clone(), weaker_button.clone());
@@ -607,11 +576,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 let finished = matches!(*ev, EngineEvent::ScanComplete(_));
                 let scanning = matches!(*ev, EngineEvent::BatchLanded(_));
                 let at_top = scroller.vadjustment().value() <= AT_TOP_PX;
-                match live_step(
-                    at_top,
-                    scanning && last.elapsed() < LIVE_RELOAD_EVERY,
-                    finished,
-                ) {
+                match live_step(at_top, scanning && last.elapsed() < LIVE_RELOAD_EVERY, finished) {
                     LiveStep::Reload => {
                         last = Instant::now();
                         match live_ctx.borrow().as_ref() {
@@ -776,10 +741,7 @@ fn run_reload(ctx: &Rc<ReloadCtx>, live: bool) {
         run_similar(ctx, g, seed_id);
         return;
     }
-    let query = (
-        ctx.search_text.borrow().trim().to_owned(),
-        ctx.kind_filter.borrow().clone(),
-    );
+    let query = (ctx.search_text.borrow().trim().to_owned(), ctx.kind_filter.borrow().clone());
     if *ctx.weaker_query.borrow() != query.0 {
         ctx.show_weaker.set(false);
         ctx.weaker_query.replace(query.0.clone());
@@ -787,13 +749,8 @@ fn run_reload(ctx: &Rc<ReloadCtx>, live: bool) {
     let same_query = ctx.last_query.borrow().as_ref() == Some(&query);
     let limit = reload_limit(same_query, ctx.model.n_items());
     ctx.last_query.replace(Some(query));
-    let known_total = (live
-        && same_query
-        && ctx
-            .counted_at
-            .get()
-            .is_some_and(|at| at.elapsed() < COUNT_FRESH_FOR))
-    .then(|| ctx.total.get());
+    let known_total = (live && same_query && ctx.counted_at.get().is_some_and(|at| at.elapsed() < COUNT_FRESH_FOR))
+        .then(|| ctx.total.get());
     if known_total.is_none() {
         ctx.counted_at.set(Some(Instant::now()));
     }
@@ -844,10 +801,7 @@ fn visual_wanted(query: &str) -> bool {
 /// The engine's result summary ("3 good matches, 1 weaker."), shown in place
 /// of the file count; nothing when the engine sent none.
 fn strength_label(message: Option<&str>) -> Option<String> {
-    message
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .map(str::to_owned)
+    message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)
 }
 
 /// Good and weaker counts from exactly one of the engine's summary sentences.
@@ -857,17 +811,12 @@ fn parse_strength(message: Option<&str>) -> Option<(u64, u64)> {
         return None;
     }
     let count = |digits: &str| {
-        (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| digits.parse().ok())
-            .flatten()
+        (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit())).then(|| digits.parse().ok()).flatten()
     };
     if text == "No matches." {
         return Some((0, 0));
     }
-    if let Some(weak) = text
-        .strip_prefix("No good matches, ")
-        .and_then(|t| t.strip_suffix(" weaker."))
-    {
+    if let Some(weak) = text.strip_prefix("No good matches, ").and_then(|t| t.strip_suffix(" weaker.")) {
         return Some((0, count(weak)?));
     }
     let body = text.strip_suffix('.')?;
@@ -875,9 +824,7 @@ fn parse_strength(message: Option<&str>) -> Option<(u64, u64)> {
         Some((head, tail)) => (head, Some(tail.strip_suffix(" weaker")?)),
         None => (body, None),
     };
-    let good = head
-        .strip_suffix(" good matches")
-        .or_else(|| head.strip_suffix(" good match"))?;
+    let good = head.strip_suffix(" good matches").or_else(|| head.strip_suffix(" good match"))?;
     let weaker = match weak {
         Some(digits) => count(digits)?,
         None => 0,
@@ -907,20 +854,10 @@ struct SearchDecision {
 /// How a search with the engine's summary is shown (Mac `LibrarySearchOutcome.decide`).
 fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool) -> SearchDecision {
     let Some((good, weaker)) = parse_strength(message) else {
-        return SearchDecision {
-            source: SearchSource::Engine,
-            label: strength_label(message),
-            hidden_weaker: 0,
-            add_keyword_rows: true,
-        };
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0, add_keyword_rows: true };
     };
     if good > 0 || show_weaker {
-        return SearchDecision {
-            source: SearchSource::Engine,
-            label: strength_label(message),
-            hidden_weaker: 0,
-            add_keyword_rows: true,
-        };
+        return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0, add_keyword_rows: true };
     }
     let label = if weaker == 0 {
         "No matches".to_owned()
@@ -929,21 +866,13 @@ fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool)
     } else {
         "No good matches".to_owned()
     };
-    SearchDecision {
-        source: SearchSource::Keyword,
-        label: Some(label),
-        hidden_weaker: weaker,
-        add_keyword_rows: false,
-    }
+    SearchDecision { source: SearchSource::Keyword, label: Some(label), hidden_weaker: weaker, add_keyword_rows: false }
 }
 
 /// The engine's rows in its order, then the keyword rows it lacks in theirs.
 fn append_keyword_rows<T>(engine: Vec<T>, keyword: Vec<T>, id: impl Fn(&T) -> i64) -> Vec<T> {
     let known: HashSet<i64> = engine.iter().map(&id).collect();
-    let extra = keyword
-        .into_iter()
-        .filter(|row| !known.contains(&id(row)))
-        .collect::<Vec<_>>();
+    let extra = keyword.into_iter().filter(|row| !known.contains(&id(row))).collect::<Vec<_>>();
     engine.into_iter().chain(extra).collect()
 }
 
@@ -953,12 +882,7 @@ fn weaker_label(count: u64) -> String {
 
 /// Keyword matches stay on screen with the weaker look-alikes behind a header
 /// action, or, with no keyword match, an empty state that says so.
-fn show_keyword_only(
-    ctx: &Rc<ReloadCtx>,
-    query: &str,
-    decision: &SearchDecision,
-    keyword_count: usize,
-) {
+fn show_keyword_only(ctx: &Rc<ReloadCtx>, query: &str, decision: &SearchDecision, keyword_count: usize) {
     let hidden = decision.hidden_weaker;
     if let Some(label) = &decision.label {
         ctx.count_label.set_text(label);
@@ -977,23 +901,17 @@ fn show_keyword_only(
             if let Some(old) = ctx.weaker_handler.take() {
                 ctx.weaker_button.disconnect(old);
             }
-            ctx.weaker_handler
-                .replace(Some(ctx.weaker_button.connect_clicked(reveal())));
+            ctx.weaker_handler.replace(Some(ctx.weaker_button.connect_clicked(reveal())));
         }
         return;
     }
     ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
-    ctx.empty_page
-        .set_title(&format!("No matches for \u{201C}{query}\u{201D}"));
+    ctx.empty_page.set_title(&format!("No matches for \u{201C}{query}\u{201D}"));
     if hidden > 0 {
         ctx.empty_page.set_description(Some(&format!(
             "Nothing has that in its name, tags or text, and no picture matches it well. {hidden} weaker look-alikes were set aside."
         )));
-        let button = gtk::Button::builder()
-            .label(weaker_label(hidden))
-            .halign(gtk::Align::Center)
-            .css_classes(["pill"])
-            .build();
+        let button = gtk::Button::builder().label(weaker_label(hidden)).halign(gtk::Align::Center).css_classes(["pill"]).build();
         button.connect_clicked(reveal());
         ctx.empty_page.set_child(Some(&button));
     } else {
@@ -1008,18 +926,10 @@ fn show_keyword_only(
 /// matches first) and shows its summary. Any failure keeps the keyword rows.
 async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     let query = searched.trim().to_owned();
-    let request = fileid_engine::ipc::EmbedTextQueryPayload {
-        query: query.clone(),
-        query_id: super::workbench_state::request_id(),
-    };
+    let request = fileid_engine::ipc::EmbedTextQueryPayload { query: query.clone(), query_id: super::workbench_state::request_id() };
     let events = ctx.engine.borrow_mut().subscribe();
     let query_id = request.query_id.clone();
-    if ctx
-        .engine
-        .borrow_mut()
-        .send(fileid_engine::ipc::CommandPayload::EmbedTextQuery(request))
-        .is_err()
-    {
+    if ctx.engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::EmbedTextQuery(request)).is_err() {
         return;
     }
     let deadline = events.deadline(Duration::from_secs(15));
@@ -1050,27 +960,14 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     request.limit = Some(SIMILAR_LIMIT as _);
     request.root_id = super::library_scope::current_id();
     request.result_scope = Some("files".into());
-    let Some(response) = catalog_roundtrip(&ctx.engine, request)
-        .await
-        .filter(|r| r.status == "ok")
-    else {
-        return;
-    };
+    let Some(response) = catalog_roundtrip(&ctx.engine, request).await.filter(|r| r.status == "ok") else { return };
     if ctx.query_gen.get() != generation {
         return;
     }
     let keyword_count = ctx.model.n_items() as usize;
-    let decision = decide_search(
-        response.message.as_deref(),
-        keyword_count,
-        ctx.show_weaker.get(),
-    );
+    let decision = decide_search(response.message.as_deref(), keyword_count, ctx.show_weaker.get());
     if std::env::var_os("FILEID_SELF_SEARCH").is_some() {
-        eprintln!(
-            "self-search: query={query:?} hits={} keyword={keyword_count} message={:?} decision={decision:?}",
-            response.hits.len(),
-            response.message
-        );
+        eprintln!("self-search: query={query:?} hits={} keyword={keyword_count} message={:?} decision={decision:?}", response.hits.len(), response.message);
     }
     if decision.source == SearchSource::Keyword {
         show_keyword_only(ctx, &query, &decision, keyword_count);
@@ -1078,10 +975,7 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
     }
     let ids: Vec<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
     let kind = ctx.kind_filter.borrow().clone();
-    let mut rows = read_rows_in_order(ids, kind)
-        .recv()
-        .await
-        .unwrap_or_default();
+    let mut rows = read_rows_in_order(ids, kind).recv().await.unwrap_or_default();
     if ctx.query_gen.get() != generation {
         return;
     }
@@ -1103,10 +997,7 @@ fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str
     // One items-changed signal for the whole page instead of one per row.
     let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
     // Keep the same files selected (and the pane on them) across a refresh.
-    let selected: HashSet<i64> = selected_rows(&ctx.selection)
-        .into_iter()
-        .map(|(_, row)| row.id)
-        .collect();
+    let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
     ctx.weaker_button.set_visible(false);
     ctx.empty_page.set_child(None::<&gtk::Box>);
     ctx.restoring.set(true);
@@ -1116,15 +1007,13 @@ fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str
     for position in &positions {
         chosen.add(*position);
     }
-    ctx.selection
-        .set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
+    ctx.selection.set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
     ctx.restoring.set(false);
     show_selection(&ctx.selection, &ctx.pane, true);
     ctx.total.set(total);
     ctx.has_more.set(total > rows.len() as i64);
     if total > rows.len() as i64 {
-        ctx.count_label
-            .set_text(&format!("{} of {} files", rows.len(), total));
+        ctx.count_label.set_text(&format!("{} of {} files", rows.len(), total));
     } else {
         ctx.count_label.set_text(&format!("{} files", rows.len()));
     }
@@ -1139,12 +1028,9 @@ fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str
             ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
             ctx.empty_page.set_title("No matches");
             let description = if searched.is_empty() {
-                "Nothing matches this filter. Try another kind, or choose All to see every file."
-                    .to_string()
+                "Nothing matches this filter. Try another kind, or choose All to see every file.".to_string()
             } else {
-                format!(
-                    "Nothing matches “{searched}”. Try other words, or choose All to see every file."
-                )
+                format!("Nothing matches “{searched}”. Try other words, or choose All to see every file.")
             };
             ctx.empty_page.set_description(Some(&description));
         } else {
@@ -1218,10 +1104,7 @@ fn run_similar(ctx: &Rc<ReloadCtx>, generation: u64, seed_id: i64) {
 fn similar_pending(response: &fileid_engine::ipc::CatalogResponse) -> bool {
     response.status == "indexing"
         || (response.status == "error"
-            && response
-                .message
-                .as_deref()
-                .is_some_and(|m| m.starts_with("Preparing the local visual search index")))
+            && response.message.as_deref().is_some_and(|m| m.starts_with("Preparing the local visual search index")))
 }
 
 async fn similar_request(
@@ -1244,11 +1127,9 @@ async fn catalog_roundtrip(
     let id = request.request_id.clone();
     let events = engine.borrow_mut().subscribe();
     let _deadline = events.deadline(Duration::from_secs(10));
-    let sent = engine
-        .borrow_mut()
-        .send(fileid_engine::ipc::CommandPayload::CatalogRequest(
-            Box::new(fileid_engine::ipc::CatalogRequestPayload { request }),
-        ));
+    let sent = engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::CatalogRequest(Box::new(
+        fileid_engine::ipc::CatalogRequestPayload { request },
+    )));
     let mut found = None;
     if sent.is_ok() {
         while let Ok(event) = events.recv().await {
@@ -1266,10 +1147,7 @@ async fn catalog_roundtrip(
 }
 
 /// The rows for `ids` in that order, of one `kind` when set; files gone from the catalog drop out.
-fn read_rows_in_order(
-    ids: Vec<i64>,
-    kind: Option<String>,
-) -> async_channel::Receiver<Vec<FileRow>> {
+fn read_rows_in_order(ids: Vec<i64>, kind: Option<String>) -> async_channel::Receiver<Vec<FileRow>> {
     crate::engine_client::read_db(move |conn| {
         let mut found = HashMap::new();
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
@@ -1499,11 +1377,7 @@ fn thumb_cache_put(key: ThumbCacheKey, texture: gtk::gdk::Texture) {
     });
 }
 
-fn bind_tile(
-    engine: &Rc<RefCell<EngineClient>>,
-    list_item: &gtk::ListItem,
-    offline: &OfflineRoots,
-) {
+fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offline: &OfflineRoots) {
     let Some(obj) = list_item.item() else { return };
     let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else {
         return;
@@ -1526,8 +1400,7 @@ fn bind_tile(
     else {
         return;
     };
-    BOUND_TILES
-        .with_borrow_mut(|tiles| tiles.insert(tile_token_key(list_item), list_item.downgrade()));
+    BOUND_TILES.with_borrow_mut(|tiles| tiles.insert(tile_token_key(list_item), list_item.downgrade()));
     offline_badge.set_visible(offline.is_offline(&row.path));
 
     // Filename — the suggested name in gold when present (macOS parity).
@@ -1595,10 +1468,7 @@ fn refresh_offline_badges(offline: &OfflineRoots) {
                 .item()
                 .and_downcast::<BoxedAnyObject>()
                 .map(|boxed| boxed.borrow::<FileRow>().path.clone());
-            let parts = list_item
-                .child()
-                .and_downcast::<gtk::Box>()
-                .and_then(|vbox| tile_parts(&vbox));
+            let parts = list_item.child().and_downcast::<gtk::Box>().and_then(|vbox| tile_parts(&vbox));
             if let (Some(path), Some(parts)) = (row, parts) {
                 parts.offline.set_visible(offline.is_offline(&path));
             }
@@ -1614,8 +1484,7 @@ fn tile_token_key(list_item: &gtk::ListItem) -> usize {
 /// A fresh cancel token for the tile; the previous binding's work is dropped.
 fn renew_tile_token(list_item: &gtk::ListItem) -> CancelToken {
     let token = CancelToken::default();
-    let previous = TILE_TOKENS
-        .with_borrow_mut(|tokens| tokens.insert(tile_token_key(list_item), token.clone()));
+    let previous = TILE_TOKENS.with_borrow_mut(|tokens| tokens.insert(tile_token_key(list_item), token.clone()));
     if let Some(previous) = previous {
         previous.store(true, Ordering::Release);
     }
@@ -1623,25 +1492,18 @@ fn renew_tile_token(list_item: &gtk::ListItem) -> CancelToken {
 }
 
 fn cancel_tile_token(list_item: &gtk::ListItem) {
-    if let Some(token) =
-        TILE_TOKENS.with_borrow_mut(|tokens| tokens.remove(&tile_token_key(list_item)))
-    {
+    if let Some(token) = TILE_TOKENS.with_borrow_mut(|tokens| tokens.remove(&tile_token_key(list_item))) {
         token.store(true, Ordering::Release);
     }
 }
 
 fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry: bool) {
     let cancel = renew_tile_token(list_item);
-    let dim = request
-        .pic
-        .upgrade()
-        .map_or(TILE_THUMB_PX, |pic| decode_px(&pic, TILE_THUMB_PX));
-    let rx = request.engine.borrow().request_tile(
-        request.key.path.clone(),
-        dim,
-        request.is_video,
-        cancel,
-    );
+    let dim = request.pic.upgrade().map_or(TILE_THUMB_PX, |pic| decode_px(&pic, TILE_THUMB_PX));
+    let rx = request
+        .engine
+        .borrow()
+        .request_tile(request.key.path.clone(), dim, request.is_video, cancel);
     glib::MainContext::default().spawn_local(async move {
         let reply = rx.recv().await.unwrap_or(ThumbReply::Dropped);
         let still_wanted = tile_still_wants(&request.list_item, &request.key);
@@ -1730,9 +1592,7 @@ fn open_preview(
         .tooltip_text("Next (→)")
         .build();
     next_btn.update_property(&[gtk::accessible::Property::Label("Next")]);
-    let counter = gtk::Label::builder()
-        .css_classes(["dim-label", "numeric"])
-        .build();
+    let counter = gtk::Label::builder().css_classes(["dim-label", "numeric"]).build();
     header.pack_start(&prev_btn);
     header.pack_start(&counter);
     header.pack_end(&next_btn);
@@ -1827,12 +1687,7 @@ fn open_preview(
     };
     let fetch_more: Rc<dyn Fn()> = {
         let fetching = Rc::new(Cell::new(false));
-        let (engine, rows, more, update_nav) = (
-            engine.clone(),
-            rows.clone(),
-            more.clone(),
-            update_nav.clone(),
-        );
+        let (engine, rows, more, update_nav) = (engine.clone(), rows.clone(), more.clone(), update_nav.clone());
         Rc::new(move || {
             if !more.get() || fetching.replace(true) {
                 return;
@@ -1846,12 +1701,7 @@ fn open_preview(
                 scope: super::library_scope::current_param(),
                 known_total: Some(0),
             });
-            let (rows, more, update_nav, fetching) = (
-                rows.clone(),
-                more.clone(),
-                update_nav.clone(),
-                fetching.clone(),
-            );
+            let (rows, more, update_nav, fetching) = (rows.clone(), more.clone(), update_nav.clone(), fetching.clone());
             glib::MainContext::default().spawn_local(async move {
                 let page = page.recv().await;
                 fetching.set(false);
@@ -1972,9 +1822,7 @@ fn open_preview(
                 if !matches!(*event, EngineEvent::ScanComplete(_)) {
                     continue;
                 }
-                let Some(id) = rows.borrow().get(idx.get()).map(|row| row.id) else {
-                    continue;
-                };
+                let Some(id) = rows.borrow().get(idx.get()).map(|row| row.id) else { continue };
                 glib::MainContext::default().spawn_local(clone!(
                     #[strong]
                     rows,
@@ -1987,13 +1835,8 @@ fn open_preview(
                     #[weak]
                     dialog,
                     async move {
-                        let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await
-                        else {
-                            return;
-                        };
-                        if closed.get()
-                            || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id)
-                        {
+                        let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { return };
+                        if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
                             return;
                         }
                         rows.borrow_mut()[idx.get()] = row.clone();
@@ -2048,15 +1891,8 @@ fn selected_rows(selection: &gtk::MultiSelection) -> Vec<(u32, FileRow)> {
 fn show_selection(selection: &gtk::MultiSelection, pane: &SelectedPane, reloaded: bool) {
     let rows = selected_rows(selection);
     super::chat_handoff::set_files(rows.iter().map(|(_, row)| row.id).collect());
-    pane.set_picked(
-        rows.iter()
-            .map(|(_, row)| (row.id, row.kind.clone()))
-            .collect(),
-    );
-    let sizes: Vec<(u32, i64)> = rows
-        .iter()
-        .map(|(position, row)| (*position, row.size_bytes))
-        .collect();
+    pane.set_picked(rows.iter().map(|(_, row)| (row.id, row.kind.clone())).collect());
+    let sizes: Vec<(u32, i64)> = rows.iter().map(|(position, row)| (*position, row.size_bytes)).collect();
     match picking::view(&sizes) {
         PaneView::Hidden => pane.hide(),
         PaneView::One(_) => {
@@ -2079,9 +1915,7 @@ fn row_at(model: &impl IsA<gio::ListModel>, pos: u32) -> Option<FileRow> {
 }
 
 fn snapshot_rows(model: &impl IsA<gio::ListModel>) -> Vec<FileRow> {
-    (0..model.n_items())
-        .filter_map(|pos| row_at(model, pos))
-        .collect()
+    (0..model.n_items()).filter_map(|pos| row_at(model, pos)).collect()
 }
 
 /// Build the metadata glass-card for one row (rebuilt on each navigation).
@@ -2117,10 +1951,7 @@ fn build_meta(row: &FileRow) -> gtk::Box {
         }
     }
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
-        meta.append(&meta_row(
-            "Suggested name",
-            &format!("{}.{}", p, row.extension),
-        ));
+        meta.append(&meta_row("Suggested name", &format!("{}.{}", p, row.extension)));
     }
     super::library_pane::append_details(&meta, row.id);
     meta
@@ -2145,11 +1976,9 @@ fn load_preview_image(
     generation: u64,
 ) {
     if row.kind == "image" || row.kind == "video" {
-        let rx = engine.borrow().request_preview(
-            row.path.clone(),
-            decode_px(pic, PREVIEW_PX),
-            row.kind == "video",
-        );
+        let rx = engine
+            .borrow()
+            .request_preview(row.path.clone(), decode_px(pic, PREVIEW_PX), row.kind == "video");
         let kind = row.kind.clone();
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
@@ -2294,20 +2123,11 @@ mod tests {
 
     #[test]
     fn parses_the_engines_sentences() {
-        assert_eq!(
-            parse_strength(Some("3 good matches, 1 weaker.")),
-            Some((3, 1))
-        );
+        assert_eq!(parse_strength(Some("3 good matches, 1 weaker.")), Some((3, 1)));
         assert_eq!(parse_strength(Some("1 good match.")), Some((1, 0)));
-        assert_eq!(
-            parse_strength(Some("No good matches, 60 weaker.")),
-            Some((0, 60))
-        );
+        assert_eq!(parse_strength(Some("No good matches, 60 weaker.")), Some((0, 60)));
         assert_eq!(parse_strength(Some("No matches.")), Some((0, 0)));
-        assert_eq!(
-            parse_strength(Some("Matches by name, text and what's in the picture.")),
-            None
-        );
+        assert_eq!(parse_strength(Some("Matches by name, text and what's in the picture.")), None);
         assert_eq!(parse_strength(Some("Visual similarity results.")), None);
         assert_eq!(parse_strength(None), None);
     }
@@ -2333,10 +2153,7 @@ mod tests {
         assert_eq!((d.source, d.hidden_weaker), (SearchSource::Keyword, 60));
         assert_eq!(d.label.as_deref(), Some("No good matches"));
         let shown = decided(Some("No good matches, 60 weaker."), 0, true);
-        assert_eq!(
-            (shown.source, shown.hidden_weaker),
-            (SearchSource::Engine, 0)
-        );
+        assert_eq!((shown.source, shown.hidden_weaker), (SearchSource::Engine, 0));
     }
 
     #[test]
@@ -2348,34 +2165,18 @@ mod tests {
 
     #[test]
     fn no_summary_keeps_todays_behaviour() {
-        let d = decided(
-            Some("Matches by name, text and what's in the picture."),
-            0,
-            false,
-        );
+        let d = decided(Some("Matches by name, text and what's in the picture."), 0, false);
         assert_eq!((d.source, d.hidden_weaker), (SearchSource::Engine, 0));
-        assert_eq!(
-            d.label.as_deref(),
-            Some("Matches by name, text and what's in the picture.")
-        );
+        assert_eq!(d.label.as_deref(), Some("Matches by name, text and what's in the picture."));
         let none = decided(None, 0, false);
-        assert_eq!(
-            (none.source, none.hidden_weaker, none.label),
-            (SearchSource::Engine, 0, None)
-        );
+        assert_eq!((none.source, none.hidden_weaker, none.label), (SearchSource::Engine, 0, None));
     }
 
     #[test]
     fn keyword_rows_follow_the_engines_without_repeats() {
         let ids = |rows: Vec<i64>| rows;
-        assert_eq!(
-            ids(append_keyword_rows(vec![5, 2], vec![2, 9, 5, 7], |id| *id)),
-            vec![5, 2, 9, 7]
-        );
-        assert_eq!(
-            append_keyword_rows(Vec::<i64>::new(), vec![3, 1], |id| *id),
-            vec![3, 1]
-        );
+        assert_eq!(ids(append_keyword_rows(vec![5, 2], vec![2, 9, 5, 7], |id| *id)), vec![5, 2, 9, 7]);
+        assert_eq!(append_keyword_rows(Vec::<i64>::new(), vec![3, 1], |id| *id), vec![3, 1]);
         assert_eq!(append_keyword_rows(vec![4], Vec::new(), |id| *id), vec![4]);
     }
 
@@ -2383,14 +2184,7 @@ mod tests {
     fn only_the_engines_list_decisions_add_keyword_rows() {
         assert!(decided(Some("4 good matches, 20 weaker."), 2, false).add_keyword_rows);
         assert!(decided(Some("No good matches, 60 weaker."), 0, true).add_keyword_rows);
-        assert!(
-            decided(
-                Some("Matches by name, text and what's in the picture."),
-                0,
-                false
-            )
-            .add_keyword_rows
-        );
+        assert!(decided(Some("Matches by name, text and what's in the picture."), 0, false).add_keyword_rows);
         assert!(decided(None, 0, false).add_keyword_rows);
         assert!(!decided(Some("No good matches, 60 weaker."), 3, false).add_keyword_rows);
         assert!(!decided(Some("No matches."), 0, false).add_keyword_rows);

@@ -105,12 +105,10 @@ pub(crate) fn terms_gate_kind(model: &ModelCatalogItem) -> TermsGate {
     let policy = fileid_engine::models::license::policy_for(&model.id).is_some();
     let kind = fileid_engine::models::catalog::find(&model.id)
         .map(|entry| entry.id.as_str())
-        .or_else(
-            || match fileid_engine::models::registry::lookup_full(&model.id) {
-                fileid_engine::models::registry::LookupResult::Found(found) => Some(found.id),
-                fileid_engine::models::registry::LookupResult::Unknown => None,
-            },
-        );
+        .or_else(|| match fileid_engine::models::registry::lookup_full(&model.id) {
+            fileid_engine::models::registry::LookupResult::Found(found) => Some(found.id),
+            fileid_engine::models::registry::LookupResult::Unknown => None,
+        });
     match (model.terms_required || policy, policy, kind) {
         (false, _, _) => TermsGate::Open,
         (true, true, Some(kind)) => TermsGate::Prompt(kind),
@@ -143,8 +141,7 @@ impl Catalog {
             .engine
             .borrow_mut()
             .list_models(&id, Some(self.role()))
-            .is_err()
-        {
+            .is_err() {
             self.status
                 .set_label("FileID is still getting ready. Try again in a moment.");
         }
@@ -205,11 +202,7 @@ impl Catalog {
                 let terms_kind = terms_gate_kind(model);
                 install.connect_clicked(move |button| {
                     match terms_kind {
-                        TermsGate::Prompt(kind)
-                            if !crate::model_license::ensure_or_prompt(button, kind) =>
-                        {
-                            return;
-                        }
+                        TermsGate::Prompt(kind) if !crate::model_license::ensure_or_prompt(button, kind) => return,
                         TermsGate::Refuse => return,
                         _ => {}
                     }
@@ -489,10 +482,7 @@ mod tests {
         let measured = model("fast", true, "verified", 5.0, Some(40.0));
         assert!(summary(&measured).contains("Apache-2.0 · verified · installed"));
         let text = benchmark_summary(measured.benchmark.as_ref().unwrap());
-        assert_eq!(
-            text,
-            "Measured here: loads in 2.0 s · 40 tok/s · 1.5 s/image · 80% probes · 50% valid JSON · 2.4 GB peak · tuned"
-        );
+        assert_eq!(text, "Measured here: loads in 2.0 s · 40 tok/s · 1.5 s/image · 80% probes · 50% valid JSON · 2.4 GB peak · tuned");
         let gemma = ModelCatalogItem {
             license: "Gemma".into(),
             terms_required: true,
@@ -510,10 +500,7 @@ mod tests {
             terms_required: true,
             ..model("gemma_3_4b", true, "curated", 5.0, None)
         };
-        assert_eq!(
-            terms_gate_kind(&curated_gemma),
-            TermsGate::Prompt("gemma_3_4b")
-        );
+        assert_eq!(terms_gate_kind(&curated_gemma), TermsGate::Prompt("gemma_3_4b"));
         let entry = fileid_engine::models::catalog::entries()
             .iter()
             .find(|entry| entry.terms_required)
@@ -523,10 +510,7 @@ mod tests {
             terms_required: true,
             ..model(&entry.id, true, "candidate", 3.0, None)
         };
-        assert_eq!(
-            terms_gate_kind(&catalog_gemma),
-            TermsGate::Prompt(entry.id.as_str())
-        );
+        assert_eq!(terms_gate_kind(&catalog_gemma), TermsGate::Prompt(entry.id.as_str()));
         let unknown = ModelCatalogItem {
             license: "Other".into(),
             terms_required: true,

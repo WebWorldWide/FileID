@@ -147,11 +147,7 @@ pub fn undo_latest() -> bool {
 /// Records a change only when something actually changed and there is a way
 /// to put it back; a result with no successes, or an engine that returned no
 /// undo handle, leaves the list alone.
-pub fn record(
-    changed: u64,
-    label: impl FnOnce() -> String,
-    reverse: Option<Reverse>,
-) -> Option<u64> {
+pub fn record(changed: u64, label: impl FnOnce() -> String, reverse: Option<Reverse>) -> Option<u64> {
     if changed == 0 {
         return None;
     }
@@ -288,19 +284,13 @@ mod tests {
         reset();
         let calls = Rc::new(std::cell::Cell::new(0));
         let counter = calls.clone();
-        let id = push(
-            "merge",
-            Some(Rc::new(move || {
-                counter.set(counter.get() + 1);
-                true
-            })),
-        );
+        let id = push("merge", Some(Rc::new(move || {
+            counter.set(counter.get() + 1);
+            true
+        })));
         assert!(undo(id));
         settle(Some(id), 2, "face");
-        assert_eq!(
-            entries()[0].status,
-            Status::Failed("2 faces couldn't be put back".to_owned())
-        );
+        assert_eq!(entries()[0].status, Status::Failed("2 faces couldn't be put back".to_owned()));
         assert!(undo(id));
         assert_eq!(calls.get(), 2);
         settle(Some(id), 0, "face");
@@ -320,10 +310,7 @@ mod tests {
         supersede(Some(done), "A newer rename replaced it");
         supersede(None, "nothing");
         let listed = entries();
-        assert_eq!(
-            listed[1].status,
-            Status::NotUndoable("A newer rename replaced it".to_owned())
-        );
+        assert_eq!(listed[1].status, Status::NotUndoable("A newer rename replaced it".to_owned()));
         assert_eq!(listed[0].status, Status::Undone);
         assert_eq!(most_recent_undoable(), None);
         assert!(!undo(old));

@@ -18,10 +18,7 @@ fn day_start(day: Day) -> Option<glib::DateTime> {
 }
 
 /// Local midnight at the start of `from` through the last second of `to`.
-pub(super) fn window(
-    from: Option<Day>,
-    to: Option<Day>,
-) -> Result<(Option<f64>, Option<f64>), &'static str> {
+pub(super) fn window(from: Option<Day>, to: Option<Day>) -> Result<(Option<f64>, Option<f64>), &'static str> {
     let start = from.and_then(day_start).map(|day| day.to_unix() as f64);
     let end = to
         .and_then(day_start)
@@ -69,20 +66,11 @@ impl DateFilter {
             button.set_tooltip_text(Some(spoken));
             button.update_property(&[gtk::accessible::Property::Label(spoken)]);
             root.append(&button);
-            Rc::new(DateButton {
-                prefix,
-                button,
-                day: Cell::new(None),
-            })
+            Rc::new(DateButton { prefix, button, day: Cell::new(None) })
         };
         let from = side("From", "Only files captured on or after this day");
         let to = side("To", "Only files captured on or before this day");
-        let this = Rc::new(Self {
-            root,
-            from,
-            to,
-            changed: RefCell::new(None),
-        });
+        let this = Rc::new(Self { root, from, to, changed: RefCell::new(None) });
         for side in [&this.from, &this.to] {
             let filter = Rc::downgrade(&this);
             let weak = Rc::downgrade(side);
@@ -166,10 +154,7 @@ mod tests {
         let (from, to) = window(Some((2024, 9, 19)), Some((2024, 9, 19))).unwrap();
         let (from, to) = (from.unwrap(), to.unwrap());
         assert!(to > from);
-        assert!(
-            (to - from - 86_399.0).abs() <= 3_600.0,
-            "one local day, give or take a DST hour"
-        );
+        assert!((to - from - 86_399.0).abs() <= 3_600.0, "one local day, give or take a DST hour");
     }
 
     #[test]
@@ -179,10 +164,7 @@ mod tests {
         assert!(from.is_some() && to.is_none());
         let (from, to) = window(None, Some((2023, 1, 1))).unwrap();
         assert!(from.is_none() && to.is_some());
-        assert_eq!(
-            window(Some((2024, 3, 2)), Some((2024, 3, 1))),
-            Err(REVERSED)
-        );
+        assert_eq!(window(Some((2024, 3, 2)), Some((2024, 3, 1))), Err(REVERSED));
         assert!(window(Some((2024, 3, 1)), Some((2024, 3, 2))).is_ok());
     }
 

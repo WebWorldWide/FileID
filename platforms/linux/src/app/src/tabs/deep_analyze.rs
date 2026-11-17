@@ -244,8 +244,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .css_classes(["gold-button"])
         .halign(gtk::Align::Start)
         .build();
-    let smart_revealer =
-        crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &smart_list);
+    let smart_revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &smart_list);
     let smart_card = build_smart_card(&smart_count, &review_btn, &smart_revealer);
     smart_card.set_visible(false);
     content.append(&smart_card);
@@ -755,9 +754,7 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         while received_results < expected_results {
-            let Ok(event) = event_rx.recv().await else {
-                break;
-            };
+            let Ok(event) = event_rx.recv().await else { break };
             match &*event {
                 EngineEvent::BulkActionResult(result) if result.action == "applyTags" => {
                     received_results += 1;
@@ -769,19 +766,12 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
             }
         }
         if deadline.fired() {
-            finish_apply_tags(
-                &ui,
-                generation,
-                "FileID didn't finish adding tags. Try again in a moment.",
-            );
+            finish_apply_tags(&ui, generation, "FileID didn't finish adding tags. Try again in a moment.");
             return;
         }
         if received_results == expected_results {
             let status = if failed == 0 {
-                format!(
-                    "Done: added {} to files.",
-                    plural(succeeded as usize, "tag")
-                )
+                format!("Done: added {} to files.", plural(succeeded as usize, "tag"))
             } else {
                 format!(
                     "Added {}; {failed} of {requested_files} couldn't be written.",
@@ -884,10 +874,9 @@ fn sync_run_state(ui: &DeepUi) {
     });
     let blocker = run_blocker(ui);
     ui.run_btn.set_sensitive(blocker.is_none());
-    ui.run_btn
-        .set_tooltip_text(Some(blocker.as_deref().unwrap_or(
-            "Write a description and a suggested name for each file. You can stop at any time.",
-        )));
+    ui.run_btn.set_tooltip_text(Some(blocker.as_deref().unwrap_or(
+        "Write a description and a suggested name for each file. You can stop at any time.",
+    )));
     ui.cancel_btn.set_visible(in_flight);
     match blocker.filter(|_| !in_flight) {
         Some(reason) => ui.run_meta.set_text(&reason),
@@ -908,6 +897,7 @@ fn plural(count: usize, noun: &str) -> String {
         if count == 1 { "" } else { "s" }
     )
 }
+
 
 /// Optimistic refresh after a fire-and-forget command (the engine's
 /// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
@@ -973,9 +963,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
                 None => ui.progress_eta.set_text(""),
             }
             match p.current_path.as_deref() {
-                Some(path) => ui
-                    .progress_file
-                    .set_text(fileid_engine::util::display::basename(path)),
+                Some(path) => ui.progress_file.set_text(fileid_engine::util::display::basename(path)),
                 None => ui.progress_file.set_text(""),
             }
             match p.current_caption.as_deref().filter(|s| !s.is_empty()) {
@@ -1028,24 +1016,15 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
             ui.download_label.set_text(&m.message);
             ui.download_bar.set_fraction(m.fraction.clamp(0.0, 1.0));
             ui.download_card.set_visible(true);
-            if m.fraction >= 1.0
-                && ui
-                    .choices
-                    .borrow()
-                    .iter()
-                    .any(|choice| choice.id == m.model_kind)
-            {
+            if m.fraction >= 1.0 && ui.choices.borrow().iter().any(|choice| choice.id == m.model_kind) {
                 request_catalog(ui);
             }
         }
         EngineEvent::Ready => request_catalog(ui),
-        EngineEvent::ModelCatalog(catalog)
-            if catalog.request_id == *ui.catalog_request.borrow() =>
-        {
-            let shown =
-                vlm_picker::choices(&catalog.models, ui.active_kind.get(), static_kind, |id| {
-                    fileid_engine::models::license::policy_for(id).is_some()
-                });
+        EngineEvent::ModelCatalog(catalog) if catalog.request_id == *ui.catalog_request.borrow() => {
+            let shown = vlm_picker::choices(&catalog.models, ui.active_kind.get(), static_kind, |id| {
+                fileid_engine::models::license::policy_for(id).is_some()
+            });
             if !shown.is_empty() {
                 ui.choices.replace(shown);
                 render_picker(ui);
@@ -1062,10 +1041,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
 /// A busy bounce means a run IS going, and a server-format fallback keeps the
 /// run alive on the slower path; neither may tear down the live run.
 pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
-    !matches!(
-        kind,
-        "deep_analyze_already_running" | "vlm_server_payload_rejected"
-    )
+    !matches!(kind, "deep_analyze_already_running" | "vlm_server_payload_rejected")
 }
 
 // ─── DB-backed refresh (mirror of macOS ReadStore counts) ────────────────────
@@ -1104,8 +1080,7 @@ fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
     ui.lbl_pending
         .set_text(&plural(c.pending.max(0) as usize, "file"));
     let secs = c.pending as f64 * active_secs_per_image(ui);
-    ui.lbl_eta
-        .set_text(&format!("about {}", format_duration(secs)));
+    ui.lbl_eta.set_text(&format!("about {}", format_duration(secs)));
     ui.lbl_eta_key.set_visible(c.pending > 0);
     ui.lbl_eta.set_visible(c.pending > 0);
     ui.status_empty.set_visible(c.total_files == 0);
@@ -1278,11 +1253,7 @@ fn kind_display(key: &str) -> String {
 
 fn active_choice(ui: &DeepUi) -> Option<VlmChoice> {
     let active = ui.active_kind.get();
-    ui.choices
-        .borrow()
-        .iter()
-        .find(|choice| choice.id == active)
-        .cloned()
+    ui.choices.borrow().iter().find(|choice| choice.id == active).cloned()
 }
 
 fn active_display(ui: &DeepUi) -> String {
@@ -1311,12 +1282,7 @@ fn request_catalog(ui: &DeepUi) {
         return;
     }
     let id = format!("describe-models-{}", glib::monotonic_time());
-    if ui
-        .engine
-        .borrow_mut()
-        .list_models(&id, Some("vision"))
-        .is_ok()
-    {
+    if ui.engine.borrow_mut().list_models(&id, Some("vision")).is_ok() {
         ui.catalog_request.replace(id);
     }
 }
@@ -1362,10 +1328,7 @@ fn pick_row(ui: &Rc<DeepUi>, choice: &VlmChoice) -> gtk::Button {
         .label(if is_active { "●" } else { "○" })
         .valign(gtk::Align::Start)
         .build();
-    let title = gtk::Label::builder()
-        .label(&choice.name)
-        .xalign(0.0)
-        .build();
+    let title = gtk::Label::builder().label(&choice.name).xalign(0.0).build();
     if is_active {
         indicator.add_css_class("gold-accent");
         title.add_css_class("gold-accent");

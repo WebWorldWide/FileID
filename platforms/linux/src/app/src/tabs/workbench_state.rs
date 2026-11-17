@@ -128,9 +128,7 @@ impl ChatState {
         if request.action == "send"
             && (self.pending_write.is_some() || !self.deferred_clears.is_empty())
         {
-            return Err(
-                "Your last message is still being saved. Wait a moment; History, Stop and changes to the conversation don't cancel it.",
-            );
+            return Err("Your last message is still being saved. Wait a moment; History, Stop and changes to the conversation don't cancel it.");
         }
         self.display.begin("chat", &request.request_id);
         if request.action == "clear" && self.pending_write.is_some() {
@@ -319,20 +317,16 @@ mod tests {
         assert_eq!(response.messages.len(), 2);
         let deferred = state.finish(&response).unwrap();
         assert_eq!(deferred.request_id, "clear");
-        assert!(
-            state
-                .begin(&chat_request("overlap-clear", "a", "send"))
-                .is_err()
-        );
+        assert!(state
+            .begin(&chat_request("overlap-clear", "a", "send"))
+            .is_err());
         let cleared = fileid_engine::commands::chat::execute(&mut conn, &deferred).unwrap();
         assert!(cleared.messages.is_empty());
         assert!(state.finish(&cleared).is_none());
-        assert!(
-            fileid_engine::commands::chat::execute(&mut conn, &history)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
+        assert!(fileid_engine::commands::chat::execute(&mut conn, &history)
+            .unwrap()
+            .messages
+            .is_empty());
         assert!(state.begin(&chat_request("next", "a", "send")).unwrap());
     }
     #[test]
@@ -350,11 +344,9 @@ mod tests {
             assert!(state.begin(&chat_request("overlap", "a", "send")).is_err());
         }
         state.display.clear();
-        assert!(
-            state
-                .begin(&chat_request("different-conversation", "b", "send"))
-                .is_err()
-        );
+        assert!(state
+            .begin(&chat_request("different-conversation", "b", "send"))
+            .is_err());
         let clear_b = chat_request("clear-b", "b", "clear");
         assert!(!state.begin(&clear_b).unwrap());
         let mut response = fileid_engine::commands::chat::execute(&mut conn, &send).unwrap();
@@ -371,10 +363,7 @@ mod tests {
     }
     #[test]
     fn hybrid_uses_exact_pinned_identity_and_rejects_late_query_or_invalid_vectors() {
-        assert_eq!(
-            clip_space::model_id(),
-            "clip-vitb32-openai-v1:126bacbb4038a0820ca6582bd81f58d7892070deab8317b390e37d7632a53471"
-        );
+        assert_eq!(clip_space::model_id(),"clip-vitb32-openai-v1:126bacbb4038a0820ca6582bd81f58d7892070deab8317b390e37d7632a53471");
         let mut search = HybridSearch::default();
         let old = search.begin("old");
         let current = search.begin("current");

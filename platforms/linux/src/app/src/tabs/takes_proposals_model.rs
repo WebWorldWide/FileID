@@ -2,9 +2,7 @@
 // GTK: the relation chip, plain-language evidence and the job requests.
 // Lockstep with macOS TakeProposals and WinUI TakeProposalPolicy.
 
-use fileid_engine::ipc::{
-    CatalogHit, CatalogJob, CatalogRequest, CatalogResponse, CatalogTakeAutoGroup,
-};
+use fileid_engine::ipc::{CatalogHit, CatalogJob, CatalogRequest, CatalogResponse, CatalogTakeAutoGroup};
 
 use super::takes_model as model;
 use super::workbench_state::catalog_request;
@@ -32,15 +30,9 @@ pub fn relation_tone(relation: Option<&str>) -> Tone {
 
 pub fn relation_help(relation: Option<&str>) -> Option<&'static str> {
     match relation? {
-        "repeatedAttempts" => Some(
-            "One camera took these one after another, so they are separate tries of the same shot.",
-        ),
-        "alternateViews" => Some(
-            "Different cameras caught the same moment, so these are other angles or copies rather than separate tries.",
-        ),
-        "uncertain" => Some(
-            "Camera details are missing or mixed, so FileID can't tell separate tries from other angles.",
-        ),
+        "repeatedAttempts" => Some("One camera took these one after another, so they are separate tries of the same shot."),
+        "alternateViews" => Some("Different cameras caught the same moment, so these are other angles or copies rather than separate tries."),
+        "uncertain" => Some("Camera details are missing or mixed, so FileID can't tell separate tries from other angles."),
         _ => None,
     }
 }
@@ -59,28 +51,18 @@ pub fn evidence_sentence(code: &str) -> Option<&'static str> {
 }
 
 pub fn evidence_text(codes: Option<&[String]>) -> String {
-    codes
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|code| evidence_sentence(code))
-        .collect::<Vec<_>>()
-        .join(" ")
+    codes.unwrap_or_default().iter().filter_map(|code| evidence_sentence(code)).collect::<Vec<_>>().join(" ")
 }
 
 /// The review page's intro: the evidence and what the relation means, then how to pick.
 pub fn summary(group: &CatalogTakeAutoGroup) -> String {
-    const PICK: &str =
-        "FileID starred the one that looks best. Check it, then keep it and clear out the rest.";
+    const PICK: &str = "FileID starred the one that looks best. Check it, then keep it and clear out the rest.";
     if group.relation.is_none() {
         return format!("Tries of the same shot, taken moments apart. {PICK}");
     }
     let evidence = evidence_text(group.evidence.as_deref());
     let help = relation_help(group.relation.as_deref()).unwrap_or_default();
-    [evidence.as_str(), help, PICK]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    [evidence.as_str(), help, PICK].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 pub fn job(jobs: &[CatalogJob]) -> Option<CatalogJob> {
@@ -89,20 +71,13 @@ pub fn job(jobs: &[CatalogJob]) -> Option<CatalogJob> {
 
 /// Find related tries is offered unless a run is already queued or running.
 pub fn can_find(job: Option<&CatalogJob>) -> bool {
-    !matches!(
-        job.map(|job| job.state.as_str()),
-        Some("queued" | "running")
-    )
+    !matches!(job.map(|job| job.state.as_str()), Some("queued" | "running"))
 }
 
 /// True when the job has just finished a run, so the proposals should be read again.
 pub fn finished(previous: Option<&CatalogJob>, current: Option<&CatalogJob>) -> bool {
-    let Some(current) = current.filter(|job| job.state == "completed") else {
-        return false;
-    };
-    previous.is_none_or(|previous| {
-        previous.state != "completed" || previous.updated_at != current.updated_at
-    })
+    let Some(current) = current.filter(|job| job.state == "completed") else { return false };
+    previous.is_none_or(|previous| previous.state != "completed" || previous.updated_at != current.updated_at)
 }
 
 /// The job row shows while a run is pending, paused or stopped; a finished run hides it.
@@ -158,41 +133,20 @@ pub fn header(proposals: &[CatalogTakeAutoGroup]) -> String {
 }
 
 pub fn empty_text(job: Option<&CatalogJob>) -> &'static str {
-    if job.is_none() {
-        "Not looked yet. Find related tries to search the library."
-    } else {
-        "No related tries found yet."
-    }
+    if job.is_none() { "Not looked yet. Find related tries to search the library." } else { "No related tries found yet." }
 }
 
 pub fn spoken(group: &CatalogTakeAutoGroup, date: &str) -> String {
-    let relation = relation_label(group.relation.as_deref())
-        .map(|label| format!(", {label}"))
-        .unwrap_or_default();
-    let skipped = if model::is_open(group) {
-        ""
-    } else {
-        ", skipped"
-    };
+    let relation = relation_label(group.relation.as_deref()).map(|label| format!(", {label}")).unwrap_or_default();
+    let skipped = if model::is_open(group) { "" } else { ", skipped" };
     let evidence = evidence_text(group.evidence.as_deref());
-    let tail = if evidence.is_empty() {
-        String::new()
-    } else {
-        format!(". {evidence}")
-    };
-    format!(
-        "{}{relation}, {date}{skipped}{tail}",
-        model::group_title(group)
-    )
+    let tail = if evidence.is_empty() { String::new() } else { format!(". {evidence}") };
+    format!("{}{relation}, {date}{skipped}{tail}", model::group_title(group))
 }
 
 /// The members to put in a new group when the person saves a proposal: one per try.
 pub fn save_hits(group: &CatalogTakeAutoGroup) -> Vec<CatalogHit> {
-    let kind = if model::is_video(group) {
-        "video"
-    } else {
-        "image"
-    };
+    let kind = if model::is_video(group) { "video" } else { "image" };
     group
         .shots
         .iter()
@@ -235,18 +189,8 @@ mod tests {
             captured_at: 0.0,
             similarity: 0.9,
             shots: vec![
-                CatalogTakeShot {
-                    primary_file_id: 4,
-                    file_ids: vec![4, 5],
-                    path: "/p/a.JPG".into(),
-                    captured_at: None,
-                },
-                CatalogTakeShot {
-                    primary_file_id: 6,
-                    file_ids: vec![6],
-                    path: "/p/b.JPG".into(),
-                    captured_at: None,
-                },
+                CatalogTakeShot { primary_file_id: 4, file_ids: vec![4, 5], path: "/p/a.JPG".into(), captured_at: None },
+                CatalogTakeShot { primary_file_id: 6, file_ids: vec![6], path: "/p/b.JPG".into(), captured_at: None },
             ],
             relation: relation.map(str::to_owned),
             evidence: Some(vec!["captureSession".into(), "simultaneousCameras".into()]),
@@ -255,10 +199,7 @@ mod tests {
 
     #[test]
     fn relation_chips_and_evidence_text() {
-        assert_eq!(
-            relation_label(Some("repeatedAttempts")),
-            Some("Repeated tries")
-        );
+        assert_eq!(relation_label(Some("repeatedAttempts")), Some("Repeated tries"));
         assert_eq!(relation_label(Some("alternateViews")), Some("Other angles"));
         assert_eq!(relation_label(Some("uncertain")), Some("Not sure"));
         assert_eq!(relation_label(None), None);
@@ -269,24 +210,11 @@ mod tests {
         for relation in ["repeatedAttempts", "alternateViews", "uncertain"] {
             assert!(relation_help(Some(relation)).is_some());
         }
-        for code in [
-            "captureSession",
-            "visualSimilarity",
-            "sharedSubject",
-            "sameCamera",
-            "simultaneousCameras",
-            "mixedCameras",
-            "cameraDetailsMissing",
-        ] {
+        for code in ["captureSession", "visualSimilarity", "sharedSubject", "sameCamera", "simultaneousCameras", "mixedCameras", "cameraDetailsMissing"] {
             assert!(evidence_sentence(code).is_some());
         }
-        let codes: Vec<String> = ["captureSession", "visualSimilarity", "future", "sameCamera"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(
-            evidence_text(Some(&codes)),
-            "Taken close together. They look alike. One camera took them all."
-        );
+        let codes: Vec<String> = ["captureSession", "visualSimilarity", "future", "sameCamera"].map(String::from).to_vec();
+        assert_eq!(evidence_text(Some(&codes)), "Taken close together. They look alike. One camera took them all.");
         assert_eq!(evidence_text(None), "");
         let mut plain = group("k", "open", None);
         plain.evidence = None;
@@ -297,74 +225,28 @@ mod tests {
 
     #[test]
     fn job_controls_pushes_and_reload() {
-        let timeline = CatalogJob {
-            kind: "timelineSample".into(),
-            id: "t".into(),
-            ..job_in("running", 0.0)
-        };
-        assert_eq!(
-            job(&[timeline.clone(), job_in("paused", 1.0)]).map(|j| j.state),
-            Some("paused".to_owned())
-        );
-        assert!(
-            can_find(None)
-                && can_find(Some(&job_in("paused", 1.0)))
-                && can_find(Some(&job_in("completed", 1.0)))
-        );
-        assert!(
-            !can_find(Some(&job_in("queued", 1.0))) && !can_find(Some(&job_in("running", 1.0)))
-        );
-        assert!(finished(
-            Some(&job_in("running", 1.0)),
-            Some(&job_in("completed", 1.0))
-        ));
+        let timeline = CatalogJob { kind: "timelineSample".into(), id: "t".into(), ..job_in("running", 0.0) };
+        assert_eq!(job(&[timeline.clone(), job_in("paused", 1.0)]).map(|j| j.state), Some("paused".to_owned()));
+        assert!(can_find(None) && can_find(Some(&job_in("paused", 1.0))) && can_find(Some(&job_in("completed", 1.0))));
+        assert!(!can_find(Some(&job_in("queued", 1.0))) && !can_find(Some(&job_in("running", 1.0))));
+        assert!(finished(Some(&job_in("running", 1.0)), Some(&job_in("completed", 1.0))));
         assert!(finished(None, Some(&job_in("completed", 1.0))));
-        assert!(finished(
-            Some(&job_in("completed", 1.0)),
-            Some(&job_in("completed", 2.0))
-        ));
-        assert!(!finished(
-            Some(&job_in("completed", 1.0)),
-            Some(&job_in("completed", 1.0))
-        ));
-        assert!(!finished(
-            Some(&job_in("queued", 1.0)),
-            Some(&job_in("running", 1.0))
-        ));
-        assert!(
-            !show_job(None)
-                && !show_job(Some(&job_in("completed", 1.0)))
-                && show_job(Some(&job_in("paused", 1.0)))
-        );
-        let names = |state: &str| {
-            controls(&job_in(state, 1.0))
-                .into_iter()
-                .map(|(_, name)| name)
-                .collect::<Vec<_>>()
-        };
+        assert!(finished(Some(&job_in("completed", 1.0)), Some(&job_in("completed", 2.0))));
+        assert!(!finished(Some(&job_in("completed", 1.0)), Some(&job_in("completed", 1.0))));
+        assert!(!finished(Some(&job_in("queued", 1.0)), Some(&job_in("running", 1.0))));
+        assert!(!show_job(None) && !show_job(Some(&job_in("completed", 1.0))) && show_job(Some(&job_in("paused", 1.0))));
+        let names = |state: &str| controls(&job_in(state, 1.0)).into_iter().map(|(_, name)| name).collect::<Vec<_>>();
         assert_eq!(names("running"), ["Pause", "Cancel"]);
         assert_eq!(names("paused"), ["Resume", "Cancel"]);
         assert_eq!(names("failed"), ["Retry"]);
         assert!(names("completed").is_empty());
-        assert_eq!(
-            control_request("enqueueTakeGrouping", &job_in("failed", 1.0)).action,
-            "enqueueTakeGrouping"
-        );
+        assert_eq!(control_request("enqueueTakeGrouping", &job_in("failed", 1.0)).action, "enqueueTakeGrouping");
         let resume = control_request("resumeJob", &job_in("paused", 1.0));
-        assert_eq!(
-            (resume.action.as_str(), resume.job_id.as_deref()),
-            ("resumeJob", Some(JOB_ID))
-        );
+        assert_eq!((resume.action.as_str(), resume.job_id.as_deref()), ("resumeJob", Some(JOB_ID)));
         let read = proposals_request();
-        assert_eq!(
-            (read.action.as_str(), read.limit),
-            ("takeGroupProposals", Some(100))
-        );
+        assert_eq!((read.action.as_str(), read.limit), ("takeGroupProposals", Some(100)));
         assert_eq!(enqueue_request().action, "enqueueTakeGrouping");
-        assert_eq!(
-            empty_text(None),
-            "Not looked yet. Find related tries to search the library."
-        );
+        assert_eq!(empty_text(None), "Not looked yet. Find related tries to search the library.");
     }
 
     #[test]
@@ -373,10 +255,7 @@ mod tests {
             spoken(&group("k", "skipped", Some("alternateViews")), "Sat 4 Jul"),
             "2 photos, Other angles, Sat 4 Jul, skipped. Taken close together. Different cameras took them at the same moment."
         );
-        assert_eq!(
-            header(&[group("a", "open", None), group("b", "skipped", None)]),
-            "RELATED TRIES · 1"
-        );
+        assert_eq!(header(&[group("a", "open", None), group("b", "skipped", None)]), "RELATED TRIES · 1");
         let hits = save_hits(&group("k", "open", None));
         assert_eq!(hits.iter().map(|h| h.file_id).collect::<Vec<_>>(), [4, 6]);
         assert!(hits.iter().all(|h| h.kind == "image"));

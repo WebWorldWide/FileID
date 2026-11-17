@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::shell::status::Tone;
-use crate::spring::{Spring, animate_with};
+use crate::spring::{animate_with, Spring};
 
 fn classed<W: IsA<gtk::Widget>>(widget: W, classes: &[&str]) -> W {
     for class in classes {
@@ -223,11 +223,7 @@ pub fn timer_wanted(mapped: bool, suspended: bool) -> bool {
 /// Runs `tick` every `interval`, but only while `widget` is on screen in a
 /// window that is not suspended. The timer is removed, not just skipped, the
 /// rest of the time, so a hidden page or a minimised window wakes nothing.
-pub fn while_on_screen(
-    widget: &impl IsA<gtk::Widget>,
-    interval: std::time::Duration,
-    tick: impl Fn() + 'static,
-) {
+pub fn while_on_screen(widget: &impl IsA<gtk::Widget>, interval: std::time::Duration, tick: impl Fn() + 'static) {
     use std::cell::RefCell;
     use std::rc::Rc;
     struct State {
@@ -237,11 +233,7 @@ pub fn while_on_screen(
         interval: std::time::Duration,
     }
     fn sync(state: &Rc<State>, widget: &gtk::Widget) {
-        let suspended = state
-            .window
-            .borrow()
-            .as_ref()
-            .is_some_and(|(window, _)| window.is_suspended());
+        let suspended = state.window.borrow().as_ref().is_some_and(|(window, _)| window.is_suspended());
         if !timer_wanted(widget.is_mapped(), suspended) {
             if let Some(timer) = state.timer.take() {
                 timer.remove();
@@ -274,9 +266,7 @@ pub fn while_on_screen(
             if let Some(window) = widget.root().and_downcast::<gtk::Window>() {
                 let (state_weak, widget_weak) = (Rc::downgrade(&state), widget.downgrade());
                 let handler = window.connect_suspended_notify(move |_| {
-                    if let (Some(state), Some(widget)) =
-                        (state_weak.upgrade(), widget_weak.upgrade())
-                    {
+                    if let (Some(state), Some(widget)) = (state_weak.upgrade(), widget_weak.upgrade()) {
                         sync(&state, &widget);
                     }
                 });

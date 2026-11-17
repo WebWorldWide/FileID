@@ -49,27 +49,9 @@ struct Blob {
 
 /// Speeds, drifts and alphas match the macOS + Windows recipe 1:1.
 const BLOBS: [Blob; 3] = [
-    Blob {
-        colour: crate::theme::rgb::GOLD,
-        speed: (0.20, 0.23),
-        drift: (0.30, 0.30),
-        radius: 0.46,
-        alpha: 0.44,
-    },
-    Blob {
-        colour: crate::theme::rgb::ORANGE,
-        speed: (0.15, 0.18),
-        drift: (0.40, 0.40),
-        radius: 0.38,
-        alpha: 0.34,
-    },
-    Blob {
-        colour: crate::theme::rgb::DARK,
-        speed: (0.10, 0.12),
-        drift: (0.20, 0.20),
-        radius: 0.50,
-        alpha: 0.35,
-    },
+    Blob { colour: crate::theme::rgb::GOLD, speed: (0.20, 0.23), drift: (0.30, 0.30), radius: 0.46, alpha: 0.44 },
+    Blob { colour: crate::theme::rgb::ORANGE, speed: (0.15, 0.18), drift: (0.40, 0.40), radius: 0.38, alpha: 0.34 },
+    Blob { colour: crate::theme::rgb::DARK, speed: (0.10, 0.12), drift: (0.20, 0.20), radius: 0.50, alpha: 0.35 },
 ];
 
 /// Centre and radius of blob `index` at lamp time `t` in a `w`×`h` window.
@@ -155,10 +137,7 @@ mod imp {
             }
             let bounds = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
             let (r, g, b) = crate::theme::rgb::BASE;
-            snapshot.append_color(
-                &gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0),
-                &bounds,
-            );
+            snapshot.append_color(&gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0), &bounds);
             if !is_enabled() {
                 return;
             }
@@ -167,10 +146,7 @@ mod imp {
                 let (cx, cy, radius) = blob_frame(index, t, w, h);
                 let (r, g, b) = blob.colour;
                 let stop = |offset: f32, alpha: f64| {
-                    gtk::gsk::ColorStop::new(
-                        offset,
-                        gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, alpha as f32),
-                    )
+                    gtk::gsk::ColorStop::new(offset, gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, alpha as f32))
                 };
                 snapshot.append_radial_gradient(
                     &bounds,
@@ -179,11 +155,7 @@ mod imp {
                     radius as f32,
                     0.0,
                     1.0,
-                    &[
-                        stop(0.0, blob.alpha),
-                        stop(0.55, blob.alpha * 0.35),
-                        stop(1.0, 0.0),
-                    ],
+                    &[stop(0.0, blob.alpha), stop(0.55, blob.alpha * 0.35), stop(1.0, 0.0)],
                 );
             }
         }
@@ -199,8 +171,7 @@ impl LavaLamp {
         let window = self.root().and_downcast::<gtk::Window>();
         Conditions {
             enabled: is_enabled(),
-            animations: gtk::Settings::default()
-                .is_none_or(|settings| settings.is_gtk_enable_animations()),
+            animations: gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations()),
             high_contrast: crate::theme::high_contrast(),
             mapped: self.is_mapped(),
             active: window.as_ref().is_none_or(|window| window.is_active()),
@@ -226,13 +197,8 @@ impl LavaLamp {
         let id = self.add_tick_callback(|lamp, clock| {
             let imp = lamp.imp();
             let now = clock.frame_time();
-            if imp
-                .last_frame
-                .get()
-                .is_none_or(|last| now - last >= FRAME_MICROS)
-            {
-                imp.time
-                    .set(advance(imp.time.get(), imp.last_frame.get(), now));
+            if imp.last_frame.get().is_none_or(|last| now - last >= FRAME_MICROS) {
+                imp.time.set(advance(imp.time.get(), imp.last_frame.get(), now));
                 imp.last_frame.set(Some(now));
                 lamp.queue_draw();
             }
@@ -249,9 +215,7 @@ impl LavaLamp {
 
     fn watch_window(&self) {
         self.unwatch_window();
-        let Some(window) = self.root().and_downcast::<gtk::Window>() else {
-            return;
-        };
+        let Some(window) = self.root().and_downcast::<gtk::Window>() else { return };
         let weak = self.downgrade();
         let on_change = move || {
             if let Some(lamp) = weak.upgrade() {
@@ -312,43 +276,19 @@ pub fn reduce_motion() -> bool {
 mod tests {
     use super::*;
 
-    const VISIBLE: Conditions = Conditions {
-        enabled: true,
-        animations: true,
-        high_contrast: false,
-        mapped: true,
-        active: true,
-        suspended: false,
-    };
+    const VISIBLE: Conditions =
+        Conditions { enabled: true, animations: true, high_contrast: false, mapped: true, active: true, suspended: false };
 
     #[test]
     fn the_lamp_moves_only_when_it_can_be_seen_moving() {
         assert!(should_animate(VISIBLE));
         for still in [
-            Conditions {
-                enabled: false,
-                ..VISIBLE
-            },
-            Conditions {
-                animations: false,
-                ..VISIBLE
-            },
-            Conditions {
-                high_contrast: true,
-                ..VISIBLE
-            },
-            Conditions {
-                mapped: false,
-                ..VISIBLE
-            },
-            Conditions {
-                active: false,
-                ..VISIBLE
-            },
-            Conditions {
-                suspended: true,
-                ..VISIBLE
-            },
+            Conditions { enabled: false, ..VISIBLE },
+            Conditions { animations: false, ..VISIBLE },
+            Conditions { high_contrast: true, ..VISIBLE },
+            Conditions { mapped: false, ..VISIBLE },
+            Conditions { active: false, ..VISIBLE },
+            Conditions { suspended: true, ..VISIBLE },
         ] {
             assert!(!should_animate(still));
         }
@@ -368,8 +308,7 @@ mod tests {
         assert!((cx - 500.0).abs() < 1e-9);
         assert!((cy - (250.0 + 500.0 * 0.30)).abs() < 1e-9);
         assert!((radius - 460.0).abs() < 1e-9);
-        let (alphas, radii): (Vec<f64>, Vec<f64>) =
-            BLOBS.iter().map(|blob| (blob.alpha, blob.radius)).unzip();
+        let (alphas, radii): (Vec<f64>, Vec<f64>) = BLOBS.iter().map(|blob| (blob.alpha, blob.radius)).unzip();
         assert_eq!(alphas, [0.44, 0.34, 0.35]);
         assert_eq!(radii, [0.46, 0.38, 0.50]);
         for index in 0..3 {

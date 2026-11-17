@@ -119,10 +119,7 @@ impl<T> Default for BuiltPages<T> {
 
 impl<T> BuiltPages<T> {
     fn get(&self, id: &str) -> Option<&T> {
-        self.items
-            .iter()
-            .find(|(built, _)| *built == id)
-            .map(|(_, item)| item)
+        self.items.iter().find(|(built, _)| *built == id).map(|(_, item)| item)
     }
 
     fn insert(&mut self, id: &'static str, item: T) {
@@ -130,6 +127,7 @@ impl<T> BuiltPages<T> {
             self.items.push((id, item));
         }
     }
+
 }
 
 /// The page, built first when it is not there yet. `build` runs with nothing
@@ -149,9 +147,7 @@ fn ensure_built<T: Clone>(
 
 /// The page the window opens on: the remembered one, else Library.
 fn launch_page(remembered: Option<&str>) -> &'static str {
-    remembered
-        .and_then(shell::page)
-        .map_or("library", |page| page.id)
+    remembered.and_then(shell::page).map_or("library", |page| page.id)
 }
 
 fn build_page(id: &str, engine: &Rc<RefCell<EngineClient>>) -> Option<gtk::Widget> {
@@ -175,21 +171,12 @@ fn build_page(id: &str, engine: &Rc<RefCell<EngineClient>>) -> Option<gtk::Widge
 const PROGRESS_REFRESH: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long a progress repaint waits so repaints stay `interval` apart.
-fn throttle_wait(
-    since_last: Option<std::time::Duration>,
-    interval: std::time::Duration,
-) -> std::time::Duration {
-    since_last.map_or(std::time::Duration::ZERO, |elapsed| {
-        interval.saturating_sub(elapsed)
-    })
+fn throttle_wait(since_last: Option<std::time::Duration>, interval: std::time::Duration) -> std::time::Duration {
+    since_last.map_or(std::time::Duration::ZERO, |elapsed| interval.saturating_sub(elapsed))
 }
 
 fn detail_page(has_folder: bool, total_files: u64, settings_requested: bool) -> &'static str {
-    if !has_folder && total_files == 0 && !settings_requested {
-        "first-run"
-    } else {
-        "pages"
-    }
+    if !has_folder && total_files == 0 && !settings_requested { "first-run" } else { "pages" }
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -241,7 +228,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     content.add_css_class("fileid-pages");
     content.append(&stack);
     content.append(&inspector);
-    let detail = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    let detail = gtk::Stack::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .build();
     detail.add_named(&first_run(&act), Some("first-run"));
     detail.add_named(&content, Some("pages"));
     split.set_content(Some(&detail));
@@ -386,12 +376,9 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
             .ok()
             .and_then(|ms| ms.trim().parse::<u64>().ok())
             .unwrap_or(2200);
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(delay + settle),
-            move || {
-                self_capture(&window, &path, 6);
-            },
-        );
+        glib::timeout_add_local_once(std::time::Duration::from_millis(delay + settle), move || {
+            self_capture(&window, &path, 6);
+        });
     }
     // Dev-only: `FILEID_SELF_SCAN=<folder>` starts a scan as soon as the engine is ready.
     if let Some(folder) = std::env::var_os("FILEID_SELF_SCAN") {
@@ -489,8 +476,7 @@ impl Shell {
                     self.build_inspector();
                 }
                 self.inspector.set_reveal_child(open);
-                self.title_bar
-                    .set_chat_state(open, self.current.get() == "chat");
+                self.title_bar.set_chat_state(open, self.current.get() == "chat");
             }
             Action::DismissNote => self.set_note(None),
             Action::ChooseScope(root_id) => crate::tabs::library_scope::choose(root_id),
@@ -513,17 +499,17 @@ impl Shell {
         if page.id == "chat" {
             self.inspector.set_reveal_child(false);
         }
-        self.title_bar
-            .set_chat_state(self.inspector.reveals_child(), page.id == "chat");
+        self.title_bar.set_chat_state(self.inspector.reveals_child(), page.id == "chat");
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false);
         }
-        if changed && let Some(child) = self.stack.visible_child() {
-            let target = child.clone();
-            let _ = crate::spring::animate(&child, 0.0, 1.0, move |v| {
-                target.set_opacity(v.clamp(0.0, 1.0))
-            });
-        }
+        if changed
+            && let Some(child) = self.stack.visible_child() {
+                let target = child.clone();
+                let _ = crate::spring::animate(&child, 0.0, 1.0, move |v| {
+                    target.set_opacity(v.clamp(0.0, 1.0))
+                });
+            }
     }
 
     /// The page's content, built first if this is the first time it is needed.
@@ -556,10 +542,7 @@ impl Shell {
         }
         let act = self.act.clone();
         self.engine.borrow_mut().replay_to_new_subscribers(true);
-        let chat = crate::tabs::chat::inspector(
-            self.engine.clone(),
-            Rc::new(move || act(Action::ToggleChat)),
-        );
+        let chat = crate::tabs::chat::inspector(self.engine.clone(), Rc::new(move || act(Action::ToggleChat)));
         self.engine.borrow_mut().replay_to_new_subscribers(false);
         self.inspector.set_child(Some(&chat));
     }
@@ -567,9 +550,7 @@ impl Shell {
     /// A local desktop notification (GNOME/KDE notification daemon over
     /// D-Bus); nothing leaves the machine.
     fn notify_scan_complete(&self, processed: u64) {
-        let Some(app) = self.window.application() else {
-            return;
-        };
+        let Some(app) = self.window.application() else { return };
         let notification = gtk::gio::Notification::new("Scan complete");
         notification.set_body(Some(&scan_complete_body(processed)));
         notification.set_default_action("app.raise");
@@ -693,9 +674,7 @@ impl Shell {
     fn confirm_wipe(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
             Some("Start over with this folder?"),
-            Some(
-                "Forgets everything FileID learned about this folder (tags, descriptions, people and search data), then scans it again from the start. Your files are not changed.",
-            ),
+            Some("Forgets everything FileID learned about this folder (tags, descriptions, people and search data), then scans it again from the start. Your files are not changed."),
         );
         dialog.add_responses(&[("cancel", "Cancel"), ("wipe", "Start over")]);
         dialog.set_response_appearance("wipe", adw::ResponseAppearance::Destructive);
@@ -752,10 +731,7 @@ impl Shell {
         if self.refresh_pending.get() {
             return;
         }
-        let wait = throttle_wait(
-            self.last_refresh.get().map(|at| at.elapsed()),
-            PROGRESS_REFRESH,
-        );
+        let wait = throttle_wait(self.last_refresh.get().map(|at| at.elapsed()), PROGRESS_REFRESH);
         if wait.is_zero() {
             self.refresh();
             return;
@@ -780,11 +756,7 @@ impl Shell {
             .map(|path| path.to_string_lossy().into_owned());
         self.title_bar.update(&status, path.as_deref());
         self.sidebar.update(&status);
-        let page = detail_page(
-            status.folder.is_some(),
-            status.total_files,
-            self.settings_requested.get(),
-        );
+        let page = detail_page(status.folder.is_some(), status.total_files, self.settings_requested.get());
         crate::motion::show_child(&self.detail, page);
         for (id, built) in &self.pages.borrow().items {
             built.header.set_meta(&status.page_meta(id));
@@ -803,9 +775,7 @@ impl Shell {
         }
         let progress_only = matches!(
             state,
-            EngineState::Progress(_)
-                | EngineState::DeepAnalyzeProgress(_)
-                | EngineState::BatchLanded(_)
+            EngineState::Progress(_) | EngineState::DeepAnalyzeProgress(_) | EngineState::BatchLanded(_)
         );
         {
             let mut status = self.status.borrow_mut();
@@ -907,11 +877,7 @@ impl Shell {
                     }
                     if !(model_kind.is_some() && kind == "prewarm_cancelled") {
                         note = Some(Some(crate::engine_errors::sentence(kind, message)));
-                        note_detail = Some(crate::engine_errors::detail(
-                            kind,
-                            message,
-                            model_kind.as_deref(),
-                        ));
+                        note_detail = Some(crate::engine_errors::detail(kind, message, model_kind.as_deref()));
                     }
                 }
                 EngineState::Failed(message) => {
@@ -939,8 +905,7 @@ impl Shell {
             self.notify_scan_complete(processed);
         }
         if let Some(note) = note {
-            self.sidebar
-                .set_note_detail(note.as_deref(), note_detail.as_deref());
+            self.sidebar.set_note_detail(note.as_deref(), note_detail.as_deref());
             self.note.replace(note);
         }
         if blocked {
@@ -971,15 +936,13 @@ fn clear_running(status: &mut Status) {
 
 fn find_editable(root: &gtk::Widget, placeholder: &str) -> Option<gtk::Editable> {
     if let Some(entry) = root.downcast_ref::<gtk::Entry>()
-        && entry.placeholder_text().as_deref() == Some(placeholder)
-    {
-        return Some(entry.clone().upcast());
-    }
+        && entry.placeholder_text().as_deref() == Some(placeholder) {
+            return Some(entry.clone().upcast());
+        }
     if let Some(entry) = root.downcast_ref::<gtk::SearchEntry>()
-        && entry.placeholder_text().as_deref() == Some(placeholder)
-    {
-        return Some(entry.clone().upcast());
-    }
+        && entry.placeholder_text().as_deref() == Some(placeholder) {
+            return Some(entry.clone().upcast());
+        }
     let mut child = root.first_child();
     while let Some(widget) = child {
         if let Some(found) = find_editable(&widget, placeholder) {
@@ -992,10 +955,7 @@ fn find_editable(root: &gtk::Widget, placeholder: &str) -> Option<gtk::Editable>
 
 /// Keys that also edit text must stay with a focused entry or text view.
 fn needs_text_guard(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::SelectAll | Action::TrashSelected | Action::Undo
-    )
+    matches!(action, Action::SelectAll | Action::TrashSelected | Action::Undo)
 }
 
 fn text_has_focus(window: &adw::ApplicationWindow) -> bool {
@@ -1054,11 +1014,7 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
         let guarded = needs_text_guard(&action);
         let window = window.downgrade();
         let callback = gtk::CallbackAction::new(move |_, _| {
-            if guarded
-                && window
-                    .upgrade()
-                    .is_some_and(|window| text_has_focus(&window))
-            {
+            if guarded && window.upgrade().is_some_and(|window| text_has_focus(&window)) {
                 return glib::Propagation::Proceed;
             }
             act(action.clone());
@@ -1105,10 +1061,7 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
         let action = gtk::gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
         let act = act.clone();
         action.connect_activate(move |_, parameter| {
-            if let Some(text) = parameter
-                .and_then(|value| value.str())
-                .filter(|text| !text.is_empty())
-            {
+            if let Some(text) = parameter.and_then(|value| value.str()).filter(|text| !text.is_empty()) {
                 act(make(text.to_owned()));
             }
         });
@@ -1313,14 +1266,8 @@ mod shortcut_tests {
         use std::time::Duration;
         let interval = Duration::from_millis(200);
         assert_eq!(throttle_wait(None, interval), Duration::ZERO);
-        assert_eq!(
-            throttle_wait(Some(Duration::from_millis(50)), interval),
-            Duration::from_millis(150)
-        );
-        assert_eq!(
-            throttle_wait(Some(Duration::from_millis(900)), interval),
-            Duration::ZERO
-        );
+        assert_eq!(throttle_wait(Some(Duration::from_millis(50)), interval), Duration::from_millis(150));
+        assert_eq!(throttle_wait(Some(Duration::from_millis(900)), interval), Duration::ZERO);
     }
 
     #[test]
@@ -1336,12 +1283,7 @@ mod shortcut_tests {
         for action in [Action::SelectAll, Action::TrashSelected, Action::Undo] {
             assert!(needs_text_guard(&action));
         }
-        for action in [
-            Action::FocusSearch,
-            Action::FocusLibrarySearch,
-            Action::ToggleSidebar,
-            Action::Navigate("library"),
-        ] {
+        for action in [Action::FocusSearch, Action::FocusLibrarySearch, Action::ToggleSidebar, Action::Navigate("library")] {
             assert!(!needs_text_guard(&action));
         }
     }

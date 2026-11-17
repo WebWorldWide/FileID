@@ -42,13 +42,7 @@ impl Source {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|since| since.as_nanos())
             .unwrap_or(0);
-        Some(Self {
-            path: path.to_string_lossy().into_owned(),
-            size: meta.len(),
-            modified_nanos,
-            dim,
-            video,
-        })
+        Some(Self { path: path.to_string_lossy().into_owned(), size: meta.len(), modified_nanos, dim, video })
     }
 
     /// Two independent 64-bit FNV-1a passes: a stable name across runs and
@@ -58,18 +52,12 @@ impl Source {
             "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
             self.path, self.size, self.modified_nanos, self.dim, self.video
         );
-        format!(
-            "{:016x}{:016x}",
-            fnv1a(text.as_bytes(), 0xcbf2_9ce4_8422_2325),
-            fnv1a(text.as_bytes(), 0x8422_2325_cbf2_9ce4)
-        )
+        format!("{:016x}{:016x}", fnv1a(text.as_bytes(), 0xcbf2_9ce4_8422_2325), fnv1a(text.as_bytes(), 0x8422_2325_cbf2_9ce4))
     }
 }
 
 fn fnv1a(bytes: &[u8], seed: u64) -> u64 {
-    bytes.iter().fold(seed, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+    bytes.iter().fold(seed, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
 #[cfg(not(test))]
@@ -95,9 +83,7 @@ pub fn get_or_render(
         .then(default_dir)
         .flatten()
         .and_then(|dir| Some((dir, Source::of(path, dim, video)?)));
-    let Some((dir, source)) = cached else {
-        return render();
-    };
+    let Some((dir, source)) = cached else { return render() };
     if let Some(hit) = load(&dir, &source) {
         return Some(hit);
     }
@@ -145,10 +131,7 @@ fn decode(file: &Path) -> Option<DecodedImage> {
     if pixbuf.colorspace() != Colorspace::Rgb || pixbuf.bits_per_sample() != 8 {
         return None;
     }
-    let (width, height) = (
-        usize::try_from(pixbuf.width()).ok()?,
-        usize::try_from(pixbuf.height()).ok()?,
-    );
+    let (width, height) = (usize::try_from(pixbuf.width()).ok()?, usize::try_from(pixbuf.height()).ok()?);
     let channels = usize::try_from(pixbuf.n_channels()).ok()?;
     let stride = usize::try_from(pixbuf.rowstride()).ok()?;
     if width == 0 || height == 0 || !(channels == 3 || channels == 4) {
@@ -166,53 +149,23 @@ fn decode(file: &Path) -> Option<DecodedImage> {
             }
         }
     }
-    Some(DecodedImage {
-        width: width as u32,
-        height: height as u32,
-        rgba,
-    })
+    Some(DecodedImage { width: width as u32, height: height as u32, rgba })
 }
 
 /// Opaque images are stored as JPEG, anything with transparency as PNG.
 /// Returns the bytes written.
 pub(crate) fn store(dir: &Path, source: &Source, image: &DecodedImage) -> Option<u64> {
-    let (width, height) = (
-        i32::try_from(image.width).ok()?,
-        i32::try_from(image.height).ok()?,
-    );
-    let pixels = usize::try_from(image.width)
-        .ok()?
-        .checked_mul(usize::try_from(image.height).ok()?)?;
+    let (width, height) = (i32::try_from(image.width).ok()?, i32::try_from(image.height).ok()?);
+    let pixels = usize::try_from(image.width).ok()?.checked_mul(usize::try_from(image.height).ok()?)?;
     if pixels == 0 || image.rgba.len() != pixels.checked_mul(4)? {
         return None;
     }
-    let opaque = image
-        .rgba
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .all(|pixel| pixel[3] == 255);
+    let opaque = image.rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255);
     let (extension, encoded) = if opaque {
-        let rgb: Vec<u8> = image
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
-            .collect();
-        let pixbuf = Pixbuf::from_bytes(
-            &glib::Bytes::from_owned(rgb),
-            Colorspace::Rgb,
-            false,
-            8,
-            width,
-            height,
-            width * 3,
-        );
-        (
-            "jpg",
-            pixbuf.save_to_bufferv("jpeg", &[("quality", "86")]).ok()?,
-        )
+        let rgb: Vec<u8> = image.rgba.as_chunks::<4>().0.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+        let pixbuf =
+            Pixbuf::from_bytes(&glib::Bytes::from_owned(rgb), Colorspace::Rgb, false, 8, width, height, width * 3);
+        ("jpg", pixbuf.save_to_bufferv("jpeg", &[("quality", "86")]).ok()?)
     } else {
         let pixbuf = Pixbuf::from_bytes(
             &glib::Bytes::from(image.rgba.as_slice()),
@@ -223,20 +176,11 @@ pub(crate) fn store(dir: &Path, source: &Source, image: &DecodedImage) -> Option
             height,
             width * 4,
         );
-        (
-            "png",
-            pixbuf
-                .save_to_bufferv("png", &[("compression", "3")])
-                .ok()?,
-        )
+        ("png", pixbuf.save_to_bufferv("png", &[("compression", "3")]).ok()?)
     };
     std::fs::create_dir_all(dir).ok()?;
     let file = entry_path(dir, source, extension);
-    let partial = dir.join(format!(
-        "{}.{}.part",
-        source.file_stem(),
-        std::process::id()
-    ));
+    let partial = dir.join(format!("{}.{}.part", source.file_stem(), std::process::id()));
     if std::fs::write(&partial, &encoded).is_err() || std::fs::rename(&partial, &file).is_err() {
         let _ = std::fs::remove_file(&partial);
         return None;
@@ -259,11 +203,7 @@ pub(crate) fn trim_plan(mut entries: Vec<Entry>, cap: u64) -> Vec<String> {
         return Vec::new();
     }
     let target = cap / 10 * 9;
-    entries.sort_by(|a, b| {
-        a.modified
-            .cmp(&b.modified)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    entries.sort_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.name.cmp(&b.name)));
     let mut doomed = Vec::new();
     for entry in entries {
         if total <= target {
@@ -276,9 +216,7 @@ pub(crate) fn trim_plan(mut entries: Vec<Entry>, cap: u64) -> Vec<String> {
 }
 
 pub(crate) fn trim(dir: &Path, cap: u64) {
-    let Ok(listing) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let Ok(listing) = std::fs::read_dir(dir) else { return };
     let mut entries = Vec::new();
     for item in listing.flatten() {
         let name = item.file_name().to_string_lossy().into_owned();
@@ -288,11 +226,7 @@ pub(crate) fn trim(dir: &Path, cap: u64) {
         }
         if name.ends_with(".part") {
             // A write that never finished (the app was closed mid-store).
-            let stale = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.elapsed().ok())
-                .is_some_and(|age| age.as_secs() > 600);
+            let stale = meta.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age.as_secs() > 600);
             if stale {
                 let _ = std::fs::remove_file(item.path());
             }
@@ -301,11 +235,7 @@ pub(crate) fn trim(dir: &Path, cap: u64) {
         if !(name.ends_with(".jpg") || name.ends_with(".png")) {
             continue;
         }
-        entries.push(Entry {
-            name,
-            bytes: meta.len(),
-            modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        });
+        entries.push(Entry { name, bytes: meta.len(), modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH) });
     }
     for name in trim_plan(entries, cap) {
         let _ = std::fs::remove_file(dir.join(name));
@@ -318,21 +248,14 @@ mod tests {
     use std::time::Duration;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("fileid-thumb-cache-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fileid-thumb-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn source(path: &str, size: u64, modified_nanos: u128, dim: i32) -> Source {
-        Source {
-            path: path.into(),
-            size,
-            modified_nanos,
-            dim,
-            video: false,
-        }
+        Source { path: path.into(), size, modified_nanos, dim, video: false }
     }
 
     fn entry(name: &str, bytes: u64, age_secs: u64) -> Entry {
@@ -352,25 +275,16 @@ mod tests {
             source("/photos/a.jpg", 11, 5, 256),
             source("/photos/a.jpg", 10, 6, 256),
             source("/photos/a.jpg", 10, 5, 512),
-            Source {
-                video: true,
-                ..base.clone()
-            },
+            Source { video: true, ..base.clone() },
         ]
         .iter()
         .map(Source::file_stem)
         .collect();
         for (index, stem) in stems.iter().enumerate() {
             assert_eq!(stem.len(), 32);
-            assert!(
-                stems[index + 1..].iter().all(|other| other != stem),
-                "key {index} collides"
-            );
+            assert!(stems[index + 1..].iter().all(|other| other != stem), "key {index} collides");
         }
-        assert_eq!(
-            base.file_stem(),
-            source("/photos/a.jpg", 10, 5, 256).file_stem()
-        );
+        assert_eq!(base.file_stem(), source("/photos/a.jpg", 10, 5, 256).file_stem());
     }
 
     #[test]
@@ -381,12 +295,7 @@ mod tests {
 
     #[test]
     fn an_oversized_cache_loses_its_oldest_files_down_to_nine_tenths() {
-        let entries = vec![
-            entry("newest", 40, 1),
-            entry("oldest", 40, 9),
-            entry("middle", 40, 5),
-            entry("old", 40, 7),
-        ];
+        let entries = vec![entry("newest", 40, 1), entry("oldest", 40, 9), entry("middle", 40, 5), entry("old", 40, 7)];
         assert_eq!(trim_plan(entries.clone(), 100), ["oldest", "old"]);
         assert_eq!(trim_plan(entries, 150), ["oldest"]);
         let tie = vec![entry("b", 60, 4), entry("a", 60, 4)];
@@ -400,12 +309,7 @@ mod tests {
             let file = dir.join(name);
             std::fs::write(&file, vec![0u8; 1000]).unwrap();
             let at = SystemTime::now() - Duration::from_secs(age);
-            std::fs::File::options()
-                .write(true)
-                .open(&file)
-                .unwrap()
-                .set_modified(at)
-                .unwrap();
+            std::fs::File::options().write(true).open(&file).unwrap().set_modified(at).unwrap();
         }
         std::fs::write(dir.join("notes.txt"), vec![0u8; 5000]).unwrap();
         trim(&dir, 2500);
@@ -419,26 +323,13 @@ mod tests {
     #[test]
     fn a_stored_thumbnail_comes_back_with_its_size_and_alpha() {
         let dir = scratch("roundtrip");
-        let opaque = DecodedImage {
-            width: 8,
-            height: 4,
-            rgba: [200u8, 100, 50, 255].repeat(32),
-        };
+        let opaque = DecodedImage { width: 8, height: 4, rgba: [200u8, 100, 50, 255].repeat(32) };
         let key = source("/photos/a.jpg", 10, 5, 256);
         assert!(load(&dir, &key).is_none());
         assert!(store(&dir, &key, &opaque).is_some_and(|bytes| bytes > 0));
         let back = load(&dir, &key).expect("cached thumbnail");
-        assert_eq!(
-            (back.width, back.height, back.rgba.len()),
-            (8, 4, 8 * 4 * 4)
-        );
-        assert!(
-            back.rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|pixel| pixel[3] == 255 && pixel[0].abs_diff(200) < 12)
-        );
+        assert_eq!((back.width, back.height, back.rgba.len()), (8, 4, 8 * 4 * 4));
+        assert!(back.rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255 && pixel[0].abs_diff(200) < 12));
 
         let mut clear = opaque.clone();
         clear.rgba[3] = 0;
@@ -447,11 +338,7 @@ mod tests {
         assert_eq!(load(&dir, &clear_key).unwrap().rgba, clear.rgba);
         assert!(load(&dir, &source("/photos/a.jpg", 11, 5, 256)).is_none());
 
-        let bad = DecodedImage {
-            width: 8,
-            height: 4,
-            rgba: vec![0; 5],
-        };
+        let bad = DecodedImage { width: 8, height: 4, rgba: vec![0; 5] };
         assert!(store(&dir, &source("/photos/c.jpg", 1, 1, 256), &bad).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -6,11 +6,7 @@ fn exclusions_at(path: &Path) -> Result<Vec<PathBuf>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(error) => {
-            return Err(format!(
-                "Couldn't read the folders not to describe: {error}"
-            ));
-        }
+        Err(error) => return Err(format!("Couldn't read the folders not to describe: {error}")),
     };
     let map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&bytes).map_err(|_| {
@@ -22,9 +18,7 @@ fn exclusions_at(path: &Path) -> Result<Vec<PathBuf>, String> {
     let folders = value
         .as_array()
         .filter(|folders| folders.len() <= 256)
-        .ok_or(
-            "Couldn't read the folders not to describe: expected up to 256 full folder paths.",
-        )?;
+        .ok_or("Couldn't read the folders not to describe: expected up to 256 full folder paths.")?;
     folders
         .iter()
         .map(|value| {
@@ -47,14 +41,13 @@ fn check_explicit_target(
 ) -> Result<(), String> {
     let conn = fileid_engine::db::open_read(db).map_err(|error| error.to_string())?;
     let paths: Vec<String> = match payload {
-        CommandPayload::DeepAnalyzeFile(request) => vec![
-            conn.query_row(
+        CommandPayload::DeepAnalyzeFile(request) => vec![conn
+            .query_row(
                 "SELECT path_text FROM files WHERE id=?1",
                 [request.file_id],
                 |row| row.get(0),
             )
-            .map_err(|_| "Choose an existing indexed file ID.".to_owned())?,
-        ],
+            .map_err(|_| "Choose an existing indexed file ID.".to_owned())?],
         CommandPayload::DeepAnalyzeFolder(request) => {
             let folder = Path::new(&request.path_prefix)
                 .canonicalize()

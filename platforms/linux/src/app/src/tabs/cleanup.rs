@@ -28,22 +28,20 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
 
 use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
-use crate::engine_client::{EngineClient, EngineEvent, texture_from_decoded};
+use fileid_engine::util::display::file_size_i64;
+use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
     BulkActionItem, CommandPayload, ExactTrashIdentity, RestoreFromTrashPayload, TrashFilesPayload,
 };
-use fileid_engine::read::dupes::{
-    self, DEFAULT_SIMILAR_THRESHOLD, ExactCaps, MAX_SIMILAR_THRESHOLD,
-};
-use fileid_engine::util::display::file_size_i64;
+use fileid_engine::read::dupes::{self, ExactCaps, DEFAULT_SIMILAR_THRESHOLD, MAX_SIMILAR_THRESHOLD};
 
 /// Largest clusters first; cap the rendered groups like the reference.
 const MAX_GROUPS: usize = 200;
@@ -147,11 +145,7 @@ fn keepers_by_victim(groups: &[DupGroup], requested: &[i64]) -> HashMap<i64, Vec
         if keepers.is_empty() {
             continue;
         }
-        for member in group
-            .members
-            .iter()
-            .filter(|member| requested.contains(&member.id))
-        {
+        for member in group.members.iter().filter(|member| requested.contains(&member.id)) {
             map.insert(member.id, keepers.clone());
         }
     }
@@ -513,15 +507,13 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     }
     {
         let weak = Rc::downgrade(&this);
-        list_scroll
-            .vadjustment()
-            .connect_value_changed(move |adjustment| {
-                let Some(this) = weak.upgrade() else { return };
-                let remaining = adjustment.upper() - adjustment.page_size() - adjustment.value();
-                if remaining < LOAD_MORE_WITHIN_PX && this.more_groups.borrow().is_some() {
-                    this.append_groups(GROUPS_PER_PAGE);
-                }
-            });
+        list_scroll.vadjustment().connect_value_changed(move |adjustment| {
+            let Some(this) = weak.upgrade() else { return };
+            let remaining = adjustment.upper() - adjustment.page_size() - adjustment.value();
+            if remaining < LOAD_MORE_WITHIN_PX && this.more_groups.borrow().is_some() {
+                this.append_groups(GROUPS_PER_PAGE);
+            }
+        });
     }
     this.update_global_summary();
 
@@ -607,9 +599,8 @@ impl Cleanup {
         self.reload_pending.set(false);
         if self.groups.borrow().is_empty() {
             self.empty_page.set_title("Looking for extra copies…");
-            self.empty_page.set_description(Some(
-                "Reading the library and checking each file byte by byte.",
-            ));
+            self.empty_page
+                .set_description(Some("Reading the library and checking each file byte by byte."));
             self.empty_page.set_icon_name(Some("view-refresh-symbolic"));
             let spinner = gtk::Spinner::new();
             spinner.start();
@@ -751,10 +742,7 @@ impl Cleanup {
         }
         let groups = self.groups.borrow();
         let skipped = self.skipped.borrow();
-        let visible: Vec<&DupGroup> = groups
-            .iter()
-            .filter(|g| !skipped.contains(&g.key))
-            .collect();
+        let visible: Vec<&DupGroup> = groups.iter().filter(|g| !skipped.contains(&g.key)).collect();
         let start = self.shown_groups.get().min(visible.len());
         let end = start + next_page(start, visible.len(), count);
         for group in &visible[start..end] {
@@ -764,10 +752,7 @@ impl Cleanup {
         let remaining = visible.len() - end;
         if remaining > 0 {
             let button = gtk::Button::builder()
-                .label(format!(
-                    "Show {} more groups",
-                    next_page(end, visible.len(), GROUPS_PER_PAGE)
-                ))
+                .label(format!("Show {} more groups", next_page(end, visible.len(), GROUPS_PER_PAGE)))
                 .tooltip_text(format!("{remaining} more groups are waiting below"))
                 .halign(gtk::Align::Center)
                 .css_classes(["pill"])
@@ -961,14 +946,7 @@ impl Cleanup {
             .build();
         let group_sizes: Rc<Vec<(i64, i64)>> =
             Rc::new(group.members.iter().map(|m| (m.id, m.size)).collect());
-        self.append_tiles(
-            &tiles,
-            Rc::new(group.members.clone()),
-            0,
-            &group_sizes,
-            &sel_lbl,
-            &del_btn,
-        );
+        self.append_tiles(&tiles, Rc::new(group.members.clone()), 0, &group_sizes, &sel_lbl, &del_btn);
         let tiles_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Never)
@@ -1019,46 +997,25 @@ impl Cleanup {
     ) {
         let end = from + next_page(from, members.len(), TILES_PER_PAGE);
         for member in &members[from..end] {
-            tiles.append(&self.build_tile(
-                member,
-                group_sizes.clone(),
-                sel_lbl.clone(),
-                del_btn.clone(),
-            ));
+            tiles.append(&self.build_tile(member, group_sizes.clone(), sel_lbl.clone(), del_btn.clone()));
         }
         let remaining = members.len() - end;
         if remaining == 0 {
             return;
         }
         let more = gtk::Button::builder()
-            .label(format!(
-                "Show {} more",
-                next_page(end, members.len(), TILES_PER_PAGE)
-            ))
+            .label(format!("Show {} more", next_page(end, members.len(), TILES_PER_PAGE)))
             .tooltip_text(format!("{remaining} more in this group"))
             .valign(gtk::Align::Center)
             .css_classes(["pill"])
             .build();
         let weak = Rc::downgrade(self);
-        let (tiles_weak, group_sizes, sel_lbl, del_btn) = (
-            tiles.downgrade(),
-            group_sizes.clone(),
-            sel_lbl.clone(),
-            del_btn.clone(),
-        );
+        let (tiles_weak, group_sizes, sel_lbl, del_btn) =
+            (tiles.downgrade(), group_sizes.clone(), sel_lbl.clone(), del_btn.clone());
         more.connect_clicked(move |button| {
-            let (Some(this), Some(tiles)) = (weak.upgrade(), tiles_weak.upgrade()) else {
-                return;
-            };
+            let (Some(this), Some(tiles)) = (weak.upgrade(), tiles_weak.upgrade()) else { return };
             tiles.remove(button);
-            this.append_tiles(
-                &tiles,
-                members.clone(),
-                end,
-                &group_sizes,
-                &sel_lbl,
-                &del_btn,
-            );
+            this.append_tiles(&tiles, members.clone(), end, &group_sizes, &sel_lbl, &del_btn);
         });
         tiles.append(&more);
     }
@@ -1204,11 +1161,7 @@ impl Cleanup {
             pic.connect_destroy(move |_| cancel.store(true, AtomicOrdering::Release));
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                let Some(decoded) = rx
-                    .recv()
-                    .await
-                    .ok()
-                    .and_then(crate::engine_client::ThumbReply::into_image)
+                let Some(decoded) = rx.recv().await.ok().and_then(crate::engine_client::ThumbReply::into_image)
                 else {
                     return;
                 };
@@ -1685,9 +1638,7 @@ impl Cleanup {
             let refused: Vec<&BulkActionItem> = result
                 .messages
                 .iter()
-                .filter(|message| {
-                    !message.ok && message.file_id.is_some_and(|id| pending.ids.contains(&id))
-                })
+                .filter(|message| !message.ok && message.file_id.is_some_and(|id| pending.ids.contains(&id)))
                 .collect();
             let details = trash_failure_details(&refused);
             let preflight = if pending.preflight_rejected > 0 {
@@ -1726,14 +1677,19 @@ impl Cleanup {
             return 0;
         }
         let count = ids.len();
-        let sent = self.engine.borrow_mut().send(CommandPayload::ApplyTags(
-            fileid_engine::ipc::ApplyTagsPayload {
+        let sent = self
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::ApplyTags(fileid_engine::ipc::ApplyTagsPayload {
                 file_ids: ids,
                 tags: vec![crate::app_settings::CLEANUP_AUTO_TAG_NAME.to_owned()],
                 mode: fileid_engine::ipc::TagMode::Add,
-            },
-        ));
-        if sent.is_ok() { count } else { 0 }
+            }));
+        if sent.is_ok() {
+            count
+        } else {
+            0
+        }
     }
 
     fn restore_last_batch(self: &Rc<Self>) {
@@ -2091,11 +2047,9 @@ fn load_exact(conn: &rusqlite::Connection) -> LoadResult {
 }
 
 fn count_active(conn: &rusqlite::Connection, filter: &str) -> rusqlite::Result<usize> {
-    conn.query_row(
-        &format!("SELECT COUNT(*) FROM files WHERE failed=0{filter}"),
-        [],
-        |row| row.get::<_, i64>(0),
-    )
+    conn.query_row(&format!("SELECT COUNT(*) FROM files WHERE failed=0{filter}"), [], |row| {
+        row.get::<_, i64>(0)
+    })
     .map(|count| count.max(0) as usize)
 }
 
@@ -2134,23 +2088,11 @@ fn load_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<RawRow>, St
 
 /// One rendered group: members ranked keeper-first, at most
 /// `MAX_VISIBLE_MEMBERS_PER_GROUP` shown, totals over every member.
-fn ranked_group(
-    rows: Vec<RawRow>,
-    key: String,
-    is_similar: bool,
-    exact_hash: Option<[u8; 32]>,
-) -> DupGroup {
+fn ranked_group(rows: Vec<RawRow>, key: String, is_similar: bool, exact_hash: Option<[u8; 32]>) -> DupGroup {
     let mut indices: Vec<usize> = (0..rows.len()).collect();
     rank_indices(&rows, &mut indices);
     let visible = indices.len().min(MAX_VISIBLE_MEMBERS_PER_GROUP);
-    let mut group = build_group(
-        &rows,
-        &indices[..visible],
-        key,
-        is_similar,
-        false,
-        exact_hash,
-    );
+    let mut group = build_group(&rows, &indices[..visible], key, is_similar, false, exact_hash);
     group.total_members = rows.len();
     group.total_bytes = rows.iter().map(|row| row.size).sum();
     group
@@ -2230,7 +2172,7 @@ fn load_similar_until(
                     "Visually similar comparison is unavailable for {candidate_count} images: {error}. \
                      Exact duplicate cleanup remains available."
                 )),
-            });
+            })
         }
     };
 
@@ -2357,10 +2299,9 @@ fn rank_indices(raw: &[RawRow], indices: &mut [usize]) {
 
 fn near_dup_threshold() -> u32 {
     if let Ok(raw) = std::env::var("FILEID_NEARDUP_HAMMING")
-        && let Ok(v) = raw.trim().parse::<i64>()
-    {
-        return v.clamp(0, i64::from(MAX_SIMILAR_THRESHOLD)) as u32;
-    }
+        && let Ok(v) = raw.trim().parse::<i64>() {
+            return v.clamp(0, i64::from(MAX_SIMILAR_THRESHOLD)) as u32;
+        }
     DEFAULT_SIMILAR_THRESHOLD
 }
 
@@ -2381,29 +2322,12 @@ fn trash_operation_is_current(current: u64, operation: u64, deleting: bool) -> b
 /// Why files stayed out of Trash. The engine's `reason` groups them in plain
 /// words; refusals without one (older engines) fall back to their messages.
 pub(super) fn trash_failure_details(refused: &[&BulkActionItem]) -> String {
-    let count = |reason: &str| {
-        refused
-            .iter()
-            .filter(|item| item.reason.as_deref() == Some(reason))
-            .count()
-    };
+    let count = |reason: &str| refused.iter().filter(|item| item.reason.as_deref() == Some(reason)).count();
     let mut parts = Vec::new();
     for (reason, one, many) in [
-        (
-            "changed",
-            "1 file changed since it was scanned.",
-            "files changed since they were scanned.",
-        ),
-        (
-            "protected",
-            "1 file is in a protected location.",
-            "files are in a protected location.",
-        ),
-        (
-            "missing",
-            "1 file is no longer in the library.",
-            "files are no longer in the library.",
-        ),
+        ("changed", "1 file changed since it was scanned.", "files changed since they were scanned."),
+        ("protected", "1 file is in a protected location.", "files are in a protected location."),
+        ("missing", "1 file is no longer in the library.", "files are no longer in the library."),
     ] {
         match count(reason) {
             0 => {}
@@ -2413,19 +2337,8 @@ pub(super) fn trash_failure_details(refused: &[&BulkActionItem]) -> String {
     }
     let other: Vec<String> = refused
         .iter()
-        .filter(|item| {
-            !matches!(
-                item.reason.as_deref(),
-                Some("changed" | "protected" | "missing")
-            )
-        })
-        .filter_map(|item| {
-            item.message.clone().or_else(|| {
-                item.reason
-                    .is_none()
-                    .then(|| "Trash rejected the file".to_owned())
-            })
-        })
+        .filter(|item| !matches!(item.reason.as_deref(), Some("changed" | "protected" | "missing")))
+        .filter_map(|item| item.message.clone().or_else(|| item.reason.is_none().then(|| "Trash rejected the file".to_owned())))
         .take(3)
         .collect();
     parts.extend(other);
@@ -2437,7 +2350,11 @@ fn is_trash_result(action: &str) -> bool {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -2538,18 +2455,14 @@ mod tests {
     #[test]
     fn cleanup_loaders_surface_schema_and_row_failures() {
         let missing_schema = rusqlite::Connection::open_in_memory().unwrap();
-        assert!(
-            load_exact_until(&missing_schema, || false)
-                .err()
-                .unwrap()
-                .contains("Could not count indexed files")
-        );
-        assert!(
-            load_similar_until(&missing_schema, || false)
-                .err()
-                .unwrap()
-                .contains("Could not count similar-image candidates")
-        );
+        assert!(load_exact_until(&missing_schema, || false)
+            .err()
+            .unwrap()
+            .contains("Could not count indexed files"));
+        assert!(load_similar_until(&missing_schema, || false)
+            .err()
+            .unwrap()
+            .contains("Could not count similar-image candidates"));
 
         let malformed_row = rusqlite::Connection::open_in_memory().unwrap();
         malformed_row
@@ -2562,12 +2475,10 @@ mod tests {
                  INSERT INTO files VALUES(2,'/tmp/two',4,NULL,NULL,NULL,'other',0,NULL);",
             )
             .unwrap();
-        assert!(
-            load_exact_until(&malformed_row, || false)
-                .err()
-                .unwrap()
-                .contains("Could not verify exact duplicates")
-        );
+        assert!(load_exact_until(&malformed_row, || false)
+            .err()
+            .unwrap()
+            .contains("Could not verify exact duplicates"));
     }
 
     #[test]
@@ -2614,11 +2525,7 @@ mod tests {
         }
         tx.commit().unwrap();
         let loaded = load_exact(&conn);
-        assert_eq!(
-            loaded.groups.len(),
-            1,
-            "the twin class still verifies first"
-        );
+        assert_eq!(loaded.groups.len(), 1, "the twin class still verifies first");
         let warning = loaded.warning.as_deref().unwrap_or_default();
         assert!(warning.contains("partial"));
         assert!(warning.contains("were outside the 5000-file"));
@@ -2653,13 +2560,11 @@ mod tests {
 
         let loaded = load_exact(&conn);
         assert_eq!(loaded.groups.len(), MAX_GROUPS);
-        assert!(
-            loaded
-                .warning
-                .as_deref()
-                .unwrap_or_default()
-                .contains("1 verified groups were outside")
-        );
+        assert!(loaded
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("1 verified groups were outside"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2824,12 +2729,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(
-            load_similar_until(&conn, || true)
-                .unwrap()
-                .groups
-                .is_empty()
-        );
+        assert!(load_similar_until(&conn, || true).unwrap().groups.is_empty());
         assert_eq!(load_similar(&conn).groups.len(), 1);
     }
 
@@ -2847,12 +2747,10 @@ mod tests {
         let loaded = load_similar(&conn);
         assert!(loaded.groups.is_empty());
         assert_eq!(loaded.candidate_count, 20_001);
-        assert!(
-            loaded
-                .warning
-                .as_deref()
-                .unwrap_or_default()
-                .contains("unavailable")
-        );
+        assert!(loaded
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unavailable"));
     }
 }

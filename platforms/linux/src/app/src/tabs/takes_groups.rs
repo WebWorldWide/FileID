@@ -499,12 +499,9 @@ impl Manual {
     pub(super) fn review_hits(&self, ui: &Rc<Ui>, hits: Vec<CatalogHit>, title: &str) {
         self.start_manual(ui);
         self.new_group_state();
-        let known: std::collections::HashSet<i64> =
-            self.pool().iter().map(|hit| hit.file_id).collect();
+        let known: std::collections::HashSet<i64> = self.pool().iter().map(|hit| hit.file_id).collect();
         *self.chosen.borrow_mut() = hits.iter().map(|hit| hit.file_id).collect();
-        self.found
-            .borrow_mut()
-            .extend(hits.into_iter().filter(|hit| !known.contains(&hit.file_id)));
+        self.found.borrow_mut().extend(hits.into_iter().filter(|hit| !known.contains(&hit.file_id)));
         self.syncing.set(true);
         self.title_entry.set_text(title);
         self.syncing.set(false);

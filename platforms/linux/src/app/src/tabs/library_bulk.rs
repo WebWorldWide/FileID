@@ -47,9 +47,7 @@ async fn bulk_result(
         closer.close();
     });
     loop {
-        let Ok(event) = subscription.0.recv().await else {
-            return None;
-        };
+        let Ok(event) = subscription.0.recv().await else { return None };
         match &*event {
             EngineEvent::BulkActionResult(result) if result.action == action => {
                 let reported: HashSet<i64> =
@@ -205,10 +203,7 @@ impl BulkBar {
         let reverse: crate::changes::Reverse = {
             let weak = Rc::downgrade(self);
             let slot = slot.clone();
-            Rc::new(move || {
-                weak.upgrade()
-                    .is_some_and(|bar| run_undo_rename(&bar, slot.get()))
-            })
+            Rc::new(move || weak.upgrade().is_some_and(|bar| run_undo_rename(&bar, slot.get())))
         };
         let entry = crate::changes::record(
             renamed as u64,
@@ -227,19 +222,11 @@ impl BulkBar {
         let reverse: crate::changes::Reverse = {
             let weak = Rc::downgrade(self);
             let slot = slot.clone();
-            Rc::new(move || {
-                weak.upgrade()
-                    .is_some_and(|bar| run_undo_tags(&bar, slot.get()))
-            })
+            Rc::new(move || weak.upgrade().is_some_and(|bar| run_undo_tags(&bar, slot.get())))
         };
         let entry = crate::changes::record(
             tagged as u64,
-            || {
-                format!(
-                    "Tagged {}",
-                    crate::changes::count_label("", tagged as u64, "file").trim_start()
-                )
-            },
+            || format!("Tagged {}", crate::changes::count_label("", tagged as u64, "file").trim_start()),
             Some(reverse),
         );
         slot.set(entry);

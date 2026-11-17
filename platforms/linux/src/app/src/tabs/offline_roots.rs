@@ -91,12 +91,16 @@ mod tests {
 
     #[test]
     fn the_most_specific_location_decides() {
-        let roots =
-            OfflineRoots::new(&[root(1, "/mnt/nas", false), root(2, "/mnt/nas/Synced", true)]);
+        let roots = OfflineRoots::new(&[
+            root(1, "/mnt/nas", false),
+            root(2, "/mnt/nas/Synced", true),
+        ]);
         assert!(roots.is_offline("/mnt/nas/Old/a.jpg"));
         assert!(!roots.is_offline("/mnt/nas/Synced/a.jpg"));
-        let flipped =
-            OfflineRoots::new(&[root(1, "/mnt/nas", true), root(2, "/mnt/nas/Gone/", false)]);
+        let flipped = OfflineRoots::new(&[
+            root(1, "/mnt/nas", true),
+            root(2, "/mnt/nas/Gone/", false),
+        ]);
         assert!(flipped.is_offline("/mnt/nas/Gone/a.jpg"));
         assert!(!flipped.is_offline("/mnt/nas/Here/a.jpg"));
     }

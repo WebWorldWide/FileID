@@ -8,7 +8,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, gsk};
 
-use crate::spring::{Spring, animate_with};
+use crate::spring::{animate_with, Spring};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Slide {
@@ -79,61 +79,33 @@ mod imp {
 
     impl WidgetImpl for SpringRevealer {
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
-            let Some(child) = self
-                .child
-                .borrow()
-                .clone()
-                .filter(|child| child.should_layout())
-            else {
+            let Some(child) = self.child.borrow().clone().filter(|child| child.should_layout()) else {
                 return (0, 0, -1, -1);
             };
             let (min, nat, _, _) = child.measure(orientation, for_size);
             if orientation == self.slide.get().axis() {
                 let progress = self.progress.get();
-                (
-                    revealed_size(min, progress),
-                    revealed_size(nat, progress),
-                    -1,
-                    -1,
-                )
+                (revealed_size(min, progress), revealed_size(nat, progress), -1, -1)
             } else {
                 (min, nat, -1, -1)
             }
         }
 
         fn size_allocate(&self, width: i32, height: i32, _baseline: i32) {
-            let Some(child) = self
-                .child
-                .borrow()
-                .clone()
-                .filter(|child| child.should_layout())
-            else {
+            let Some(child) = self.child.borrow().clone().filter(|child| child.should_layout()) else {
                 return;
             };
             let slide = self.slide.get();
             let (child_width, child_height, point) = if slide.axis() == gtk::Orientation::Vertical {
                 let (min, nat, _, _) = child.measure(gtk::Orientation::Vertical, width);
                 let full = nat.max(min).max(height);
-                (
-                    width,
-                    full,
-                    graphene::Point::new(0.0, slide_offset(slide, height, full) as f32),
-                )
+                (width, full, graphene::Point::new(0.0, slide_offset(slide, height, full) as f32))
             } else {
                 let (min, nat, _, _) = child.measure(gtk::Orientation::Horizontal, height);
                 let full = nat.max(min).max(width);
-                (
-                    full,
-                    height,
-                    graphene::Point::new(slide_offset(slide, width, full) as f32, 0.0),
-                )
+                (full, height, graphene::Point::new(slide_offset(slide, width, full) as f32, 0.0))
             };
-            child.allocate(
-                child_width,
-                child_height,
-                -1,
-                Some(gsk::Transform::new().translate(&point)),
-            );
+            child.allocate(child_width, child_height, -1, Some(gsk::Transform::new().translate(&point)));
         }
     }
 
@@ -179,12 +151,7 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            let Some(child) = self
-                .child
-                .borrow()
-                .clone()
-                .filter(|child| child.should_layout())
-            else {
+            let Some(child) = self.child.borrow().clone().filter(|child| child.should_layout()) else {
                 return;
             };
             let scale = self.scale.get() as f32;
@@ -253,9 +220,7 @@ impl SpringRevealer {
             imp.progress.get(),
             if open { 1.0 } else { 0.0 },
             move |value| {
-                let Some(revealer) = weak.upgrade() else {
-                    return;
-                };
+                let Some(revealer) = weak.upgrade() else { return };
                 let imp = revealer.imp();
                 imp.progress.set(value);
                 if value <= 0.0
@@ -313,9 +278,7 @@ pub fn show_child(stack: &gtk::Stack, name: &str) {
         return;
     }
     stack.set_visible_child_name(name);
-    let Some(child) = stack.visible_child() else {
-        return;
-    };
+    let Some(child) = stack.visible_child() else { return };
     let target = child.downgrade();
     let _ = crate::spring::animate(&child, 0.0, 1.0, move |value| {
         if let Some(child) = target.upgrade() {

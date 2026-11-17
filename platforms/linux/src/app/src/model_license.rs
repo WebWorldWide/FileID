@@ -17,11 +17,7 @@ fn accepted_in(root: &Path, policy: &LicensePolicy) -> bool {
         return false;
     }
     if let Err(error) = license::record(root, policy) {
-        tracing::warn!(
-            policy = policy.key,
-            ?error,
-            "legacy license acceptance kept unmigrated"
-        );
+        tracing::warn!(policy = policy.key, ?error, "legacy license acceptance kept unmigrated");
         return true;
     }
     let _ = std::fs::remove_file(&legacy);
@@ -138,9 +134,7 @@ mod tests {
         ));
         let policy = license::policy_for("gemma_3_4b").unwrap();
         assert!(!accepted_in(&root, &policy));
-        let legacy = root
-            .join("license-acceptance")
-            .join("Gemma-2026-07-16.accepted");
+        let legacy = root.join("license-acceptance").join("Gemma-2026-07-16.accepted");
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         std::fs::write(&legacy, "accepted\n").unwrap();
         assert!(accepted_in(&root, &policy));

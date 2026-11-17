@@ -1,10 +1,12 @@
 #![allow(deprecated)]
+
 // FileID Linux — gtk4 + libadwaita entrypoint.
 //
 // Mirror of macOS FileIDApp.swift / Windows App.xaml.cs. Boots an
 // adw::Application, installs the shared design system (palette, glass
 // surfaces, force-dark), and presents the main window over the LavaLamp
 // background. The window spawns the engine subprocess.
+
 #![allow(clippy::type_complexity)]
 
 mod app_settings;
@@ -19,10 +21,10 @@ mod model_license;
 mod motion;
 mod shell;
 mod spring;
+mod v3;
 mod tabs;
 mod theme;
 mod thumb_cache;
-mod v3;
 mod welcome;
 mod window;
 

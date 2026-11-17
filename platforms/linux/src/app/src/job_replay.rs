@@ -49,24 +49,18 @@ impl JobReplay {
             EngineState::DeepAnalyzeFileDone(_) => self.deep_file = Some(event.clone()),
             EngineState::DeepAnalyzeComplete(_) => self.end_deep(),
             EngineState::ModelDownloadProgress(progress) => {
-                self.downloads
-                    .retain(|(kind, _)| *kind != progress.model_kind);
+                self.downloads.retain(|(kind, _)| *kind != progress.model_kind);
                 if progress.fraction.is_finite() && progress.fraction < 1.0 {
-                    self.downloads
-                        .push((progress.model_kind.clone(), event.clone()));
+                    self.downloads.push((progress.model_kind.clone(), event.clone()));
                 }
             }
             EngineState::BenchmarkProgress(_) => self.benchmark = Some(event.clone()),
             EngineState::BenchmarkResult(_) => self.benchmark = None,
-            EngineState::Error {
-                kind, model_kind, ..
-            } => {
+            EngineState::Error { kind, model_kind, .. } => {
                 if let Some(model_kind) = model_kind {
                     self.downloads.retain(|(kind, _)| kind != model_kind);
                 }
-                if kind.starts_with("deep_analyze")
-                    && crate::tabs::deep_analyze::error_ends_deep_run(kind)
-                {
+                if kind.starts_with("deep_analyze") && crate::tabs::deep_analyze::error_ends_deep_run(kind) {
                     self.end_deep();
                 }
                 if kind == "models_not_installed" || kind == "scan_failed" {
@@ -118,8 +112,8 @@ fn is_scan_end(phase: ScanPhase) -> bool {
 mod tests {
     use super::*;
     use fileid_engine::ipc::{
-        BenchmarkProgress, DeepAnalyzeComplete, DeepAnalyzeProgress, DeepAnalyzeStarting,
-        DeepAnalyzeStartingPhase, ModelDownloadProgress, ScanProgress,
+        BenchmarkProgress, DeepAnalyzeComplete, DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase,
+        ModelDownloadProgress, ScanProgress,
     };
 
     fn event(state: EngineState) -> Rc<EngineState> {
@@ -222,13 +216,11 @@ mod tests {
     #[test]
     fn describe_files_replays_the_newest_stage_and_stops_when_it_completes() {
         let mut replay = JobReplay::default();
-        replay.observe(&event(EngineState::DeepAnalyzeStarting(
-            DeepAnalyzeStarting {
-                model_kind: "m".into(),
-                phase: DeepAnalyzeStartingPhase::LoadingModel,
-                message: "Loading".into(),
-            },
-        )));
+        replay.observe(&event(EngineState::DeepAnalyzeStarting(DeepAnalyzeStarting {
+            model_kind: "m".into(),
+            phase: DeepAnalyzeStartingPhase::LoadingModel,
+            message: "Loading".into(),
+        })));
         assert_eq!(names(&replay.snapshot(false)), ["deep-starting"]);
         replay.observe(&deep_progress(2));
         replay.observe(&deep_progress(7));
@@ -250,11 +242,7 @@ mod tests {
         };
         replay.observe(&event(busy));
         assert_eq!(names(&replay.snapshot(false)), ["deep-progress"]);
-        let failed = EngineState::Error {
-            kind: "deep_analyze_failed".into(),
-            message: String::new(),
-            model_kind: None,
-        };
+        let failed = EngineState::Error { kind: "deep_analyze_failed".into(), message: String::new(), model_kind: None };
         replay.observe(&event(failed));
         assert!(replay.snapshot(false).is_empty());
     }
@@ -297,15 +285,13 @@ mod tests {
             total: 4,
         })));
         assert_eq!(names(&replay.snapshot(false)), ["benchmark"]);
-        replay.observe(&event(EngineState::BenchmarkResult(
-            fileid_engine::ipc::BenchmarkResult {
-                request_id: "b".into(),
-                model_kind: "m".into(),
-                status: "ok".into(),
-                message: None,
-                benchmark: None,
-            },
-        )));
+        replay.observe(&event(EngineState::BenchmarkResult(fileid_engine::ipc::BenchmarkResult {
+            request_id: "b".into(),
+            model_kind: "m".into(),
+            status: "ok".into(),
+            message: None,
+            benchmark: None,
+        })));
         assert!(replay.snapshot(false).is_empty());
     }
 

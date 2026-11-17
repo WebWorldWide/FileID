@@ -12,7 +12,7 @@ use gtk::glib;
 use super::chat_cards::Cards;
 use super::moments::hit_kind;
 use super::workbench_state::*;
-use super::workbenches::{Engine, is_playable_media};
+use super::workbenches::{is_playable_media, Engine};
 use crate::engine_client::EngineState;
 use crate::shell::status::Tone;
 use crate::v3;
@@ -69,9 +69,7 @@ impl ChatUi {
         if action == "send" && text.trim().is_empty() {
             return;
         }
-        let scope = (action == "send")
-            .then(super::chat_handoff::scope)
-            .flatten();
+        let scope = (action == "send").then(super::chat_handoff::scope).flatten();
         let request = ChatRequest {
             request_id: request_id(),
             conversation_id: CONVERSATION.into(),
@@ -83,11 +81,7 @@ impl ChatUi {
             ..ChatRequest::default()
         };
         if action == "send" {
-            self.scoped_request.replace(if scope.is_some() {
-                request.request_id.clone()
-            } else {
-                String::new()
-            });
+            self.scoped_request.replace(if scope.is_some() { request.request_id.clone() } else { String::new() });
             self.question.replace(text.clone());
         }
         let dispatch = self.state.borrow_mut().begin(&request);
@@ -125,11 +119,7 @@ impl ChatUi {
             self.scope_row.append(&super::chat_selection::chip(scope));
         }
         self.scope_row.set_visible(scope.is_some());
-        self.placeholder.set_label(if scope.is_some() {
-            "Ask about the selected files"
-        } else {
-            "Ask about your files"
-        });
+        self.placeholder.set_label(if scope.is_some() { "Ask about the selected files" } else { "Ask about your files" });
     }
 
     fn selection_strip(self: &Rc<Self>, hits: &[CatalogHit]) -> gtk::Box {
@@ -143,14 +133,10 @@ impl ChatUi {
     }
 
     fn render(self: &Rc<Self>, response: ChatResponse) {
-        let busy = matches!(
-            response.status.as_str(),
-            "retrieving" | "queued" | "streaming"
-        );
+        let busy = matches!(response.status.as_str(), "retrieving" | "queued" | "streaming");
         self.set_busy(busy);
         let selection = super::chat_selection::has_results(&response.hits);
-        if response.status == "completed"
-            && *self.scoped_request.borrow() == response.request_id
+        if response.status == "completed" && *self.scoped_request.borrow() == response.request_id
             && let Some(narrowed) = super::chat_handoff::ChatScope::narrowed(&response.hits)
         {
             super::chat_handoff::set_scope(Some(narrowed));
@@ -162,12 +148,11 @@ impl ChatUi {
         self.has_messages.set(!response.messages.is_empty());
         self.empty.set_visible(response.messages.is_empty());
         self.clear.set_sensitive(!response.messages.is_empty());
-        self.clear
-            .set_tooltip_text(Some(if response.messages.is_empty() {
-                "Nothing to clear yet"
-            } else {
-                "Start a new conversation. This one is deleted."
-            }));
+        self.clear.set_tooltip_text(Some(if response.messages.is_empty() {
+            "Nothing to clear yet"
+        } else {
+            "Start a new conversation. This one is deleted."
+        }));
         let last_answer = response.messages.iter().rposition(|m| m.role != "user");
         for (index, message) in response.messages.iter().enumerate() {
             self.messages.append(&message_row(message));
@@ -420,20 +405,13 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     column.set_hexpand(true);
     column.set_vexpand(true);
     let header = v3::hbox(12);
-    header.add_css_class(if compact {
-        "v3-inspector-header"
-    } else {
-        "v3-chat-header"
-    });
+    header.add_css_class(if compact { "v3-inspector-header" } else { "v3-chat-header" });
     let looking = v3::vbox(6);
     looking.set_hexpand(true);
     looking.append(&v3::section("Looking in"));
     let chips = v3::hbox(6);
     let (names, spoken): (&[&str], &str) = if compact {
-        (
-            &["Names", "Tags", "Descriptions"],
-            "Looking in names, tags and descriptions",
-        )
+        (&["Names", "Tags", "Descriptions"], "Looking in names, tags and descriptions")
     } else {
         (
             &["Names", "Tags", "Descriptions", "Chapters", "Text in files"],
@@ -479,11 +457,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     ));
     busy.set_visible(false);
     let thread = v3::vbox(20);
-    thread.add_css_class(if compact {
-        "v3-inspector-pad"
-    } else {
-        "v3-page-pad"
-    });
+    thread.add_css_class(if compact { "v3-inspector-pad" } else { "v3-page-pad" });
     thread.append(&empty);
     thread.append(&messages);
     let overlay = adw::ToastOverlay::new();
@@ -719,15 +693,10 @@ fn collapsible_sources(header: &gtk::Box, pane: &gtk::Box) -> gtk::Box {
         }
         let target = angle.clone();
         let area = chevron.clone();
-        let next = crate::spring::animate(
-            &chevron,
-            angle.get(),
-            if open { 90.0 } else { 0.0 },
-            move |value| {
-                target.set(value);
-                area.queue_draw();
-            },
-        );
+        let next = crate::spring::animate(&chevron, angle.get(), if open { 90.0 } else { 0.0 }, move |value| {
+            target.set(value);
+            area.queue_draw();
+        });
         animation.replace(Some(next));
     });
     section
@@ -761,11 +730,9 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     let weak = Rc::downgrade(ui);
     root.connect_map(move |_| {
         if let Some(ui) = weak.upgrade()
-            && ui.engine.borrow().is_ready()
-            && !ui.stop.is_visible()
-        {
-            ui.dispatch("history");
-        }
+            && ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
+                ui.dispatch("history");
+            }
     });
     let weak = Rc::downgrade(ui);
     ui.composer.buffer().connect_changed(move |buffer| {

@@ -33,11 +33,7 @@ const CORE_MODELS: &[(&str, &str, &str)] = &[
         "Understands what you type",
     ),
     ("ram_plus", "Photo tags", "Labels what's in each photo"),
-    (
-        "bge_text",
-        "Documents",
-        "Understands what documents are about",
-    ),
+    ("bge_text", "Documents", "Understands what documents are about"),
     ("arcface", "Faces", "Groups photos by person"),
 ];
 
@@ -206,11 +202,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
         .css_classes(["gold-button"])
         .build();
     let later_btn = gtk::Button::builder()
-        .label(if missing_bytes > 0 {
-            "Later"
-        } else {
-            "Continue"
-        })
+        .label(if missing_bytes > 0 { "Later" } else { "Continue" })
         .build();
     let footer_note = crate::v3::meta(if missing_bytes > 0 {
         "You can also download them later in Settings."
@@ -334,12 +326,11 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                             } else {
                                 crate::engine_errors::sentence(kind, message)
                             });
-                            row.state
-                                .set_tooltip_text(Some(&crate::engine_errors::detail(
-                                    kind,
-                                    message,
-                                    Some(model_kind),
-                                )));
+                            row.state.set_tooltip_text(Some(&crate::engine_errors::detail(
+                                kind,
+                                message,
+                                Some(model_kind),
+                            )));
                         }
                     }
                     _ => {}

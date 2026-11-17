@@ -21,20 +21,20 @@
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
-use fileid_engine::client::{self, BoundedLine, Frame};
-use fileid_engine::commands::roots::clause;
 use fileid_engine::ipc::{
     CancelPrewarmPayload, CommandPayload, EventPayload, HealthCheckPayload, IpcCommand,
     ModelDownloadProgress, PrewarmModelPayload, StartScanPayload,
 };
+use fileid_engine::client::{self, BoundedLine, Frame};
+use fileid_engine::commands::roots::clause;
 use fileid_engine::read::text::{escape_like, fts_phrase_query};
 use gtk::prelude::*;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::rc::Rc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -73,11 +73,7 @@ pub enum EngineState {
     BenchmarkProgress(fileid_engine::ipc::BenchmarkProgress),
     BenchmarkResult(fileid_engine::ipc::BenchmarkResult),
     QueueState(fileid_engine::ipc::QueueState),
-    Error {
-        kind: String,
-        message: String,
-        model_kind: Option<String>,
-    },
+    Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
     /// The engine process exited; a respawn follows unless the app is closing.
     Exited,
@@ -97,9 +93,7 @@ impl crate::event_queue::Coalesce for EngineState {
             | EngineState::QueueState(_)
             | EngineState::BatchLanded(_) => true,
             // A finished download is what listeners wait for; it keeps its place.
-            EngineState::ModelDownloadProgress(progress) => {
-                progress.fraction.is_finite() && progress.fraction < 1.0
-            }
+            EngineState::ModelDownloadProgress(progress) => progress.fraction.is_finite() && progress.fraction < 1.0,
             _ => false,
         }
     }
@@ -273,33 +267,24 @@ impl QueryWorkerState {
 fn spawn_query_worker() -> Arc<QueryWorkerState> {
     let state = Arc::new(QueryWorkerState::new());
     let worker_state = state.clone();
-    thread::spawn(move || {
-        loop {
-            let job = {
-                let mut latest = worker_state.latest.lock().expect("query queue poisoned");
-                while latest.is_empty() && !worker_state.stopping.load(Ordering::Acquire) {
-                    latest = worker_state
-                        .ready
-                        .wait(latest)
-                        .expect("query queue poisoned");
-                }
-                if worker_state.stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                latest.take_next()
-            };
-            let Some(job) = job else { continue };
-            let _ = job.reply.send_blocking(query_files_from_db(&job.spec));
-        }
+    thread::spawn(move || loop {
+        let job = {
+            let mut latest = worker_state.latest.lock().expect("query queue poisoned");
+            while latest.is_empty() && !worker_state.stopping.load(Ordering::Acquire) {
+                latest = worker_state.ready.wait(latest).expect("query queue poisoned");
+            }
+            if worker_state.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            latest.take_next()
+        };
+        let Some(job) = job else { continue };
+        let _ = job.reply.send_blocking(query_files_from_db(&job.spec));
     });
     state
 }
 
-const RESPAWN_DELAYS: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(4),
-    Duration::from_secs(16),
-];
+const RESPAWN_DELAYS: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(16)];
 const RESPAWN_WINDOW: Duration = Duration::from_secs(60);
 const STABLE_READY: Duration = Duration::from_secs(30);
 
@@ -556,10 +541,7 @@ impl EngineClient {
             }
             let preview = client.preview.clone();
             thread::spawn(move || preview_worker(&preview));
-            client
-                .raw_rx
-                .take()
-                .expect("EngineClient::start called twice")
+            client.raw_rx.take().expect("EngineClient::start called twice")
         };
         spawn_process(this);
 
@@ -571,13 +553,14 @@ impl EngineClient {
                     RawEvent::Announced => {
                         // A `ready` can race in from the previous generation
                         // during a respawn; only our own nonce settles it.
-                        let probe = { client.borrow_mut().begin_health_probe() };
+                        let probe = {
+                            client.borrow_mut().begin_health_probe()
+                        };
                         if let Some((request_id, generation)) = probe {
                             let mut client = client.borrow_mut();
-                            let sent =
-                                client.send(CommandPayload::HealthCheck(HealthCheckPayload {
-                                    request_id: request_id.clone(),
-                                }));
+                            let sent = client.send(CommandPayload::HealthCheck(HealthCheckPayload {
+                                request_id: request_id.clone(),
+                            }));
                             if sent.is_err() {
                                 client.abandon_health_probe(&request_id, generation);
                             }
@@ -640,33 +623,22 @@ impl EngineClient {
     }
 
     pub fn list_models(&mut self, request_id: &str, role: Option<&str>) -> Result<()> {
-        self.send(CommandPayload::ListModels(
-            fileid_engine::ipc::ListModelsPayload {
-                request_id: request_id.to_owned(),
-                role: role.map(str::to_owned),
-            },
-        ))
+        self.send(CommandPayload::ListModels(fileid_engine::ipc::ListModelsPayload {
+            request_id: request_id.to_owned(),
+            role: role.map(str::to_owned),
+        }))
     }
 
-    pub fn benchmark_model(
-        &mut self,
-        request_id: &str,
-        model_kind: &str,
-        tune: bool,
-    ) -> Result<()> {
-        self.send(CommandPayload::BenchmarkModel(
-            fileid_engine::ipc::BenchmarkModelPayload {
-                request_id: request_id.to_owned(),
-                model_kind: model_kind.to_owned(),
-                tune,
-            },
-        ))
+    pub fn benchmark_model(&mut self, request_id: &str, model_kind: &str, tune: bool) -> Result<()> {
+        self.send(CommandPayload::BenchmarkModel(fileid_engine::ipc::BenchmarkModelPayload {
+            request_id: request_id.to_owned(),
+            model_kind: model_kind.to_owned(),
+            tune,
+        }))
     }
 
     pub fn cancel_benchmark(&mut self) -> Result<()> {
-        self.send(CommandPayload::CancelBenchmark(
-            fileid_engine::ipc::Empty {},
-        ))
+        self.send(CommandPayload::CancelBenchmark(fileid_engine::ipc::Empty {}))
     }
 
     pub fn cancel_prewarm(&mut self, model_kind: &str) -> Result<()> {
@@ -709,75 +681,35 @@ impl EngineClient {
     }
 
     /// First-in-first-out decode on the shared bounded workers.
-    pub fn request_scaled_thumbnail(
-        &self,
-        path: String,
-        dim: i32,
-    ) -> Receiver<Option<DecodedImage>> {
+    pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
         self.background_plain(ThumbWork::Image { path, dim })
     }
 
-    pub fn request_video_thumbnail(
-        &self,
-        path: String,
-        dim: i32,
-    ) -> Receiver<Option<DecodedImage>> {
+    pub fn request_video_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
         self.background_plain(ThumbWork::VideoKeyframe { path, dim })
     }
 
     fn background_plain(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
         let (reply, rx) = async_channel::bounded(1);
-        self.thumbs.push_background(ThumbJob {
-            work,
-            reply: ReplyTo::Plain(reply),
-            cancel: None,
-        });
+        self.thumbs.push_background(ThumbJob { work, reply: ReplyTo::Plain(reply), cancel: None });
         rx
     }
 
     /// A grid tile's thumbnail: newest request first, the oldest evicted with
     /// `Dropped` when the queue is full, and skipped once `cancel` is set.
-    pub fn request_tile(
-        &self,
-        path: String,
-        dim: i32,
-        video: bool,
-        cancel: CancelToken,
-    ) -> Receiver<ThumbReply> {
-        let work = if video {
-            ThumbWork::VideoKeyframe { path, dim }
-        } else {
-            ThumbWork::Image { path, dim }
-        };
+    pub fn request_tile(&self, path: String, dim: i32, video: bool, cancel: CancelToken) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
         let (reply, rx) = async_channel::bounded(1);
-        self.thumbs.push_tile(ThumbJob {
-            work,
-            reply: ReplyTo::Full(reply),
-            cancel: Some(cancel),
-        });
+        self.thumbs.push_tile(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: Some(cancel) });
         rx
     }
 
     /// A thumbnail in arrival order that is skipped once `cancel` is set (its
     /// tile was destroyed), so a rebuilt list never decodes for dead widgets.
-    pub fn request_thumbnail(
-        &self,
-        path: String,
-        dim: i32,
-        video: bool,
-        cancel: CancelToken,
-    ) -> Receiver<ThumbReply> {
-        let work = if video {
-            ThumbWork::VideoKeyframe { path, dim }
-        } else {
-            ThumbWork::Image { path, dim }
-        };
+    pub fn request_thumbnail(&self, path: String, dim: i32, video: bool, cancel: CancelToken) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
         let (reply, rx) = async_channel::bounded(1);
-        self.thumbs.push_background(ThumbJob {
-            work,
-            reply: ReplyTo::Full(reply),
-            cancel: Some(cancel),
-        });
+        self.thumbs.push_background(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: Some(cancel) });
         rx
     }
 
@@ -799,17 +731,9 @@ impl EngineClient {
     /// A preview image on its own latest-wins worker, never queued behind
     /// grid tiles; a newer request supersedes an unstarted one.
     pub fn request_preview(&self, path: String, dim: i32, video: bool) -> Receiver<ThumbReply> {
-        let work = if video {
-            ThumbWork::VideoKeyframe { path, dim }
-        } else {
-            ThumbWork::Image { path, dim }
-        };
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
         let (reply, rx) = async_channel::bounded(1);
-        self.preview.submit(ThumbJob {
-            work,
-            reply: ReplyTo::Full(reply),
-            cancel: None,
-        });
+        self.preview.submit(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: None });
         rx
     }
 }
@@ -839,11 +763,7 @@ fn spawn_command_writer(mut stdin: impl Write + Send + 'static) -> std::sync::mp
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     thread::spawn(move || {
         for line in rx {
-            if stdin
-                .write_all(line.as_bytes())
-                .and_then(|()| stdin.flush())
-                .is_err()
-            {
+            if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
                 tracing::debug!(target: "engine", "engine stopped reading commands");
                 break;
             }
@@ -871,10 +791,7 @@ fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
     let granularity = crate::app_settings::restructure_granularity();
     let mut envs: Vec<(&str, &std::ffi::OsStr)> = Vec::new();
     if granularity != "normal" {
-        envs.push((
-            "FILEID_RESTRUCTURE_GRANULARITY",
-            std::ffi::OsStr::new(&granularity),
-        ));
+        envs.push(("FILEID_RESTRUCTURE_GRANULARITY", std::ffi::OsStr::new(&granularity)));
     }
     match fileid_engine::client::spawn(&exe, &envs, Stdio::piped()) {
         Ok(mut child) => {
@@ -893,10 +810,7 @@ fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
             }
         }
         Err(err) => {
-            emit_from_main(
-                &raw_tx,
-                RawEvent::State(EngineState::Failed(format!("spawn failed: {err}"))),
-            );
+            emit_from_main(&raw_tx, RawEvent::State(EngineState::Failed(format!("spawn failed: {err}"))));
             schedule_respawn(this);
         }
     }
@@ -924,8 +838,7 @@ fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
         emit_from_main(
             &raw_tx,
             RawEvent::State(EngineState::Failed(
-                "FileID's background helper stopped 3 times in a minute. Quit and reopen FileID."
-                    .into(),
+                "FileID's background helper stopped 3 times in a minute. Quit and reopen FileID.".into(),
             )),
         );
         return;
@@ -933,10 +846,9 @@ fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
     let weak = Rc::downgrade(this);
     glib::timeout_add_local_once(delay, move || {
         if let Some(client) = weak.upgrade()
-            && !client.borrow().shutting_down.load(Ordering::Relaxed)
-        {
-            spawn_process(&client);
-        }
+            && !client.borrow().shutting_down.load(Ordering::Relaxed) {
+                spawn_process(&client);
+            }
     });
 }
 
@@ -976,7 +888,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
             return Some(RawEvent::Health {
                 request_id: r.inner.request_id,
                 pid: r.inner.pid,
-            });
+            })
         }
         EventPayload::CatalogResponse(r) => EngineState::CatalogResponse(r.inner),
         EventPayload::ToolResponse(r) => EngineState::ToolResponse(r.inner),
@@ -991,18 +903,12 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
         EventPayload::DeepAnalyzeFileDone(r) => EngineState::DeepAnalyzeFileDone(r.inner),
         EventPayload::DeepAnalyzeComplete(r) => EngineState::DeepAnalyzeComplete(r.inner),
         EventPayload::BatchSummary(batch) => EngineState::BatchLanded(batch.inner.processed_total),
-        EventPayload::ScanComplete(result) => {
-            EngineState::ScanComplete(result.inner.processed_files)
-        }
-        EventPayload::FaceClusteringComplete(result) => {
-            EngineState::FaceClusteringComplete(result.inner)
-        }
+        EventPayload::ScanComplete(result) => EngineState::ScanComplete(result.inner.processed_files),
+        EventPayload::FaceClusteringComplete(result) => EngineState::FaceClusteringComplete(result.inner),
         EventPayload::BulkActionResult(result) => EngineState::BulkActionResult(result.inner),
         EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
         EventPayload::FaceReview(page) => EngineState::FaceReview(page.inner),
-        EventPayload::ModelDownloadProgress(progress) => {
-            EngineState::ModelDownloadProgress(progress.inner)
-        }
+        EventPayload::ModelDownloadProgress(progress) => EngineState::ModelDownloadProgress(progress.inner),
         EventPayload::ModelCatalog(catalog) => EngineState::ModelCatalog(catalog.inner),
         EventPayload::RootsList(list) => EngineState::RootsList(list.inner),
         EventPayload::BenchmarkProgress(progress) => EngineState::BenchmarkProgress(progress.inner),
@@ -1088,11 +994,7 @@ fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
 fn file_row_on(conn: &rusqlite::Connection, id: i64) -> Result<Option<FileRow>> {
     use rusqlite::OptionalExtension;
     Ok(conn
-        .query_row(
-            &format!("SELECT {FILE_COLUMNS} FROM files f WHERE f.id = ?1 AND f.failed = 0"),
-            [id],
-            file_row,
-        )
+        .query_row(&format!("SELECT {FILE_COLUMNS} FROM files f WHERE f.id = ?1 AND f.failed = 0"), [id], file_row)
         .optional()?)
 }
 
@@ -1132,17 +1034,9 @@ fn query_files_on(conn: &rusqlite::Connection, spec: &QuerySpec) -> Result<(Vec<
     let fts = fts_phrase_query(search);
     let has_fts = !fts.is_empty();
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
-    let limit = if spec.limit > 0 {
-        spec.limit.min(QUERY_MAX_ROWS)
-    } else {
-        500
-    };
+    let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
     let scope = spec.scope.as_deref();
-    let within = if scope.is_some() {
-        clause("f.path_text", ":scope")
-    } else {
-        ":scope IS NULL".to_owned()
-    };
+    let within = if scope.is_some() { clause("f.path_text", ":scope") } else { ":scope IS NULL".to_owned() };
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_COLUMNS} FROM files f WHERE {QUERY_FILTER} AND {within} \
          ORDER BY f.scanned_at DESC, f.id DESC LIMIT :limit OFFSET :offset"
@@ -1259,11 +1153,7 @@ struct ThumbJob {
 
 impl ThumbJob {
     fn abandoned(&self) -> bool {
-        self.reply.is_closed()
-            || self
-                .cancel
-                .as_ref()
-                .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+        self.reply.is_closed() || self.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire))
     }
 
     fn finish(self) {
@@ -1293,11 +1183,7 @@ struct ThumbQueue {
 
 impl ThumbQueue {
     fn new() -> Self {
-        Self {
-            queues: Mutex::new(ThumbQueues::default()),
-            ready: Condvar::new(),
-            stopping: AtomicBool::new(false),
-        }
+        Self { queues: Mutex::new(ThumbQueues::default()), ready: Condvar::new(), stopping: AtomicBool::new(false) }
     }
 
     fn push_tile(&self, job: ThumbJob) {
@@ -1331,9 +1217,7 @@ impl ThumbQueue {
             let mut dropped = Vec::new();
             if queues.background.len() > BACKGROUND_QUEUE_CAP {
                 let (live, abandoned): (VecDeque<_>, VecDeque<_>) =
-                    std::mem::take(&mut queues.background)
-                        .into_iter()
-                        .partition(|job| !job.abandoned());
+                    std::mem::take(&mut queues.background).into_iter().partition(|job| !job.abandoned());
                 queues.background = live;
                 dropped.extend(abandoned);
                 while queues.background.len() > BACKGROUND_QUEUE_CAP {
@@ -1355,11 +1239,7 @@ impl ThumbQueue {
             if self.stopping.load(Ordering::Acquire) {
                 return None;
             }
-            if let Some(job) = queues
-                .tiles
-                .pop_back()
-                .or_else(|| queues.background.pop_front())
-            {
+            if let Some(job) = queues.tiles.pop_back().or_else(|| queues.background.pop_front()) {
                 return Some(job);
             }
             queues = self.ready.wait(queues).expect("thumbnail queue poisoned");
@@ -1390,11 +1270,7 @@ struct PreviewSlot {
 
 impl PreviewSlot {
     fn new() -> Self {
-        Self {
-            latest: Mutex::new(None),
-            ready: Condvar::new(),
-            stopping: AtomicBool::new(false),
-        }
+        Self { latest: Mutex::new(None), ready: Condvar::new(), stopping: AtomicBool::new(false) }
     }
 
     fn submit(&self, job: ThumbJob) {
@@ -1402,11 +1278,7 @@ impl PreviewSlot {
             job.reply.send(ThumbReply::Dropped);
             return;
         }
-        let superseded = self
-            .latest
-            .lock()
-            .expect("preview slot poisoned")
-            .replace(job);
+        let superseded = self.latest.lock().expect("preview slot poisoned").replace(job);
         if let Some(superseded) = superseded {
             superseded.reply.send(ThumbReply::Dropped);
         }
@@ -1465,9 +1337,9 @@ fn video_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
 mod tests {
     use super::*;
     use fileid_engine::ipc::IpcEvent;
+    use std::process::Command;
     use fileid_engine::ipc::{EngineError, EngineInfo, ScanComplete, Wrap};
     use std::io::Cursor;
-    use std::process::Command;
     use std::sync::atomic::AtomicUsize;
 
     fn drain(stream: String) -> Vec<RawEvent> {
@@ -1488,12 +1360,7 @@ mod tests {
         }
         assert_eq!(
             delays,
-            [
-                Some(Duration::from_secs(1)),
-                Some(Duration::from_secs(4)),
-                Some(Duration::from_secs(16)),
-                None
-            ]
+            [Some(Duration::from_secs(1)), Some(Duration::from_secs(4)), Some(Duration::from_secs(16)), None]
         );
     }
 
@@ -1506,18 +1373,12 @@ mod tests {
         }
         assert!(budget.next_delay(start).is_none());
         budget.record_ready(start + Duration::from_secs(10));
-        assert_eq!(
-            budget.next_delay(start + Duration::from_secs(41)),
-            Some(Duration::from_secs(1))
-        );
+        assert_eq!(budget.next_delay(start + Duration::from_secs(41)), Some(Duration::from_secs(1)));
         let mut aging = RespawnBudget::default();
         for _ in 0..3 {
             aging.next_delay(start);
         }
-        assert_eq!(
-            aging.next_delay(start + Duration::from_secs(61)),
-            Some(Duration::from_secs(1))
-        );
+        assert_eq!(aging.next_delay(start + Duration::from_secs(61)), Some(Duration::from_secs(1)));
     }
 
     #[test]
@@ -1572,10 +1433,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shutdown_allows_engine_to_exit_after_stdin_eof() {
-        let marker = std::env::temp_dir().join(format!(
-            "fileid-linux-graceful-shutdown-{}",
-            std::process::id()
-        ));
+        let marker = std::env::temp_dir().join(format!("fileid-linux-graceful-shutdown-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let mut child = Command::new("sh")
             .args(["-c", "cat >/dev/null; printf graceful > \"$FILEID_MARKER\""])
@@ -1593,27 +1451,18 @@ mod tests {
         while !marker.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            marker.exists(),
-            "shutdown killed the engine before graceful EOF handling"
-        );
+        assert!(marker.exists(), "shutdown killed the engine before graceful EOF handling");
         let _ = std::fs::remove_file(marker);
     }
 
     #[cfg(unix)]
     #[test]
     fn requested_shutdown_suppresses_respawn() {
-        let mut child = Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
         let mut client = EngineClient::new();
         client.stdin = Some(spawn_command_writer(child.stdin.take().unwrap()));
         client.child = Some(child);
-        client
-            .send(CommandPayload::Shutdown(fileid_engine::ipc::Empty {}))
-            .unwrap();
+        client.send(CommandPayload::Shutdown(fileid_engine::ipc::Empty {})).unwrap();
         assert!(client.shutting_down.load(Ordering::Acquire));
     }
 
@@ -1626,11 +1475,7 @@ mod tests {
         let legacy = serde_json::json!({"cmd": "startScan", "id": "scan-1", "rootPath": root});
         assert!(serde_json::from_value::<IpcCommand>(legacy).is_err());
 
-        let mut child = Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut client = EngineClient::new();
         client.stdin = Some(spawn_command_writer(child.stdin.take().unwrap()));
@@ -1666,15 +1511,13 @@ mod tests {
             failed_files: 7,
             total_seconds: 1.0,
         })));
-        let progress = IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
-            ModelDownloadProgress {
-                model_kind: "arcface".to_owned(),
-                fraction: 0.4,
-                message: "Downloading face models".to_owned(),
-                bytes_done: Some(40),
-                total_bytes: Some(100),
-            },
-        )));
+        let progress = IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(ModelDownloadProgress {
+            model_kind: "arcface".to_owned(),
+            fraction: 0.4,
+            message: "Downloading face models".to_owned(),
+            bytes_done: Some(40),
+            total_bytes: Some(100),
+        })));
         let error = IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "models_not_installed".to_owned(),
             message: "Install models before scanning".to_owned(),
@@ -1697,21 +1540,12 @@ mod tests {
         );
         let events = drain(stream);
         assert!(matches!(events[0], RawEvent::Announced));
-        assert!(matches!(
-            events[1],
-            RawEvent::State(EngineState::ScanComplete(13))
-        ));
-        assert!(
-            matches!(&events[2], RawEvent::State(EngineState::ModelDownloadProgress(p))
-            if p.model_kind == "arcface" && p.bytes_done == Some(40) && p.total_bytes == Some(100))
-        );
-        assert!(
-            matches!(&events[3], RawEvent::State(EngineState::Error { kind, model_kind, .. })
-            if kind == "models_not_installed" && model_kind.is_none())
-        );
-        assert!(
-            matches!(&events[4], RawEvent::State(EngineState::FaceClusteringBusy(m)) if m == "busy")
-        );
+        assert!(matches!(events[1], RawEvent::State(EngineState::ScanComplete(13))));
+        assert!(matches!(&events[2], RawEvent::State(EngineState::ModelDownloadProgress(p))
+            if p.model_kind == "arcface" && p.bytes_done == Some(40) && p.total_bytes == Some(100)));
+        assert!(matches!(&events[3], RawEvent::State(EngineState::Error { kind, model_kind, .. })
+            if kind == "models_not_installed" && model_kind.is_none()));
+        assert!(matches!(&events[4], RawEvent::State(EngineState::FaceClusteringBusy(m)) if m == "busy"));
         assert!(matches!(events[5], RawEvent::State(EngineState::Exited)));
         assert_eq!(events.len(), 6);
     }
@@ -1753,84 +1587,43 @@ mod tests {
                 actions: None,
             }))),
         ];
-        let stream = events
-            .iter()
-            .map(|e| serde_json::to_string(e).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let stream = events.iter().map(|e| serde_json::to_string(e).unwrap()).collect::<Vec<_>>().join("\n");
         let events = drain(stream);
-        assert!(
-            matches!(&events[0], RawEvent::State(EngineState::CatalogResponse(r)) if r.request_id == "catalog-1")
-        );
-        assert!(
-            matches!(&events[1], RawEvent::State(EngineState::ToolResponse(r)) if r.request_id == "tools-2")
-        );
-        assert!(
-            matches!(&events[2], RawEvent::State(EngineState::ChatResponse(r))
-            if r.request_id == "chat-3" && r.conversation_id == "conversation")
-        );
+        assert!(matches!(&events[0], RawEvent::State(EngineState::CatalogResponse(r)) if r.request_id == "catalog-1"));
+        assert!(matches!(&events[1], RawEvent::State(EngineState::ToolResponse(r)) if r.request_id == "tools-2"));
+        assert!(matches!(&events[2], RawEvent::State(EngineState::ChatResponse(r))
+            if r.request_id == "chat-3" && r.conversation_id == "conversation"));
         assert!(matches!(events[3], RawEvent::State(EngineState::Exited)));
     }
 
     #[test]
     fn roots_list_reaches_subscribers_with_its_request_id() {
-        let list = IpcEvent::now(EventPayload::RootsList(Wrap::new(
-            fileid_engine::ipc::RootsList {
-                request_id: "locations-4".into(),
-                roots: vec![],
-            },
-        )));
+        let list = IpcEvent::now(EventPayload::RootsList(Wrap::new(fileid_engine::ipc::RootsList {
+            request_id: "locations-4".into(),
+            roots: vec![],
+        })));
         let events = drain(serde_json::to_string(&list).unwrap());
-        assert!(
-            matches!(&events[0], RawEvent::State(EngineState::RootsList(r)) if r.request_id == "locations-4")
-        );
+        assert!(matches!(&events[0], RawEvent::State(EngineState::RootsList(r)) if r.request_id == "locations-4"));
     }
 
     #[test]
     fn health_answers_carry_their_nonce_and_pid() {
         let answer = IpcEvent::now(EventPayload::HealthCheckResult(Wrap::new(
-            fileid_engine::ipc::HealthCheckResult {
-                request_id: "health-1-2".into(),
-                pid: 77,
-            },
+            fileid_engine::ipc::HealthCheckResult { request_id: "health-1-2".into(), pid: 77 },
         )));
         let events = drain(serde_json::to_string(&answer).unwrap());
-        assert!(
-            matches!(&events[0], RawEvent::Health { request_id, pid } if request_id == "health-1-2" && *pid == 77)
-        );
+        assert!(matches!(&events[0], RawEvent::Health { request_id, pid } if request_id == "health-1-2" && *pid == 77));
     }
 
     #[test]
     fn query_queue_is_bounded_and_latest_request_wins() {
         let state = QueryWorkerState::new();
         let (first_reply, first_rx) = async_channel::bounded(1);
-        state.submit(QueryJob {
-            spec: QuerySpec {
-                search: "first".into(),
-                ..QuerySpec::default()
-            },
-            reply: first_reply,
-        });
+        state.submit(QueryJob { spec: QuerySpec { search: "first".into(), ..QuerySpec::default() }, reply: first_reply });
         let (second_reply, _second_rx) = async_channel::bounded(1);
-        state.submit(QueryJob {
-            spec: QuerySpec {
-                search: "second".into(),
-                ..QuerySpec::default()
-            },
-            reply: second_reply,
-        });
-        assert!(matches!(
-            first_rx.try_recv(),
-            Err(async_channel::TryRecvError::Closed)
-        ));
-        assert_eq!(
-            state.latest.lock().unwrap().pending[0]
-                .as_ref()
-                .unwrap()
-                .spec
-                .search,
-            "second"
-        );
+        state.submit(QueryJob { spec: QuerySpec { search: "second".into(), ..QuerySpec::default() }, reply: second_reply });
+        assert!(matches!(first_rx.try_recv(), Err(async_channel::TryRecvError::Closed)));
+        assert_eq!(state.latest.lock().unwrap().pending[0].as_ref().unwrap().spec.search, "second");
     }
 
     #[test]
@@ -1838,14 +1631,7 @@ mod tests {
         let state = QueryWorkerState::new();
         let submit = |search: &str, channel| {
             let (reply, rx) = async_channel::bounded(1);
-            state.submit(QueryJob {
-                spec: QuerySpec {
-                    search: search.into(),
-                    channel,
-                    ..QuerySpec::default()
-                },
-                reply,
-            });
+            state.submit(QueryJob { spec: QuerySpec { search: search.into(), channel, ..QuerySpec::default() }, reply });
             rx
         };
         let tools = submit("picker", QueryChannel::Tools);
@@ -1853,9 +1639,7 @@ mod tests {
         let _preview = submit("siblings", QueryChannel::Preview);
         assert!(!tools.is_closed());
         let mut slots = state.latest.lock().unwrap();
-        let order: Vec<_> = std::iter::from_fn(|| slots.take_next())
-            .map(|job| job.spec.search)
-            .collect();
+        let order: Vec<_> = std::iter::from_fn(|| slots.take_next()).map(|job| job.spec.search).collect();
         assert_eq!(order, ["grid", "siblings", "picker"]);
         assert!(slots.is_empty());
     }
@@ -1877,20 +1661,12 @@ mod tests {
         let late = client.subscribe();
         client.replay_to_new_subscribers(false);
         let after = client.subscribe();
-        assert!(matches!(
-            late.try_recv().as_deref(),
-            Some(EngineState::Scanning)
-        ));
-        assert!(
-            matches!(late.try_recv().as_deref(), Some(EngineState::ModelDownloadProgress(p)) if p.model_kind == "clip")
-        );
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::Scanning)));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ModelDownloadProgress(p)) if p.model_kind == "clip"));
         assert!(late.try_recv().is_none());
         assert!(after.try_recv().is_none());
         client.publish_test_event(EngineState::ScanComplete(3));
-        assert!(matches!(
-            late.try_recv().as_deref(),
-            Some(EngineState::ScanComplete(3))
-        ));
+        assert!(matches!(late.try_recv().as_deref(), Some(EngineState::ScanComplete(3))));
     }
 
     #[test]
@@ -1910,20 +1686,10 @@ mod tests {
         assert!(RAW_EVENT_CAP > 0 && RAW_EVENT_CAP <= 8);
     }
 
-    fn probe_job(
-        run: impl FnOnce() -> Option<DecodedImage> + Send + 'static,
-    ) -> (ThumbJob, Receiver<ThumbReply>, CancelToken) {
+    fn probe_job(run: impl FnOnce() -> Option<DecodedImage> + Send + 'static) -> (ThumbJob, Receiver<ThumbReply>, CancelToken) {
         let (reply, rx) = async_channel::bounded(1);
         let cancel = CancelToken::default();
-        (
-            ThumbJob {
-                work: ThumbWork::Custom(Box::new(run)),
-                reply: ReplyTo::Full(reply),
-                cancel: Some(cancel.clone()),
-            },
-            rx,
-            cancel,
-        )
+        (ThumbJob { work: ThumbWork::Custom(Box::new(run)), reply: ReplyTo::Full(reply), cancel: Some(cancel.clone()) }, rx, cancel)
     }
 
     #[test]
@@ -1939,10 +1705,7 @@ mod tests {
         assert_eq!(queue.queues.lock().unwrap().tiles.len(), THUMB_QUEUE_CAP);
         let newest = queue.next().unwrap();
         newest.finish();
-        assert!(matches!(
-            replies[THUMB_QUEUE_CAP].try_recv(),
-            Ok(ThumbReply::Failed)
-        ));
+        assert!(matches!(replies[THUMB_QUEUE_CAP].try_recv(), Ok(ThumbReply::Failed)));
     }
 
     #[test]
@@ -1959,10 +1722,7 @@ mod tests {
         }
         let (job, _live_rx, _live_cancel) = probe_job(|| None);
         queue.push_background(job);
-        assert_eq!(
-            queue.queues.lock().unwrap().background.len(),
-            BACKGROUND_QUEUE_CAP - 9
-        );
+        assert_eq!(queue.queues.lock().unwrap().background.len(), BACKGROUND_QUEUE_CAP - 9);
         assert!(matches!(cancelled[0].0.try_recv(), Ok(ThumbReply::Dropped)));
         assert!(cancelled[10].0.try_recv().is_err());
 
@@ -1972,14 +1732,8 @@ mod tests {
             queue.push_background(job);
             kept.push((rx, cancel));
         }
-        assert_eq!(
-            queue.queues.lock().unwrap().background.len(),
-            BACKGROUND_QUEUE_CAP
-        );
-        assert!(matches!(
-            cancelled[10].0.try_recv(),
-            Ok(ThumbReply::Dropped)
-        ));
+        assert_eq!(queue.queues.lock().unwrap().background.len(), BACKGROUND_QUEUE_CAP);
+        assert!(matches!(cancelled[10].0.try_recv(), Ok(ThumbReply::Dropped)));
     }
 
     #[test]
@@ -2055,8 +1809,7 @@ mod tests {
 
     #[test]
     fn oversized_sparse_image_is_not_decoded() {
-        let path =
-            std::env::temp_dir().join(format!("fileid-linux-thumb-cap-{}.png", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fileid-linux-thumb-cap-{}.png", std::process::id()));
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(THUMB_MAX_BYTES + 1).unwrap();
         drop(file);
@@ -2066,8 +1819,7 @@ mod tests {
 
     #[test]
     fn raw_files_skip_the_byte_cap_and_still_fail_cleanly_without_a_preview() {
-        let path =
-            std::env::temp_dir().join(format!("fileid-linux-thumb-raw-{}.ARW", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fileid-linux-thumb-raw-{}.ARW", std::process::id()));
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(THUMB_MAX_BYTES + 1).unwrap();
         drop(file);
@@ -2080,10 +1832,7 @@ mod tests {
         let fixture = std::env::temp_dir().join(format!(
             "fileid-library-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&fixture).unwrap();
         let db_path = fixture.join("fileid.sqlite");
@@ -2107,56 +1856,27 @@ mod tests {
                 [fixture.join("failed.png").to_str().unwrap()],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO tags (file_id,tag,source) VALUES (1,'urgent','manual')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO ocr_text (file_id,text) VALUES (3,'needle in OCR')",
-                [],
-            )
-            .unwrap();
-            conn.execute("UPDATE files SET vlm_inherited_from = 3 WHERE id = 2", [])
-                .unwrap();
+            conn.execute("INSERT INTO tags (file_id,tag,source) VALUES (1,'urgent','manual')", []).unwrap();
+            conn.execute("INSERT INTO ocr_text (file_id,text) VALUES (3,'needle in OCR')", []).unwrap();
+            conn.execute("UPDATE files SET vlm_inherited_from = 3 WHERE id = 2", []).unwrap();
         }
         let query = |search: &str, kind: Option<&str>, limit: i64| {
             query_files_at_path(
                 &db_path,
-                &QuerySpec {
-                    search: search.to_owned(),
-                    kind: kind.map(str::to_owned),
-                    limit,
-                    ..QuerySpec::default()
-                },
+                &QuerySpec { search: search.to_owned(), kind: kind.map(str::to_owned), limit, ..QuerySpec::default() },
             )
             .unwrap()
         };
         let (first, total) = query("", None, 2);
         assert_eq!(total, 3);
-        assert_eq!(
-            first
-                .iter()
-                .map(|file| file.name.as_str())
-                .collect::<Vec<_>>(),
-            ["image.png", "notes.pdf"]
-        );
+        assert_eq!(first.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(), ["image.png", "notes.pdf"]);
         let (literal, literal_total) = query("100%", None, 10);
         assert_eq!(literal_total, 1);
         assert_eq!(literal[0].name, "draft_100%.txt");
         assert_eq!(query("urgent", None, 10).1, 1);
         assert_eq!(query("needle", None, 10).0[0].kind, "pdf");
         assert_eq!(query("", Some("image"), 10).1, 1);
-        assert!(
-            query_files_at_path(
-                &fixture.join("missing.sqlite"),
-                &QuerySpec {
-                    limit: 10,
-                    ..QuerySpec::default()
-                }
-            )
-            .is_err()
-        );
+        assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec { limit: 10, ..QuerySpec::default() }).is_err());
         let conn = fileid_engine::db::open_read(&db_path).unwrap();
         let image = file_row_on(&conn, 2).unwrap().unwrap();
         assert_eq!(image.name, "image.png");
@@ -2179,97 +1899,23 @@ mod tests {
               (5,'/m/Cameras/e.jpg',5,1,5,'image','jpg');",
         )
         .unwrap();
-        let others = [
-            "/m/Camera2".to_owned(),
-            "/m/Camera/Synced".to_owned(),
-            "/elsewhere".to_owned(),
-        ];
-        let scope = Some(
-            fileid_engine::commands::roots::RootScope::new("/m/Camera/", &others)
-                .param()
-                .to_owned(),
-        );
+        let others = ["/m/Camera2".to_owned(), "/m/Camera/Synced".to_owned(), "/elsewhere".to_owned()];
+        let scope = Some(fileid_engine::commands::roots::RootScope::new("/m/Camera/", &others).param().to_owned());
         let ids = |spec: QuerySpec| -> (Vec<i64>, i64) {
             let (rows, total) = query_files_on(&conn, &spec).unwrap();
             (rows.into_iter().map(|row| row.id).collect(), total)
         };
-        let scoped = |spec: QuerySpec| {
-            ids(QuerySpec {
-                scope: scope.clone(),
-                ..spec
-            })
-        };
-        assert_eq!(
-            scoped(QuerySpec {
-                limit: 10,
-                ..QuerySpec::default()
-            }),
-            (vec![2, 1], 2)
-        );
-        assert_eq!(
-            scoped(QuerySpec {
-                limit: 1,
-                ..QuerySpec::default()
-            }),
-            (vec![2], 2)
-        );
-        assert_eq!(
-            scoped(QuerySpec {
-                limit: 1,
-                offset: 1,
-                ..QuerySpec::default()
-            }),
-            (vec![1], 2)
-        );
-        assert_eq!(
-            scoped(QuerySpec {
-                limit: 10,
-                kind: Some("image".into()),
-                ..QuerySpec::default()
-            }),
-            (vec![1], 1)
-        );
-        assert_eq!(
-            scoped(QuerySpec {
-                limit: 10,
-                search: "b.mov".into(),
-                ..QuerySpec::default()
-            }),
-            (vec![2], 1)
-        );
-        assert_eq!(
-            ids(QuerySpec {
-                limit: 2,
-                ..QuerySpec::default()
-            }),
-            (vec![5, 4], 5)
-        );
+        let scoped = |spec: QuerySpec| ids(QuerySpec { scope: scope.clone(), ..spec });
+        assert_eq!(scoped(QuerySpec { limit: 10, ..QuerySpec::default() }), (vec![2, 1], 2));
+        assert_eq!(scoped(QuerySpec { limit: 1, ..QuerySpec::default() }), (vec![2], 2));
+        assert_eq!(scoped(QuerySpec { limit: 1, offset: 1, ..QuerySpec::default() }), (vec![1], 2));
+        assert_eq!(scoped(QuerySpec { limit: 10, kind: Some("image".into()), ..QuerySpec::default() }), (vec![1], 1));
+        assert_eq!(scoped(QuerySpec { limit: 10, search: "b.mov".into(), ..QuerySpec::default() }), (vec![2], 1));
+        assert_eq!(ids(QuerySpec { limit: 2, ..QuerySpec::default() }), (vec![5, 4], 5));
         // A total counted a moment ago is reused instead of counting again,
         // but never reported below the rows actually returned.
-        assert_eq!(
-            ids(QuerySpec {
-                limit: 2,
-                known_total: Some(4),
-                ..QuerySpec::default()
-            }),
-            (vec![5, 4], 4)
-        );
-        assert_eq!(
-            ids(QuerySpec {
-                limit: 2,
-                known_total: Some(1),
-                ..QuerySpec::default()
-            }),
-            (vec![5, 4], 2)
-        );
-        assert_eq!(
-            ids(QuerySpec {
-                limit: 10,
-                known_total: Some(99),
-                ..QuerySpec::default()
-            })
-            .1,
-            5
-        );
+        assert_eq!(ids(QuerySpec { limit: 2, known_total: Some(4), ..QuerySpec::default() }), (vec![5, 4], 4));
+        assert_eq!(ids(QuerySpec { limit: 2, known_total: Some(1), ..QuerySpec::default() }), (vec![5, 4], 2));
+        assert_eq!(ids(QuerySpec { limit: 10, known_total: Some(99), ..QuerySpec::default() }).1, 5);
     }
 }

@@ -11,12 +11,7 @@ pub(super) fn is_playable_media(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                FileKind::from_extension(ext),
-                FileKind::Video | FileKind::Audio
-            )
-        })
+        .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Video | FileKind::Audio))
 }
 pub(super) fn timeline_request(file_ids: Vec<i64>, mode: &str) -> CatalogRequest {
     let mut r = catalog_request("enqueueTimeline");
@@ -70,15 +65,7 @@ mod tests {
     use super::*;
     #[test]
     fn camera_and_phone_media_play_in_place() {
-        for path in [
-            "/v/clip.MTS",
-            "/v/a.m2ts",
-            "/v/b.3gp",
-            "/v/c.mpg",
-            "/a/d.opus",
-            "/a/e.aiff",
-            "/v/f.mp4",
-        ] {
+        for path in ["/v/clip.MTS", "/v/a.m2ts", "/v/b.3gp", "/v/c.mpg", "/a/d.opus", "/a/e.aiff", "/v/f.mp4"] {
             assert!(is_playable_media(path), "{path}");
         }
         for path in ["/p/photo.jpg", "/d/notes.pdf", "/x/no_extension"] {

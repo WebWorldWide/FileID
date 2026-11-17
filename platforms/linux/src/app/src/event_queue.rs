@@ -44,12 +44,7 @@ pub fn channel<T: Coalesce>() -> (EventSender<T>, EventReceiver<T>) {
         sender_gone: false,
         receiver_gone: false,
     }));
-    (
-        EventSender {
-            shared: shared.clone(),
-        },
-        EventReceiver { shared },
-    )
+    (EventSender { shared: shared.clone() }, EventReceiver { shared })
 }
 
 impl<T: Coalesce> EventSender<T> {
@@ -168,9 +163,7 @@ impl<T: Coalesce> EventReceiver<T> {
     }
 
     pub fn closer(&self) -> Closer<T> {
-        Closer {
-            shared: Rc::downgrade(&self.shared),
-        }
+        Closer { shared: Rc::downgrade(&self.shared) }
     }
 
     /// Closes this receiver after `timeout` unless the returned guard is
@@ -311,10 +304,7 @@ mod tests {
         tx.push(&Rc::new(Ev::Progress(1)));
         tx.push(&Rc::new(Ev::Download("a", 2)));
         tx.push(&Rc::new(Ev::Progress(2)));
-        assert_eq!(
-            values(&rx),
-            ["Download(\"b\", 1)", "Download(\"a\", 2)", "Progress(2)"]
-        );
+        assert_eq!(values(&rx), ["Download(\"b\", 1)", "Download(\"a\", 2)", "Progress(2)"]);
     }
 
     #[test]
@@ -380,17 +370,13 @@ mod tests {
         assert!(Pin::new(&mut recv).poll(&mut cx).is_pending());
         tx.push(&Rc::new(Ev::Reply(1)));
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
-        assert!(
-            matches!(Pin::new(&mut recv).poll(&mut cx), Poll::Ready(Ok(event)) if *event == Ev::Reply(1))
-        );
+        assert!(matches!(Pin::new(&mut recv).poll(&mut cx), Poll::Ready(Ok(event)) if *event == Ev::Reply(1)));
 
         let mut recv = rx.recv();
         assert!(Pin::new(&mut recv).poll(&mut cx).is_pending());
         tx.push(&Rc::new(Ev::Done));
         drop(tx);
-        assert!(
-            matches!(Pin::new(&mut recv).poll(&mut cx), Poll::Ready(Ok(event)) if *event == Ev::Done)
-        );
+        assert!(matches!(Pin::new(&mut recv).poll(&mut cx), Poll::Ready(Ok(event)) if *event == Ev::Done));
         let mut recv = rx.recv();
         assert_eq!(Pin::new(&mut recv).poll(&mut cx), Poll::Ready(Err(Closed)));
     }

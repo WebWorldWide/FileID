@@ -14,7 +14,7 @@ use gtk::glib;
 use super::chat_actions::{self as rules, PlanSummary};
 use super::workbench_state::catalog_request;
 use super::workbenches::Engine;
-use crate::engine_client::{EngineState, read_db};
+use crate::engine_client::{read_db, EngineState};
 use crate::v3;
 
 const NOT_READY: &str = "FileID is still getting ready. Try again in a moment.";
@@ -53,37 +53,15 @@ struct PersonName {
 enum Wait {
     Scan,
     Describe,
-    Plan {
-        root: String,
-    },
-    Move {
-        undo_root: Option<String>,
-    },
-    Trash {
-        ids: HashSet<i64>,
-        bytes: HashMap<i64, i64>,
-        changed: u64,
-    },
+    Plan { root: String },
+    Move { undo_root: Option<String> },
+    Trash { ids: HashSet<i64>, bytes: HashMap<i64, i64>, changed: u64 },
     Restore,
-    Rename {
-        ids: HashSet<i64>,
-        old: HashMap<i64, String>,
-        skipped: u64,
-        undoing: bool,
-    },
-    Person {
-        person: i64,
-        before: Option<PersonName>,
-    },
+    Rename { ids: HashSet<i64>, old: HashMap<i64, String>, skipped: u64, undoing: bool },
+    Person { person: i64, before: Option<PersonName> },
     Unknown,
-    Merge {
-        outstanding: usize,
-        failed: bool,
-        operations: Vec<String>,
-    },
-    MomentsJobs {
-        request_id: String,
-    },
+    Merge { outstanding: usize, failed: bool, operations: Vec<String> },
+    MomentsJobs { request_id: String },
 }
 
 struct Pending {
@@ -108,11 +86,7 @@ fn file_facts(conn: &rusqlite::Connection, ids: &[i64]) -> HashMap<i64, FileFact
         .filter_map(|id| {
             statement
                 .query_row([id], |row| {
-                    Ok(FileFacts {
-                        path: row.get(0)?,
-                        size: row.get(1)?,
-                        proposed: row.get(2)?,
-                    })
+                    Ok(FileFacts { path: row.get(0)?, size: row.get(1)?, proposed: row.get(2)? })
                 })
                 .ok()
                 .map(|facts| (*id, facts))
@@ -169,9 +143,7 @@ fn verify_copies(
             continue;
         };
         match (hash(*keeper), hash(*victim)) {
-            (Some(kept_hash), Some(copy_hash))
-                if kept_hash == copy_hash && copy.size == kept.size =>
-            {
+            (Some(kept_hash), Some(copy_hash)) if kept_hash == copy_hash && copy.size == kept.size => {
                 valid.push(ExactTrashIdentity {
                     file_id: *victim,
                     path: copy.path.clone(),
@@ -189,10 +161,9 @@ fn verify_copies(
 }
 
 fn file_name(path: &str) -> String {
-    std::path::Path::new(path).file_name().map_or_else(
-        || path.to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    )
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
 /// The Recent changes line for a finished card: its result sentence.
@@ -248,11 +219,7 @@ impl Runner {
     }
 
     fn phase(&self, id: &str) -> Phase {
-        self.phases
-            .borrow()
-            .get(id)
-            .cloned()
-            .unwrap_or(Phase::Proposed)
+        self.phases.borrow().get(id).cloned().unwrap_or(Phase::Proposed)
     }
 
     fn running(&self, id: &str) -> bool {
@@ -282,19 +249,10 @@ impl Runner {
     }
 
     fn toast(self: &Rc<Self>, id: &str, text: &str) {
-        let Some(overlay) = self
-            .overlays
-            .borrow()
-            .get(id)
-            .and_then(glib::WeakRef::upgrade)
-        else {
+        let Some(overlay) = self.overlays.borrow().get(id).and_then(glib::WeakRef::upgrade) else {
             return;
         };
-        let toast = adw::Toast::builder()
-            .title(text)
-            .use_markup(false)
-            .timeout(10)
-            .build();
+        let toast = adw::Toast::builder().title(text).use_markup(false).timeout(10).build();
         if let Some((label, _)) = self.undos.borrow().get(id) {
             toast.set_button_label(Some(label));
             let weak = Rc::downgrade(self);
@@ -314,9 +272,7 @@ impl Runner {
         crate::changes::supersede(self.entries.borrow_mut().remove(id), "Run again from Chat");
         match undo {
             Some((label, run)) => {
-                self.undos
-                    .borrow_mut()
-                    .insert(id.to_owned(), (label.to_owned(), run));
+                self.undos.borrow_mut().insert(id.to_owned(), (label.to_owned(), run));
                 self.record_change(id, &text);
             }
             None => {
@@ -331,8 +287,7 @@ impl Runner {
     fn record_change(self: &Rc<Self>, id: &str, text: &str) {
         let weak = Rc::downgrade(self);
         let card = id.to_owned();
-        let reverse: crate::changes::Reverse =
-            Rc::new(move || weak.upgrade().is_some_and(|runner| runner.undo(&card)));
+        let reverse: crate::changes::Reverse = Rc::new(move || weak.upgrade().is_some_and(|runner| runner.undo(&card)));
         if let Some(entry) = crate::changes::record(1, || chat_change_label(text), Some(reverse)) {
             self.entries.borrow_mut().insert(id.to_owned(), entry);
         }
@@ -353,10 +308,7 @@ impl Runner {
     }
 
     fn wait(&self, id: &str, wait: Wait) {
-        self.pending.borrow_mut().push(Pending {
-            action: id.to_owned(),
-            wait,
-        });
+        self.pending.borrow_mut().push(Pending { action: id.to_owned(), wait });
     }
 
     fn take(&self, matches: impl Fn(&Wait) -> bool) -> Option<Pending> {
@@ -374,9 +326,7 @@ impl Runner {
         if !matches!(self.phase(id), Phase::Done(_)) {
             return false;
         }
-        let Some((_, run)) = self.undos.borrow_mut().remove(id) else {
-            return false;
-        };
+        let Some((_, run)) = self.undos.borrow_mut().remove(id) else { return false };
         if let Some(entry) = self.entries.borrow_mut().remove(id) {
             crate::changes::set_status(entry, crate::changes::Status::Undoing);
             self.undoing.borrow_mut().insert(id.to_owned(), entry);
@@ -408,33 +358,20 @@ impl Runner {
         rules::plan_summary(plan.as_ref()?, action.path.as_deref())
     }
 
-    fn run(
-        self: &Rc<Self>,
-        action: &ChatAction,
-        anchor: &gtk::Button,
-        overlay: &adw::ToastOverlay,
-    ) {
-        if !rules::runnable(action)
-            || self.running(&action.id)
-            || self.phase(&action.id) == Phase::Cancelled
-        {
+    fn run(self: &Rc<Self>, action: &ChatAction, anchor: &gtk::Button, overlay: &adw::ToastOverlay) {
+        if !rules::runnable(action) || self.running(&action.id) || self.phase(&action.id) == Phase::Cancelled {
             return;
         }
         let id = action.id.as_str();
-        self.overlays
-            .borrow_mut()
-            .insert(id.to_owned(), overlay.downgrade());
+        self.overlays.borrow_mut().insert(id.to_owned(), overlay.downgrade());
         let navigate = |page: &str| {
-            let _ =
-                anchor.activate_action("win.navigate", Some(&rules::page_id(page).to_variant()));
+            let _ = anchor.activate_action("win.navigate", Some(&rules::page_id(page).to_variant()));
         };
         match action.kind.as_str() {
             "scanFolder" | "rescan" => {
                 let path = action.path.clone().unwrap_or_default();
                 let started = if action.kind == "scanFolder" {
-                    anchor
-                        .activate_action("win.scan-folder", Some(&path.to_variant()))
-                        .is_ok()
+                    anchor.activate_action("win.scan-folder", Some(&path.to_variant())).is_ok()
                 } else {
                     self.engine.borrow_mut().start_scan(&path).is_ok()
                 };
@@ -450,10 +387,7 @@ impl Runner {
                 if !crate::model_license::ensure_or_prompt(anchor, kind) {
                     return;
                 }
-                let file_ids = action
-                    .file_ids
-                    .as_ref()
-                    .map(|ids| ids.iter().take(100).copied().collect());
+                let file_ids = action.file_ids.as_ref().map(|ids| ids.iter().take(100).copied().collect());
                 let sent = self.send(CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                     model_kind: kind.to_owned(),
                     skip_existing: action.file_ids.is_none(),
@@ -463,10 +397,7 @@ impl Runner {
                     excluded_folders: None,
                 }));
                 if !sent {
-                    self.fail(
-                        id,
-                        "Describing didn't start. Check the AI model in Describe Files.",
-                    );
+                    self.fail(id, "Describing didn't start. Check the AI model in Describe Files.");
                     return;
                 }
                 self.wait(id, Wait::Describe);
@@ -488,33 +419,20 @@ impl Runner {
                 if all || job == "moments" {
                     let request = catalog_request("jobs");
                     let request_id = request.request_id.clone();
-                    if self.send(CommandPayload::CatalogRequest(Box::new(
-                        CatalogRequestPayload { request },
-                    ))) {
+                    if self.send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request }))) {
                         self.wait(id, Wait::MomentsJobs { request_id });
                     } else {
                         sent = false;
                     }
                 }
                 if sent {
-                    self.finish(
-                        id,
-                        "Asked FileID to stop. Finished work is kept.".to_owned(),
-                        None,
-                    );
+                    self.finish(id, "Asked FileID to stop. Finished work is kept.".to_owned(), None);
                 } else {
                     self.fail(id, NOT_READY);
                 }
             }
             "findDuplicates" | "openPage" => {
-                let page = action
-                    .page
-                    .as_deref()
-                    .unwrap_or(if action.kind == "findDuplicates" {
-                        "cleanup"
-                    } else {
-                        "library"
-                    });
+                let page = action.page.as_deref().unwrap_or(if action.kind == "findDuplicates" { "cleanup" } else { "library" });
                 navigate(page);
                 self.finish(id, format!("Opened {}.", rules::page_title(page)), None);
             }
@@ -524,22 +442,13 @@ impl Runner {
                 self.finish(id, "Opened Library with this search.".to_owned(), None);
             }
             "findMoments" => {
-                match action
-                    .query
-                    .as_deref()
-                    .filter(|query| !query.trim().is_empty())
-                {
+                match action.query.as_deref().filter(|query| !query.trim().is_empty()) {
                     Some(query) => {
-                        let _ =
-                            anchor.activate_action("win.moments-query", Some(&query.to_variant()));
+                        let _ = anchor.activate_action("win.moments-query", Some(&query.to_variant()));
                     }
                     None => navigate("search"),
                 }
-                self.finish(
-                    id,
-                    "Opened Search & Moments with this search.".to_owned(),
-                    None,
-                );
+                self.finish(id, "Opened Search & Moments with this search.".to_owned(), None);
             }
             "exportFiles" => {
                 let ids = action.file_ids.clone().unwrap_or_default();
@@ -547,16 +456,11 @@ impl Runner {
                 if super::chat_handoff::hand_to_tools(ids) {
                     self.finish(id, "Opened File Tools with Chat's files ticked. Pick a format there; nothing is written until you export.".to_owned(), None);
                 } else {
-                    self.fail(
-                        id,
-                        "File Tools isn't open in this window. Nothing was exported.",
-                    );
+                    self.fail(id, "File Tools isn't open in this window. Nothing was exported.");
                 }
             }
             "changeSetting" => {
-                let (Some(setting), Some(value)) = (action.setting.clone(), action.value) else {
-                    return;
-                };
+                let (Some(setting), Some(value)) = (action.setting.clone(), action.value) else { return };
                 if !rules::setting_supported(Some(&setting)) {
                     self.fail(id, rules::SETTING_UNAVAILABLE);
                     return;
@@ -567,11 +471,7 @@ impl Runner {
                     rules::set_setting(&setting, previous);
                     runner.finish(id, "Changed back.".to_owned(), None);
                 });
-                self.finish(
-                    id,
-                    if value { "Turned on." } else { "Turned off." }.to_owned(),
-                    Some(("Undo", undo)),
-                );
+                self.finish(id, if value { "Turned on." } else { "Turned off." }.to_owned(), Some(("Undo", undo)));
             }
             "suggestFolderLayout" => {
                 let root = action.path.clone().unwrap_or_default();
@@ -600,12 +500,7 @@ impl Runner {
                     self.fail(id, NOT_READY);
                     return;
                 }
-                self.wait(
-                    id,
-                    Wait::Move {
-                        undo_root: Some(summary.root),
-                    },
-                );
+                self.wait(id, Wait::Move { undo_root: Some(summary.root) });
                 self.set(id, Phase::Running("Moving files".to_owned()));
             }
             "undoLastMove" => {
@@ -619,14 +514,11 @@ impl Runner {
             "renameToSuggested" => self.rename(action),
             "namePerson" => self.name_person(action),
             "mergePeople" => {
-                let (Some(target), Some(sources)) = (action.person_id, action.person_ids.clone())
-                else {
+                let (Some(target), Some(sources)) = (action.person_id, action.person_ids.clone()) else {
                     return;
                 };
                 let (runner, id) = (self.clone(), id.to_owned());
-                super::people_actions::confirm_merge(anchor, move || {
-                    runner.merge_people(&id, target, sources)
-                });
+                super::people_actions::confirm_merge(anchor, move || runner.merge_people(&id, target, sources));
             }
             _ => self.fail(id, "This action isn't available."),
         }
@@ -643,12 +535,7 @@ impl Runner {
                 destination_person_id: target,
             });
             if let Ok(command_id) = self.engine.borrow_mut().send_with_id(command) {
-                super::merge_ledger::sent(
-                    super::merge_ledger::Owner::Chat,
-                    command_id,
-                    source,
-                    target,
-                );
+                super::merge_ledger::sent(super::merge_ledger::Owner::Chat, command_id, source, target);
                 outstanding += 1;
             }
         }
@@ -656,14 +543,7 @@ impl Runner {
             self.fail(id, NOT_READY);
             return;
         }
-        self.wait(
-            id,
-            Wait::Merge {
-                outstanding,
-                failed: false,
-                operations: Vec::new(),
-            },
-        );
+        self.wait(id, Wait::Merge { outstanding, failed: false, operations: Vec::new() });
         self.set(id, Phase::Running("Merging".to_owned()));
     }
 
@@ -673,17 +553,9 @@ impl Runner {
             let (runner, id, operations) = (runner.clone(), id.to_owned(), operations.clone());
             glib::MainContext::default().spawn_local(async move {
                 for operation in operations.into_iter().rev() {
-                    let detail = match super::people_actions::undo_merge_operation(
-                        &runner.engine,
-                        operation,
-                        30,
-                    )
-                    .await
-                    {
+                    let detail = match super::people_actions::undo_merge_operation(&runner.engine, operation, 30).await {
                         Some(page) if page.status == "ok" => continue,
-                        Some(page) => page
-                            .message
-                            .unwrap_or_else(|| "FileID didn't confirm it.".to_owned()),
+                        Some(page) => page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned()),
                         None => "FileID restarted. Try again.".to_owned(),
                     };
                     runner.fail(&id, &super::people_actions::undo_merge_failed(&detail));
@@ -707,28 +579,17 @@ impl Runner {
     }
 
     fn trash(self: &Rc<Self>, action: &ChatAction) {
-        let (Some(victims), Some(keepers)) =
-            (action.file_ids.clone(), action.keeper_file_ids.clone())
-        else {
+        let (Some(victims), Some(keepers)) = (action.file_ids.clone(), action.keeper_file_ids.clone()) else {
             return;
         };
         let id = action.id.clone();
         self.set(&id, Phase::Running("Checking copies".to_owned()));
-        let ids: Vec<i64> = victims
-            .iter()
-            .chain(&keepers)
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
+        let ids: Vec<i64> = victims.iter().chain(&keepers).copied().collect::<HashSet<_>>().into_iter().collect();
         let weak = Rc::downgrade(self);
         let rx = read_db(move |conn| {
             let facts = file_facts(conn, &ids);
             let (valid, changed) = verify_copies(&victims, &keepers, &facts);
-            let bytes = valid
-                .iter()
-                .map(|identity| (identity.file_id, identity.size_bytes))
-                .collect();
+            let bytes = valid.iter().map(|identity| (identity.file_id, identity.size_bytes)).collect();
             (valid, changed, bytes)
         });
         glib::MainContext::default().spawn_local(async move {
@@ -755,17 +616,9 @@ impl Runner {
     }
 
     fn rename(self: &Rc<Self>, action: &ChatAction) {
-        let Some(renames) = action.renames.clone() else {
-            return;
-        };
+        let Some(renames) = action.renames.clone() else { return };
         let id = action.id.clone();
-        self.set(
-            &id,
-            Phase::Running(format!(
-                "Renaming {} files",
-                crate::shell::grouped(renames.len() as u64)
-            )),
-        );
+        self.set(&id, Phase::Running(format!("Renaming {} files", crate::shell::grouped(renames.len() as u64))));
         let weak = Rc::downgrade(self);
         let rx = read_db(move |conn| {
             let ids: Vec<i64> = renames.iter().map(|rename| rename.file_id).collect();
@@ -773,52 +626,32 @@ impl Runner {
             let mut kept = Vec::new();
             let mut old = HashMap::new();
             for rename in &renames {
-                let Some(file) = facts.get(&rename.file_id) else {
-                    continue;
-                };
+                let Some(file) = facts.get(&rename.file_id) else { continue };
                 if rules::suggestion_matches(file.proposed.as_deref(), &file.path, &rename.new_name)
                     && old.insert(rename.file_id, file_name(&file.path)).is_none()
                 {
-                    kept.push(RenameEntry {
-                        file_id: rename.file_id,
-                        new_name: rename.new_name.clone(),
-                    });
+                    kept.push(RenameEntry { file_id: rename.file_id, new_name: rename.new_name.clone() });
                 }
             }
             let skipped = (renames.len() - kept.len()) as u64;
             (kept, old, skipped)
         });
         glib::MainContext::default().spawn_local(async move {
-            let Ok((kept, old, skipped)) = rx.recv().await else {
-                return;
-            };
+            let Ok((kept, old, skipped)) = rx.recv().await else { return };
             let Some(runner) = weak.upgrade() else { return };
             if !runner.running(&id) {
                 return;
             }
             if kept.is_empty() {
-                runner.fail(
-                    &id,
-                    "Nothing was renamed. The suggestions changed; look again in Describe Files.",
-                );
+                runner.fail(&id, "Nothing was renamed. The suggestions changed; look again in Describe Files.");
                 return;
             }
             let ids = kept.iter().map(|entry| entry.file_id).collect();
-            if !runner.send(CommandPayload::RenameFiles(RenameFilesPayload {
-                renames: kept,
-            })) {
+            if !runner.send(CommandPayload::RenameFiles(RenameFilesPayload { renames: kept })) {
                 runner.fail(&id, NOT_READY);
                 return;
             }
-            runner.wait(
-                &id,
-                Wait::Rename {
-                    ids,
-                    old,
-                    skipped,
-                    undoing: false,
-                },
-            );
+            runner.wait(&id, Wait::Rename { ids, old, skipped, undoing: false });
         });
     }
 
@@ -852,13 +685,7 @@ impl Runner {
                 runner.fail(&id, NOT_READY);
                 return;
             }
-            runner.wait(
-                &id,
-                Wait::Person {
-                    person,
-                    before: Some(before),
-                },
-            );
+            runner.wait(&id, Wait::Person { person, before: Some(before) });
             runner.progress(&id, format!("Naming this person {name}"));
         });
     }
@@ -871,9 +698,7 @@ impl Runner {
                 let text = rules::scan_progress(progress);
                 self.scan.replace(Some(progress.clone()));
                 match phase {
-                    ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed => {
-                        self.scan_done(phase, None)
-                    }
+                    ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed => self.scan_done(phase, None),
                     _ => {
                         if let Some(text) = text {
                             for id in self.waiting(|wait| matches!(wait, Wait::Scan)) {
@@ -883,12 +708,8 @@ impl Runner {
                     }
                 }
             }
-            EngineState::ScanPhase(phase @ (ScanPhase::Cancelled | ScanPhase::Failed)) => {
-                self.scan_done(*phase, None)
-            }
-            EngineState::ScanComplete(processed) => {
-                self.scan_done(ScanPhase::Completed, Some(*processed))
-            }
+            EngineState::ScanPhase(phase @ (ScanPhase::Cancelled | ScanPhase::Failed)) => self.scan_done(*phase, None),
+            EngineState::ScanComplete(processed) => self.scan_done(ScanPhase::Completed, Some(*processed)),
             EngineState::DeepAnalyzeStarting(_) => {
                 for id in self.waiting(|wait| matches!(wait, Wait::Describe)) {
                     self.progress(&id, "Loading the local AI model".to_owned());
@@ -912,35 +733,21 @@ impl Runner {
             EngineState::RestructurePlan(plan) => {
                 let root = plan.library_root.clone();
                 self.plan.replace(Some(plan.clone()));
-                let summary = self
-                    .plan
-                    .borrow()
-                    .as_ref()
-                    .and_then(|plan| rules::plan_summary(plan, None));
-                while let Some(pending) =
-                    self.take(|wait| matches!(wait, Wait::Plan { root: wanted } if *wanted == root))
-                {
+                let summary = self.plan.borrow().as_ref().and_then(|plan| rules::plan_summary(plan, None));
+                while let Some(pending) = self.take(|wait| matches!(wait, Wait::Plan { root: wanted } if *wanted == root)) {
                     self.finish(&pending.action, rules::plan_ready(summary.as_ref()), None);
                 }
                 self.notify();
             }
             EngineState::RestructureApplyResult(result) => {
-                let Some(pending) = self.take(|wait| matches!(wait, Wait::Move { .. })) else {
-                    return;
-                };
-                let Wait::Move { undo_root } = pending.wait else {
-                    return;
-                };
+                let Some(pending) = self.take(|wait| matches!(wait, Wait::Move { .. })) else { return };
+                let Wait::Move { undo_root } = pending.wait else { return };
                 match undo_root {
                     Some(root) if result.applied > 0 && result.privilege_error.is_none() => {
                         let undo: UndoFn = Rc::new(move |runner, id| {
                             let _ = runner.undo_move(id, root.clone());
                         });
-                        self.finish(
-                            &pending.action,
-                            rules::apply_summary(result),
-                            Some(("Undo moves", undo)),
-                        );
+                        self.finish(&pending.action, rules::apply_summary(result), Some(("Undo moves", undo)));
                     }
                     Some(_) => self.finish(&pending.action, rules::apply_summary(result), None),
                     None => self.finish(&pending.action, rules::undo_move_summary(result), None),
@@ -959,16 +766,10 @@ impl Runner {
                 if self.take(|wait| matches!(wait, Wait::MomentsJobs { request_id: id } if *id == request_id)).is_none() {
                     return;
                 }
-                for job in response
-                    .jobs
-                    .iter()
-                    .filter(|job| matches!(job.state.as_str(), "running" | "queued"))
-                {
+                for job in response.jobs.iter().filter(|job| matches!(job.state.as_str(), "running" | "queued")) {
                     let mut request = catalog_request("cancelJob");
                     request.job_id = Some(job.id.clone());
-                    let _ = self.send(CommandPayload::CatalogRequest(Box::new(
-                        CatalogRequestPayload { request },
-                    )));
+                    let _ = self.send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request })));
                 }
             }
             EngineState::Error { kind, message, .. } => {
@@ -978,9 +779,7 @@ impl Runner {
                     }
                 }
                 if rules::is_folder_error(kind) {
-                    while let Some(pending) =
-                        self.take(|wait| matches!(wait, Wait::Plan { .. } | Wait::Move { .. }))
-                    {
+                    while let Some(pending) = self.take(|wait| matches!(wait, Wait::Plan { .. } | Wait::Move { .. })) {
                         self.fail(&pending.action, &rules::folder_error_text(kind, message));
                     }
                 }
@@ -1015,11 +814,7 @@ impl Runner {
     }
 
     fn on_bulk(self: &Rc<Self>, result: BulkActionResult) {
-        let reported: HashSet<i64> = result
-            .messages
-            .iter()
-            .filter_map(|item| item.file_id)
-            .collect();
+        let reported: HashSet<i64> = result.messages.iter().filter_map(|item| item.file_id).collect();
         let first_error = || {
             result
                 .messages
@@ -1032,14 +827,7 @@ impl Runner {
             }) else {
                 return;
             };
-            let Wait::Trash {
-                ids,
-                bytes,
-                changed,
-            } = pending.wait
-            else {
-                return;
-            };
+            let Wait::Trash { ids, bytes, changed } = pending.wait else { return };
             let trashed: Vec<i64> = result
                 .messages
                 .iter()
@@ -1047,14 +835,9 @@ impl Runner {
                 .filter_map(|item| item.file_id)
                 .filter(|id| ids.contains(id))
                 .collect();
-            let count = if reported.is_empty() {
-                u64::from(result.succeeded)
-            } else {
-                trashed.len() as u64
-            };
+            let count = if reported.is_empty() { u64::from(result.succeeded) } else { trashed.len() as u64 };
             if count == 0 {
-                let reason =
-                    first_error().unwrap_or_else(|| "Nothing was moved to Trash.".to_owned());
+                let reason = first_error().unwrap_or_else(|| "Nothing was moved to Trash.".to_owned());
                 self.fail(&pending.action, &reason);
                 return;
             }
@@ -1062,32 +845,23 @@ impl Runner {
             let text = rules::trash_summary(count, freed, changed, u64::from(result.failed));
             let undo = rules::trash_batch(&result).map(|batch_id| -> UndoFn {
                 Rc::new(move |runner, id| {
-                    if runner.send(CommandPayload::RestoreFromTrash(RestoreFromTrashPayload {
-                        batch_id: batch_id.clone(),
-                    })) {
+                    if runner.send(CommandPayload::RestoreFromTrash(RestoreFromTrashPayload { batch_id: batch_id.clone() })) {
                         runner.wait(id, Wait::Restore);
                     } else {
                         runner.fail(id, NOT_READY);
                     }
                 })
             });
-            self.finish(
-                &pending.action,
-                text,
-                undo.map(|undo| ("Put them back", undo)),
-            );
+            self.finish(&pending.action, text, undo.map(|undo| ("Put them back", undo)));
             return;
         }
         match result.action.as_str() {
             "restoreFromTrash" => {
-                let Some(pending) = self.take(|wait| matches!(wait, Wait::Restore)) else {
-                    return;
-                };
+                let Some(pending) = self.take(|wait| matches!(wait, Wait::Restore)) else { return };
                 let text = if result.succeeded > 0 {
                     format!("Put back {}.", rules::copies(result.succeeded.into()))
                 } else {
-                    first_error()
-                        .unwrap_or_else(|| "Nothing was put back. Check the Trash.".to_owned())
+                    first_error().unwrap_or_else(|| "Nothing was put back. Check the Trash.".to_owned())
                 };
                 self.finish(&pending.action, text, None);
             }
@@ -1097,15 +871,7 @@ impl Runner {
                 }) else {
                     return;
                 };
-                let Wait::Rename {
-                    ids,
-                    old,
-                    skipped,
-                    undoing,
-                } = pending.wait
-                else {
-                    return;
-                };
+                let Wait::Rename { ids, old, skipped, undoing } = pending.wait else { return };
                 let renamed: Vec<i64> = result
                     .messages
                     .iter()
@@ -1114,45 +880,22 @@ impl Runner {
                     .filter(|id| ids.contains(id))
                     .collect();
                 if undoing {
-                    self.finish(
-                        &pending.action,
-                        format!(
-                            "Put back {} names.",
-                            crate::shell::grouped(renamed.len() as u64)
-                        ),
-                        None,
-                    );
+                    self.finish(&pending.action, format!("Put back {} names.", crate::shell::grouped(renamed.len() as u64)), None);
                     return;
                 }
-                let text =
-                    rules::rename_summary(renamed.len() as u64, u64::from(result.failed), skipped);
+                let text = rules::rename_summary(renamed.len() as u64, u64::from(result.failed), skipped);
                 if renamed.is_empty() {
                     self.fail(&pending.action, &first_error().unwrap_or(text));
                     return;
                 }
                 let back: Vec<RenameEntry> = renamed
                     .iter()
-                    .filter_map(|id| {
-                        old.get(id).map(|name| RenameEntry {
-                            file_id: *id,
-                            new_name: name.clone(),
-                        })
-                    })
+                    .filter_map(|id| old.get(id).map(|name| RenameEntry { file_id: *id, new_name: name.clone() }))
                     .collect();
                 let undo: UndoFn = Rc::new(move |runner, id| {
                     let ids = back.iter().map(|entry| entry.file_id).collect();
-                    if runner.send(CommandPayload::RenameFiles(RenameFilesPayload {
-                        renames: back.clone(),
-                    })) {
-                        runner.wait(
-                            id,
-                            Wait::Rename {
-                                ids,
-                                old: HashMap::new(),
-                                skipped: 0,
-                                undoing: true,
-                            },
-                        );
+                    if runner.send(CommandPayload::RenameFiles(RenameFilesPayload { renames: back.clone() })) {
+                        runner.wait(id, Wait::Rename { ids, old: HashMap::new(), skipped: 0, undoing: true });
                     } else {
                         runner.fail(id, NOT_READY);
                     }
@@ -1160,69 +903,34 @@ impl Runner {
                 self.finish(&pending.action, text, Some(("Undo renames", undo)));
             }
             "renamePerson" => {
-                let Some(pending) = self.take(|wait| matches!(wait, Wait::Person { .. })) else {
-                    return;
-                };
-                let Wait::Person { person, before } = pending.wait else {
-                    return;
-                };
+                let Some(pending) = self.take(|wait| matches!(wait, Wait::Person { .. })) else { return };
+                let Wait::Person { person, before } = pending.wait else { return };
                 if result.failed > 0 || result.succeeded == 0 {
-                    let reason = first_error().unwrap_or_else(|| {
-                        "The name wasn't saved. Try again in People.".to_owned()
-                    });
+                    let reason = first_error().unwrap_or_else(|| "The name wasn't saved. Try again in People.".to_owned());
                     self.fail(&pending.action, &reason);
                     return;
                 }
                 match before {
                     Some(before) => {
-                        let undo: UndoFn =
-                            Rc::new(move |runner, id| runner.restore_person(id, person, &before));
-                        self.finish(
-                            &pending.action,
-                            "Name saved.".to_owned(),
-                            Some(("Undo", undo)),
-                        );
+                        let undo: UndoFn = Rc::new(move |runner, id| runner.restore_person(id, person, &before));
+                        self.finish(&pending.action, "Name saved.".to_owned(), Some(("Undo", undo)));
                     }
                     None => self.finish(&pending.action, "Name put back.".to_owned(), None),
                 }
             }
             "markPersonsAsUnknown" => {
-                let Some(pending) = self.take(|wait| matches!(wait, Wait::Unknown)) else {
-                    return;
-                };
+                let Some(pending) = self.take(|wait| matches!(wait, Wait::Unknown)) else { return };
                 self.finish(&pending.action, "Name put back.".to_owned(), None);
             }
             "mergeClusters" => {
                 let (action, done, failed, operations) = {
                     let mut pending = self.pending.borrow_mut();
-                    let Some(entry) = pending
-                        .iter_mut()
-                        .find(|p| matches!(p.wait, Wait::Merge { .. }))
-                    else {
-                        return;
-                    };
-                    let Wait::Merge {
-                        outstanding,
-                        failed,
-                        operations,
-                    } = &mut entry.wait
-                    else {
-                        return;
-                    };
+                    let Some(entry) = pending.iter_mut().find(|p| matches!(p.wait, Wait::Merge { .. })) else { return };
+                    let Wait::Merge { outstanding, failed, operations } = &mut entry.wait else { return };
                     *outstanding = outstanding.saturating_sub(1);
                     *failed |= result.failed > 0 || result.succeeded == 0;
-                    operations.extend(
-                        result
-                            .messages
-                            .iter()
-                            .filter_map(|item| item.operation_id.clone()),
-                    );
-                    (
-                        entry.action.clone(),
-                        *outstanding == 0,
-                        *failed,
-                        operations.clone(),
-                    )
+                    operations.extend(result.messages.iter().filter_map(|item| item.operation_id.clone()));
+                    (entry.action.clone(), *outstanding == 0, *failed, operations.clone())
                 };
                 if !done {
                     return;
@@ -1231,13 +939,8 @@ impl Runner {
                 if failed {
                     self.fail(&action, "The merge didn't fully go through. Check People.");
                 } else {
-                    let undo = (!operations.is_empty())
-                        .then(|| ("Undo merge", Self::merge_undo(operations)));
-                    self.finish(
-                        &action,
-                        "Merged. These people are now one card in People.".to_owned(),
-                        undo,
-                    );
+                    let undo = (!operations.is_empty()).then(|| ("Undo merge", Self::merge_undo(operations)));
+                    self.finish(&action, "Merged. These people are now one card in People.".to_owned(), undo);
                 }
             }
             _ => {}
@@ -1247,19 +950,11 @@ impl Runner {
     fn restore_person(self: &Rc<Self>, id: &str, person_id: i64, before: &PersonName) {
         let (payload, wait) = if before.unknown {
             (
-                CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
-                    person_ids: vec![person_id],
-                }),
+                CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload { person_ids: vec![person_id] }),
                 Wait::Unknown,
             )
         } else {
-            let structured = [
-                &before.title,
-                &before.first,
-                &before.middle,
-                &before.last,
-                &before.suffix,
-            ];
+            let structured = [&before.title, &before.first, &before.middle, &before.last, &before.suffix];
             let first_name = if structured.iter().all(|part| part.is_none()) {
                 before.name.clone()
             } else {
@@ -1274,10 +969,7 @@ impl Runner {
                     last_name: before.last.clone(),
                     suffix: before.suffix.clone(),
                 }),
-                Wait::Person {
-                    person: person_id,
-                    before: None,
-                },
+                Wait::Person { person: person_id, before: None },
             )
         };
         if self.send(payload) {
@@ -1317,11 +1009,7 @@ impl Cards {
             overlay: overlay.clone(),
             cards: RefCell::default(),
         });
-        cards
-            .runner
-            .listeners
-            .borrow_mut()
-            .push(Rc::downgrade(&cards));
+        cards.runner.listeners.borrow_mut().push(Rc::downgrade(&cards));
         cards
     }
 
@@ -1347,8 +1035,7 @@ impl Cards {
 
     /// Cards wait under the answer; they hide while a new answer is coming.
     pub(super) fn set_hidden(&self, hidden: bool) {
-        self.root
-            .set_visible(!hidden && !self.cards.borrow().is_empty());
+        self.root.set_visible(!hidden && !self.cards.borrow().is_empty());
     }
 
     fn refresh(self: &Rc<Self>) {
@@ -1387,11 +1074,7 @@ impl Cards {
         root.append(&buttons);
         root.update_property(&[gtk::accessible::Property::Label(&format!(
             "{}: {}",
-            if action.requires_confirmation {
-                "Needs your OK"
-            } else {
-                "Suggested action"
-            },
+            if action.requires_confirmation { "Needs your OK" } else { "Suggested action" },
             action.title
         ))]);
         let card = Rc::new(Card {
@@ -1410,19 +1093,13 @@ impl Cards {
     fn update(self: &Rc<Self>, card: &Rc<Card>) {
         let action = &card.action;
         let phase = self.runner.phase(&action.id);
-        let plan = (action.kind == "applyFolderLayout")
-            .then(|| self.runner.plan_summary(action))
-            .flatten();
+        let plan = (action.kind == "applyFolderLayout").then(|| self.runner.plan_summary(action)).flatten();
         let plan_changed = match (card.plan.borrow().as_ref(), plan.as_ref()) {
             (Some(shown), Some(next)) => !shown.same(next),
             (None, None) => false,
             _ => true,
         };
-        let unchanged = card
-            .shown
-            .borrow()
-            .as_ref()
-            .is_some_and(|shown| shown.same_shape(&phase));
+        let unchanged = card.shown.borrow().as_ref().is_some_and(|shown| shown.same_shape(&phase));
         if unchanged && !plan_changed {
             if let (Phase::Running(text), Some(label)) = (&phase, card.progress.borrow().as_ref()) {
                 label.set_text(text);
@@ -1431,11 +1108,9 @@ impl Cards {
         }
         card.plan.replace(plan.clone());
         card.shown.replace(Some(phase.clone()));
-        card.detail
-            .set_text(&rules::card_detail(action, plan.as_ref()));
+        card.detail.set_text(&rules::card_detail(action, plan.as_ref()));
         v3::clear(&card.well);
-        card.well
-            .set_visible(action.requires_confirmation && phase == Phase::Proposed);
+        card.well.set_visible(action.requires_confirmation && phase == Phase::Proposed);
         if card.well.is_visible() {
             fill_well(&card.well, action, plan.as_ref());
         }
@@ -1456,16 +1131,14 @@ impl Cards {
                 icon.add_css_class("tone-done");
                 icon.set_valign(gtk::Align::Start);
                 card.status.append(&icon);
-                card.status
-                    .append(&v3::wrapped(text, &["v3-meta", "tone-text2"]));
+                card.status.append(&v3::wrapped(text, &["v3-meta", "tone-text2"]));
             }
             Phase::Failed(text) => {
                 let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
                 icon.add_css_class("tone-danger");
                 icon.set_valign(gtk::Align::Start);
                 card.status.append(&icon);
-                card.status
-                    .append(&v3::wrapped(text, &["v3-meta", "tone-danger"]));
+                card.status.append(&v3::wrapped(text, &["v3-meta", "tone-danger"]));
             }
             Phase::Cancelled => card.status.append(&v3::meta("Cancelled. Nothing changed.")),
         }
@@ -1490,18 +1163,14 @@ impl Cards {
                 } else {
                     v3::primary(&title, true)
                 };
-                let reason =
-                    rules::unavailable(action, plan, super::deep_analyze::vlm_runtime_available());
+                let reason = rules::unavailable(action, plan, super::deep_analyze::vlm_runtime_available());
                 primary.set_sensitive(reason.is_none());
                 primary.set_tooltip_text(reason);
                 let weak = Rc::downgrade(self);
                 let target = card.clone();
                 primary.connect_clicked(move |button| {
                     if let Some(cards) = weak.upgrade() {
-                        cards
-                            .runner
-                            .clone()
-                            .run(&target.action, button, &cards.overlay);
+                        cards.runner.clone().run(&target.action, button, &cards.overlay);
                     }
                 });
                 card.buttons.append(&primary);
@@ -1553,8 +1222,7 @@ impl Cards {
             }
             _ => {}
         }
-        card.buttons
-            .set_visible(card.buttons.first_child().is_some());
+        card.buttons.set_visible(card.buttons.first_child().is_some());
     }
 }
 
@@ -1568,9 +1236,7 @@ fn fill_well(well: &gtk::Box, action: &ChatAction, plan: Option<&PlanSummary>) {
             let shown = v3::mono(value, "s125");
             shown.add_css_class("v3-semibold");
             fact.append(&shown);
-            fact.update_property(&[gtk::accessible::Property::Label(&format!(
-                "{label}: {value}"
-            ))]);
+            fact.update_property(&[gtk::accessible::Property::Label(&format!("{label}: {value}"))]);
             counts.append(&fact);
         }
     }
@@ -1601,10 +1267,7 @@ mod change_tests {
 
     #[test]
     fn a_finished_card_is_listed_by_its_result_sentence() {
-        assert_eq!(
-            chat_change_label("Moved 3 files to Trash."),
-            "Chat: Moved 3 files to Trash"
-        );
+        assert_eq!(chat_change_label("Moved 3 files to Trash."), "Chat: Moved 3 files to Trash");
         assert_eq!(chat_change_label("  Turned on.  "), "Chat: Turned on");
     }
 }

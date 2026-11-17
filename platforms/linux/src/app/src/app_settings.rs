@@ -239,9 +239,7 @@ fn naming_from_map(map: &Map<String, Value>) -> NamingSettings {
 }
 
 pub fn naming() -> NamingSettings {
-    settings_path().map_or_else(NamingSettings::default, |path| {
-        naming_from_map(&load_map(&path))
-    })
+    settings_path().map_or_else(NamingSettings::default, |path| naming_from_map(&load_map(&path)))
 }
 
 pub fn remember_naming(naming: &NamingSettings) {
@@ -321,10 +319,7 @@ pub fn lava_lamp_on() -> bool {
 }
 
 pub fn remember_lava_lamp(on: bool) {
-    set_entries(&[(
-        "lavaMode",
-        Value::String(if on { "full" } else { "off" }.to_owned()),
-    )]);
+    set_entries(&[("lavaMode", Value::String(if on { "full" } else { "off" }.to_owned()))]);
 }
 
 pub const GRANULARITY_IDS: [&str; 3] = ["loose", "normal", "tight"];
@@ -341,18 +336,11 @@ pub fn remember_restructure_granularity(id: &str) {
 
 /// Settings ▸ "Folders not to describe" (`deepAnalyzeExcludedFolders`).
 pub fn deep_analyze_excluded_folders() -> Vec<String> {
-    let Some(path) = settings_path() else {
-        return Vec::new();
-    };
+    let Some(path) = settings_path() else { return Vec::new() };
     let raw: Vec<String> = load_map(&path)
         .get("deepAnalyzeExcludedFolders")
         .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_owned))
-                .collect()
-        })
+        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
     sanitize_deep_analyze_excluded_folders(&raw)
 }
@@ -447,9 +435,7 @@ mod tests {
         let Value::Object(map) = serde_json::json!({
             "namingStyle": "dateFirst", "namingMaxLength": 64, "namingIncludePeople": false,
             "namingIncludeEvent": false, "namingIncludeDate": true, "namingLearn": false
-        }) else {
-            unreachable!()
-        };
+        }) else { unreachable!() };
         assert_eq!(
             naming_from_map(&map),
             NamingSettings {
@@ -462,43 +448,19 @@ mod tests {
             }
         );
         let Value::Object(bad) = serde_json::json!({"namingStyle": "loud", "namingMaxLength": 900})
-        else {
-            unreachable!()
-        };
+        else { unreachable!() };
         let sanitized = naming_from_map(&bad);
-        assert_eq!(
-            (sanitized.style.as_str(), sanitized.max_length),
-            ("short", 120)
-        );
+        assert_eq!((sanitized.style.as_str(), sanitized.max_length), ("short", 120));
     }
 
     #[test]
     fn appearance_and_granularity_choices_fall_back_to_defaults() {
         let Value::Object(map) = serde_json::json!({"textSize": "huge", "lavaMode": "off", "restructureGranularity": "tight"})
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            choice_from_map(&map, "textSize", &TEXT_SIZE_IDS, "standard"),
-            "standard"
-        );
-        assert_eq!(
-            choice_from_map(&map, "lavaMode", &["full", "calm", "off"], "full"),
-            "off"
-        );
-        assert_eq!(
-            choice_from_map(&map, "restructureGranularity", &GRANULARITY_IDS, "normal"),
-            "tight"
-        );
-        assert_eq!(
-            choice_from_map(
-                &Map::new(),
-                "restructureGranularity",
-                &GRANULARITY_IDS,
-                "normal"
-            ),
-            "normal"
-        );
+        else { unreachable!() };
+        assert_eq!(choice_from_map(&map, "textSize", &TEXT_SIZE_IDS, "standard"), "standard");
+        assert_eq!(choice_from_map(&map, "lavaMode", &["full", "calm", "off"], "full"), "off");
+        assert_eq!(choice_from_map(&map, "restructureGranularity", &GRANULARITY_IDS, "normal"), "tight");
+        assert_eq!(choice_from_map(&Map::new(), "restructureGranularity", &GRANULARITY_IDS, "normal"), "normal");
     }
 
     #[test]
