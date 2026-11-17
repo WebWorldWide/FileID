@@ -544,6 +544,65 @@ pub fn run(
     is_paused: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Summary {
+    run_with_health(conn, root, analyzer, is_cancelled, is_paused, progress, &CAREFUL_READER)
+}
+
+/// How long the careful text reader is left alone after it stopped answering.
+/// Each further failure doubles it, up to the cap, and one good pass resets it.
+const READER_BACKOFF_FIRST: std::time::Duration = std::time::Duration::from_secs(60);
+const READER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// After a failure, the pass that tries the reader again waits this long for it, not the full warm-up wait.
+const READER_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the careful text reader answered the last time it was asked. A reader
+/// that did not is not waited on by every scan that follows.
+#[derive(Debug, Default)]
+pub struct ReaderHealth {
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+
+impl ReaderHealth {
+    pub const fn new() -> Self {
+        Self { failures: 0, retry_at: None }
+    }
+
+    /// The time left before the reader is asked again, or `None` when it may be asked now.
+    pub fn deferred_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.retry_at.and_then(|at| at.checked_duration_since(now)).filter(|left| !left.is_zero())
+    }
+
+    pub fn failed(&mut self, now: std::time::Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let doublings = (self.failures - 1).min(16);
+        self.retry_at = Some(now + READER_BACKOFF_FIRST.saturating_mul(1 << doublings).min(READER_BACKOFF_CAP));
+    }
+
+    pub fn recovered(&mut self) {
+        *self = Self::new();
+    }
+
+    fn wait_for(&self, ready_wait: std::time::Duration) -> std::time::Duration {
+        if self.failures > 0 { ready_wait.min(READER_PROBE_WAIT) } else { ready_wait }
+    }
+}
+
+static CAREFUL_READER: Mutex<ReaderHealth> = Mutex::new(ReaderHealth::new());
+
+/// True while a scan should not wait for the careful text reader because it stopped answering recently.
+pub fn careful_reader_deferred() -> bool {
+    CAREFUL_READER.lock().deferred_for(std::time::Instant::now()).is_some()
+}
+
+pub fn run_with_health(
+    conn: &Mutex<rusqlite::Connection>,
+    root: Option<&std::path::Path>,
+    analyzer: &dyn Analyzer,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    is_paused: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
+    reader: &Mutex<ReaderHealth>,
+) -> Summary {
     let mut summary = Summary::default();
     let (owed_tags, owed_careful) = owed(&conn.lock(), root);
     if owed_tags + owed_careful == 0 {
@@ -558,7 +617,7 @@ pub fn run(
     let mut visited = 0;
     if owed_tags > 0 {
         if analyzer.ready(Phase::Tags) {
-            visited += pass(conn, root, Phase::Tags, analyzer, is_cancelled, is_paused, progress, &mut summary);
+            visited += pass(conn, root, Phase::Tags, analyzer, is_cancelled, is_paused, progress, &mut summary).visited;
         } else {
             tracing::info!("[CATCH-UP] tags skipped: the tagger is not available");
         }
@@ -566,14 +625,26 @@ pub fn run(
     let careful = owed(&conn.lock(), root).1;
     if careful > 0 && !summary.cancelled && !is_cancelled() {
         progress(Progress::Total(visited + careful));
-        let deadline = std::time::Instant::now() + analyzer.ready_wait(Phase::CarefulText);
-        while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        if analyzer.ready(Phase::CarefulText) {
-            pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, is_paused, progress, &mut summary);
+        let deferred = reader.lock().deferred_for(std::time::Instant::now());
+        if let Some(left) = deferred {
+            tracing::info!(owed = careful, retry_in_seconds = left.as_secs(), "[CATCH-UP] careful text skipped: the careful reader stopped answering recently");
         } else {
-            tracing::info!(owed = careful, "[CATCH-UP] careful text skipped: the careful reader is not ready");
+            let wait = reader.lock().wait_for(analyzer.ready_wait(Phase::CarefulText));
+            let deadline = std::time::Instant::now() + wait;
+            while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if analyzer.ready(Phase::CarefulText) {
+                let careful_pass = pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, is_paused, progress, &mut summary);
+                if careful_pass.blocked {
+                    reader.lock().failed(std::time::Instant::now());
+                } else if !careful_pass.stopped_early {
+                    reader.lock().recovered();
+                }
+            } else if !is_cancelled() {
+                reader.lock().failed(std::time::Instant::now());
+                tracing::info!(owed = careful, "[CATCH-UP] careful text skipped: the careful reader is not ready");
+            }
         }
     }
     if is_cancelled() {
@@ -604,23 +675,27 @@ fn pass(
     is_paused: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(Progress) + Sync),
     summary: &mut Summary,
-) -> u64 {
+) -> PassEnd {
     let scheduler = crate::resource_scheduler::ResourceScheduler::shared();
     let chunk_size = analyzer.parallelism().clamp(1, 16);
     let mut cursor = 0;
     let mut visited = 0;
+    let mut blocked = false;
+    let mut stopped_early = false;
     loop {
         while is_paused() && !is_cancelled() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         if is_cancelled() {
             summary.cancelled = true;
+            stopped_early = true;
             break;
         }
         let chunk = match next_chunk(&conn.lock(), root, phase, cursor, chunk_size) {
             Ok(chunk) => chunk,
             Err(error) => {
                 tracing::warn!(%error, "[CATCH-UP] could not read what is owed");
+                stopped_early = true;
                 break;
             }
         };
@@ -675,21 +750,32 @@ fn pass(
             }
             Err(error) => {
                 tracing::warn!(%error, "[CATCH-UP] could not store results; the rest stays owed");
+                stopped_early = true;
                 break;
             }
         }
         if outcomes.iter().any(|outcome| matches!(outcome, Outcome::Blocked)) {
             tracing::info!("[CATCH-UP] paused: the reader stopped answering");
+            blocked = true;
             break;
         }
         if cancelled_midway {
             summary.cancelled = true;
+            stopped_early = true;
             break;
         }
         visited += chunk.len() as u64;
         progress(Progress::Advance(chunk.len() as u64));
     }
-    visited
+    PassEnd { visited, blocked, stopped_early }
+}
+
+struct PassEnd {
+    visited: u64,
+    /// The reader stopped answering and the pass gave up on it.
+    blocked: bool,
+    /// Cancelled, or the catalog could not be read or written: says nothing about the reader.
+    stopped_early: bool,
 }
 
 #[cfg(test)]
@@ -702,6 +788,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn ram_plus_is_deferred_by_default_on_the_mac_and_on_request_elsewhere() {
@@ -819,7 +906,11 @@ mod tests {
         }
 
         fn run(&self, analyzer: &dyn Analyzer) -> Summary {
-            run(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {})
+            run_with_health(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {}, &Mutex::new(ReaderHealth::new()))
+        }
+
+        fn run_remembering(&self, analyzer: &dyn Analyzer, reader: &Mutex<ReaderHealth>) -> Summary {
+            run_with_health(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {}, reader)
         }
 
         /// (tags with scores, text, handwritten, has_text, owed stages)
@@ -1354,6 +1445,125 @@ mod tests {
         library.write(vec![owing(&library, "a.png")]).await;
         assert_eq!(library.run(&NotReady).tagged, 0);
         assert_eq!(library.stored("a.png").4, Some(TAGS_OWED));
+    }
+
+    #[test]
+    fn a_reader_that_stopped_answering_is_left_alone_for_longer_each_time() {
+        let t0 = std::time::Instant::now();
+        let mut health = ReaderHealth::new();
+        assert_eq!(health.deferred_for(t0), None);
+        assert_eq!(health.wait_for(Duration::from_secs(180)), Duration::from_secs(180));
+
+        health.failed(t0);
+        assert_eq!(health.deferred_for(t0), Some(Duration::from_secs(60)));
+        assert_eq!(health.deferred_for(t0 + Duration::from_secs(61)), None);
+        assert_eq!(health.wait_for(Duration::from_secs(180)), READER_PROBE_WAIT, "the retry is a probe, not the whole warm-up wait");
+        assert_eq!(health.wait_for(Duration::from_secs(2)), Duration::from_secs(2));
+
+        health.failed(t0);
+        assert_eq!(health.deferred_for(t0), Some(Duration::from_secs(120)));
+        for _ in 0..40 {
+            health.failed(t0);
+        }
+        assert_eq!(health.deferred_for(t0), Some(READER_BACKOFF_CAP));
+
+        health.recovered();
+        assert_eq!(health.deferred_for(t0), None);
+        assert_eq!(health.wait_for(Duration::from_secs(180)), Duration::from_secs(180));
+    }
+
+    struct SilentReader {
+        calls: AtomicUsize,
+        ready_checks: AtomicUsize,
+        answers: bool,
+    }
+
+    impl Analyzer for SilentReader {
+        fn ready(&self, phase: Phase) -> bool {
+            self.ready_checks.fetch_add(1, Ordering::SeqCst);
+            phase == Phase::CarefulText && self.answers
+        }
+        fn parallelism(&self) -> usize {
+            2
+        }
+        fn ready_wait(&self, _phase: Phase) -> Duration {
+            Duration::from_millis(600)
+        }
+        fn analyse(&self, _file: &Pending, _phase: Phase, _context: Option<&Context>) -> Outcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Outcome::Blocked
+        }
+    }
+
+    fn owing_careful_text(library: &Library, name: &str) -> TaggedFile {
+        let mut row = library.image(name);
+        row.catch_up = marker(CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, Context { u: true, ..Context::default() }, 0);
+        row
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_rescan_does_not_wait_again_for_a_reader_that_never_became_ready() {
+        let library = Library::new("reader-never-ready");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: false };
+
+        let first = std::time::Instant::now();
+        let summary = library.run_remembering(&silent, &reader);
+        assert!(first.elapsed() >= Duration::from_millis(600), "the first scan waits the warm-up wait");
+        assert_eq!((summary.owed_careful, summary.text_read), (1, 0));
+        assert!(reader.lock().deferred_for(std::time::Instant::now()).is_some());
+
+        let waits_before = silent.ready_checks.load(Ordering::SeqCst);
+        let second = std::time::Instant::now();
+        let summary = library.run_remembering(&silent, &reader);
+        assert!(second.elapsed() < Duration::from_millis(300), "the rescan answered at once: {:?}", second.elapsed());
+        assert_eq!(summary.owed_careful, 1);
+        assert_eq!(silent.ready_checks.load(Ordering::SeqCst), waits_before, "the reader was not even asked");
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 1), "the read stays owed");
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_stopped_answering_mid_pass_is_not_tried_again_straight_away() {
+        let library = Library::new("reader-blocked");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1);
+        assert!(reader.lock().deferred_for(std::time::Instant::now()).is_some());
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1, "no read was attempted while the reader is backed off");
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_answers_again_after_its_backoff_is_trusted_again() {
+        let library = Library::new("reader-recovers");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth { failures: 2, retry_at: Some(std::time::Instant::now()) });
+        struct Answering;
+        impl Analyzer for Answering {
+            fn ready(&self, _phase: Phase) -> bool {
+                true
+            }
+            fn parallelism(&self) -> usize {
+                1
+            }
+            fn analyse(&self, file: &Pending, _phase: Phase, context: Option<&Context>) -> Outcome {
+                Outcome::Done(Update {
+                    tags: None,
+                    text: Some(TextUpdate { text: Some("read".into()), handwritten: false }),
+                    stages: file.stages & !CAREFUL_TEXT_OWED,
+                    vision: context.and_then(Context::encoded),
+                })
+            }
+        }
+        let summary = library.run_remembering(&Answering, &reader);
+        assert_eq!(summary.text_read, 1);
+        assert_eq!(reader.lock().failures, 0);
+        assert_eq!(reader.lock().deferred_for(std::time::Instant::now()), None);
     }
 
     #[test]
