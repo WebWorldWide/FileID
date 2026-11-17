@@ -35,6 +35,24 @@ struct RestructureSemanticTests {
         #expect(!cats.contains("Photo"))
     }
 
+    @Test("A stray in no nearest list is clustered by single linkage")
+    func strayJoinsByItsOwnList() {
+        // Two 13-photo folders 36 degrees apart and a stray 17 degrees from the first and 19 from the
+        // second. Each photo has 12 identical neighbours nearer than the stray, so a mutual-kNN gate
+        // would leave it out (and the margin rule, 0.01 < 0.08, out of both folders); single linkage
+        // joins it to the first through its own list. The Rust engine's tests pin the same plan.
+        func at(_ degrees: Float) -> [Float] {
+            [cos(degrees * .pi / 180), sin(degrees * .pi / 180), 0]
+        }
+        var files: [RestructureSemantic.SemanticFile] = []
+        for i in 0..<13 { files.append(file(Int64(i), "/lib/Alpha/a\(i).jpg", at(0), [])) }
+        for i in 13..<26 { files.append(file(Int64(i), "/lib/Beta/b\(i).jpg", at(36), [])) }
+        files.append(file(99, "/lib/Inbox/stray.jpg", at(17), []))
+        let protos = RestructureSemantic.folderPrototypes(files, minFiles: 4)
+        let moves = RestructureSemantic.classify(files: files, prototypes: protos, libraryRoot: "/lib")
+        #expect(moves.first { $0.fileID == 99 }?.destinationDir == "/lib/Alpha")
+    }
+
     @Test("Tight match to an existing folder auto-files with a reason")
     func tightFolderMatch() {
         let files = (0..<5).map { file(Int64($0), "inbox/d\($0).jpg", [1, 0, 0], ["dog"]) }
@@ -234,6 +252,10 @@ struct RestructureSemanticTests {
         #expect(RestructureSemantic.filenameTokens("/a/acme_invoice_2023.pdf") == ["acme", "invoice"])
         #expect(RestructureSemantic.filenameTokens("/a/IMG_4821.heic").isEmpty)
         #expect(RestructureSemantic.filenameTokens("/a/Screenshot 2024-01-02.png").isEmpty)
+        let composed = ["r\u{e9}sum\u{e9}", "\u{fc}n\u{ef}code"]
+        #expect(RestructureSemantic.filenameTokens("/a/re\u{301}sume\u{301}_u\u{308}ni\u{308}code_1.pdf") == composed,
+                "a decomposed name tokenizes like its composed twin")
+        #expect(RestructureSemantic.filenameTokens("/a/r\u{e9}sum\u{e9}_\u{fc}n\u{ef}code_1.pdf") == composed)
     }
 
     /// The R1 fix: non-image files (no CLIP embedding — `clip` is empty) cluster by

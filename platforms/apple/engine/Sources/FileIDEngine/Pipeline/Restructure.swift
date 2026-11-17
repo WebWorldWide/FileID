@@ -1067,7 +1067,7 @@ public enum Restructure {
         let low: UInt64
 
         init(_ path: String) {
-            let digest = SHA256.hash(data: Data(path.lowercased().utf8))
+            let digest = SHA256.hash(data: Data(path.precomposedStringWithCanonicalMapping.lowercased().utf8))
             var high: UInt64 = 0
             var low: UInt64 = 0
             for (index, byte) in digest.prefix(16).enumerated() {
@@ -1464,6 +1464,9 @@ public enum Restructure {
                                             "skipped": AnyCodable(skipped),
                                             "failed": AnyCodable(failed)])
             }
+            // `URL.path` returns decomposed (NFD) text and FileManager writes decomposed names, so
+            // the strings of the plan are what reaches the disk, the journal and the catalog: an
+            // existing name keeps its spelling and a new one is exactly what the plan says.
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let plannedURL = URL(fileURLWithPath: p.newPath)
             if (try? ReadOnlyLocations.requireSourceMutation(oldURL)) == nil || (try? ReadOnlyLocations.requireSourceMutation(plannedURL)) == nil {
@@ -1526,7 +1529,7 @@ public enum Restructure {
             // home; only the row still names the group folder.
             if !recordUndo && !FileManager.default.fileExists(atPath: p.oldPath)
                 && Self.fileRefMatches(dbRef: live.fileRef, currentRef: Discovery.inode(of: plannedURL)) {
-                let homePath = plannedURL.path
+                let homePath = p.newPath
                 try? await database.pool.write { db in
                     try db.execute(
                         sql: "UPDATE OR ABORT files SET path_text = ?, path_hash = ?, path_search = ? WHERE id = ? AND path_text = ?",
@@ -1569,8 +1572,7 @@ public enum Restructure {
                 continue
             }
             do {
-                try fm.createDirectory(at: plannedURL.deletingLastPathComponent(),
-                                       withIntermediateDirectories: true)
+                try Self.makeDirectories((p.newPath as NSString).deletingLastPathComponent)
             } catch {
                 failed += 1
                 // Mirror the moveItem/DB-update sites: a swallowed mkdir failure
@@ -1597,18 +1599,19 @@ public enum Restructure {
             // parent (so the containment checks above still hold), claim it, and
             // move there. moveItem never overwrites, so a remaining collision
             // fails safe rather than destroying data.
-            let finalURL = Self.uniqueDestination(plannedURL, claimed: claimed, fm: fm)
+            let finalPath = Self.uniquePath(p.newPath, claimed: claimed, fm: fm)
+            let finalURL = URL(fileURLWithPath: finalPath)
             // Store case-folded: APFS (and NTFS) are case-INSENSITIVE by default, so
             // "Photo.jpg" and "photo.jpg" are the SAME on-disk slot. A case-sensitive
             // claim would miss that collision and let the second move overwrite the
             // first (data loss). Erring toward uniquify is safe even on case-sensitive
             // volumes — byte-faithful with the Windows restructure_apply fix.
-            claimed.insert(DestinationClaim(finalURL.path))
+            claimed.insert(DestinationClaim(finalPath))
 
             if let h = undoHandle {
                 do {
                     try Self.appendUndoEntryRecovering(
-                        UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path,
+                        UndoEntry(fileID: p.fileID, from: finalPath, to: p.oldPath,
                                   sourceIdentity: FileIdentity(path: oldURL.path)),
                         to: h, writer: journalAppender)
                 } catch {
@@ -1629,13 +1632,13 @@ public enum Restructure {
 
             // Write-ahead for the catalog row: a kill after the move but before the row
             // update is repaired at the next start (PathMoveJournal.reconcile).
-            let pathIntent = PathMoveJournal.begin(fileID: p.fileID, from: oldURL.path, to: finalURL.path,
+            let pathIntent = PathMoveJournal.begin(fileID: p.fileID, from: p.oldPath, to: finalPath,
                                                    fileRef: Discovery.inode(of: oldURL))
             defer { PathMoveJournal.finish(pathIntent) }
             do {
                 try ReadOnlyLocations.requireSourceMutation(oldURL)
                 try ReadOnlyLocations.requireSourceMutation(finalURL)
-                try fm.moveItem(at: oldURL, to: finalURL)
+                try Self.moveWithoutOverwrite(from: p.oldPath, to: finalPath, fm: fm)
             } catch {
                 failed += 1
                 // The durable inverse entry is harmless: undo treats a live row and
@@ -1653,7 +1656,7 @@ public enum Restructure {
             if recordUndo {
                 // Credit every successful move to the feedback memory regardless
                 // of whether the undo journal opened (disk-full / sandbox failure).
-                appliedPairs.append((source: oldURL.path, destination: finalURL.path))
+                appliedPairs.append((source: p.oldPath, destination: finalPath))
                 if appliedPairs.count >= Self.applyProgressInterval {
                     await RestructureFeedback.record(
                         database: database, moves: appliedPairs,
@@ -1661,11 +1664,10 @@ public enum Restructure {
                     appliedPairs.removeAll(keepingCapacity: true)
                 }
             }
-            if finalURL.path != plannedURL.path, conflicts.count < 1_000 {
-                conflicts.append(plannedURL.path)
+            if finalPath != p.newPath, conflicts.count < 1_000 {
+                conflicts.append(p.newPath)
             }
             do {
-                let finalPath = finalURL.path
                 // ENG-91: refresh path_hash too (notNull, indexed StablePathHash
                 // column) so cross-run/cross-platform path identity stays valid —
                 // a move that touched only path_text/path_search left it stale.
@@ -1680,10 +1682,10 @@ public enum Restructure {
             } catch {
                 let ns = error as NSError
                 JSONLog.shared.error(ev: "restructure_db_update_failed_after_move",
-                                     path: redactPathForLog(finalURL.path),
+                                     path: redactPathForLog(finalPath),
                                      error: "\(ns.domain) \(ns.code)")
                 Self.recordPathUpdateFailure(
-                    fileID: p.fileID, src: oldURL.path, dst: finalURL.path)
+                    fileID: p.fileID, src: p.oldPath, dst: finalPath)
             }
         }
         // Final durability barrier — fsync the journal so it's complete on a clean
@@ -2023,23 +2025,58 @@ public enum Restructure {
     static func uniqueDestination(
         _ dest: URL, claimed: Set<DestinationClaim>, fm: FileManager
     ) -> URL {
-        func occupied(_ url: URL) -> Bool {
+        URL(fileURLWithPath: uniquePath(dest.path, claimed: claimed, fm: fm))
+    }
+
+    /// `uniqueDestination` on the text of the path, so the name that reaches the disk is the
+    /// one the plan holds (URLs hand back decomposed text).
+    static func uniquePath(_ dest: String, claimed: Set<DestinationClaim>, fm: FileManager) -> String {
+        func occupied(_ path: String) -> Bool {
             // Case-folded membership: the claimed set is stored lowercased so a
             // case-only collision (APFS/NTFS are case-insensitive) is still detected.
-            claimed.contains(DestinationClaim(url.path))
-                || (try? fm.attributesOfItem(atPath: url.path)) != nil
+            claimed.contains(DestinationClaim(path))
+                || (try? fm.attributesOfItem(atPath: path)) != nil
         }
         if !occupied(dest) { return dest }
-        let parent = dest.deletingLastPathComponent()
-        let ext = dest.pathExtension
-        let stem = dest.deletingPathExtension().lastPathComponent
+        let parent = (dest as NSString).deletingLastPathComponent
+        let ext = (dest as NSString).pathExtension
+        let stem = ((dest as NSString).lastPathComponent as NSString).deletingPathExtension
         for n in 2...9999 {
             let name = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
-            let candidate = parent.appendingPathComponent(name)
+            let candidate = (parent as NSString).appendingPathComponent(name)
             if !occupied(candidate) { return candidate }
         }
         // Exhausted — return the original; the no-overwrite move then fails safely.
         return dest
+    }
+
+    /// `createDirectory(withIntermediateDirectories:)` that writes each new component exactly as
+    /// given (FileManager would decompose it). An existing folder is left as it is.
+    static func makeDirectories(_ path: String) throws {
+        var missing: [String] = []
+        var current = path
+        var info = stat()
+        while current.count > 1, lstat(current, &info) != 0 {
+            missing.append(current)
+            current = (current as NSString).deletingLastPathComponent
+        }
+        for directory in missing.reversed() where mkdir(directory, 0o777) != 0 && errno != EEXIST {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    /// Moves a file without replacing anything at `to`, writing the name exactly as given.
+    /// Across volumes, and on a volume that has no exclusive rename (exFAT, FAT, most network
+    /// shares), it falls back to FileManager's move, which does not overwrite either.
+    static func moveWithoutOverwrite(from: String, to: String, fm: FileManager) throws {
+        if renamex_np(from, to, UInt32(RENAME_EXCL)) == 0 { return }
+        let code = errno
+        guard Self.fallsBackToFileManagerMove(code) else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+        try fm.moveItem(at: URL(fileURLWithPath: from), to: URL(fileURLWithPath: to))
+    }
+
+    static func fallsBackToFileManagerMove(_ code: Int32) -> Bool {
+        code == EXDEV || code == ENOTSUP || code == EINVAL
     }
 
     /// Path equality tolerant of symlink and case-only aliases without treating

@@ -36,6 +36,8 @@ enum ChatFacts {
         var maxBytes: Int64?
         /// The library location the app is scoped to (`rootID`).
         var root: LibraryRoots.Scope?
+        /// Only files showing someone ("photos of people"): a face that is not excluded, or a person observed by the user.
+        var withFaces = false
 
         var effectiveKinds: [String] { kinds.isEmpty && undescribed ? ChatFacts.analyzable : kinds }
 
@@ -64,6 +66,9 @@ enum ChatFacts {
             if !excludedPersonIDs.isEmpty {
                 parts.append("f.id NOT IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)")
                 args.append(ChatFacts.json(excludedPersonIDs)); args.append(ChatFacts.json(excludedPersonIDs))
+            }
+            if withFaces {
+                parts.append("f.id IN (SELECT file_id FROM face_prints WHERE COALESCE(excluded,0)=0 UNION SELECT file_id FROM catalog_observations WHERE person_id IS NOT NULL AND stale=0)")
             }
             if let minBytes { parts.append("f.size_bytes>?"); args.append(minBytes) }
             if let maxBytes { parts.append("f.size_bytes<?"); args.append(maxBytes) }
@@ -102,6 +107,7 @@ enum ChatFacts {
         var qualifiers: String {
             var text = ""
             if let subject, !subject.isEmpty { text += " matching “\(subject)”" }
+            if withFaces { text += " with people" }
             if !extensions.isEmpty { text += " in \(ChatFacts.formatLabel(extensions)) format" }
             if !personNames.isEmpty { text += " of \(personNames.joined(separator: allPeople || personNames.count == 1 ? " and " : " or "))" }
             if !excludedPersonNames.isEmpty { text += " without \(excludedPersonNames.joined(separator: " or "))" }
@@ -346,6 +352,15 @@ enum ChatFacts {
     /// to the first few alternatives and words (Rust `subject_groups`).
     static let subjectMaxGroups = 6
     static let subjectMaxWords = 8
+
+    static let peopleSubjects: Set<String> = ["people", "person", "persons", "faces", "face", "anyone", "someone", "somebody", "humans"]
+
+    /// "photos of people", "pictures with faces": the subject asks for anyone at all, not for a word.
+    static func asksForAnyone(_ query: String) -> Bool {
+        let groups = subjectGroups(query)
+        guard groups.count == 1, let group = groups.first, !group.isEmpty else { return false }
+        return group.allSatisfy { peopleSubjects.contains($0) }
+    }
 
     static func subjectGroups(_ query: String) -> [[String]] {
         var groups: [[String]] = [[]]

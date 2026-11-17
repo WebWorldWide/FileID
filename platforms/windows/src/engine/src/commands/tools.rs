@@ -1210,6 +1210,35 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn a_photo_export_refuses_video_only_options_and_every_video_choice_it_cannot_honour() {
+        let recipe = |kind: &str, format: &str, dimension: u32, edit: &dyn Fn(&mut ToolRecipe)| {
+            let mut recipe = ToolRecipe {
+                kind: kind.into(),
+                format: format.into(),
+                max_dimension: dimension,
+                allow_upscale: None,
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
+            };
+            edit(&mut recipe);
+            recipe
+        };
+        assert!(supports(&recipe("photo", "png", 64, &|_| {})), "positive control");
+        assert!(!supports(&recipe("photo", "png", 8193, &|_| {})), "8193 px is over the limit");
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_aspect_ratio = Some("9:16".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_framing = Some("fit".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_stabilization = Some(true))));
+        assert!(!supports(&recipe("chapters", "json", 64, &|r| r.allow_upscale = Some(true))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_aspect_ratio = Some("10:3".into()))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_framing = Some("zoom".into()))));
+    }
+
+    #[test]
     fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
         let mut fixture = Fixture::new();
         let request = fixture.request("png");
@@ -1541,6 +1570,59 @@ mod tests {
         assert!(!stage.exists());
         assert!(unrelated.exists());
         assert_eq!(hash(&fixture.source).unwrap(), original);
+    }
+
+    // A leftover stage path that was replaced by a link to the user's file must not be followed and deleted.
+    #[cfg(unix)]
+    #[test]
+    fn restart_cleanup_never_deletes_what_a_stage_path_links_to() {
+        let fixture = Fixture::new();
+        let aliased = fixture.root.join(format!(".FileIDExport-{}.part", uuid::Uuid::new_v4()));
+        std::os::unix::fs::symlink(&fixture.source, &aliased).unwrap();
+        let real = fixture.root.join(format!(".FileIDExport-{}.part", uuid::Uuid::new_v4()));
+        fs::write(&real, b"Partial output").unwrap();
+        let original = hash(&fixture.source).unwrap();
+        let plan = Plan {
+            version: 1,
+            r#type: "export".into(),
+            recipe: ToolRecipe {
+                kind: "photo".into(),
+                format: "png".into(),
+                max_dimension: 16,
+                allow_upscale: None,
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
+            },
+            items: vec![Item {
+                output: ToolOutput {
+                    file_id: 1,
+                    source_path: fixture.source.to_string_lossy().into_owned(),
+                    output_path: fixture.root.join("Export.png").to_string_lossy().into_owned(),
+                    state: "pending".into(),
+                    message: String::new(),
+                },
+                source_hash: original.clone(),
+                chapters: vec![],
+            }],
+            // The link comes first, so it has been looked at by the time the real stage file is gone.
+            stage_paths: Some(vec![aliased.to_string_lossy().into_owned(), real.to_string_lossy().into_owned()]),
+        };
+        fixture.conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES('interrupted',?1,'[]','running',0)",[serde_json::to_string(&plan).unwrap()]).unwrap();
+        recover(&fixture.conn).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while real.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!real.exists(), "the real stage file is cleaned up");
+        assert!(fs::symlink_metadata(&aliased).is_ok_and(|m| m.file_type().is_symlink()), "the link is left alone");
+        assert_eq!(hash(&fixture.source).unwrap(), original, "the user's file is untouched");
+        let state: String = fixture.conn.query_row("SELECT state FROM catalog_operations WHERE id='interrupted'", [], |r| r.get(0)).unwrap();
+        assert_eq!(state, "failed", "an interrupted export is marked failed, not left running");
     }
 
     struct CrossDeviceUndo {

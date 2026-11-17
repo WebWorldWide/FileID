@@ -16,7 +16,9 @@
 //   FILEID_SELF_SHOT_CHAT=<q>|<q>  after that, ask each question in Chat (the composer's send) and capture the answer
 //   FILEID_SELF_SHOT_CHAT_SCOPED=<q>  one more question attached to the first FILEID_SELF_SHOT_CHAT_SCOPE_N (default 6) photos, the selection check
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
-//   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
+//   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder that exists>
+//                                  a query that finds nothing is logged and retried with the first library photo's name (an exact name: the search matches whole words, so "IMG_41" finds nothing)
+//   FILEID_SELF_SHOT_TOOLS_VIDEO=<query>  one more pass with the first video found, the Trim tool from 0 to 1 second, previewed (needs FILEID_SELF_SHOT_TOOLS)
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -267,26 +269,17 @@ enum SelfShot {
             navigate(MainWindow.Tab.tools.rawValue)
             try? await Task.sleep(for: .seconds(plan.settle))
             write(name: "tools-empty", plan: plan)
-            session.kind = env("FILEID_SELF_SHOT_TOOLS_KIND") ?? "photo"
-            session.query = query
-            session.searchID = UUID().uuidString
-            _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: query)))
-            await waitUntil(timeout: 30) { !session.allHits.isEmpty }
-            try? await Task.sleep(for: .seconds(1))
             let n = env("FILEID_SELF_SHOT_TOOLS_N").flatMap(Int.init) ?? 2
-            session.selection = Set(session.hits.prefix(n).map(\.fileID))
-            session.destination = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
-            try? await Task.sleep(for: .seconds(1))
-            write(name: "tools-selected", plan: plan)
-            let request = ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(),
-                                      destination: session.destination, recipe: session.recipe, destinationBookmark: nil)
-            session.pending = request.requestID; session.pendingAction = request.action
-            session.pendingEngineGeneration = engine.engineResetSignal
-            _ = engine.send(.toolRequest(request: request))
-            await waitUntil(timeout: 60) { session.pending.isEmpty }
-            try? await Task.sleep(for: .seconds(2))
-            note("tools preview: \(session.message) outputs \(session.outputs.count)")
-            write(name: "tools-preview", plan: plan)
+            let dest = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
+            let photoFallback = photos.first.map { URL(fileURLWithPath: $0.pathText).deletingPathExtension().lastPathComponent }
+            await toolsPass(session: session, engine: engine, plan: plan, name: "tools", kind: env("FILEID_SELF_SHOT_TOOLS_KIND") ?? "photo",
+                            query: query, fallbackQuery: photoFallback, count: n, destination: dest, trim: false)
+            if let videoQuery = env("FILEID_SELF_SHOT_TOOLS_VIDEO") {
+                let videos = store.files(limit: 2000).filter { FileTypes.videos.contains(URL(fileURLWithPath: $0.pathText).pathExtension.lowercased()) }
+                let videoFallback = videos.first.map { URL(fileURLWithPath: $0.pathText).deletingPathExtension().lastPathComponent }
+                await toolsPass(session: session, engine: engine, plan: plan, name: "tools-video", kind: "video",
+                                query: videoQuery, fallbackQuery: videoFallback, count: 1, destination: dest, trim: true)
+            }
         }
         await waitUntil(timeout: 120) {
             !engine.deepAnalyzeInFlight && !engine.faceClusteringInFlight && !engine.catalogJobs.contains { $0.state == "running" || $0.state == "queued" }
@@ -294,6 +287,44 @@ enum SelfShot {
         navigate(MainWindow.Tab.library.rawValue)
         try? await Task.sleep(for: .seconds(plan.settle + 3))
         write(name: "final-idle", plan: plan)
+    }
+
+    /// File Tools: search, select, and press Preview, each through the call the page makes. A search that finds
+    /// nothing is logged and retried once with a file name taken from the library, so a bad query cannot leave the page empty.
+    private static func toolsPass(session: ToolsSession, engine: EngineClient, plan: SelfShotPlan, name: String, kind: String, query: String,
+                                  fallbackQuery: String?, count: Int, destination: String, trim: Bool) async {
+        session.kind = kind
+        session.format = kind == "video" ? "mp4" : "png"
+        session.maxDimension = kind == "video" ? 1920 : 4096
+        for text in [query] + (fallbackQuery.map { [$0] } ?? []) {
+            session.query = text
+            session.searchID = UUID().uuidString
+            _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: text)))
+            await waitUntil(timeout: 30) { session.searchID.isEmpty && !session.hits.isEmpty }
+            session.applyKindFilter()
+            note("\(name) search for \"\(text)\": \(session.allHits.count) results, \(session.hits.count) \(kind)")
+            if !session.hits.isEmpty { break }
+        }
+        try? await Task.sleep(for: .seconds(1))
+        session.selection = Set(session.hits.prefix(count).map(\.fileID))
+        session.destination = destination
+        if trim {
+            session.media.adopt(tool: "trim", sources: session.selectedPaths)
+            session.media.trimStart = 0
+            session.media.trimEnd = 1
+        }
+        try? await Task.sleep(for: .seconds(1))
+        write(name: "\(name)-selected", plan: plan)
+        guard !session.selection.isEmpty else { note("\(name): nothing selected, no preview sent"); return }
+        let request = ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(),
+                                  destination: session.destination, recipe: session.recipe, destinationBookmark: nil)
+        session.pending = request.requestID; session.pendingAction = request.action
+        session.pendingEngineGeneration = engine.engineResetSignal
+        _ = engine.send(.toolRequest(request: request))
+        await waitUntil(timeout: 60) { session.pending.isEmpty }
+        try? await Task.sleep(for: .seconds(2))
+        note("\(name) preview: \(session.message) outputs \(session.outputs.count)")
+        write(name: "\(name)-preview", plan: plan)
     }
 
     private static func askChat(_ question: String, name: String, engine: EngineClient, plan: SelfShotPlan) async {

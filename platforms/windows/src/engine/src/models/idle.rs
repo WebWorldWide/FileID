@@ -149,6 +149,19 @@ mod tests {
     }
 
     #[test]
+    fn using_a_model_restarts_its_idle_period() {
+        static SLOT: IdleSlot<u32> = IdleSlot::new("test-restart", Duration::from_millis(400));
+        SLOT.with(|| Ok(1), |_| ()).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        SLOT.with(|| Ok(1), |_| ()).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(!SLOT.park_idle(Instant::now()), "500 ms since the load but only 250 ms since the last use");
+        assert!(SLOT.is_loaded());
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(SLOT.park_idle(Instant::now()), "500 ms since the last use parks it");
+    }
+
+    #[test]
     fn a_value_can_be_put_peeked_and_cleared_without_a_loader() {
         static SLOT: IdleSlot<u32> = IdleSlot::new("test-put", Duration::from_secs(60));
         assert_eq!(SLOT.peek(|v| *v), None);

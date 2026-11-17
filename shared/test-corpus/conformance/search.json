@@ -1,5 +1,18 @@
 [
   {
+    "name": "catalog-search-partial-file-name",
+    "description": "A query term also matches names that start with it, after the whole-word matches: IMG_41 finds IMG_41.jpg first, then IMG_4181.jpg;.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/IMG_4181.jpg',1,10,0,'image','jpg'),(2,'{root}/IMG_41.jpg',2,10,0,'image','jpg'),(3,'{root}/IMG_4200.jpg',3,10,0,'image','jpg'),(4,'{root}/notes 41.txt',4,10,0,'doc','txt')"
+    ],
+    "steps": [
+      {"label": "whole name", "catalog": {"action": "search", "query": "IMG_4181"}, "expect": {"status": "ok", "hits": [{"fileID": 1}]}},
+      {"label": "start of a name", "catalog": {"action": "search", "query": "IMG_41"}, "expect": {"hits": [{"fileID": 2}, {"fileID": 1}]}},
+      {"label": "start of another name", "catalog": {"action": "search", "query": "img_42"}, "expect": {"hits": [{"fileID": 3}]}},
+      {"label": "no such name", "catalog": {"action": "search", "query": "IMG_9"}, "expect": {"status": "ok", "hits": []}}
+    ]
+  },
+  {
     "name": "catalog-search-plural-words-reach-singular-tags",
     "description": "Keyword search matches scan tags at word starts, folds plural query words onto singular tags, keeps only files matching the most words, ignores rejected tags and orders newest id first.",
     "sql": [

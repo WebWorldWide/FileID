@@ -232,6 +232,31 @@ public enum CatalogStore {
             for row in files {
                 results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
             }
+            // Names are typed from the start ("IMG_41" for "IMG_4181"): add files whose name or
+            // description has a word starting with each term, after the exact ones.
+            let prefixed = FTSQuery.prefixed(meaningful)
+            if !prefixed.isEmpty && results.count < 100 {
+                let exact = String(decoding: try JSONEncoder().encode(results.map(\.fileID)), as: UTF8.self)
+                let more = try Row.fetchAll(db, sql: """
+                    SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description
+                    FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid
+                    WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+                      AND (? IS NULL OR f.id IN (
+                        SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                        UNION SELECT file_id FROM catalog_observations
+                          WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+                      ))
+                      AND (? IS NULL OR f.id IN (
+                        SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+                      ))
+                      AND \(LibraryRoots.scopeSQL("f.path_text"))
+                      AND f.id NOT IN (SELECT value FROM json_each(?))
+                    ORDER BY bm25(catalog_file_fts),f.id LIMIT 100
+                    """, arguments: [prefixed, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, root, exact])
+                for row in more {
+                    results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
+                }
+            }
             let seen = Set(results.map(\.fileID))
             results.append(contentsOf: try tagHits(db, words: meaningful, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, root: root)
                 .filter { !seen.contains($0.fileID) })

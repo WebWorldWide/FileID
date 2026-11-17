@@ -175,6 +175,11 @@ fn summary_model(requested: Option<&str>) -> Option<String> {
     }
 }
 
+/// The earlier turns come before the request, never after it.
+fn with_history(history: &str, evidence: &str) -> String {
+    format!("{history}{evidence}")
+}
+
 /// Retrieval embeds the query and scans stored vectors; that must not hold the
 /// single writer connection, so it runs on a fresh read-only one when the
 /// database has a file path (in-memory test databases fall back to the writer).
@@ -227,15 +232,15 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     let answer = if crate::apple::vlm::model_spec(model).is_ok() {
         // The Swift engine's chat answer: the evidence system prompt is its own
         // message and the reply streams (`DeepAnalyze.answerCatalog`).
-        let prompt = format!("{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let prompt = with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
         summarize_mlx(sink, &database, &request, &hits, model, &prompt, cancel.clone()).await
     } else {
-        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{}", with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details)));
         summarize(model, &plain, cancel.clone()).await
     };
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     let answer = {
-        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{}", with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details)));
         summarize(model, &plain, cancel.clone()).await
     };
     let cancelled = cancel.load(Ordering::Acquire);
@@ -995,11 +1000,13 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     // becomes the full set of files it describes.
     let wants_all = question.measure != "list" || question.explicit_order || question.duplicates;
     if question.structured() && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
-        if !plan.query.is_empty()
+        if chat_facts::asks_for_anyone(&plan.query) {
+            structured.with_faces = true;
+        } else if !plan.query.is_empty()
             && let Some(ids) = chat_facts::subject_ids(conn, &plan.query)?
         {
             structured.ids = Some(ids);
-            structured.subject = Some(plan.query.clone());
+            structured.subject = Some(plan.query.trim_end_matches(['?', '!', '.', ',']).to_owned());
         }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
@@ -1716,8 +1723,45 @@ mod tests {
         assert_eq!(ask("h", "how many photos per year?").0, "Photos by year: 2023: 3, 2019: 68, 2018: 182.");
         assert_eq!(ask("i", "photos from summer 2023").0, "Found 3 photos from summer 2023.");
         assert_eq!(ask("j", "what's taking up the most space?").0, "Files use 2.5 GB (254 files). Largest: surf.mov (2.5 GB), c.arw (9.0 KB), b.jpg (5.0 KB).");
+        // "this" points at the library, not at a word to search for.
+        for (conversation, text, answer) in [
+            ("k1", "how many videos are in this library?", "Found 1 video, using 2.5 GB."),
+            ("k2", "How many videos do I have", "Found 1 video, using 2.5 GB."),
+            ("k3", "how many photos from 2023", "Found 3 photos from 2023, using 18.0 KB."),
+            ("k4", "how many files", "Found 254 files, using 2.5 GB."),
+            ("k5", "how many videos in this", "Found 1 video, using 2.5 GB."),
+        ] {
+            assert_eq!(ask(conversation, text).0, answer, "{text}");
+        }
         ask("g", "dog photos");
         assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
+    }
+
+    #[test]
+    fn counting_photos_of_people_counts_photos_with_a_face_not_the_word() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Kyle','Kyle',0,0);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES
+             (1,'/lib/a.jpg',1,1000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (2,'/lib/b.jpg',2,1000,1688472000,0,'image','jpg','A crowd'),
+             (3,'/lib/c.jpg',3,1000,1688472000,0,'image','jpg','Many people at a market'),
+             (4,'/lib/d.jpg',4,1000,1688472000,0,'image','jpg','A tree'),
+             (5,'/lib/people.docx',5,1000,1688472000,0,'doc','docx',NULL),
+             (6,'/lib/e.mov',6,1000,1688472000,0,'video','mov',NULL);
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES
+             (1,1,X'00','[0,0,1,1]',0),(2,NULL,X'00','[0,0,1,1]',0),(4,NULL,X'00','[0,0,1,1]',1),(6,NULL,X'00','[0,0,1,1]',0);",
+        )
+        .unwrap();
+        let mut ask = |text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            execute(&mut conn, &request).unwrap().message
+        };
+        assert_eq!(ask("how many photos of people do I have?"), "Found 2 photos with people, using 2.0 KB.");
+        assert_eq!(ask("how many pictures with faces?"), "Found 2 photos with people, using 2.0 KB.");
+        assert_eq!(ask("how many files have people in them"), "Found 3 files with people, using 3.0 KB.");
+        assert_eq!(ask("how many photos of Kyle"), "Found 1 photo of Kyle, using 1.0 KB.");
+        assert_eq!(ask("how many photos of people at a market?"), "Found 1 photo matching “people market”, using 1.0 KB.");
     }
 
     #[test]
@@ -1744,5 +1788,49 @@ mod tests {
             super::super::chat_search::SearchPlan::resolve("Please show me my birthday videos", None).query,
             "birthday"
         );
+    }
+
+    fn plain_hit(file_id: i64, evidence_id: Option<&str>) -> CatalogHit {
+        CatalogHit {
+            file_id,
+            path: format!("/p/{file_id}.mov"),
+            kind: "chapter".into(),
+            text: String::new(),
+            evidence_id: evidence_id.map(str::to_owned),
+            start_seconds: None,
+            page: None,
+            selection_match: None,
+        }
+    }
+
+    #[test]
+    fn rank_fusion_rewards_agreement_keeps_the_evidence_id_and_breaks_ties_by_first_appearance() {
+        let ids = |hits: Vec<CatalogHit>| -> Vec<String> {
+            hits.into_iter().map(|h| h.evidence_id.unwrap_or_else(|| format!("file:{}", h.file_id))).collect()
+        };
+        let a = vec![plain_hit(1, Some("chapter:1")), plain_hit(2, None)];
+        let b = vec![plain_hit(2, None), plain_hit(3, Some("chapter:3"))];
+        assert_eq!(ids(fuse(vec![a, b])), vec!["file:2", "chapter:1", "chapter:3"], "the hit both lists found comes first");
+        let one = vec![plain_hit(1, None)];
+        let two = vec![plain_hit(2, None)];
+        assert_eq!(ids(fuse(vec![one, two])), vec!["file:1", "file:2"], "equal scores keep first appearance");
+        let same_file_two_moments = vec![plain_hit(7, Some("chapter:a")), plain_hit(7, Some("chapter:b"))];
+        assert_eq!(fuse(vec![same_file_two_moments, vec![]]).len(), 2, "evidence items of one file are not merged");
+    }
+
+    #[test]
+    fn earlier_turns_come_before_the_request_in_the_prompt() {
+        let history = history_block(&[("user".to_owned(), "winter photos".to_owned())], 4, 300);
+        let prompt = with_history(&history, &evidence_prompt("only the ones with snow", &[], 3, &HashMap::new()));
+        let earlier = prompt.find("Earlier in this conversation:").expect("history present");
+        let request = prompt.find("Request: only the ones with snow").expect("request present");
+        assert!(earlier < request);
+    }
+
+    #[test]
+    fn a_summary_never_wakes_a_model_kind_that_is_not_a_known_installed_one() {
+        for kind in ["../../etc/passwd", "not_a_model", "", "qwen2_5_vl_7b\0x"] {
+            assert_eq!(summary_model(Some(kind)), None, "{kind:?}");
+        }
     }
 }

@@ -1,0 +1,44 @@
+{
+ "capturedFrom": "older-catalog-v21",
+ "conversation": "a02d6b4c-594a-49b9-9e82-7fd71de0c7ce",
+ "dirs": [
+  "Documents",
+  "Pictures"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1700000120,
+    0
+   ],
+   "path": "Documents/Notes.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1700000180,
+    0
+   ],
+   "path": "Documents/Report.pdf"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1700000060,
+    0
+   ],
+   "path": "Pictures/Picture.png"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

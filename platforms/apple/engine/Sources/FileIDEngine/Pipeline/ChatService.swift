@@ -206,9 +206,11 @@ actor ChatService {
             // subject becomes the full set of files it describes.
             let wantsAll = question.measure != "list" || question.explicitOrder || question.duplicates
             if question.structured, plan.eventIDs.isEmpty, plan.timeSeconds == nil, plan.query.isEmpty || wantsAll {
-                if !plan.query.isEmpty, let ids = try ChatFacts.subjectIDs(db, plan.query) {
+                if ChatFacts.asksForAnyone(plan.query) {
+                    structured.withFaces = true
+                } else if !plan.query.isEmpty, let ids = try ChatFacts.subjectIDs(db, plan.query) {
                     structured.ids = ids
-                    structured.subject = plan.query
+                    structured.subject = String(plan.query.reversed().drop(while: { "?!.,".contains($0) }).reversed())
                 }
                 let (message, hits) = try ChatFacts.answer(db, question, structured)
                 return (Prepared(message: message, hits: hits, summarize: false), plan, question, [])

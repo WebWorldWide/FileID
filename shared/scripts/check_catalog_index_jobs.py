@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify native index recovery and controls against an isolated actual engine."""
+"""Verify native index recovery and controls against an isolated actual engine.
+
+The conformance case catalog-index-job-recovers-cancels-and-resumes checks the same lifecycle on
+both engines; this script keeps the separate-process variant (the job row is written between two
+engine runs) for either engine."""
 import argparse
 import hashlib
 import json
@@ -8,10 +12,10 @@ import sqlite3
 import tempfile
 import time
 
-from conformance import Engine
+from conformance import Engine, case_env
 
 
-def verify(binary: Path) -> None:
+def verify(binary: Path, flavor: str) -> None:
     root = Path(__file__).resolve().parents[2]
     manifest = json.loads((root / "shared/models/manifest.json").read_text())
     hashes = {entry["id"]: entry["sha256"] for entry in manifest["artifacts"]}
@@ -21,7 +25,7 @@ def verify(binary: Path) -> None:
     job_id = "catalog-index-" + hashlib.sha256(model.encode()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="fileid-index-jobs-") as temporary:
         directory = Path(temporary)
-        engine = Engine(binary.resolve(), directory, swift=True)
+        engine = Engine(binary.resolve(), directory, swift=flavor == "swift", env=case_env(directory, {}))
         try:
             engine.wait("ready")
         finally:
@@ -31,7 +35,7 @@ def verify(binary: Path) -> None:
                 "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,progress,created_at,updated_at) VALUES(?,'catalogIndex','[]',?,'running',1,0.4,1,1)",
                 (job_id, json.dumps({"model": model})),
             )
-        engine = Engine(binary.resolve(), directory, swift=True)
+        engine = Engine(binary.resolve(), directory, swift=flavor == "swift", env=case_env(directory, {}))
         try:
             engine.wait("ready")
             jobs = engine.request("jobs")["jobs"]
@@ -65,4 +69,6 @@ def verify(binary: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", type=Path, required=True)
-    verify(parser.parse_args().engine)
+    parser.add_argument("--flavor", choices=["swift", "rust"], default="swift")
+    arguments = parser.parse_args()
+    verify(arguments.engine, arguments.flavor)

@@ -2613,6 +2613,26 @@ mod tests {
         assert_eq!(rows, 200);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_writer_commits_every_row_across_more_than_two_batches_and_the_tail() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let n = current_batch_size() * 2 + 7;
+        let (tx, rx) = mpsc::channel(n + 1);
+        for i in 0..n {
+            tx.send(fixture(&format!("/lib/many/{i}.jpg"))).await.unwrap();
+        }
+        drop(tx);
+        let mut batches = 0u32;
+        let (total, failed) = writer.run(rx, |_| batches += 1).await.unwrap();
+        assert_eq!((total, failed), (n as u64, 0));
+        assert!(batches >= 3, "two full batches and the tail are three commits, got {batches}");
+        let rows: i64 = conn.lock().query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows as usize, n, "no row is lost between batches or in the final partial batch");
+        let distinct: i64 = conn.lock().query_row("SELECT COUNT(DISTINCT path_hash) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(distinct as usize, n);
+    }
+
     #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
         let dir = unique_tmp_dir("overcap_legacy");
@@ -3052,6 +3072,42 @@ mod twin_reuse_tests {
         assert_eq!(owed(&conn, "/lib/b.jpg"), None);
     }
 
+    fn copy_after_spoiling_the_twin(spoil: &str, switch_off: bool) -> (i64, i64, i64) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [31u8; 32];
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock().execute_batch(spoil).unwrap();
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.reuse_twin = !switch_off;
+        writer.flush(&mut vec![copy], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let db = conn.lock();
+        db.query_row(
+            "SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id), (SELECT count(*) FROM clip_embeddings WHERE file_id = f.id) \
+             FROM files f WHERE path_text = '/lib/b.jpg'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_copy_never_takes_over_a_failed_row_a_non_image_a_sampled_hash_or_a_row_with_reuse_switched_off() {
+        let none = (1, 0, 0);
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET failed = 1", false), none, "failed twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET kind = 'video'", false), none, "non-image twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET content_hash = substr(content_hash, 1, 16)", false), none, "sampled or short hash");
+        assert_eq!(
+            copy_after_spoiling_the_twin("DELETE FROM tags; DELETE FROM clip_embeddings", false),
+            none,
+            "a twin that kept no tag and no vector"
+        );
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", true);
+        assert_eq!((failed, tags, clips), (0, 0, 0), "reuse off: the copy keeps only its own row and gets nothing of the twin's");
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", false);
+        assert_eq!((failed, tags, clips), (0, 3, 1), "positive control: the intact twin is taken over");
+    }
+
     #[test]
     fn a_copy_of_an_earlier_scan_is_served_from_the_catalog() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
@@ -3360,3 +3416,257 @@ mod failure_memory_tests {
     }
 }
 
+
+#[cfg(test)]
+mod rescan_preservation_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    const PATH: &str = "/lib/IMG_0001.jpg";
+
+    fn scan(modified_unix: f64) -> TaggedFile {
+        TaggedFile::bare(&DiscoveredFile {
+            path: PathBuf::from(PATH),
+            kind: FileKind::Image,
+            size_bytes: 4,
+            modified_unix,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        })
+    }
+
+    fn analysed(modified_unix: f64, tags: &[&str], ocr: &str) -> TaggedFile {
+        let mut file = scan(modified_unix);
+        file.tags = tags.iter().map(|tag| ((*tag).to_string(), None)).collect();
+        file.tags_evaluated = true;
+        file.faces_evaluated = true;
+        file.ocr_stage_ran = true;
+        file.ocr_text = Some(ocr.to_string());
+        file
+    }
+
+    fn flush(writer: &DbWriter, file: TaggedFile, batch: u32) {
+        writer.flush(&mut vec![file], &mut 0, &mut 0, &mut 0, batch).unwrap();
+    }
+
+    struct Seeded {
+        conn: Arc<Mutex<Connection>>,
+        writer: DbWriter,
+        file_id: i64,
+        face_id: i64,
+        person_id: i64,
+    }
+
+    /// A scanned file with an automatic tag, OCR text, one face the user has
+    /// named, and a tag the user typed.
+    fn seeded() -> Seeded {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        flush(&writer, analysed(1_700_000_000.0, &["beach"], "alpha bravo"), 0);
+        let (file_id, face_id, person_id) = {
+            let db = conn.lock();
+            let file_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+            db.execute("INSERT INTO persons (name, file_count, created_at) VALUES ('Mom', 1, 0)", []).unwrap();
+            let person_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES (?1, ?2, X'01', '{}')",
+                params![file_id, person_id],
+            )
+            .unwrap();
+            let face_id = db.last_insert_rowid();
+            db.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'keepme', 'user')", [file_id]).unwrap();
+            (file_id, face_id, person_id)
+        };
+        Seeded { conn, writer, file_id, face_id, person_id }
+    }
+
+    fn state(seed: &Seeded) -> (Option<i64>, Vec<String>, Vec<Option<i64>>, Vec<String>, i64) {
+        let db = seed.conn.lock();
+        let id = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).ok();
+        let tags = db
+            .prepare("SELECT tag || ':' || source FROM tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let people = db
+            .prepare("SELECT person_id FROM face_prints ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let text = db
+            .prepare("SELECT text FROM ocr_text ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let failed = db.query_row("SELECT failed FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+        (id, tags, people, text, failed)
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_row_id_and_the_people_the_user_named() {
+        let seed = seeded();
+        let before = state(&seed);
+        assert_eq!(before.2, vec![Some(seed.person_id)]);
+
+        // The same file again with the face stage skipped (the usual state of
+        // a scan that reads only what changed).
+        let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+        again.faces_evaluated = false;
+        flush(&seed.writer, again, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "files.id survives a rewrite");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the named face stays named");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(seed.conn.lock().query_row("SELECT id FROM face_prints", [], |r| r.get::<_, i64>(0)).unwrap(), seed.face_id);
+    }
+
+    #[test]
+    fn a_changed_file_whose_stages_did_not_run_keeps_its_tags_people_and_text() {
+        let seed = seeded();
+        // A read that timed out, or models that were not ready: the file
+        // changed, nothing was produced, no stage ran.
+        let changed = scan(1_700_000_060.0);
+        flush(&seed.writer, changed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id));
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()], "tags survive");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the person assignment survives");
+        assert_eq!(after.3, vec!["alpha bravo".to_string()], "the text survives");
+        assert_eq!(after.4, 0);
+    }
+
+    #[test]
+    fn a_failed_read_of_a_changed_file_records_the_failure_and_keeps_what_was_found_before() {
+        let seed = seeded();
+        let mut failed = scan(1_700_000_060.0);
+        failed.failed = true;
+        failed.error_message = Some("image decode: broken".to_string());
+        flush(&seed.writer, failed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "the row is not replaced");
+        assert_eq!(after.4, 1, "the failure is recorded");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(after.2, vec![Some(seed.person_id)]);
+        assert_eq!(after.3, vec!["alpha bravo".to_string()]);
+
+        // The next good read clears the failure and replaces the old results.
+        flush(&seed.writer, analysed(1_700_000_060.0, &["sunset"], "charlie"), 2);
+        let healed = state(&seed);
+        assert_eq!(healed.0, Some(seed.file_id));
+        assert_eq!(healed.4, 0);
+        assert_eq!(healed.1, vec!["keepme:user".to_string(), "sunset:auto".to_string()], "automatic tags are replaced, the user's stay");
+        assert_eq!(healed.3, vec!["charlie".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "finding: the Rust writer stores a failed row for a file deleted after discovery (the Swift writer skips it)"]
+    fn a_file_deleted_after_discovery_gets_no_failed_row_but_a_broken_one_does() {
+        let dir = std::env::temp_dir().join(format!("fileid-vanish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (gone, broken) = (dir.join("deleted.jpg"), dir.join("broken.jpg"));
+        std::fs::write(&broken, b"not a jpeg").unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let failure = |path: &PathBuf| {
+            let mut file = scan(1_700_000_000.0);
+            file.path = path.clone();
+            file.failed = true;
+            file.error_message = Some("Could not decode image".to_string());
+            file
+        };
+        writer.flush(&mut vec![failure(&gone), failure(&broken)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let paths: Vec<String> = conn
+            .lock()
+            .prepare("SELECT path_text FROM files")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(paths, vec![broken.to_string_lossy().into_owned()]);
+    }
+
+    fn unit_vector() -> Vec<f32> {
+        let mut vector = vec![0.0f32; crate::models::clip_space::DIMENSION];
+        vector[0] = 1.0;
+        vector
+    }
+
+    fn clip_rows(seed: &Seeded) -> Vec<(i64, String)> {
+        seed.conn
+            .lock()
+            .prepare("SELECT file_id, model FROM clip_embeddings")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn rescanning_an_unchanged_image_fills_a_missing_vector_once_and_never_duplicates_it() {
+        let seed = seeded();
+        assert!(clip_rows(&seed).is_empty(), "the first scan had no CLIP model");
+        for batch in 1..=2 {
+            let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+            again.clip_embedding = Some(unit_vector());
+            flush(&seed.writer, again, batch);
+            assert_eq!(clip_rows(&seed), vec![(seed.file_id, crate::models::clip_space::model_id().to_string())]);
+        }
+        assert_eq!(state(&seed).1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+    }
+
+    #[test]
+    fn a_vector_from_an_older_model_is_replaced_in_place_and_the_users_tags_stay() {
+        let seed = seeded();
+        seed.conn
+            .lock()
+            .execute(
+                "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?1, X'00', 'clip_legacy')",
+                [seed.file_id],
+            )
+            .unwrap();
+        let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+        again.clip_embedding = Some(unit_vector());
+        flush(&seed.writer, again, 1);
+        let rows = clip_rows(&seed);
+        assert_eq!(rows, vec![(seed.file_id, crate::models::clip_space::model_id().to_string())]);
+        let blob: Vec<u8> = seed.conn.lock().query_row("SELECT embedding FROM clip_embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(blob.len(), crate::models::clip_space::DIMENSION * 4);
+        assert!(state(&seed).1.contains(&"keepme:user".to_string()));
+    }
+
+    #[test]
+    fn a_file_that_timed_out_is_walked_again_even_though_its_date_is_unchanged() {
+        let seed = seeded();
+        let sql = format!(
+            "SELECT path_text FROM files WHERE failed = 0 {}",
+            crate::scan_session::SKIP_SET_CONTENT_HASH_GATE
+        );
+        let skipped = |seed: &Seeded| -> Vec<String> {
+            let db = seed.conn.lock();
+            db.execute("UPDATE files SET content_hash = X'01'", []).ok();
+            db.prepare(&sql).unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        assert_eq!(skipped(&seed), vec![PATH.to_string()], "a cleanly scanned file is skipped");
+
+        let mut timed_out = scan(1_700_000_000.0);
+        timed_out.failed = true;
+        timed_out.error_message = Some("per-file timeout after 60s".into());
+        flush(&seed.writer, timed_out, 1);
+        assert!(skipped(&seed).is_empty(), "a timed-out file is marked failed, so the next scan walks it again");
+    }
+}

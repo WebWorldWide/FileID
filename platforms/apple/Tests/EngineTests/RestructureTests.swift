@@ -458,6 +458,38 @@ struct RestructureApplyTests {
         #expect(d3 == tmp.appendingPathComponent("audio (2).mp3"))
     }
 
+    @Test("Apply writes folder and file names exactly as the plan spells them")
+    func applyKeepsNameSpelling() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDSpelling-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let root = tmp.path
+        let composedFolder = "R\u{e9}sum\u{e9}"
+        let decomposedFile = "re\u{301}sume\u{301}.pdf"
+        try Restructure.makeDirectories(root + "/" + composedFolder + "/sub")
+        #expect(try fm.contentsOfDirectory(atPath: root).map { Array($0.unicodeScalars.map(\.value)) }
+                == [Array(composedFolder.unicodeScalars.map(\.value))], "a new folder is written composed")
+        let source = root + "/" + decomposedFile
+        try Data("x".utf8).write(to: URL(fileURLWithPath: source))
+        let destination = root + "/" + composedFolder + "/sub/" + decomposedFile
+        try Restructure.moveWithoutOverwrite(from: source, to: destination, fm: fm)
+        #expect(try fm.contentsOfDirectory(atPath: root + "/" + composedFolder + "/sub").map { Array($0.unicodeScalars.map(\.value)) }
+                == [Array(decomposedFile.unicodeScalars.map(\.value))], "a file keeps its decomposed name")
+        try Data("y".utf8).write(to: URL(fileURLWithPath: source))
+        #expect(throws: Error.self) { try Restructure.moveWithoutOverwrite(from: source, to: destination, fm: fm) }
+        #expect(try String(contentsOfFile: destination, encoding: .utf8) == "x", "nothing is overwritten")
+        #expect(Restructure.uniquePath(destination, claimed: [], fm: fm).hasSuffix(" (2).pdf"))
+        // A volume without exclusive rename (exFAT, FAT, a network share) or another
+        // volume falls back to FileManager's move; a real failure does not.
+        #expect(Restructure.fallsBackToFileManagerMove(ENOTSUP))
+        #expect(Restructure.fallsBackToFileManagerMove(EXDEV))
+        #expect(!Restructure.fallsBackToFileManagerMove(EEXIST))
+        #expect(!Restructure.fallsBackToFileManagerMove(ENOENT))
+        #expect(!Restructure.fallsBackToFileManagerMove(EACCES))
+    }
+
     @Test("An unavailable undo journal prevents every move")
     func unavailableUndoJournalFailsClosed() async throws {
         let tmp = FileManager.default.temporaryDirectory
