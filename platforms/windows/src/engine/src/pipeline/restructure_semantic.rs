@@ -266,7 +266,9 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
     let gap = time_gap_secs();
     let (mut timed, untimed): (Vec<usize>, Vec<usize>) =
         (0..files.len()).partition(|&i| files[i].time_unix > 0.0);
-    timed.sort_unstable_by(|&a, &b| {
+    // Stable: files with one capture time (copies) keep their catalog order, which is the
+    // order the Swift engine's stable sort gives and the order the clusterer's tie-breaks see.
+    timed.sort_by(|&a, &b| {
         files[a]
             .time_unix
             .partial_cmp(&files[b].time_unix)
@@ -908,7 +910,10 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
     });
 
     let mut knn_search = crate::util::hnsw_index::Searcher::default();
-    let result = identity_clustering::cluster(
+    // Single linkage, as the Swift engine's Restructure uses: the mutual-kNN gate that
+    // `identity_clustering::cluster` takes from the face settings (and the
+    // FILEID_FACE_MUTUAL_KNN variable) was never part of the calibration of these cosines.
+    let result = identity_clustering::cluster_with_options(
         fused,
         |i| match (&exact, &hnsw) {
             (Some(lists), _) => lists[i].clone(),
@@ -923,6 +928,8 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
             (None, None) => Vec::new(),
         },
         params,
+        &[],
+        false,
     );
     result.cluster_ids
 }
@@ -1138,6 +1145,72 @@ mod tests {
             clip: unit(clip),
             tags: tags.iter().map(|&s| s.to_string()).collect(),
             time_unix: 0.0,
+        }
+    }
+
+    /// Two 13-photo folders 36 degrees apart and a stray 17 degrees from the first and 19 from the second.
+    /// The stray is in none of their 12-nearest lists (each photo has 12 identical neighbours nearer), so
+    /// a mutual-kNN gate leaves it out and the margin rule (0.01 < 0.08) keeps it out of both; single
+    /// linkage joins it to the first through its own list.
+    fn two_folders_and_a_stray() -> Vec<SemanticFile> {
+        let at = |degrees: f32| vec![degrees.to_radians().cos(), degrees.to_radians().sin(), 0.0];
+        let mut files: Vec<SemanticFile> =
+            (0..13).map(|i| file(i, &format!("/lib/Alpha/a{i}.jpg"), at(0.0), &[])).collect();
+        files.extend((13..26).map(|i| file(i, &format!("/lib/Beta/b{i}.jpg"), at(36.0), &[])));
+        files.push(file(99, "/lib/Inbox/stray.jpg", at(17.0), &[]));
+        files
+    }
+
+    /// The Swift engine's `RestructureSemanticTests` pins the same plan.
+    #[test]
+    fn a_stray_is_clustered_by_single_linkage() {
+        let files = two_folders_and_a_stray();
+        let protos = folder_prototypes(&files, 4);
+        let moves = semantic_classify(
+            &files,
+            &protos,
+            Path::new("/lib"),
+            &mut std::collections::HashSet::new(),
+            &mut std::collections::HashSet::new(),
+        );
+        let stray = moves.iter().find(|m| m.file_id == 99).expect("the stray is routed");
+        assert_eq!(stray.destination, PathBuf::from("/lib/Alpha/stray.jpg"));
+    }
+
+    #[test]
+    fn the_face_mutual_knn_setting_does_not_reach_restructure() {
+        let _guard = crate::util::hnsw_index::tests::COUNTING.lock().unwrap_or_else(|e| e.into_inner());
+        let fused: Vec<Vec<f32>> = two_folders_and_a_stray().iter().map(|f| f.clip.clone()).collect();
+        let default = cluster(&fused, file_hyperparams(), false);
+        // SAFETY: serialised by the shared test lock above; no other test reads this variable.
+        unsafe { std::env::set_var("FILEID_FACE_MUTUAL_KNN", "1") };
+        let forced = cluster(&fused, file_hyperparams(), false);
+        unsafe { std::env::remove_var("FILEID_FACE_MUTUAL_KNN") };
+        assert_eq!(default, forced);
+        assert_eq!(default[26], default[0], "the stray shares the first folder's cluster");
+        assert_ne!(default[0], default[13]);
+    }
+
+    /// Copies share a capture time. The segment order must be the catalog order for them (a stable
+    /// sort), whatever the slice length: the clusterer's tie-breaks follow it.
+    #[test]
+    fn equal_capture_times_keep_catalog_order_in_a_segment() {
+        let mut state = 11u64;
+        let files: Vec<SemanticFile> = (0..90)
+            .map(|i| {
+                let mut f = file(i, &format!("/lib/f{i}.jpg"), vec![1.0, 0.0, 0.0], &[]);
+                f.time_unix = 1_700_000_000.0 + (((lcg(&mut state) + 0.5) * 6.0) as i64) as f64 * 60.0;
+                f
+            })
+            .collect();
+        let segments = time_segment_indices(&files);
+        assert_eq!(segments.len(), 1);
+        for pair in segments[0].windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                files[a].time_unix.total_cmp(&files[b].time_unix).then(a.cmp(&b)).is_lt(),
+                "{a} before {b}"
+            );
         }
     }
 
