@@ -273,7 +273,10 @@ enum SelfShot {
             NotificationCenter.default.post(name: .selfShotFindMoments, object: nil)
             try? await Task.sleep(for: .seconds(2))
             write(name: "moments-queued", plan: plan)
-            await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            await waitUntil(timeout: 10) { engine.catalogJobs.contains { $0.kind == "timelineSample" } }
+            if engine.catalogJobs.contains(where: { $0.kind == "timelineSample" }) {
+                await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            }
             note("timeline jobs: \(engine.catalogJobs.map { "\($0.kind) \($0.state)" }.joined(separator: ", "))")
             try? await Task.sleep(for: .seconds(3))
             write(name: "moments-timeline", plan: plan)
