@@ -73,6 +73,11 @@ public actor Discovery {
     }
     public private(set) var lastShortfall = Shortfall()
 
+    /// Test seam: directories (by enumerator path) whose enumeration is cut short after their first
+    /// entry, as the URL enumerator does on exFAT.
+    var simulatedFailures: Set<String> = []
+    func simulateEnumeratorFailures(in directories: Set<String>) { simulatedFailures = directories }
+
     public struct Progress: Sendable {
         public let discovered: Int
         public let isComplete: Bool
@@ -156,6 +161,37 @@ public actor Discovery {
     private struct Exclusion: Sendable {
         let path: String
         let prefix: String
+    }
+
+    /// What the URL enumerator has handed out, so a directory it fails on can be listed again
+    /// without repeating entries it already returned.
+    private final class EnumerationRecord: @unchecked Sendable {
+        private let lock = NSLock()
+        private var yieldedChildren: [String: Set<String>] = [:]
+        private var lastParent = ""
+        private var failed: [(url: URL, covered: Set<String>)] = []
+
+        func noteYield(of url: URL, parent: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            if parent != lastParent {
+                yieldedChildren = yieldedChildren.filter { parent == $0.key || parent.hasPrefix($0.key + "/") }
+                lastParent = parent
+            }
+            yieldedChildren[parent, default: []].insert(url.lastPathComponent)
+        }
+
+        func noteFailure(of directory: URL) {
+            lock.lock()
+            defer { lock.unlock() }
+            failed.append((directory, yieldedChildren[directory.path] ?? []))
+        }
+
+        func failures() -> [(url: URL, covered: Set<String>)] {
+            lock.lock()
+            defer { lock.unlock() }
+            return failed
+        }
     }
 
     private struct SkipEntry: Sendable {
@@ -252,27 +288,31 @@ public actor Discovery {
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
     ) async -> Int {
-        let resourceKeys: [URLResourceKey] = [
-            .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
-            .fileSizeKey, .creationDateKey
-        ]
+        // `.fileSizeKey` is deliberately not prefetched: on exFAT volumes the batched
+        // fetch fails with EINVAL for some directories and the enumerator then drops
+        // the rest of that directory. The size is read per file instead.
+        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey, .creationDateKey]
         // Without an errorHandler the enumerator SILENTLY drops any entry it
         // can't read (permission denied, a NAS share that drops mid-scan, a file
         // removed underfoot) — the user gets an incomplete library with no warning.
-        // Count the failures and return true to keep walking, so one unreadable
-        // subtree can't truncate the scan; the running total is surfaced as a
+        // A directory the enumerator fails on is listed again with contentsOfDirectory
+        // once the walk ends, so a quirk of one volume never drops its subtree. Only
+        // what that second listing cannot read is counted, and surfaced as a
         // non-fatal `discovery_partial` summary below, mirroring the Windows engine
         // (scan_session.rs error_count → "discovery_partial").
         var discoveryErrorCount = 0
         var oversizedCount = 0
+        let record = EnumerationRecord()
+        let simulatedFailures = self.simulatedFailures
+        var failedSimulatedParents = Set<String>()
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: resourceKeys,
             options: skipHidden ? [.skipsHiddenFiles] : [],
             errorHandler: { url, error in
-                discoveryErrorCount += 1
-                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
+                JSONLog.shared.warn(ev: "discovery_enumerator_fallback",
                                     path: redactPathForLog(url.path), error: "\(error)")
+                record.noteFailure(of: url)
                 return true
             }
         ) else {
@@ -293,25 +333,20 @@ public actor Discovery {
         var movedCount = 0
         let libraryHasRows = skip?.isEmpty == false
 
-        // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
-        // async contexts (Sendable issues). nextObject() is the sync escape.
-        while let next = enumerator.nextObject() {
-            guard let url = next as? URL else { continue }
-            if cancelCheck() { break }
+        enum Step { case file, directory, excludedDirectory, other }
+
+        func handle(_ url: URL, isolation: isolated (any Actor)? = #isolation) async -> Step {
             let values = try? url.resourceValues(forKeys: Set(resourceKeys))
             // Skip directories (enumerator yields both; we want files).
             if values?.isDirectory == true {
-                if Self.isExcluded(url.path, by: exclusions) {
-                    enumerator.skipDescendants()
-                }
-                continue
+                return Self.isExcluded(url.path, by: exclusions) ? .excludedDirectory : .directory
             }
-            if Self.isExcluded(url.path, by: exclusions) { continue }
-            if values?.isRegularFile != true { continue }
-            if url.path.hasPrefix(Self.engineStatePrefix) { continue }
+            if Self.isExcluded(url.path, by: exclusions) { return .other }
+            if values?.isRegularFile != true { return .other }
+            if url.path.hasPrefix(Self.engineStatePrefix) { return .other }
             let ext = url.pathExtension
-            guard FileTypes.isCataloged(name: url.lastPathComponent) else { continue }
-            let size = Int64(values?.fileSize ?? 0)
+            guard FileTypes.isCataloged(name: url.lastPathComponent) else { return .other }
+            let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             let fileKind = FileTypes.kind(forExtension: ext)
             // Video, audio and other files are never decoded whole, so the size cap does not apply.
             let streamed = fileKind == .video || fileKind == .audio || fileKind == .other
@@ -319,7 +354,7 @@ public actor Discovery {
                 oversizedCount += 1
                 JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
-                continue
+                return .other
             }
             // Incremental skip: a DB row that succeeded before and still
             // has the same size AND the same mtime as on disk (the DBWriter
@@ -344,14 +379,14 @@ public actor Discovery {
                     await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
                     skippedTouch.removeAll(keepingCapacity: true)
                 }
-                continue
+                return .other
             }
             // Reading a cloud-only file makes macOS download it. Leave it out
             // (keeping any row it already has) until it is on this Mac.
             if identity.cloudOnly {
                 cloudOnlyCount += 1
                 skippedTouch.append(url.path)
-                continue
+                return .other
             }
             var discovered = DiscoveredFile(
                 url: url,
@@ -375,6 +410,46 @@ public actor Discovery {
             if kept == 1 || sinceLastProgress >= 16 {
                 progress(kept)
                 sinceLastProgress = 0
+            }
+            return .file
+        }
+
+        // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
+        // async contexts (Sendable issues). nextObject() is the sync escape.
+        while let next = enumerator.nextObject() {
+            guard let url = next as? URL else { continue }
+            if cancelCheck() { break }
+            let parent = url.deletingLastPathComponent().path
+            if failedSimulatedParents.contains(parent) {
+                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            record.noteYield(of: url, parent: parent)
+            if await handle(url) == .excludedDirectory { enumerator.skipDescendants() }
+            if simulatedFailures.contains(parent) {
+                failedSimulatedParents.insert(parent)
+                record.noteFailure(of: url.deletingLastPathComponent())
+            }
+        }
+        var fallbackDirectories = record.failures()
+        while !fallbackDirectories.isEmpty, !cancelCheck() {
+            let (directory, covered) = fallbackDirectories.removeLast()
+            let children: [URL]
+            do {
+                children = try FileManager.default.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: resourceKeys,
+                    options: skipHidden ? [.skipsHiddenFiles] : [])
+            } catch {
+                discoveryErrorCount += 1
+                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
+                                    path: redactPathForLog(directory.path), error: "\(error)")
+                continue
+            }
+            for child in children.sorted(by: { $0.path > $1.path }) where !covered.contains(child.lastPathComponent) {
+                if cancelCheck() { break }
+                if await handle(child) == .directory { fallbackDirectories.append((child, [])) }
             }
         }
         if !skippedTouch.isEmpty {

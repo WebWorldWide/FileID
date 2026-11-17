@@ -367,3 +367,87 @@ struct DiscoveryShortfallTests {
         #expect(Discovery.shortfallNotice(Discovery.Shortfall()) == nil)
     }
 }
+
+@Suite("Discovery enumerator fallback")
+struct DiscoveryEnumeratorFallbackTests {
+
+    private func makeTree() throws -> (root: URL, expected: [String]) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDFallback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var resolved: String
+        if let real = realpath(base.path, nil) { resolved = String(cString: real); free(real) } else { resolved = base.path }
+        let root = URL(fileURLWithPath: resolved)
+        let payload = Data("x".utf8)
+        let relative = [
+            "top.jpg", "Photos/a.jpg", "Photos/b.jpg", "Photos/c.pdf", "Photos/.hidden.jpg",
+            "Photos/Party/d.jpg", "Photos/Party/e.png", "Photos/Party/Deep/f.jpg",
+            "Photos/Aaa/g.jpg", "Other/h.jpg",
+        ]
+        var expected: [String] = []
+        for path in relative {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try payload.write(to: url)
+            if !url.lastPathComponent.hasPrefix(".") { expected.append(url.path) }
+        }
+        return (root, expected.sorted())
+    }
+
+    @Test("A directory the enumerator gives up on is listed again, once, with its subtree")
+    func fallbackKeepsSubtreeWithoutDuplicates() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        let failing: Set<String> = [
+            root.appendingPathComponent("Photos").path,
+            root.appendingPathComponent("Photos/Party").path,
+        ]
+        await discovery.simulateEnumeratorFailures(in: failing)
+
+        let found = await discovery.walk(root: root).map(\.url.path)
+
+        #expect(found.sorted() == expected)
+        #expect(Set(found).count == found.count)
+        #expect(await discovery.lastShortfall.unreadablePaths == 0)
+    }
+
+    @Test("Streaming walk with a failed directory reports the same count as a clean walk")
+    func streamingFallbackCount() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(in: [root.appendingPathComponent("Photos").path])
+        let kept = await discovery.walkStreaming(root: root) { _ in }
+        #expect(kept == expected.count)
+    }
+
+    @Test("The fallback still honors folder exclusions")
+    func fallbackHonorsExclusions() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(in: [root.appendingPathComponent("Photos").path])
+        let excluded = root.appendingPathComponent("Photos/Party").path
+
+        let found = await discovery.walk(root: root, excludedPaths: [excluded]).map(\.url.path)
+
+        #expect(found.sorted() == expected.filter { !$0.hasPrefix(excluded + "/") })
+    }
+
+    @Test("A directory the fallback cannot list either is counted as unreadable")
+    func fallbackFailureIsCounted() async throws {
+        let (root, expected) = try makeTree()
+        let locked = root.appendingPathComponent("Other")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let discovery = Discovery()
+        let found = await discovery.walk(root: root).map(\.url.path)
+        #expect(found.sorted() == expected.filter { !$0.contains("/Other/") })
+        #expect(await discovery.lastShortfall.unreadablePaths == 1)
+    }
+}
