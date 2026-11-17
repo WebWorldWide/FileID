@@ -39,24 +39,16 @@ const LOCAL_MODELS: [(&str, &str, &str); 5] = [
 ];
 
 enum Transfer {
-    Checking {
-        after_download: bool,
-    },
+    Checking { after_download: bool },
     Missing,
-    Downloading {
-        fraction: f64,
-        message: String,
-    },
+    Downloading { fraction: f64, message: String },
     Cancelling,
     Installed,
     Cancelled,
     Failed(String),
     /// The helper reported an error: plain `text` on screen, the code and
     /// raw message in the tooltip.
-    Refused {
-        text: String,
-        detail: String,
-    },
+    Refused { text: String, detail: String },
 }
 
 struct ModelRow {
@@ -205,10 +197,7 @@ impl ModelRow {
         }
         if !matches!(
             *self.transfer.borrow(),
-            Transfer::Missing
-                | Transfer::Cancelled
-                | Transfer::Failed(_)
-                | Transfer::Refused { .. }
+            Transfer::Missing | Transfer::Cancelled | Transfer::Failed(_) | Transfer::Refused { .. }
         ) {
             return;
         }
