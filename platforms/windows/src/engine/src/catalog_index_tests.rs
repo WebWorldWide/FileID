@@ -800,6 +800,45 @@ fn a_change_that_returns_to_the_indexed_vector_needs_no_extra_entry() {
 }
 
 #[test]
+fn a_rolled_back_vector_write_does_not_advance_the_index_checkpoint() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    let built = index.state.lock().cache.clone().unwrap();
+    let before = revision(&index.writer.lock()).unwrap();
+    assert_eq!(built.revision, before);
+    {
+        let conn = index.writer.lock();
+        let tx = conn.unchecked_transaction().unwrap();
+        let moved = vector(1).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        tx.execute("UPDATE clip_embeddings SET embedding=?1 WHERE file_id=2", [&moved]).unwrap();
+        tx.execute("DELETE FROM clip_embeddings WHERE file_id=3", []).unwrap();
+        assert_ne!(revision(&tx).unwrap(), before, "the writer sees its own uncommitted change");
+        assert_eq!(revision(&db::open_read(&index.database).unwrap()).unwrap(), before, "a reader never sees it");
+        drop(tx);
+    }
+    assert_eq!(revision(&index.writer.lock()).unwrap(), before);
+    let logged: i64 = index
+        .writer
+        .lock()
+        .query_row("SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1", [before.generation], |row| row.get(0))
+        .unwrap();
+    assert_eq!(logged, 0, "the rolled-back write leaves nothing in the change log");
+    let response = index.search(&seed()).unwrap();
+    assert_eq!(response.status, "ok", "the index is still current, so no re-index starts");
+    assert_eq!(response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![2, 3]);
+    let cache = index.state.lock().cache.clone().unwrap();
+    assert!(Arc::ptr_eq(&cache.graph, &built.graph) && cache.pending() == 0 && cache.revision == before);
+
+    index.writer.lock().execute("DELETE FROM files WHERE id=2", []).unwrap();
+    ready(&index);
+    let advanced = index.state.lock().cache.clone().unwrap();
+    assert_eq!(advanced.revision.generation, before.generation + 1, "a later committed write is the next step, not a replay");
+    assert!(Arc::ptr_eq(&advanced.graph, &built.graph), "it rides beside the graph instead of forcing a rebuild");
+    assert_eq!(seeded_ids(&index), vec![3]);
+    index.close();
+}
+
+#[test]
 fn many_changes_rebuild_the_graph_once_and_fold_them_in() {
     assert!(!needs_rebuild(3, MIN_PENDING_BEFORE_REBUILD));
     assert!(needs_rebuild(3, MIN_PENDING_BEFORE_REBUILD + 1));
