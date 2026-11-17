@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-engine-mlx-install-record-swift-first",
- "conversation": "16202856-2ddb-4ec2-aa57-a082137c79fc",
+ "conversation": "aa7a14cb-b296-4c55-ba4b-d20b2d9c685c",
  "dirs": [
   "hf",
   "hf/models",
@@ -15,48 +15,48 @@
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    655439391
+    1794900922,
+    771296196
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache/huggingface/download/config.json.metadata"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    703534377
+    1794900922,
+    861594592
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    543722813
+    1794900922,
+    625114853
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    642972864
+    1794900922,
+    757061532
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    543460313
+    1794900922,
+    624809353
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900340,
-    543604021
+    1794900922,
+    624986436
    ],
    "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors"
   }

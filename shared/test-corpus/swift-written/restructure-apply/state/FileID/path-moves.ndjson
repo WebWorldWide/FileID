@@ -1,16 +1,16 @@
-{"intent":{"from":"{root:json}\/DCIM\/100MSDCF\/DSC00001.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00001.JPG","fileRef":{inode:Photos/2026/2026-10-04/DSC00001.JPG},"fileID":1,"id":"14B46A2D-C842-47FE-8E78-ED7FAC89086F"}}
-{"done":"14B46A2D-C842-47FE-8E78-ED7FAC89086F"}
-{"intent":{"from":"{root:json}\/DCIM\/100MSDCF\/DSC00002.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00002.JPG","fileRef":{inode:Photos/2026/2026-10-04/DSC00002.JPG},"fileID":2,"id":"C14C0384-9FAA-47AE-BD92-52A8B81735C9"}}
-{"done":"C14C0384-9FAA-47AE-BD92-52A8B81735C9"}
-{"intent":{"from":"{root:json}\/DCIM\/100MSDCF\/DSC00003.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00003.JPG","fileRef":{inode:Photos/2026/2026-10-04/DSC00003.JPG},"fileID":3,"id":"8D814C91-E91B-4518-883D-6269FE0030DA"}}
-{"done":"8D814C91-E91B-4518-883D-6269FE0030DA"}
-{"intent":{"from":"{root:json}\/DCIM\/100MSDCF\/DSC00004.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00004.JPG","fileRef":{inode:Photos/2026/2026-10-04/DSC00004.JPG},"fileID":4,"id":"F0E68559-4753-4C9F-99B9-5435132CEB66"}}
-{"done":"F0E68559-4753-4C9F-99B9-5435132CEB66"}
-{"intent":{"from":"{root:json}\/DCIM\/100MSDCF\/DSC00005.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00005.JPG","fileRef":{inode:Photos/2026/2026-10-04/DSC00005.JPG},"fileID":5,"id":"97734824-A5C9-43F2-BA5E-FB9A66CF4619"}}
-{"done":"97734824-A5C9-43F2-BA5E-FB9A66CF4619"}
-{"intent":{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D1.ARW","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D1.ARW","fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW},"fileID":13,"id":"99F617EA-4103-461A-8F96-FA1FF695FC60"}}
-{"done":"99F617EA-4103-461A-8F96-FA1FF695FC60"}
-{"intent":{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D2.ARW","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D2.ARW","fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW},"fileID":14,"id":"5EE20219-5BA2-4E2C-B32A-791268FB5934"}}
-{"done":"5EE20219-5BA2-4E2C-B32A-791268FB5934"}
-{"intent":{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D3.ARW","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D3.ARW","fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW},"fileID":15,"id":"12CB5063-766E-4000-9572-21A677BD3CBB"}}
-{"done":"12CB5063-766E-4000-9572-21A677BD3CBB"}
+{"intent":{"fileRef":{inode:Photos/2026/2026-10-04/DSC00001.JPG},"id":"18B25CD1-D1F9-4540-99DE-57BEEB5C53B7","fileID":1,"from":"{root:json}\/DCIM\/100MSDCF\/DSC00001.JPG","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00001.JPG"}}
+{"done":"18B25CD1-D1F9-4540-99DE-57BEEB5C53B7"}
+{"intent":{"fileRef":{inode:Photos/2026/2026-10-04/DSC00002.JPG},"fileID":2,"from":"{root:json}\/DCIM\/100MSDCF\/DSC00002.JPG","id":"158AA3FF-5BB9-46C9-AED6-51E8BE0AD2EE","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00002.JPG"}}
+{"done":"158AA3FF-5BB9-46C9-AED6-51E8BE0AD2EE"}
+{"intent":{"fileRef":{inode:Photos/2026/2026-10-04/DSC00003.JPG},"fileID":3,"from":"{root:json}\/DCIM\/100MSDCF\/DSC00003.JPG","id":"74922FD4-07C8-4ED0-AE41-C909FCA24CB7","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00003.JPG"}}
+{"done":"74922FD4-07C8-4ED0-AE41-C909FCA24CB7"}
+{"intent":{"fileRef":{inode:Photos/2026/2026-10-04/DSC00004.JPG},"fileID":4,"from":"{root:json}\/DCIM\/100MSDCF\/DSC00004.JPG","id":"08662B60-1B6B-48B6-A229-2381CEA64637","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00004.JPG"}}
+{"done":"08662B60-1B6B-48B6-A229-2381CEA64637"}
+{"intent":{"fileRef":{inode:Photos/2026/2026-10-04/DSC00005.JPG},"fileID":5,"from":"{root:json}\/DCIM\/100MSDCF\/DSC00005.JPG","id":"9F7E725E-92B3-46FE-A0FF-F86ABF41B612","to":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00005.JPG"}}
+{"done":"9F7E725E-92B3-46FE-A0FF-F86ABF41B612"}
+{"intent":{"fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW},"fileID":13,"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D1.ARW","id":"001DEE72-6E65-458E-A2AA-B3504C79B1A4","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D1.ARW"}}
+{"done":"001DEE72-6E65-458E-A2AA-B3504C79B1A4"}
+{"intent":{"fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW},"fileID":14,"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D2.ARW","id":"66D5D63C-1FAB-4F92-BE86-5564E769B270","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D2.ARW"}}
+{"done":"66D5D63C-1FAB-4F92-BE86-5564E769B270"}
+{"intent":{"fileRef":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW},"fileID":15,"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D3.ARW","id":"0BA76B00-36CB-48B4-A6E7-1C185BACE361","to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D3.ARW"}}
+{"done":"0BA76B00-36CB-48B4-A6E7-1C185BACE361"}

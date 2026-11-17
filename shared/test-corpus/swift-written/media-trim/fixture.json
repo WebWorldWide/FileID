@@ -1,14 +1,14 @@
 {
  "capturedFrom": "cross-media-swift-preview-rust-execute-trim",
- "conversation": "480698ed-6acf-4a34-9c22-3ee7ecd150a4",
+ "conversation": "aead740a-b368-4cdd-b246-5e7039f593ca",
  "dirs": [],
  "files": [
   {
    "area": "tree",
    "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
    "mtimeNs": [
-    1794900344,
-    82556044
+    1794900927,
+    691097608
    ],
    "path": "Clip.mov"
   }
@@ -22,7 +22,7 @@
   "user_version": 0
  },
  "vars": {
-  "op": "12D34E0A-F45C-41DC-AC49-AE78D2826F5B",
+  "op": "BC88DFF9-719F-48AC-A8D3-F0966B0F3B79",
   "out": "{std_root}/Clip - Trim.mp4"
  },
  "writtenBy": "swift"

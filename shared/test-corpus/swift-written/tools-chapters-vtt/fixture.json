@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-tools-swift-previews-chapters-rust-executes",
- "conversation": "8deef4e2-f465-475f-a82e-5506c9a5b194",
+ "conversation": "f28b7aed-655b-4817-941d-255502fe1636",
  "dirs": [
   "out"
  ],
@@ -9,16 +9,16 @@
    "area": "tree",
    "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
    "mtimeNs": [
-    1794900335,
-    79782104
+    1794900914,
+    529028310
    ],
    "path": "Clip.mov"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900335,
-    79964479
+    1794900914,
+    529755644
    ],
    "path": "out/keep.txt"
   }
@@ -32,7 +32,7 @@
   "user_version": 0
  },
  "vars": {
-  "op": "18EE5C66-7A85-4BB6-B0B1-574259DAAB2F"
+  "op": "0467BD90-CE66-4515-9B24-79233BA77556"
  },
  "writtenBy": "swift"
 }

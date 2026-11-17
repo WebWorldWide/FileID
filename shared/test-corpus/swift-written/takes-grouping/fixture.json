@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-takes-grouping-swift-then-rust",
- "conversation": "8bfa201b-a56f-48d7-a369-366d4eec949f",
+ "conversation": "cc418638-32e4-464b-893b-8190c99d7859",
  "dirs": [
   "party",
   "shoot",
@@ -10,56 +10,56 @@
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    387990596
+    1794900917,
+    967107717
    ],
    "path": "party/b1.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    388085054
+    1794900917,
+    967206925
    ],
    "path": "party/b2.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    387640554
+    1794900917,
+    966682967
    ],
    "path": "shoot/a1.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    387769096
+    1794900917,
+    966846550
    ],
    "path": "shoot/a2.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    387865387
+    1794900917,
+    966960258
    ],
    "path": "shoot/a3.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    388223428
+    1794900917,
+    967341883
    ],
    "path": "walk/c1.jpg"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900337,
-    388315679
+    1794900917,
+    967434342
    ],
    "path": "walk/c2.jpg"
   }
@@ -77,37 +77,37 @@
    [
     1,
     "photos-b91afb922b8a6e0b",
-    "6:4745315165658468122|4652007308841189376|Phone A||{root}/shoot/a1.jpg"
+    "6:4745315168093593122|4652007308841189376|Phone A||{root}/shoot/a1.jpg"
    ],
    [
     2,
     "photos-b91afb922b8a6e0b",
-    "6:4745315165658468661|4652244803352788992|Phone A||{root}/shoot/a2.jpg"
+    "6:4745315168093593808|4652244803352788992|Phone A||{root}/shoot/a2.jpg"
    ],
    [
     3,
     "photos-b91afb922b8a6e0b",
-    "6:4745315165658469065|4652376744748122112|Phone A||{root}/shoot/a3.jpg"
+    "6:4745315168093594285|4652376744748122112|Phone A||{root}/shoot/a3.jpg"
    ],
    [
     4,
     "photos-94841574fde2fe0c",
-    "6:4745315165658469591|4666173416653455360|Phone A||{root}/party/b1.jpg"
+    "6:4745315168093594904|4666173416653455360|Phone A||{root}/party/b1.jpg"
    ],
    [
     5,
     "photos-94841574fde2fe0c",
-    "6:4745315165658469987|4666173966409269248|Camera B||{root}/party/b2.jpg"
+    "6:4745315168093595320|4666173966409269248|Camera B||{root}/party/b2.jpg"
    ],
    [
     6,
     "photos-674d8700cc7c1067",
-    "6:4745315165658470567|4671226772094713856|||{root}/walk/c1.jpg"
+    "6:4745315168093595886|4671226772094713856|||{root}/walk/c1.jpg"
    ],
    [
     7,
     "photos-674d8700cc7c1067",
-    "6:4745315165658470954|4671237767210991616|Phone A||{root}/walk/c2.jpg"
+    "6:4745315168093596274|4671237767210991616|Phone A||{root}/walk/c2.jpg"
    ]
   ],
   "stamps": [
@@ -117,7 +117,7 @@
     "repeatedAttempts",
     "[1,2]",
     "[\"captureSession\",\"visualSimilarity\",\"sameCamera\"]",
-    1794900337.499465
+    1794900918.113884
    ],
    [
     "takes-c73bcaadd9498526",
@@ -125,7 +125,7 @@
     "alternateViews",
     "[4,5]",
     "[\"captureSession\",\"visualSimilarity\",\"simultaneousCameras\"]",
-    1794900337.5005798
+    1794900918.115119
    ],
    [
     "takes-d6acb9a68e9239c2",
@@ -133,7 +133,7 @@
     "uncertain",
     "[6,7]",
     "[\"captureSession\",\"visualSimilarity\",\"cameraDetailsMissing\"]",
-    1794900337.5016189
+    1794900918.116158
    ]
   ],
   "swiftGroups": {
@@ -141,16 +141,16 @@
    "hits": [],
    "jobs": [
     {
-     "createdAt": 1794900337.495256,
+     "createdAt": 1794900918.105164,
      "fileIDs": [],
      "id": "take-grouping",
      "kind": "takeGrouping",
      "progress": 1,
      "state": "completed",
-     "updatedAt": 1794900337.5021439
+     "updatedAt": 1794900918.116586
     }
    ],
-   "requestID": "aa3afde8-a8d0-4930-982a-f8a47325dc4a",
+   "requestID": "bcd96220-2450-402c-8b2b-5c682f9f98c7",
    "status": "ok",
    "takeGroups": [
     {

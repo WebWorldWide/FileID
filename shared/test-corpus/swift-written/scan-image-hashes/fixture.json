@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-scan-swift-then-rust-same-image-hashes",
- "conversation": "169a985a-283b-415b-b492-01d51fcc9bfa",
+ "conversation": "75d8cc68-628f-4e18-b204-7c26655ae52b",
  "dirs": [
   "photos",
   "screens"
@@ -36,10 +36,10 @@
   {
    "area": "state",
    "mtimeNs": [
-    1794900342,
-    601366428
+    1794900925,
+    511134506
    ],
-   "path": "FileID/capture-dates-v1/f78a2133b6a6f8a5589b472b4ab2153a"
+   "path": "FileID/capture-dates-v1/88aa4d62586f62d16c191bcfab745393"
   }
  ],
  "format": 1,

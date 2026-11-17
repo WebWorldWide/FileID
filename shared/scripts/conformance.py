@@ -971,8 +971,9 @@ class Templater:
 
 
 def refuse_leftovers(text, where):
-    for marker in (*LEFTOVERS, str(Path.home())):
-        if marker in text:
+    lowered = text.lower()
+    for marker in (*LEFTOVERS, str(Path.home()), tempfile.gettempdir(), "/private/tmp", "/tmp/"):
+        if marker.lower() in lowered:
             raise Failure(f"{where} still holds {marker}")
 
 

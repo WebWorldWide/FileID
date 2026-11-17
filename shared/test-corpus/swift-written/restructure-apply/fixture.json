@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-restructure-swift-apply-rust-undo",
- "conversation": "3cb969e1-0ac2-4fd7-829e-e726a9376170",
+ "conversation": "40133c01-2631-403d-9701-9c90c5d3f584",
  "dirs": [
   "DCIM",
   "DCIM/100MSDCF",
@@ -17,128 +17,128 @@
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529473545
+    1794900924,
+    196382464
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529569628
+    1794900924,
+    196480964
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K2.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529680462
+    1794900924,
+    196573589
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K3.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529782670
+    1794900924,
+    196665172
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529877878
+    1794900924,
+    196755422
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529971044
+    1794900924,
+    196847547
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    530114586
+    1794900924,
+    196987297
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    530212044
+    1794900924,
+    197080922
    ],
    "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K2.ARW"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    528689421
+    1794900924,
+    195688256
    ],
    "path": "Photos/2026/2026-10-04/DSC00001.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    528842754
+    1794900924,
+    195829006
    ],
    "path": "Photos/2026/2026-10-04/DSC00002.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    528967004
+    1794900924,
+    195939755
    ],
    "path": "Photos/2026/2026-10-04/DSC00003.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529081004
+    1794900924,
+    196037797
    ],
    "path": "Photos/2026/2026-10-04/DSC00004.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    529189337
+    1794900924,
+    196125881
    ],
    "path": "Photos/2026/2026-10-04/DSC00005.JPG"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    530342877
+    1794900924,
+    197209380
    ],
    "path": "Recipes/lasagna.txt"
   },
   {
    "area": "tree",
    "mtimeNs": [
-    1794900341,
-    530436586
+    1794900924,
+    197294589
    ],
    "path": "Recipes/pesto.txt"
   },
   {
    "area": "state",
    "mtimeNs": [
-    1794900341,
-    721690031
+    1794900924,
+    419321289
    ],
    "path": "FileID/path-moves.ndjson",
    "template": true
@@ -146,8 +146,8 @@
   {
    "area": "state",
    "mtimeNs": [
-    1794900341,
-    715419871
+    1794900924,
+    413031499
    ],
    "path": "FileID/restructure_undo.ndjson",
    "template": true

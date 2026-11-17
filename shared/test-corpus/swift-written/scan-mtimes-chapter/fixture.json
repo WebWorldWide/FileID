@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-scan-swift-then-rust-keeps-modified-times-and-reviewed-rows",
- "conversation": "69358f48-4ac5-4a90-8800-3707fb2cff31",
+ "conversation": "af747e57-b18f-4f81-b73e-1194d0277710",
  "dirs": [
   "docs",
   "images"
@@ -57,10 +57,10 @@
   {
    "area": "state",
    "mtimeNs": [
-    1794900339,
-    261076924
+    1794900920,
+    652020956
    ],
-   "path": "FileID/capture-dates-v1/e61f33aeaab3fd45d082c87050c63a3e"
+   "path": "FileID/capture-dates-v1/f934e820ec1e504ba6b13eb3edd627c4"
   }
  ],
  "format": 1,
@@ -72,7 +72,7 @@
   "user_version": 0
  },
  "vars": {
-  "fid": 4,
+  "fid": 3,
   "first": [
    [
     "{root}/docs/a.txt",

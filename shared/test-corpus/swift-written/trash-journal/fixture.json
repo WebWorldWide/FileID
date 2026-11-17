@@ -1,6 +1,6 @@
 {
  "capturedFrom": "cross-trash-swift-trashes-rust-puts-back",
- "conversation": "2a55552c-a603-40b7-9ad8-bc13647ed8a4",
+ "conversation": "70e643b9-0c85-4a00-a04f-7f826ed48a92",
  "dirs": [
   "docs"
  ],
@@ -8,24 +8,24 @@
   {
    "area": "tree",
    "mtimeNs": [
-    1794900338,
-    419772900
+    1794900919,
+    501351127
    ],
    "path": "docs/stay.txt"
   },
   {
    "area": "state",
    "mtimeNs": [
-    1794900338,
-    535440016
+    1794900919,
+    655971218
    ],
    "path": "FileID/log-hmac.key"
   },
   {
    "area": "state",
    "mtimeNs": [
-    1794900338,
-    534986474
+    1794900919,
+    655481927
    ],
    "path": "FileID/trash-journal.json",
    "template": true
@@ -33,8 +33,8 @@
   {
    "area": "state",
    "mtimeNs": [
-    1794900338,
-    535928223
+    1794900919,
+    656554051
    ],
    "path": "FileID/trash_log.json",
    "template": true
@@ -42,8 +42,8 @@
   {
    "area": "state",
    "mtimeNs": [
-    1794900338,
-    419630275
+    1794900919,
+    501201752
    ],
    "path": "Trash/trash me.txt"
   }
@@ -57,7 +57,7 @@
   "user_version": 0
  },
  "vars": {
-  "batch": "1709dd10-6007-4d52-94f2-2f61c826893f"
+  "batch": "3b9efb48-5871-4b13-b00d-5ecf56e09ba9"
  },
  "writtenBy": "swift"
 }
