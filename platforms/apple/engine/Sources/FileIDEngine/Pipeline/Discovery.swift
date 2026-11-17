@@ -73,6 +73,22 @@ public actor Discovery {
     }
     public private(set) var lastShortfall = Shortfall()
 
+    /// Files of the last walk that are on disk and need no work: current in the catalog, or
+    /// iCloud-only and left out. Their rows are not rewritten; the orphan sweep reads this set
+    /// to tell them from rows of files that are gone.
+    private(set) var presentUnchanged: Set<PathFingerprint> = []
+
+    /// Plain-language notice (kind `rescan_no_changes`, as the shared engine's) when a walk found
+    /// files the catalog already holds and nothing else to do; nil when anything was kept or the
+    /// walk fell short (that notice says more).
+    public static func rescanNoChangesNotice(kept: Int, shortfall: Shortfall, unchangedFiles: Int, root: String) -> EngineError? {
+        guard kept == 0, unchangedFiles > 0, shortfallNotice(shortfall) == nil else { return nil }
+        return EngineError(
+            kind: "rescan_no_changes",
+            message: "Nothing changed in these files since the last scan. FileID is finishing a quick check of the folder.",
+            path: root)
+    }
+
     /// Test seam: directories (by enumerator path) whose enumeration is cut short after their first
     /// entry, as the URL enumerator does on exFAT (or, with `keepYielding`, reported as failed while it
     /// still yields the rest of the directory).
@@ -233,7 +249,7 @@ public actor Discovery {
     /// at a million files that can consume hundreds of MiB before tagging even
     /// begins. SHA-256 truncated to 128 bits makes the retained size independent
     /// of path length while keeping collision risk negligible.
-    private struct PathFingerprint: Hashable, Sendable {
+    struct PathFingerprint: Hashable, Sendable {
         let high: UInt64
         let low: UInt64
 
@@ -353,12 +369,9 @@ public actor Discovery {
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
         var kept = 0
         var sinceLastProgress = 0
-        // Paths skipped this scan whose `scanned_at` must still be
-        // bumped to "now" so the post-scan orphan sweep doesn't mistake a present-
-        // but-skipped file for a deletion. Captured once at the walk's start
-        // (always > the upstream scanStart), flushed in bounded batches.
-        var skippedTouch: [String] = []
-        let touchTime = Date().timeIntervalSince1970
+        // Files skipped or left out this walk are present, so the post-scan orphan sweep
+        // must not take their untouched rows for deletions; it reads them from here.
+        var present = Set<PathFingerprint>()
         var cloudOnlyCount = 0
         var movedCount = 0
         let libraryHasRows = skip?.isEmpty == false
@@ -396,26 +409,20 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row; a lookup miss
             // fails safe (the file is processed).
-            if let skip, let entry = skip[PathFingerprint(url.path)],
+            let fingerprint = PathFingerprint(url.path)
+            if let skip, let entry = skip[fingerprint],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: identity.modified,
                    currentSize: size) {
-                // The file is PRESENT (just unchanged) — record it
-                // so its row's `scanned_at` is refreshed; otherwise the orphan
-                // sweep (scanned_at < scanStart) would treat it as deleted.
-                skippedTouch.append(url.path)
-                if skippedTouch.count >= 2_000 {
-                    await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
-                    skippedTouch.removeAll(keepingCapacity: true)
-                }
+                present.insert(fingerprint)
                 return .other
             }
             // Reading a cloud-only file makes macOS download it. Leave it out
             // (keeping any row it already has) until it is on this Mac.
             if identity.cloudOnly {
                 cloudOnlyCount += 1
-                skippedTouch.append(url.path)
+                present.insert(fingerprint)
                 return .other
             }
             var discovered = DiscoveredFile(
@@ -484,9 +491,7 @@ public actor Discovery {
                 if await handle(child) == .directory { fallbackDirectories.append(child) }
             }
         }
-        if !skippedTouch.isEmpty {
-            await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
-        }
+        presentUnchanged = present
         // Non-fatal partial-discovery summary: some entries under `root` couldn't be
         // read this walk (counted by the enumerator's errorHandler above). Logged so
         // the app (Settings → Logs) can tell the user the library may be incomplete
@@ -505,38 +510,6 @@ public actor Discovery {
                                         "kept": AnyCodable(kept)])
         }
         return kept
-    }
-
-    /// Bump `scanned_at` for files SKIPPED this scan. A skip never
-    /// reaches the DBWriter UPSERT that normally refreshes `scanned_at`, so without
-    /// this the post-scan orphan sweep — which prunes rows whose `scanned_at`
-    /// predates the scan — would saturate its candidate cap with present-but-skipped
-    /// files and fail to delete genuinely-gone ones. A cheap UPDATE-only touch keeps
-    /// the skip set and the orphan sweep agreeing on "seen this scan". Bound the
-    /// IN-list to stay under SQLite's bound-variable limit. Fail-safe: a touch error
-    /// only risks an over-eager sweep candidate next run, never data loss, so it is
-    /// logged and swallowed.
-    private static func touchScannedAt(
-        _ paths: [String], to scannedAt: Double, database: Database?
-    ) async {
-        guard let database, !paths.isEmpty else { return }
-        do {
-            try await database.pool.write { db in
-                for chunk in stride(from: 0, to: paths.count, by: 500).map({
-                    Array(paths[$0..<min($0 + 500, paths.count)])
-                }) {
-                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
-                    var args: [DatabaseValueConvertible] = [scannedAt]
-                    args.append(contentsOf: chunk)
-                    try db.execute(
-                        sql: "UPDATE files SET scanned_at = ? WHERE path_text IN (\(placeholders))",
-                        arguments: StatementArguments(args))
-                }
-            }
-        } catch {
-            JSONLog.shared.warn(ev: "discovery_skip_touch_failed",
-                                path: redactPathForLog(paths.first ?? ""), error: "\(error)")
-        }
     }
 
     /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of

@@ -169,13 +169,11 @@ struct DiscoveryTests {
         #expect(!resultPaths.contains(nestedFile.resolvingSymlinksInPath().path))
     }
 
-    // A file the incremental skip set DROPS is still present on
-    // disk, so discovery must refresh its `scanned_at`; otherwise the post-scan
-    // orphan sweep (which prunes rows with `scanned_at < scanStart`) would treat
-    // every skipped-but-present file as a deletion candidate and stop pruning the
-    // genuinely-deleted ones once its cap is saturated.
-    @Test("A skipped unchanged file still gets its scanned_at bumped (R-08)")
-    func skippedFileScannedAtIsBumped() async throws {
+    // A file the incremental skip set drops is still on disk, but its row is left alone: a
+    // rescan with nothing new must not rewrite every row. The walk reports such files as
+    // present, so the orphan sweep does not take their old `scanned_at` for a deletion.
+    @Test("A skipped unchanged file keeps its row untouched and is reported as present")
+    func skippedFileRowIsUntouched() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileIDSkipTouch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -183,12 +181,8 @@ struct DiscoveryTests {
 
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
 
-        // Resolve to the REAL path so the inserted path_text, the skip-set prefix
-        // range, AND the enumerator's output all agree. `realpath` (not
-        // Foundation's resolvingSymlinksInPath, which STRIPS /private) yields the
-        // /private-prefixed form the FileManager enumerator actually emits for a
-        // /var temp dir; otherwise the skip range excludes the row and nothing
-        // skips. (Real scan roots are /Users/.. or /Volumes/.. — no /private.)
+        // realpath (not resolvingSymlinksInPath, which strips /private): the enumerator reports
+        // /private-prefixed paths for a /var temp dir, and the skip range must agree.
         let root = realResolved(tmp)
 
         // A fully-processed doc: it already HAS its BGE text_embedding (seeded below),
@@ -229,18 +223,66 @@ struct DiscoveryTests {
         let discovery = Discovery()
         let result = await discovery.walk(root: root, database: db, forceReprocess: false)
 
-        // Unchanged → SKIPPED (never re-emitted to the pipeline)…
         #expect(!result.contains { $0.url.lastPathComponent == "report.pdf" })
 
-        // …but its scanned_at must be refreshed to ~now so the orphan sweep
-        // (scanned_at < scanStart) won't treat the present file as deleted.
         let after: Double = try await db.pool.read { conn in
             try Double.fetchOne(conn, sql:
                 "SELECT scanned_at FROM files WHERE path_text = ?",
                 arguments: [doc.path]) ?? -1
         }
-        #expect(after > oldScannedAt)
-        #expect(after > fixedMtime.timeIntervalSince1970)
+        #expect(after == oldScannedAt)
+        #expect(await discovery.presentUnchanged == [Discovery.PathFingerprint(doc.path)])
+        let presentUnchanged = await discovery.presentUnchanged
+        let candidates = try await db.pool.read { conn in
+            try FileIDEngineMain.orphanCandidates(
+                conn, scanRootPath: root.path, scanStart: Date(),
+                presentUnchanged: presentUnchanged, cap: 10)
+        }
+        #expect(candidates.isEmpty)
+    }
+
+    @Test("The orphan sweep still finds the row of a file that is gone, past a crowd of present unchanged ones")
+    func orphanCandidatesSkipPresentRows() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDOrphanCandidates-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let root = "/lib"
+        let present = Set((0..<20).map { Discovery.PathFingerprint("/lib/present\($0).jpg") })
+        try await db.pool.write { conn in
+            func insert(_ path: String, scannedAt: Double) throws {
+                try conn.execute(sql: """
+                    INSERT INTO files (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension)
+                    VALUES (?, 0, ?, 1, ?, 'image', 'jpg')
+                    """, arguments: [path, path, scannedAt])
+            }
+            for i in 0..<20 { try insert("/lib/present\(i).jpg", scannedAt: 1_000) }
+            try insert("/lib/gone.jpg", scannedAt: 1_000)
+            try insert("/lib/written-this-scan.jpg", scannedAt: 5_000)
+            try insert("/elsewhere/other.jpg", scannedAt: 1_000)
+        }
+
+        let candidates = try await db.pool.read { conn in
+            try FileIDEngineMain.orphanCandidates(
+                conn, scanRootPath: root, scanStart: Date(timeIntervalSince1970: 2_000),
+                presentUnchanged: present, cap: 5)
+        }
+
+        #expect(candidates.map(\.path) == ["/lib/gone.jpg"])
+    }
+
+    @Test("A walk that kept nothing but found current files says nothing changed; other walks do not")
+    func rescanNoChangesNotice() {
+        let clean = Discovery.Shortfall()
+        let notice = Discovery.rescanNoChangesNotice(kept: 0, shortfall: clean, unchangedFiles: 185, root: "/lib")
+        #expect(notice?.kind == "rescan_no_changes")
+        #expect(notice?.path == "/lib")
+        #expect(Discovery.rescanNoChangesNotice(kept: 1, shortfall: clean, unchangedFiles: 185, root: "/lib") == nil)
+        #expect(Discovery.rescanNoChangesNotice(kept: 0, shortfall: clean, unchangedFiles: 0, root: "/lib") == nil)
+        var partial = Discovery.Shortfall()
+        partial.unreadablePaths = 1
+        #expect(Discovery.rescanNoChangesNotice(kept: 0, shortfall: partial, unchangedFiles: 185, root: "/lib") == nil)
     }
 }
 

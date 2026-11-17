@@ -2099,7 +2099,12 @@ struct FileIDEngineMain {
                             discoveryDur > 0 ? Double(discovered) / discoveryDur : 0)
                     ])
                 await sink.emit(.discoveryComplete(totalFiles: discovered))
-                if let notice = Discovery.shortfallNotice(await discovery.lastShortfall) {
+                let shortfall = await discovery.lastShortfall
+                if let notice = Discovery.shortfallNotice(shortfall) {
+                    await sink.emit(.error(notice))
+                } else if let notice = Discovery.rescanNoChangesNotice(
+                    kept: discovered, shortfall: shortfall,
+                    unchangedFiles: await discovery.presentUnchanged.count, root: url.path) {
                     await sink.emit(.error(notice))
                 }
             }
@@ -2230,7 +2235,8 @@ struct FileIDEngineMain {
             await coordinator.setPhase(.postScan)
             await sink.emit(.phaseChanged(.postScan))
             await sweepOrphans(database: database, scanRootPath: url.path,
-                                scanStart: sweepStart, sink: sink, sessionID: session.id)
+                                scanStart: sweepStart, presentUnchanged: await discovery.presentUnchanged,
+                                sink: sink, sessionID: session.id)
             await recountStalePersons(database: database, sessionID: session.id)
             if datesCurrent { CaptureDateBackfill.markDone(root: url) } else {
                 await CaptureDateBackfill.runIfNeeded(database: database, root: url,
@@ -2358,43 +2364,16 @@ struct FileIDEngineMain {
         database: Database,
         scanRootPath: String,
         scanStart: Date,
+        presentUnchanged: Set<Discovery.PathFingerprint>,
         sink: IPCSink,
         sessionID: String
     ) async {
-        struct CandidateRow: Sendable { let id: Int64; let path: String }
-        let prefix = scanRootPath.hasSuffix("/") ? scanRootPath : scanRootPath + "/"
-        // Match descendants with a half-open prefix RANGE, not LIKE. A real
-        // folder named e.g. "100%" or "a_b" contains LIKE wildcards, and an
-        // unescaped `LIKE prefix||'%'` would then match — and DELETE — rows for
-        // files OUTSIDE the scanned tree. The upper bound is the prefix with
-        // its final scalar bumped by one (SQLite's default BINARY collation
-        // compares byte-wise, so this captures exactly the prefix subtree).
-        let prefixUpper: String = {
-            var s = prefix
-            guard let last = s.popLast(),
-                  let next = UnicodeScalar(last.unicodeScalars.first!.value + 1) else {
-                return prefix  // unreachable for a non-empty "…/" prefix
-            }
-            return s + String(next)
-        }()
         let cap = 5000
-        let candidates: [CandidateRow]
+        let candidates: [OrphanCandidate]
         do {
             candidates = try await database.pool.read { db in
-                let rows = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT id, path_text FROM files
-                    WHERE (path_text = ? OR (path_text >= ? AND path_text < ?))
-                      AND scanned_at < ?
-                    LIMIT \(cap)
-                    """, arguments: [
-                        scanRootPath,
-                        prefix,
-                        prefixUpper,
-                        scanStart.timeIntervalSince1970
-                    ])
-                return rows.map { r in
-                    CandidateRow(id: r["id"] ?? 0, path: r["path_text"] ?? "")
-                }
+                try orphanCandidates(db, scanRootPath: scanRootPath, scanStart: scanStart,
+                                     presentUnchanged: presentUnchanged, cap: cap)
             }
         } catch {
             JSONLog.shared.warn(ev: "orphan_sweep_query_failed", sess: sessionID, error: "\(error)")
@@ -2406,7 +2385,6 @@ struct FileIDEngineMain {
                                 error: "scan root missing, empty or unmounted; \(candidates.count) rows kept")
             return
         }
-
         // Stat off the writer thread; FileManager hits are cheap but blocking.
         let missing: [Int64] = await Task.detached(priority: .background) {
             let fm = FileManager.default
@@ -2461,6 +2439,44 @@ struct FileIDEngineMain {
                 message: "FileID couldn't clear \(missing.count) missing \(missing.count == 1 ? "file" : "files") from your library. It will try again on the next scan."
             )))
         }
+    }
+
+    struct OrphanCandidate: Sendable { let id: Int64; let path: String }
+
+    /// Rows under the scan root that this scan neither wrote nor saw unchanged: the files that
+    /// may be gone. Unchanged rows keep their old `scanned_at`, so `presentUnchanged` (kept by
+    /// the walk) is what tells them from a deleted file's row.
+    static func orphanCandidates(
+        _ db: GRDB.Database, scanRootPath: String, scanStart: Date,
+        presentUnchanged: Set<Discovery.PathFingerprint>, cap: Int
+    ) throws -> [OrphanCandidate] {
+        let prefix = scanRootPath.hasSuffix("/") ? scanRootPath : scanRootPath + "/"
+        // Match descendants with a half-open prefix RANGE, not LIKE. A real
+        // folder named e.g. "100%" or "a_b" contains LIKE wildcards, and an
+        // unescaped `LIKE prefix||'%'` would then match — and DELETE — rows for
+        // files OUTSIDE the scanned tree. The upper bound is the prefix with
+        // its final scalar bumped by one (SQLite's default BINARY collation
+        // compares byte-wise, so this captures exactly the prefix subtree).
+        let prefixUpper: String = {
+            var s = prefix
+            guard let last = s.popLast(),
+                  let next = UnicodeScalar(last.unicodeScalars.first!.value + 1) else {
+                return prefix  // unreachable for a non-empty "…/" prefix
+            }
+            return s + String(next)
+        }()
+        let cursor = try GRDB.Row.fetchCursor(db, sql: """
+            SELECT id, path_text FROM files
+            WHERE (path_text = ? OR (path_text >= ? AND path_text < ?))
+              AND scanned_at < ?
+            """, arguments: [scanRootPath, prefix, prefixUpper, scanStart.timeIntervalSince1970])
+        var candidates: [OrphanCandidate] = []
+        while candidates.count < cap, let row = try cursor.next() {
+            let path: String = row["path_text"] ?? ""
+            if presentUnchanged.contains(Discovery.PathFingerprint(path)) { continue }
+            candidates.append(OrphanCandidate(id: row["id"] ?? 0, path: path))
+        }
+        return candidates
     }
 
     /// Delete already-cataloged rows under user-excluded folders before a scan
