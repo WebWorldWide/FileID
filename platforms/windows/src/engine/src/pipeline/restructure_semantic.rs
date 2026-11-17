@@ -1353,6 +1353,25 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_outside_the_library_root_is_never_a_routing_target() {
+        let files: Vec<SemanticFile> = (0..5)
+            .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![1.0, 0.0, 0.0], &["dog"]))
+            .collect();
+        // A perfect content match, but one is elsewhere and one only shares the root's spelling as a prefix.
+        let protos: Vec<FolderPrototype> = ["/other/Dogs", "/library/Dogs"]
+            .iter()
+            .map(|path| FolderPrototype {
+                path: PathBuf::from(path),
+                centroid: unit(vec![1.0, 0.0, 0.0]),
+                name_tokens: std::collections::HashSet::default(),
+            })
+            .collect();
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        assert!(!moves.is_empty(), "the cluster still gets a group inside the root");
+        assert!(moves.iter().all(|m| Path::new(&m.destination).starts_with("/lib")), "every destination stays inside the root: {moves:?}");
+    }
+
+    #[test]
     fn folder_prototypes_skip_sparse_folders() {
         let files = vec![
             file(1, "/lib/A/x.jpg", vec![1.0, 0.0], &[]),
