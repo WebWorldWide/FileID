@@ -511,9 +511,13 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
                 "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
                 "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
-                "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all", "this"
+                "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all"
             ]
-            for (index, word) in words.enumerated() where filler.contains(word) { used.insert(index) }
+            for (index, word) in words.enumerated() {
+                let namesTheLibrary = ["this", "the", "our"].contains(word)
+                    && words.indices.contains(index + 1) && ["library", "collection"].contains(words[index + 1])
+                if filler.contains(word) || namesTheLibrary { used.insert(index) }
+            }
             question.reduced = raw.enumerated().filter { !used.contains($0.offset) }.map(\.element).joined(separator: " ")
         } else {
             question.reduced = text

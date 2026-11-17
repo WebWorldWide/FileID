@@ -124,6 +124,24 @@ struct ChatLibraryAnswersTests {
         #expect(message == "Found 1 video, using 50.0 KB.")
     }
 
+    @Test func onlyThisTheOrOurBeforeLibraryOrCollectionIsDropped() {
+        let cases = [
+            ("How many videos are in this library?", "count", "videos in"),
+            ("count the videos in our library", "count", "the videos in"),
+            ("how many photos are in our collection", "count", "photos in"),
+            ("how many photos of this dog", "count", "photos of this dog"),
+            ("how many photos from this trip", "count", "photos from this trip"),
+        ]
+        for (text, measure, reduced) in cases {
+            let question = ChatIntent.question(text)
+            #expect(question.measure == measure, "\(text)")
+            #expect(question.reduced == reduced, "\(text) → \(question.reduced)")
+        }
+        #expect(ChatSearchPlan.resolve(ChatIntent.question("count the videos in our library").reduced).query == "")
+        #expect(ChatSearchPlan.resolve(ChatIntent.question("how many photos are in our collection").reduced).query == "")
+        #expect(ChatSearchPlan.resolve(ChatIntent.question("how many photos of this dog").reduced).query.contains("this dog"))
+    }
+
     @Test func ordinaryQuestionsAreNotCapturedAsLibraryQuestions() {
         #expect(ChatIntent.question("how many files in my library").measure == "count")
         #expect(ChatIntent.question("photos of my library dog").measure == "list")
