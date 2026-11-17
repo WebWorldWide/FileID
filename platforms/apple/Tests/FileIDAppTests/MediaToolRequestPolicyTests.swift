@@ -103,12 +103,15 @@ struct MediaToolRequestPolicyTests {
         #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
     }
     @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
-        let engine = "Creates 2 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR."
         let photoCaveat = " Photo copies leave out details such as location and use standard 8-bit colors."
-        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 2) == "Press Export to make 2 new files. Your originals stay as they are." + photoCaveat)
-        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 1) == "Press Export to make 1 new file. Your original stays as it is." + photoCaveat)
-        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: "Creates 1 new file(s). Originals are preserved.", outputs: 1) == "Press Export to make 1 new file. Your original stays as it is.")
-        #expect(ToolsSession.plainMessage(action: "preview", status: "error", message: "No such file", outputs: 0) == "No such file")
-        #expect(ToolsSession.plainMessage(action: "execute", status: "ok", message: "Done", outputs: 1) == "Done")
+        func plain(_ action: String = "preview", _ status: String = "ok", outputs: Int, kind: String?, _ message: String) -> String {
+            ToolsSession.plainMessage(action: action, status: status, outputs: outputs, recipeKind: kind, message: message)
+        }
+        #expect(plain(outputs: 2, kind: "photo", "Creates 2 new file(s).") == "Press Export to make 2 new files. Your originals stay as they are." + photoCaveat)
+        #expect(plain(outputs: 1, kind: "photo", "Anything the engine words differently") == "Press Export to make 1 new file. Your original stays as it is." + photoCaveat)
+        #expect(plain(outputs: 1, kind: "video", "Creates 1 new file(s). Photo outputs normalize to 8-bit SDR.") == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(plain(outputs: 1, kind: nil, "Creates 1 new file(s).") == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(plain("preview", "error", outputs: 0, kind: "photo", "No such file") == "No such file")
+        #expect(plain("execute", "ok", outputs: 1, kind: "photo", "Done") == "Done")
     }
 }

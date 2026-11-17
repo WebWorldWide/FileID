@@ -121,6 +121,7 @@ final class ToolsSession {
     var message = "Choose files and a folder to save to. Exports are new files; your originals stay as they are."
     var pending = ""
     var pendingAction = ""
+    var pendingRecipeKind: String?
     var searchID = ""
     var operationID: String?
     var outputs: [ToolOutput] = []
@@ -140,12 +141,12 @@ final class ToolsSession {
     }
 
     /// A successful preview says what Export will do in plain words; the engine's sentence ("new file(s)",
-    /// "8-bit SDR") stays for everything else.
-    nonisolated static func plainMessage(action: String, status: String, message: String, outputs: Int) -> String {
+    /// "8-bit SDR") stays for everything else. The photo caveat follows the recipe kind that was sent, not the engine's wording.
+    nonisolated static func plainMessage(action: String, status: String, outputs: Int, recipeKind: String?, message: String) -> String {
         guard action == "preview", status == "ok", outputs > 0 else { return message }
         let plain = outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
                                  : "Press Export to make \(outputs.formatted()) new files. Your originals stay as they are."
-        return message.contains("8-bit SDR") ? plain + " Photo copies leave out details such as location and use standard 8-bit colors." : plain
+        return recipeKind == "photo" ? plain + " Photo copies leave out details such as location and use standard 8-bit colors." : plain
     }
 
     /// The query sent with the search still waiting for its reply.
@@ -771,15 +772,16 @@ struct ToolsWorkbench: View {
         if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }
     private func send(_ request: ToolRequest) {
-        session.pending = request.requestID; session.pendingAction = request.action
+        session.pending = request.requestID; session.pendingAction = request.action; session.pendingRecipeKind = request.recipe?.kind
         session.pendingEngineGeneration = engine.engineResetSignal
         session.searchID = ""
         if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }
     private func consume() {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }
-        let action = session.pendingAction; session.pending = ""; session.pendingAction = ""
-        session.message = ToolsSession.plainMessage(action: action, status: response.status, message: response.message, outputs: response.outputs.count)
+        let action = session.pendingAction, recipeKind = session.pendingRecipeKind
+        session.pending = ""; session.pendingAction = ""; session.pendingRecipeKind = nil
+        session.message = ToolsSession.plainMessage(action: action, status: response.status, outputs: response.outputs.count, recipeKind: recipeKind, message: response.message)
         if action == "capabilities" {
             session.capabilities = response.capabilities
             if !MediaToolChoice.available(response.capabilities).contains(where: { $0.0 == session.media.tool }) { session.media.tool = "export" }
