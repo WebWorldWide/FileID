@@ -226,6 +226,7 @@ struct Sidebar: View {
         case "deep_analyze_failed": return "Describing files stopped"
         case "face_clustering_failed", "face_clustering_aborted", "face_clustering_start_failed": return "Grouping faces didn't finish"
         case "find_merge_suggestions_failed": return "Looking for matching people didn't finish"
+        case "face_cluster_no_model", "face_cluster_embedder_load_failed": return "Faces can't be grouped yet"
         case "engine_output_error": return "FileID's helper stopped"
         default: return "Something went wrong"
         }

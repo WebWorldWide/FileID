@@ -3,7 +3,7 @@
 //! when done. Pre-flight checks that required models are installed and
 //! that no scan is already running.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,6 +237,13 @@ fn ort_runtime_available() -> bool {
     true
 }
 
+/// An absolute path with no NUL, the only kind a scan may start from (the Swift engine's
+/// `isUsableScanRoot`).
+fn is_usable_scan_root(path: &str) -> bool {
+    Path::new(path).is_absolute() && !path.contains('\0')
+}
+
+/// Whether the scan ran to the end (not refused, cancelled or failed).
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -245,8 +252,23 @@ pub(crate) async fn handle_start_scan(
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     slot: Option<Box<dyn Send>>,
     other_heavy_work: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-) {
+) -> bool {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
+
+    // A relative or empty path would be resolved against the engine's own folder, and a NUL
+    // would cut it short: either would scan a folder the person never chose.
+    if !is_usable_scan_root(&payload.root_path) {
+        sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
+        sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
+            session_id: String::new(),
+            total_files: 0,
+            processed_files: 0,
+            failed_files: 0,
+            total_seconds: 0.0,
+        }))))
+        .await;
+        return false;
+    }
 
     // Atomic check-and-reserve under one lock: gate + slot reservation must
     // be a single critical section, or two StartScan commands queued back-to-
@@ -275,7 +297,7 @@ pub(crate) async fn handle_start_scan(
         ))
         .await;
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
-        return;
+        return false;
     }
     let _state_guard = ScanStateGuard(scan_state.clone(), coord.clone());
     {
@@ -300,7 +322,7 @@ pub(crate) async fn handle_start_scan(
             total_seconds: 0.0,
         }))))
         .await;
-        return;
+        return false;
     };
 
     if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
@@ -312,20 +334,20 @@ pub(crate) async fn handle_start_scan(
         .await;
         *scan_state.lock() = None;
         tracing::info!("[SCAN] queued scan cancelled before model loading");
-        return;
+        return false;
     }
 
     let active_decoders = crate::pipeline::tagging::active_decoder_threads();
     if active_decoders > 0 {
         reject_stranded_decoders(&sink, &scan_state, active_decoders).await;
         tracing::warn!(active_decoders, "[SCAN] previous decoder workers are still active");
-        return;
+        return false;
     }
 
     if coord.is_gpu_dead() {
         reject_gpu_device_removed(&sink, &scan_state).await;
         tracing::warn!("[SCAN] handle_start_scan exiting: process GPU failure is latched");
-        return;
+        return false;
     }
 
     // Missing models never block a scan (macOS parity): every file is still
@@ -457,7 +479,7 @@ pub(crate) async fn handle_start_scan(
                 }
             }
             *scan_state.lock() = None;
-            return;
+            return false;
         }
         Err(err) => {
             tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
@@ -473,7 +495,7 @@ pub(crate) async fn handle_start_scan(
             .into_event())
             .await;
             tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
-            return;
+            return false;
         }
     };
 
@@ -499,6 +521,7 @@ pub(crate) async fn handle_start_scan(
     {
         super::take_grouping::start_after_scan(sink, after_scan_db, busy);
     }
+    !finished_scan.is_cancelled() && !finished_scan.is_gpu_dead()
 }
 
 /// `purgeExcluded` handler — immediately remove cataloged rows under the
@@ -508,7 +531,18 @@ pub(crate) async fn handle_start_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_scan_root_must_be_absolute_and_free_of_nul() {
+        assert!(is_usable_scan_root(if cfg!(windows) { r"C:\photos" } else { "/photos" }));
+        assert!(!is_usable_scan_root(""));
+        assert!(!is_usable_scan_root("photos"));
+        assert!(!is_usable_scan_root("./photos"));
+        assert!(!is_usable_scan_root("../photos"));
+        assert!(!is_usable_scan_root(if cfg!(windows) { "C:\\photos\0x" } else { "/photos\0x" }));
+    }
 
     #[test]
     fn scan_state_guard_clears_a_preflight_panic() {
