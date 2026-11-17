@@ -1606,7 +1606,9 @@ mod tests {
             .map(|_| {
                 let mut v: Vec<f32> = (0..48).map(|_| next()).collect();
                 let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                v.iter_mut().for_each(|x| *x /= norm);
+                for x in &mut v {
+                    *x /= norm;
+                }
                 v
             })
             .collect();
