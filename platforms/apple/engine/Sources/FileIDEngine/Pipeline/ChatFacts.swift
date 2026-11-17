@@ -282,10 +282,91 @@ enum ChatFacts {
         return (message, hits)
     }
 
+    private struct PersonGroup {
+        let id: Int64
+        let name: String?
+        let files: Int64
+    }
+
+    /// Face groups with a counted face on an active file. A group is named when
+    /// it has a name or a first or last name. Mirrors Rust `person_groups`.
+    private static func personGroups(_ db: GRDB.Database, root: LibraryRoots.Scope?) throws -> [PersonGroup] {
+        try Row.fetchAll(db, sql: """
+            SELECT p.id,p.name,p.first_name,p.last_name,COUNT(DISTINCT fp.file_id) AS n FROM persons p
+            JOIN face_prints fp ON fp.person_id=p.id AND COALESCE(fp.excluded,0)=0
+            JOIN files f ON f.id=fp.file_id AND f.failed=0
+            WHERE COALESCE(p.is_unknown,0)=0 AND \(LibraryRoots.scopeSQL("f.path_text")) GROUP BY p.id ORDER BY n DESC,p.id ASC
+            """, arguments: [root?.param]).map { row in
+            let name: String? = row["name"]
+            let composed = [row["first_name"] as String?, row["last_name"] as String?].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ")
+            let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let display = (trimmed?.isEmpty == false ? trimmed : nil) ?? (composed.isEmpty ? nil : composed)
+            return PersonGroup(id: row["id"], name: display, files: row["n"])
+        }
+    }
+
+    /// "How many people are in my library?" and "who is in my photos?": answered
+    /// from the face groups, never from the word "people". Files with a counted
+    /// face are listed. Mirrors Rust `people_answer`.
+    static func peopleAnswer(_ db: GRDB.Database, _ question: ChatIntent.Question, root: LibraryRoots.Scope?) throws -> (String, [CatalogHit]) {
+        let groups = try personGroups(db, root: root)
+        guard !groups.isEmpty else {
+            return ("No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups.", [])
+        }
+        let files: Int64 = try Int64.fetchOne(db, sql: """
+            SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN persons p ON p.id=fp.person_id AND COALESCE(p.is_unknown,0)=0
+            JOIN files f ON f.id=fp.file_id AND f.failed=0 WHERE COALESCE(fp.excluded,0)=0 AND \(LibraryRoots.scopeSQL("f.path_text"))
+            """, arguments: [root?.param]) ?? 0
+        let hits = try listed(db, Filter(personIDs: groups.map(\.id), root: root), order: "newest", limit: shown, count: files)
+        let named = groups.filter { $0.name != nil }
+        let unnamed = groups.count - named.count
+        func plural(_ count: Int, _ one: String, _ many: String) -> String { "\(ChatIntent.countLabel(Int64(count))) \(count == 1 ? one : many)" }
+        let inFiles = plural(Int(files), "file", "files")
+        let message: String
+        if named.isEmpty {
+            message = "Your library has \(plural(groups.count, "group", "groups")) of people in \(inFiles), but none are named yet. Open People to name them."
+        } else if question.people == "who" {
+            let names = named.prefix(8).map { "\($0.name ?? "") (\(plural(Int($0.files), "file", "files")))" }.joined(separator: ", ")
+            let more = named.count > 8 ? " and \(named.count - 8) more" : ""
+            let rest = unnamed == 0 ? "" : " \(plural(unnamed, "more group is", "more groups are")) not named yet; open People to name them."
+            message = "People in your library: \(names)\(more).\(rest)"
+        } else {
+            let names = named.prefix(5).compactMap(\.name).joined(separator: ", ")
+            let more = named.count > 5 ? " and \(named.count - 5) more" : ""
+            let rest = unnamed == 0 ? "" : ", \(unnamed) not named yet. Open People to name the rest"
+            message = "Your library has \(plural(groups.count, "group", "groups")) of people in \(inFiles): \(ChatIntent.countLabel(Int64(named.count))) named (\(names)\(more))\(rest)."
+        }
+        return (message, hits)
+    }
+
+    private static func peakLead(_ groups: [(label: String?, count: Int64, bytes: Int64)], _ question: ChatIntent.Question, peak: String, unit: String, nounPhrase: String) -> String {
+        let bySize = question.measure == "size"
+        let dated = groups.compactMap { group in group.label.map { (label: $0, value: bySize ? group.bytes : group.count) } }
+        guard let target = peak == "least" ? dated.map(\.value).min() : dated.map(\.value).max() else {
+            return "None of these files has a capture date, so I can't rank them by \(unit)."
+        }
+        func label(_ text: String) -> String {
+            let parts = text.split(separator: "-", maxSplits: 1).map(String.init)
+            if unit == "month", parts.count == 2, let month = Int(parts[1]), (1...12).contains(month) { return "\(ChatIntent.monthNames[month - 1]) \(parts[0])" }
+            return text
+        }
+        let winners = dated.filter { $0.value == target }.map { label($0.label) }
+        let extreme = peak == "least" ? (bySize ? "the least" : "the fewest") : "the most"
+        let amount = bySize ? ChatIntent.bytesLabel(target) : ChatIntent.countLabel(target)
+        let what = bySize ? "space" : nounPhrase
+        if winners.count == 1 { return "\(winners[0]) \(bySize ? "uses" : "has") \(extreme) \(what) (\(amount))." }
+        return "\(winners.dropLast().joined(separator: ", ")) and \(winners.last ?? "") are tied for \(extreme) \(what) (\(amount) each)."
+    }
+
     /// Answers a question that is fully structured: no subject words remain.
+
     static func answer(_ db: GRDB.Database, _ question: ChatIntent.Question, _ filter: Filter) throws -> (String, [CatalogHit]) {
         if ["overview", "folders", "formats"].contains(question.measure) { return try libraryAnswer(db, question, root: filter.root) }
         let qualifiers = filter.qualifiers
+        if let unit = question.breakdown, question.peak != nil, !["year", "month"].contains(unit) {
+            let plural = ChatIntent.noun(filter.kinds, 2)
+            return ("I can't rank \(plural) by \(unit) yet. I can count them by year or month, for example “which month has the most \(plural)?”", [])
+        }
         if question.duplicates {
             let found = try extras(db, filter, limit: shown)
             let message = question.measure == "size" && found.count > 0
@@ -314,7 +395,10 @@ enum ChatFacts {
                 return question.measure == "size" ? "\(label): \(ChatIntent.bytesLabel(row["b"]))" : "\(label): \(ChatIntent.countLabel(n))"
             }
             let more = groups.count > 24 ? " and \(groups.count - 24) more" : ""
-            return ("\(capitalized(ChatIntent.noun(kinds, 2)))\(qualifiers) by \(unit): \(parts.joined(separator: ", "))\(more).", hits)
+            let lead = question.peak.map { peak in
+                peakLead(groups.map { (label: $0["g"] as String?, count: $0["c"] as Int64, bytes: $0["b"] as Int64) }, question, peak: peak, unit: unit, nounPhrase: ChatIntent.noun(kinds, 2)) + " "
+            } ?? ""
+            return ("\(lead)\(capitalized(ChatIntent.noun(kinds, 2)))\(qualifiers) by \(unit): \(parts.joined(separator: ", "))\(more).", hits)
         }
         let message: String
         switch question.measure {

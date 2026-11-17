@@ -86,6 +86,12 @@ pub struct Question {
     /// "per year" / "by month": counts grouped by "year" or "month".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<String>,
+    /// "which year has the most photos": "most" or "least" over the breakdown groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak: Option<String>,
+    /// "how many people are in my library" is "count"; "who is in my photos" is "who".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub people: Option<String>,
 }
 
 impl Default for Question {
@@ -104,6 +110,8 @@ impl Default for Question {
             min_bytes: None,
             max_bytes: None,
             breakdown: None,
+            peak: None,
+            people: None,
         }
     }
 }
@@ -111,7 +119,7 @@ impl Default for Question {
 impl Question {
     pub fn structured(&self) -> bool {
         self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
-            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some()
+            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some() || self.people.is_some()
     }
 }
 
@@ -483,6 +491,11 @@ pub fn parse_question(text: &str) -> Question {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
     let mut question = Question::default();
+    if let Some(ask) = people_ask(&words) {
+        question.measure = if ask == "count" { "count" } else { "list" }.into();
+        question.people = Some(ask.into());
+        return question;
+    }
     if let Some((measure, order)) = library_measure(&words) {
         question.measure = measure.into();
         question.order = order.into();
@@ -598,6 +611,14 @@ pub fn parse_question(text: &str) -> Question {
             mark(&mut used, index..index + 2);
         }
     }
+    if let Some((peak, unit, range)) = peak_unit(&words) {
+        question.peak = Some(peak.into());
+        question.breakdown = Some(unit.into());
+        if question.measure == "list" {
+            question.measure = "count".into();
+        }
+        used.extend(range);
+    }
     if has(&words, &["yearly", "annually"]) {
         question.breakdown = Some("year".into());
         if question.measure == "list" {
@@ -646,6 +667,73 @@ pub fn parse_question(text: &str) -> Question {
         text.clone_into(&mut question.reduced);
     }
     question
+}
+
+const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "collection", "files"];
+const COUNT_PEOPLE_TAIL: &[&str] = &[
+    "in", "on", "of", "my", "our", "the", "this", "that", "whole", "entire", "library", "collection", "photos", "pictures", "images", "photo", "files",
+    "there", "are", "is", "do", "i", "we", "have", "has", "got", "altogether", "overall", "total", "all", "so", "far",
+    "named", "unnamed", "grouped", "identified", "recognized", "recognised", "yet",
+];
+const WHO_WORDS: &[&str] = &[
+    "who", "whos", "is", "are", "in", "on", "my", "our", "the", "this", "all", "photos", "pictures", "images", "library", "collection", "files",
+    "there", "here", "appear", "appears", "appearing", "featured", "shown", "do", "i", "we", "have", "got", "people", "persons", "everyone", "anyone",
+];
+const LIST_LEADS: &[&str] = &["which", "what", "whats", "list", "show", "give", "tell"];
+
+/// "how many people are in my library?" is "count"; "who is in my photos?" and
+/// "show me the people" are "who". Anything with another filter or subject is
+/// not a people question and keeps its normal parse.
+fn people_ask(words: &[String]) -> Option<&'static str> {
+    let words: Vec<&str> = words.iter().map(String::as_str).filter(|word| !word.is_empty()).collect();
+    let is_people = |word: &&str| ["people", "persons"].contains(word);
+    let start = words
+        .windows(2)
+        .position(|pair| pair == ["how", "many"] || pair == ["number", "of"])
+        .map(|at| at + 2)
+        .or_else(|| (words.first() == Some(&"count")).then_some(1));
+    if let Some(start) = start {
+        let mut at = start;
+        while words.get(at).is_some_and(|word| ["different", "unique", "distinct", "named", "unnamed", "separate", "total", "the", "my", "all", "of"].contains(word)) {
+            at += 1;
+        }
+        return (words.get(at).is_some_and(|word| is_people(word)) && words[at + 1..].iter().all(|word| COUNT_PEOPLE_TAIL.contains(word))).then_some("count");
+    }
+    let place = words.iter().any(|word| PLACE_WORDS.contains(word)) || words.iter().any(|word| ["everyone", "anyone"].contains(word));
+    if words.iter().any(|word| ["who", "whos", "everyone", "anyone"].contains(word)) && place && words.iter().all(|word| WHO_WORDS.contains(word)) {
+        return Some("who");
+    }
+    let noun = words.iter().position(is_people)?;
+    let leads = words.first().is_some_and(|word| LIST_LEADS.contains(word));
+    let about_photos = words.get(noun + 1).is_some_and(|word| ["photos", "pictures", "images", "files", "videos"].contains(word));
+    (leads && !about_photos && words.iter().all(|word| WHO_WORDS.contains(word) || LIST_LEADS.contains(word) || ["me", "a", "any"].contains(word))).then_some("who")
+}
+
+/// "which year has the most photos", "what was my busiest month": the group
+/// unit, the extreme asked for and the words it consumed.
+fn peak_unit(words: &[String]) -> Option<(&'static str, &'static str, Vec<usize>)> {
+    let peak = words.iter().position(|word| ["most", "busiest", "highest", "fewest", "least", "lowest"].contains(&word.as_str()))?;
+    if words.get(peak + 1).is_some_and(|next| ["recent", "recently", "common", "commonly"].contains(&next.as_str())) {
+        return None;
+    }
+    let unit_at = words.iter().enumerate().position(|(index, word)| {
+        let unit = ["year", "years", "month", "months", "day", "days", "week", "weeks", "hour", "hours"].contains(&word.as_str());
+        let before = index.checked_sub(1).map(|at| words[at].as_str());
+        unit && before.is_some_and(|before| ["which", "what", "whats", "busiest", "highest", "fewest", "lowest"].contains(&before))
+    })?;
+    let unit = match words[unit_at].trim_end_matches('s') {
+        "year" => "year",
+        "month" => "month",
+        "day" => "day",
+        "week" => "week",
+        _ => "hour",
+    };
+    let extreme = if ["fewest", "least", "lowest"].contains(&words[peak].as_str()) { "least" } else { "most" };
+    let mut range = vec![peak, unit_at];
+    if ["busiest", "highest", "fewest", "lowest"].contains(&words[unit_at - 1].as_str()) {
+        range.push(unit_at - 1);
+    }
+    Some((extreme, unit, range))
 }
 
 /// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
@@ -853,7 +941,7 @@ const MONTHS: [(&str, u32); 23] = [
     ("june", 6), ("jun", 6), ("july", 7), ("jul", 7), ("august", 8), ("aug", 8), ("september", 9), ("sept", 9), ("sep", 9),
     ("october", 10), ("oct", 10), ("november", 11), ("nov", 11), ("december", 12),
 ];
-const MONTH_NAMES: [&str; 12] = [
+pub(crate) const MONTH_NAMES: [&str; 12] = [
     "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
 ];
 

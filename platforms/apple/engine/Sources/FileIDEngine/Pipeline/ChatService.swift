@@ -193,6 +193,11 @@ actor ChatService {
                 let resolution = try ChatActions.resolve(db, intent, context)
                 return (Prepared(message: resolution.message, hits: resolution.hits, actions: resolution.actions, summarize: false), ChatSearchPlan(query: "", kinds: []), ChatIntent.Question(), [])
             }
+            let asked = ChatIntent.question(text)
+            if asked.people != nil {
+                let (message, hits) = try ChatFacts.peopleAnswer(db, asked, root: root)
+                return (Prepared(message: message, hits: hits, summarize: false), ChatSearchPlan(query: "", kinds: []), ChatIntent.Question(), [])
+            }
             let previousTexts = try String.fetchAll(db, sql: "SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=? AND role='user' ORDER BY rowid DESC LIMIT 21) ORDER BY rowid", arguments: [request.conversationID]).dropLast()
             let previous = previousTexts.filter { ChatIntent.parse($0) == nil }
                 .reduce(nil as ChatSearchPlan?) { searchPlan($1, previous: $0, people: knownPeople, events: knownEvents).1 }
