@@ -80,4 +80,15 @@ struct MediaToolRequestPolicyTests {
         #expect(choice.recipe?.format == "mov", "with both containers taken the choice stays and the engine's refusal is shown")
         #expect(MediaToolChoice.container(ofPath: "/v/notes.txt") == nil)
     }
+    @MainActor
+    @Test func anEmptySearchSaysNothingMatchedInsteadOfRepeatingTheIntro() {
+        let session = ToolsSession()
+        #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
+        session.answeredQuery = "IMG_41"
+        #expect(session.pickFilesNote == "Nothing in the library matches “IMG_41”. Try part of a file name or a few words about what's in it.")
+        session.allHits = [CatalogHit(fileID: 1, path: "/v/a.mov", kind: "video", text: "")]
+        session.applyKindFilter()
+        #expect(session.hits.isEmpty)
+        #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
+    }
 }

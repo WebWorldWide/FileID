@@ -139,6 +139,21 @@ final class ToolsSession {
         selection.formIntersection(hits.map(\.fileID))
     }
 
+    /// The query the last search reply answered; nil before the first search.
+    var answeredQuery: String?
+
+    /// The line under the search field when no result fits the mode: the intro before a search,
+    /// "nothing matches" after an empty one, and how to switch modes when the results are of the other kind.
+    var pickFilesNote: String {
+        if !allHits.isEmpty {
+            return "That search found \(allHits.count.formatted()) file\(allHits.count == 1 ? "" : "s"), but no \(kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again."
+        }
+        if let answeredQuery, !answeredQuery.isEmpty {
+            return "Nothing in the library matches “\(answeredQuery)”. Try part of a file name or a few words about what's in it."
+        }
+        return "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
+    }
+
     var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
 
     var recipe: ToolRecipe {
@@ -285,9 +300,7 @@ struct ToolsWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
             if session.hits.isEmpty {
-                MetaText(session.allHits.isEmpty
-                         ? "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
-                         : "That search found \(session.allHits.count.formatted()) file\(session.allHits.count == 1 ? "" : "s"), but no \(session.kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again.")
+                MetaText(session.pickFilesNote)
                     .padding(.horizontal, 14).padding(.bottom, 12)
             } else {
                 Hairline()
@@ -668,6 +681,7 @@ struct ToolsWorkbench: View {
         session.searchID = ""
         var seen = Set<Int64>()
         session.allHits = result.hits.filter { seen.insert($0.fileID).inserted }
+        session.answeredQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
         session.selection.removeAll()
         session.applyKindFilter()
         invalidate()
