@@ -1741,6 +1741,51 @@
   ]
  },
  {
+  "name": "swift-written-path-moves-repaired",
+  "description": "Two renames the Swift engine journaled in path-moves.ndjson (intent lines, no done lines, as a kill before the done line leaves them) while their catalog rows still name the old path are repaired when the Rust engine starts: the rows point at the new paths and the journal is cleared. Derived from the Swift-written restructure fixture: its done lines are dropped and two rows put back to their old paths.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "restructure-apply",
+  "fixtureOmit": [
+   "FileID/restructure_undo.ndjson"
+  ],
+  "fixtureDropLines": {
+   "FileID/path-moves.ndjson": [
+    "\"done\""
+   ]
+  },
+  "sql": [
+   "UPDATE files SET path_text='{path:DCIM/100MSDCF/DSC00001.JPG}' WHERE id=1",
+   "UPDATE files SET path_text='{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}' WHERE id=13"
+  ],
+  "steps": [
+   {
+    "label": "rows repaired at start",
+    "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Photos/2026/2026-10-04/DSC00001.JPG}"
+     ],
+     [
+      13,
+      "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}"
+     ]
+    ]
+   },
+   {
+    "label": "journal cleared",
+    "fs": {
+     "absent": [
+      "{state}/FileID/path-moves.ndjson"
+     ]
+    }
+   }
+  ]
+ },
+ {
   "name": "swift-written-mlx-install-record",
   "description": "The Rust engine accepts the MLX install the Swift engine recorded (its installed marker and its verified-identity record, which escapes '/' in paths) without a download.",
   "engines": [

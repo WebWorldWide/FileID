@@ -41,7 +41,8 @@ A tree entry with "copy" copies a repo file (synthetic media under shared/test-c
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
-A case with "fixture": "<name>" (and optionally "fixtureOmit": state files to leave out) starts from state the Swift engine wrote, committed under
+A case with "fixture": "<name>" (and optionally "fixtureOmit": state files to leave out, "fixtureDropLines": {state file: text
+that removes the lines holding it} and "sql": statements run on the seeded catalog) starts from state the Swift engine wrote, committed under
 shared/test-corpus/swift-written/<name>/ (see its README): the harness seeds the
 state folder, the library tree and the catalog from that folder before the engine's
 first start, so one engine alone does the second half of a cross-engine case once the
@@ -1159,7 +1160,7 @@ def expand_text(ctx, text):
     return PLACEHOLDER.sub(lambda m: str(ctx.placeholder(m.group(1))), text)
 
 
-def seed_fixture(ctx, name, omit=()):
+def seed_fixture(ctx, name, omit=(), drop_lines=None):
     """Recreate a captured run before the engine's first start: library files with their
     modification times, state files, the catalog, and the values earlier steps saved."""
     base = FIXTURES / name
@@ -1180,7 +1181,10 @@ def seed_fixture(ctx, name, omit=()):
             if "copy" in entry:
                 destination.write_bytes((ROOT / entry["copy"]).read_bytes())
             elif templated:
-                destination.write_text(expand_text(ctx, source.read_text(encoding="utf-8")), encoding="utf-8", newline="")
+                text = expand_text(ctx, source.read_text(encoding="utf-8"))
+                for needle in (drop_lines or {}).get(entry["path"], []):
+                    text = "".join(line for line in text.splitlines(keepends=True) if needle not in line)
+                destination.write_text(text, encoding="utf-8", newline="")
             else:
                 destination.write_bytes(source.read_bytes())
             seconds, nanoseconds = entry["mtimeNs"]
@@ -1238,7 +1242,11 @@ def run_case(case, flavor, binaries, os_name, parent, capture=None):
             stage_model(ctx, model_source(case))
         first = case.get("start", flavor)
         if case.get("fixture"):
-            seed_fixture(ctx, case["fixture"], case.get("fixtureOmit", ()))
+            seed_fixture(ctx, case["fixture"], case.get("fixtureOmit", ()), case.get("fixtureDropLines"))
+            if case.get("sql"):
+                with connect(ctx.database) as database:
+                    for statement in case["sql"]:
+                        database.execute(ctx.expand(statement))
         else:
             start(binaries, first, ctx).close()
             rows = build_tree(ctx, case.get("tree", []))
