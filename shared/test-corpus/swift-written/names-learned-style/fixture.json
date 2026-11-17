@@ -1,0 +1,51 @@
+{
+ "capturedFrom": "cross-names-learned-style",
+ "conversation": "13383a9f-6b2f-4281-ba46-14f3e5af0947",
+ "dirs": [
+  "learn"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1000,
+    0
+   ],
+   "path": "learn/IMG_0001.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1000,
+    0
+   ],
+   "path": "learn/IMG_0002.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1000,
+    0
+   ],
+   "path": "learn/IMG_0003.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1000,
+    0
+   ],
+   "path": "learn/IMG_0004.jpg"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

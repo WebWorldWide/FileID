@@ -1,0 +1,29 @@
+{
+ "capturedFrom": "cross-video-swift-preview-rust-execute-fit",
+ "conversation": "caf5e834-3209-4c88-9802-1f0194b00201",
+ "dirs": [],
+ "files": [
+  {
+   "area": "tree",
+   "copy": "shared/test-corpus/conformance-media/clip-rotated.mov",
+   "mtimeNs": [
+    1794900342,
+    997329302
+   ],
+   "path": "Clip.mov"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "op": "EFD86433-6A40-424B-A1AD-F78BC32C95D9",
+  "out": "{std_root}/Clip - Export - 1x1 Fit.mp4"
+ },
+ "writtenBy": "swift"
+}

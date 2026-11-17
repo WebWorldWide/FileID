@@ -1,0 +1,18 @@
+{
+ "capturedFrom": "cross-face-review-resolve-and-undo",
+ "conversation": "418e4810-16db-439e-86bb-5381b4d7d76c",
+ "dirs": [],
+ "files": [],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "op": "daf122ca-2da9-434e-8286-ed39f30ae7e8"
+ },
+ "writtenBy": "swift"
+}

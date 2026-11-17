@@ -1,0 +1,16 @@
+{
+ "capturedFrom": "cross-catalog-chapter-edit-and-undo",
+ "conversation": "a8710974-356c-4838-b120-a082164c67f1",
+ "dirs": [],
+ "files": [],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

@@ -1,0 +1,28 @@
+{
+ "capturedFrom": "cross-tools-swift-preview-rust-execute-png-enlarge",
+ "conversation": "565032db-e62f-4a4b-99d1-3d438ee234a3",
+ "dirs": [],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900336,
+    938543575
+   ],
+   "path": "Picture.png"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "op": "AB2CA343-EF51-4448-A14F-5CCECDC1A9FD",
+  "out": "{std_root}/Picture - Export.png"
+ },
+ "writtenBy": "swift"
+}

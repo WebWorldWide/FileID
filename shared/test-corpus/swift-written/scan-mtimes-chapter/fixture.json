@@ -1,0 +1,110 @@
+{
+ "capturedFrom": "cross-scan-swift-then-rust-keeps-modified-times-and-reviewed-rows",
+ "conversation": "69358f48-4ac5-4a90-8800-3707fb2cff31",
+ "dirs": [
+  "docs",
+  "images"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1724989629,
+    833179165
+   ],
+   "path": "docs/a.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1603520313,
+    785102536
+   ],
+   "path": "docs/b.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1704538783,
+    171373719
+   ],
+   "path": "docs/c.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1700000000,
+    0
+   ],
+   "path": "docs/d.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1719409671,
+    136042265
+   ],
+   "path": "images/e.png"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1635498135,
+    1905740
+   ],
+   "path": "images/f.png"
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900339,
+    261076924
+   ],
+   "path": "FileID/capture-dates-v1/e61f33aeaab3fd45d082c87050c63a3e"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "fid": 4,
+  "first": [
+   [
+    "{root}/docs/a.txt",
+    24,
+    1724989629.8331792
+   ],
+   [
+    "{root}/docs/b.txt",
+    24,
+    1603520313.7851026
+   ],
+   [
+    "{root}/docs/c.txt",
+    24,
+    1704538783.1713736
+   ],
+   [
+    "{root}/docs/d.txt",
+    24,
+    1700000000.0
+   ],
+   [
+    "{root}/images/e.png",
+    850,
+    1719409671.1360424
+   ],
+   [
+    "{root}/images/f.png",
+    850,
+    1635498135.0019057
+   ]
+  ]
+ },
+ "writtenBy": "swift"
+}

@@ -1,0 +1,25 @@
+{
+ "capturedFrom": "cross-chat-history-and-filters",
+ "conversation": "bf15ee81-4f5b-4064-a3c1-6202257624f2",
+ "dirs": [],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900336,
+    22073845
+   ],
+   "path": "birthday.txt"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

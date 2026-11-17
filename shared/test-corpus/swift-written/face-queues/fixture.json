@@ -1,0 +1,18 @@
+{
+ "capturedFrom": "cross-face-queues-merge-split-and-undo",
+ "conversation": "363388a0-7838-4aa2-b2c6-29e795dd02ce",
+ "dirs": [],
+ "files": [],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "op": "53b8be68-0a8a-4205-876c-625a8a61a6d3"
+ },
+ "writtenBy": "swift"
+}

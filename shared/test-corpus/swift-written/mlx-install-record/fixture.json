@@ -1,0 +1,74 @@
+{
+ "capturedFrom": "cross-engine-mlx-install-record-swift-first",
+ "conversation": "16202856-2ddb-4ec2-aa57-a082137c79fc",
+ "dirs": [
+  "hf",
+  "hf/models",
+  "hf/models/mlx-community",
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit",
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache",
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache/huggingface",
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache/huggingface/download",
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    655439391
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache/huggingface/download/config.json.metadata"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    703534377
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    543722813
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    642972864
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    543460313
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900340,
+    543604021
+   ],
+   "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

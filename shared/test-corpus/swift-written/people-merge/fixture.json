@@ -1,0 +1,16 @@
+{
+ "capturedFrom": "cross-people-merge-undo-swift-merge-rust-undo",
+ "conversation": "197cbbc6-73bd-4d97-b16e-f0a35376329e",
+ "dirs": [],
+ "files": [],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {},
+ "writtenBy": "swift"
+}

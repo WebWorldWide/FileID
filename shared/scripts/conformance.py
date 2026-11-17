@@ -41,7 +41,7 @@ A tree entry with "copy" copies a repo file (synthetic media under shared/test-c
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
 {"restart": "rust"} steps; they run only when --peer-engine supplies the other.
-A case with "fixture": "<name>" starts from state the Swift engine wrote, committed under
+A case with "fixture": "<name>" (and optionally "fixtureOmit": state files to leave out) starts from state the Swift engine wrote, committed under
 shared/test-corpus/swift-written/<name>/ (see its README): the harness seeds the
 state folder, the library tree and the catalog from that folder before the engine's
 first start, so one engine alone does the second half of a cross-engine case once the
@@ -49,7 +49,8 @@ Swift engine is gone. --capture-fixture <dir> --case <name> writes such a folder
 live run of a cross-engine case (up to its first restart); --verify-fixture <dir> seeds
 a folder in a scratch library and captures it again, which must give the same folder.
 Fixture text expands {root}, {state}, {std_root}, {std_state} (the folders as Foundation
-standardizes them), {inode:rel}, {state_inode:rel}, {path_hash:rel} and {std_path_hash:rel}.
+standardizes them), {device} (the library's volume), {inode:rel}, {state_inode:rel}, {path_hash:rel} and
+{std_path_hash:rel}.
 A case with "appHosted": true runs only when every engine it uses (the one under
 test and any it "requires") is one the Mac app hosts, i.e. writes events on stderr:
 the Swift engine and the Rust engine built with the Apple adapters. Case "env"
@@ -422,6 +423,8 @@ class Context:
                      "std_root": foundation_standardized(str(self.root)),
                      "std_state": foundation_standardized(str(self.state))}[name]
             return value.replace("/", "\\/") if argument == "json" else value
+        if name == "device":
+            return self.root.stat().st_dev
         if name == "state_inode":
             return (self.state / argument).stat().st_ino
         if name == "std_path_hash":
@@ -863,8 +866,8 @@ FTS_SHADOWS = ("_data", "_idx", "_content", "_docsize", "_config")
 
 def catalog_objects(connection):
     """sqlite_master rows in creation order, split into the tables (virtual tables
-    included, their shadow tables not), those shadow tables, and the indexes, triggers
-    and views that are created after the data."""
+    included, their shadow tables not), the shadow tables of the full-text indexes, and
+    the indexes, triggers and views that are created after the data."""
     rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY rowid").fetchall()
     virtual = [name for kind, name, _, sql in rows if kind == "table" and (sql or "").upper().startswith("CREATE VIRTUAL")]
 
@@ -874,6 +877,14 @@ def catalog_objects(connection):
     shadows = [r for r in rows if r[0] == "table" and shadow(r[1])]
     after = [r for r in rows if r[0] in ("index", "trigger", "view") and r[3]]
     return tables, shadows, after, virtual
+
+
+def fts_content(sql):
+    """None for a full-text table that keeps its own text, else the table its text lives in."""
+    found = re.search(r"content\s*=\s*'?(\w*)'?", sql)
+    if found and not found.group(1):
+        raise Failure("a contentless full-text table cannot be dumped as text")
+    return found.group(1) if found else None
 
 
 def table_columns(connection, name):
@@ -909,7 +920,7 @@ class Templater:
                              (str(ctx.state), "state"), (foundation_standardized(str(ctx.state)), "std_state")):
             pairs.setdefault(needle, name)
         self.pairs = sorted(pairs.items(), key=lambda item: -len(item[0]))
-        self.numbers = {}
+        self.numbers = {ctx.root.stat().st_dev: "{device}"}
         for path in sorted(ctx.root.rglob("*")):
             if path.is_file():
                 self.numbers.setdefault(path.stat().st_ino, "{inode:%s}" % path.relative_to(ctx.root).as_posix())
@@ -977,9 +988,16 @@ def dump_catalog(path, templater):
             tables, shadows, after, virtual = catalog_objects(connection)
             pragmas = {name: connection.execute(f"PRAGMA {name}").fetchone()[0]
                        for name in ("user_version", "application_id", "journal_mode", "page_size", "auto_vacuum")}
-            data = [(name, True, table_rows(connection, name)) for _, name, _, sql in shadows]
-            data = [(name, False, table_rows(connection, name)) for _, name, _, sql in tables
-                    if name not in virtual and not sql.upper().startswith("CREATE VIRTUAL")] + data
+            # The full-text indexes are rebuilt from their text on load: their segment files are a
+            # product of insertion history and would carry the capture machine's paths as tokens.
+            data = [(name, True, table_rows(connection, name)) for _, name, _, _ in shadows if name.endswith("_config")]
+            data += [(name, False, table_rows(connection, name)) for _, name, _, sql in tables if name not in virtual]
+            for _, name, _, sql in tables:
+                if name in virtual and not fts_content(sql):
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_xinfo({quote_name(name)})") if row[6] == 0]
+                    rows = connection.execute(
+                        f"SELECT rowid,{','.join(quote_name(c) for c in columns)} FROM {quote_name(name)} ORDER BY rowid").fetchall()
+                    data.append((name, False, (["rowid"] + columns, rows)))
             templater.add_paths([cell for _, _, (_, rows) in data for row in rows for cell in row if isinstance(cell, str)])
             lines = ["BEGIN;"] + [sql.rstrip(";") + ";" for _, _, _, sql in tables]
             for name, shadow, (names, rows) in data:
@@ -989,11 +1007,14 @@ def dump_catalog(path, templater):
                 for row in rows:
                     cells = [sql_literal(templater.text(v) if isinstance(v, str) else templater.number(v)) for v in row]
                     lines.append(f"INSERT INTO {quote_name(name)}({columns}) VALUES({','.join(cells)});")
+            lines.extend(f"INSERT INTO {quote_name(name)}({quote_name(name)}) VALUES('rebuild');"
+                         for _, name, _, sql in tables if name in virtual and fts_content(sql))
             has_sequence = connection.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone()
-            sequence = connection.execute("SELECT name,seq FROM sqlite_sequence ORDER BY name").fetchall() if has_sequence else []
-            if sequence:
-                lines.append("DELETE FROM sqlite_sequence;")
-                lines.extend(f"INSERT INTO sqlite_sequence(name,seq) VALUES({sql_literal(n)},{s});" for n, s in sequence)
+            if has_sequence:
+                names, rows = table_rows(connection, "sqlite_sequence")
+                if rows:
+                    lines.append("DELETE FROM sqlite_sequence;")
+                    lines.extend(f"INSERT INTO sqlite_sequence({','.join(names)}) VALUES({','.join(sql_literal(v) for v in row)});" for row in rows)
             lines.extend(sql.rstrip(";") + ";" for _, _, _, sql in after)
             lines.append("COMMIT;")
         finally:
@@ -1033,8 +1054,19 @@ def catalog_image(path):
             image = {"master": master,
                      "pragmas": {name: connection.execute(f"PRAGMA {name}").fetchone()[0]
                                  for name in ("user_version", "application_id", "page_size", "auto_vacuum", "encoding")}}
+            virtual = [name for kind, name, _, sql in master if kind == "table" and (sql or "").upper().startswith("CREATE VIRTUAL")]
             for kind, name, _, sql in master:
-                if kind == "table" and not (sql or "").upper().startswith("CREATE VIRTUAL"):
+                if kind != "table" or any(name == v + suffix for v in virtual for suffix in FTS_SHADOWS if suffix != "_config"):
+                    continue
+                if name in virtual:
+                    # the index itself: every term with its row, column and position, whatever its segment layout
+                    connection.execute(f"CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main,{sql_literal(name)},'instance')")
+                    image["index " + name] = sorted(connection.execute("SELECT term,doc,col,offset FROM temp.vocab").fetchall())
+                    connection.execute("DROP TABLE temp.vocab")
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_xinfo({quote_name(name)})") if row[6] == 0]
+                    image["text " + name] = sorted(connection.execute(
+                        f"SELECT rowid,{','.join(quote_name(c) for c in columns)} FROM {quote_name(name)}").fetchall(), key=repr)
+                else:
                     image["table " + name] = sorted(table_rows(connection, name)[1], key=repr)
             return image
         finally:
@@ -1127,7 +1159,7 @@ def expand_text(ctx, text):
     return PLACEHOLDER.sub(lambda m: str(ctx.placeholder(m.group(1))), text)
 
 
-def seed_fixture(ctx, name):
+def seed_fixture(ctx, name, omit=()):
     """Recreate a captured run before the engine's first start: library files with their
     modification times, state files, the catalog, and the values earlier steps saved."""
     base = FIXTURES / name
@@ -1140,7 +1172,7 @@ def seed_fixture(ctx, name):
     roots = {"tree": ctx.root, "state": ctx.state}
     for templated in (False, True):
         for entry in meta["files"]:
-            if bool(entry.get("template")) != templated:
+            if bool(entry.get("template")) != templated or (entry["area"] == "state" and entry["path"] in omit):
                 continue
             destination = roots[entry["area"]] / entry["path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1206,7 +1238,7 @@ def run_case(case, flavor, binaries, os_name, parent, capture=None):
             stage_model(ctx, model_source(case))
         first = case.get("start", flavor)
         if case.get("fixture"):
-            seed_fixture(ctx, case["fixture"])
+            seed_fixture(ctx, case["fixture"], case.get("fixtureOmit", ()))
         else:
             start(binaries, first, ctx).close()
             rows = build_tree(ctx, case.get("tree", []))
