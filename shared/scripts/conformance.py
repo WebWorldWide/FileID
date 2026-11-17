@@ -36,8 +36,8 @@ time runs out, for durable jobs that finish after their reply.
 A step {"schemaOf": "<fixture>"} requires the catalog to have that fixture's schema objects and columns.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
-also checks "symlinks", empties folders ("emptyDir") and writes tree entries ("tree") before
-its checks.
+also checks "symlinks", empties folders ("emptyDir"), checks a folder's exact entry names ("entries": {folder: [names]})
+and writes tree entries ("tree") before its checks.
 A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
@@ -738,6 +738,10 @@ def run_step(engine, ctx, step, binaries):
         for relative in spec.get("exists", []):
             if not Path(ctx.path(relative)).exists():
                 raise Failure(f"expected {relative} to exist")
+        for relative, names in spec.get("entries", {}).items():
+            found = sorted(os.listdir(ctx.path(relative)))
+            if found != sorted(names):
+                raise Failure(f"{relative} holds {[ascii(n) for n in found]}, expected {[ascii(n) for n in sorted(names)]}")
         for relative in spec.get("absent", []):
             if Path(ctx.path(relative)).exists() or Path(ctx.path(relative)).is_symlink():
                 raise Failure(f"expected {relative} to be absent")
