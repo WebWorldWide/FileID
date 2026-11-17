@@ -166,7 +166,7 @@ struct MainWindow: View {
                     // the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
                         VHairline()
-                        ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                        ChatWorkbench(engine: engine, store: store, onClose: { chatPresented = false })
                             .font(Theme.Font.body(13.5))
                             .frame(width: 380)
                             .focusSection()

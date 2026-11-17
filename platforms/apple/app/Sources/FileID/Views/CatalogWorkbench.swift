@@ -134,6 +134,10 @@ struct CatalogWorkbench: View {
 
     // MARK: - Results pane
 
+    private var libraryReadiness: LibraryReadiness? {
+        store.map { LibraryReadiness(catalogedFiles: $0.totalFiles, scanPhase: engine.lastProgress?.phase) }
+    }
+
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
@@ -164,7 +168,19 @@ struct CatalogWorkbench: View {
             MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, checked: checkedRows, textSize: ContentTextScale.shared.size, onSelect: clickRow)
             .equatable()
             .overlay {
-                if hits.isEmpty && pendingAction != "search" {
+                if hits.isEmpty && pendingAction != "search", let readiness = libraryReadiness, !readiness.hasFiles {
+                    VStack(spacing: 10) {
+                        MetaText(readiness == .reading
+                                 ? "FileID is reading your files. Search opens as soon as the first ones are read."
+                                 : "Scan a folder first. Search looks through the files FileID has scanned.")
+                            .multilineTextAlignment(.center)
+                        if readiness == .needsScan {
+                            Button("Choose a folder to scan") { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                                .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        }
+                    }
+                    .padding(24)
+                } else if hits.isEmpty && pendingAction != "search" {
                     MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }

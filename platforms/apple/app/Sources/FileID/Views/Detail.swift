@@ -129,7 +129,7 @@ private struct PageStack: View {
         case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
         case .moments:     CatalogWorkbench(engine: engine, store: store, onSwitchTab: onSwitchTab, inline: true)
         case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
-        case .chat:        ChatWorkbench(engine: engine)
+        case .chat:        ChatWorkbench(engine: engine, store: store)
         case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
         case .cleanup:     CleanupView(engine: engine, store: store)
         case .restructure: RestructureView(store: store, engine: engine, selectedRoot: pickedURL)

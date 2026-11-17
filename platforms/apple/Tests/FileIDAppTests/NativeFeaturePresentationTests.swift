@@ -33,7 +33,7 @@ struct NativeFeaturePresentationTests {
         try #require(root.path.hasPrefix("/tmp/"))
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let engine = EngineClient()
-        try await capture(ChatWorkbench(engine: engine, onClose: {}), name: "chat-inspector", size: NSSize(width: 380,height: 760),root: root)
+        try await capture(ChatWorkbench(engine: engine, store: ReadStore(), onClose: {}), name: "chat-inspector", size: NSSize(width: 380,height: 760),root: root)
         try await capture(ModelCatalogBrowser(engine: engine, initialSelection: .qwen35_2B, onSelect: { _ in }),name:"model-browser",size:NSSize(width:760,height:650),root:root)
         let settings = DeepAnalyzeSettings.shared
         let previousModel = settings.activeKind
