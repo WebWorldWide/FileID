@@ -210,6 +210,37 @@ pub(crate) mod tests {
         assert!(near.len() >= 10 && near.iter().filter(|(_, d)| *d == 0.0).count() >= 10, "a copy's nearest are its identical members");
     }
 
+    /// 16,000 vectors in 64 tight clusters, as the Swift engine's recall test: the graph search must
+    /// still reach a query's exact ten nearest, or near matches silently drop out of search.
+    #[test]
+    fn dense_clusters_keep_routes_to_the_exact_nearest_neighbours() {
+        let mut state = 0xF11E_1D12_345u64;
+        let mut sample = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let centers: Vec<Vec<f32>> = (0..64).map(|_| norm((0..128).map(|_| sample()).collect())).collect();
+        let vectors: Vec<Vec<f32>> = (0..16_000).map(|id| norm(centers[id % 64].iter().map(|c| c + sample() * 0.08).collect())).collect();
+        let index = build_search_index(vectors.iter().cloned().enumerate().map(|(id, v)| (v, id)).collect(), 64);
+        let mut searcher = Searcher::default();
+        let recalls: Vec<f64> = (0..20)
+            .map(|query| {
+                let target = &vectors[query * 797];
+                let found: Vec<usize> = searcher.top_k(&index, target, 10).into_iter().map(|(id, _)| id).collect();
+                let mut exact: Vec<(f32, usize)> =
+                    vectors.iter().enumerate().map(|(id, v)| (v.iter().zip(target).map(|(a, b)| (a - b) * (a - b)).sum(), id)).collect();
+                exact.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let expected: HashSet<usize> = exact[..10].iter().map(|(_, id)| *id).collect();
+                found.iter().filter(|id| expected.contains(id)).count() as f64 / 10.0
+            })
+            .collect();
+        let worst = recalls.iter().copied().fold(1.0, f64::min);
+        let mean = recalls.iter().sum::<f64>() / recalls.len() as f64;
+        assert!(worst >= 0.9 && mean >= 0.98, "recall worst {worst}, mean {mean}");
+    }
+
     #[test]
     fn nearest_neighbor_recovers_itself() {
         let points = vec![

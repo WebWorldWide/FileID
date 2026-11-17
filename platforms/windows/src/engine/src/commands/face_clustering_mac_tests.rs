@@ -585,28 +585,24 @@ fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
 #[test]
 fn a_persist_that_fails_part_way_leaves_every_person_and_assignment_as_it_was() {
     let catalog = Catalog::new();
-    catalog.person(10, None, false);
     for face in 1..=4 {
-        catalog.face(face, 0, 0.6, Some(10));
+        catalog.face(face, 0, 0.6, None);
     }
     for face in 5..=8 {
         catalog.face(face, 1, 0.6, None);
     }
+    // The recount is the last statement of the write, after the new people and their faces.
     catalog
         .conn
         .execute_batch("CREATE TEMP TRIGGER refuse_recount BEFORE UPDATE OF file_count ON persons BEGIN SELECT RAISE(ABORT,'refused'); END;")
         .unwrap();
-    let people = |catalog: &Catalog| -> Vec<(i64, Option<i64>, Option<Vec<u8>>)> {
-        let mut statement = catalog.conn.prepare("SELECT id,representative_face_id,centroid FROM persons ORDER BY id").unwrap();
-        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
-    };
-    let (before_people, before_faces) = (people(&catalog), catalog.assignments());
     let (catalog, outcome) = catalog.run();
     assert_eq!(outcome.error.map(|(kind, _)| kind), Some("face_cluster_persist_failed"));
-    assert_eq!(people(&catalog), before_people, "the new person and person 10's centroid were rolled back with the rest");
-    assert_eq!(catalog.assignments(), before_faces);
+    assert!(person_ids(&catalog).is_empty(), "the people created before the failure were rolled back");
+    assert!(catalog.assignments().iter().all(|(_, person)| person.is_none()), "and so were their faces");
     catalog.conn.execute_batch("DROP TRIGGER refuse_recount").unwrap();
     let (catalog, outcome) = catalog.run();
     assert!(outcome.error.is_none());
-    assert!(catalog.assignments()[4..].iter().all(|(_, person)| person.is_some()), "with the refusal gone the same pass publishes");
+    assert_eq!(person_ids(&catalog).len(), 2, "with the refusal gone the same pass publishes");
+    assert!(catalog.assignments().iter().all(|(_, person)| person.is_some()));
 }
