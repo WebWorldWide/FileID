@@ -131,3 +131,64 @@ async fn the_journal_names_the_whole_batch_before_the_first_file_moves() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+// A restore that gets only some files back leaves the whole batch in the
+// journal, so the files still in the Trash can be restored by a retry. Plain
+// macOS build: its restore backend refuses every file that is not already home,
+// so no real Trash is involved.
+#[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
+#[tokio::test]
+async fn a_partial_restore_keeps_the_whole_batch_journaled_for_a_retry() {
+    let _turn = JOURNAL_TURN.lock().await;
+    let dir = std::env::temp_dir().join(format!("fileid-restore-keep-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (home, away) = (dir.join("home.jpg"), dir.join("away.jpg"));
+    std::fs::write(&home, b"home").unwrap();
+    std::fs::write(&away, b"away").unwrap();
+    let db = catalog_with(&[]);
+    db.lock()
+        .execute(
+            "INSERT INTO scan_sessions (id, root_path, started_at, status) VALUES ('s', ?1, 0, 'completed')",
+            [dir.to_string_lossy()],
+        )
+        .unwrap();
+    let batch_id = uuid::Uuid::new_v4().to_string();
+    let item = |file_id: i64, path: &std::path::Path| trash_log::TrashLogItem {
+        file_id,
+        original_path: path.to_string_lossy().into_owned(),
+        source_identity: crate::platform::file_identity(path),
+        ..Default::default()
+    };
+    let entry = trash_log::TrashLogEntry {
+        batch_id: batch_id.clone(),
+        timestamp: 1_700_000_000.0,
+        items: vec![item(1, &home), item(2, &away)],
+    };
+    trash_log::append(&entry).unwrap();
+    // The second file is still "in the Trash": it is not at its original path.
+    let held = dir.join("held-elsewhere.jpg");
+    std::fs::rename(&away, &held).unwrap();
+
+    let restore = || async {
+        let (sink, mut events) = Sink::channel_for_test(8);
+        super::trash::handle_restore_from_trash(sink, db.clone(), ipc::RestoreFromTrashPayload { batch_id: batch_id.clone() }).await;
+        while let Some(event) = events.recv().await {
+            if let EventPayload::BulkActionResult(result) = event.payload {
+                return result.inner;
+            }
+        }
+        panic!("restoreFromTrash sent no result");
+    };
+
+    let first = restore().await;
+    assert_eq!((first.succeeded, first.failed), (1, 1), "one file is back, one is not");
+    let kept = journaled(&batch_id).expect("the batch stays journaled after a partial restore");
+    let mut ids: Vec<_> = kept.items.iter().map(|item| item.file_id).collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2], "the file still away is not forgotten");
+
+    std::fs::rename(&held, &away).unwrap();
+    let retry = restore().await;
+    assert_eq!((retry.succeeded, retry.failed), (2, 0), "a retry finishes the batch from the same journal entry");
+    std::fs::remove_dir_all(dir).ok();
+}
