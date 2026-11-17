@@ -135,7 +135,7 @@ struct CatalogWorkbench: View {
     // MARK: - Results pane
 
     private var libraryReadiness: LibraryReadiness? {
-        store.map { LibraryReadiness(catalogedFiles: $0.totalFiles, scanPhase: engine.lastProgress?.phase) }
+        store.map { LibraryReadiness(catalogedFiles: $0.catalogedFileCount, scanPhase: engine.lastProgress?.phase) }
     }
 
     private var resultsPane: some View {

@@ -10,9 +10,12 @@ enum LibraryReadiness: Equatable {
     case ready
     case readyWhileReading
 
-    init(catalogedFiles: Int, scanPhase: ScanPhase?) {
+    /// `catalogedFiles` is nil while the count is unknown (not loaded yet, or the reader failed). Unknown is treated as
+    /// having files: a library that has files must not flash "Scan a folder" at launch, and the engine can answer even
+    /// when the app's reader cannot open the catalog.
+    init(catalogedFiles: Int?, scanPhase: ScanPhase?) {
         let reading = [.discovering, .tagging, .postScan].contains(scanPhase)
-        switch (catalogedFiles > 0, reading) {
+        switch ((catalogedFiles ?? 1) > 0, reading) {
         case (false, false): self = .needsScan
         case (false, true): self = .reading
         case (true, false): self = .ready

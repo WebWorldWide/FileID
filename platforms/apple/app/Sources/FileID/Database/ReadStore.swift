@@ -34,6 +34,11 @@ public final class ReadStore: @unchecked Sendable {
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
+    /// False until the first counters read lands, and again while the reader cannot open or the counters read fails;
+    /// `totalFiles` is then a placeholder, not a count of an empty library.
+    public private(set) var countersAvailable = false
+    /// `totalFiles` once it is a real count; nil while it is unknown.
+    var catalogedFileCount: Int? { countersAvailable ? totalFiles : nil }
     public private(set) var totalImages: Int = 0
     /// Files the scan could not decode or read; the Library hides them unless
     /// the Unreadable filter is chosen.
@@ -99,6 +104,7 @@ public final class ReadStore: @unchecked Sendable {
     public func openIfPossible() {
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
             self.queue = nil
+            self.countersAvailable = true
             self.totalFiles = 0
             self.totalImages = 0
             self.unreadableFiles = 0
@@ -116,6 +122,7 @@ public final class ReadStore: @unchecked Sendable {
                 self.queue = try Self.openReader(at: dbURL)
             } catch {
                 reportError("Could not open DB: \(error)")
+                self.countersAvailable = false
                 return
             }
         }
@@ -206,7 +213,10 @@ public final class ReadStore: @unchecked Sendable {
                 case .ok(let snapshot):
                     await MainActor.run { self.applyCounters(snapshot) }
                 case .failure(let message):
-                    await MainActor.run { self.lastError = message }
+                    await MainActor.run {
+                        self.lastError = message
+                        self.countersAvailable = false
+                    }
                 case .noDatabase:
                     break
                 }
@@ -295,6 +305,7 @@ public final class ReadStore: @unchecked Sendable {
     @MainActor
     private func applyCounters(_ snapshot: CounterSnapshot) {
         // Observation notifies on every set, changed or not; unchanged counters stay quiet.
+        if !self.countersAvailable { self.countersAvailable = true }
         if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
         if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
         if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }

@@ -48,6 +48,19 @@ struct LibraryReadinessTests {
         #expect(readiness.readingNote == nil && readiness.chatComposerPlaceholder == nil)
         #expect(LibraryReadiness(catalogedFiles: 5, scanPhase: nil) == .ready)
     }
+
+    @Test("an unknown count (counters not loaded yet, or the reader failed) counts as a library with files, never as empty")
+    func unknownCountIsReady() {
+        for phase in [nil, .idle, .completed, .cancelled, .failed] as [ScanPhase?] {
+            let readiness = LibraryReadiness(catalogedFiles: nil, scanPhase: phase)
+            #expect(readiness == .ready, "\(String(describing: phase))")
+            #expect(readiness.hasFiles && readiness.chatComposerPlaceholder == nil)
+        }
+        for phase in [.discovering, .tagging, .postScan] as [ScanPhase] {
+            #expect(LibraryReadiness(catalogedFiles: nil, scanPhase: phase) == .readyWhileReading)
+        }
+        #expect(LibraryReadiness(catalogedFiles: 0, scanPhase: nil) == .needsScan)
+    }
 }
 
 @Suite("Counter refresh during a scan")

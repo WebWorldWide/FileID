@@ -35,7 +35,7 @@ struct ChatWorkbench: View {
     @State private var puttingBack = false
 
     private var isPage: Bool { onClose == nil }
-    private var readiness: LibraryReadiness { LibraryReadiness(catalogedFiles: store.totalFiles, scanPhase: engine.lastProgress?.phase) }
+    private var readiness: LibraryReadiness { LibraryReadiness(catalogedFiles: store.catalogedFileCount, scanPhase: engine.lastProgress?.phase) }
     private var chosenFolderName: String? { handoff.libraryRoot?.lastPathComponent }
     private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
     private var followsDescribe: Bool { chatModelKind.isEmpty || chatModelKind == describeKind }
