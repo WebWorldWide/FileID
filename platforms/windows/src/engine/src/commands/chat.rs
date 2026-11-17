@@ -1716,6 +1716,16 @@ mod tests {
         assert_eq!(ask("h", "how many photos per year?").0, "Photos by year: 2023: 3, 2019: 68, 2018: 182.");
         assert_eq!(ask("i", "photos from summer 2023").0, "Found 3 photos from summer 2023.");
         assert_eq!(ask("j", "what's taking up the most space?").0, "Files use 2.5 GB (254 files). Largest: surf.mov (2.5 GB), c.arw (9.0 KB), b.jpg (5.0 KB).");
+        // "this" points at the library, not at a word to search for.
+        for (conversation, text, answer) in [
+            ("k1", "how many videos are in this library?", "Found 1 video, using 2.5 GB."),
+            ("k2", "How many videos do I have", "Found 1 video, using 2.5 GB."),
+            ("k3", "how many photos from 2023", "Found 3 photos from 2023, using 18.0 KB."),
+            ("k4", "how many files", "Found 254 files, using 2.5 GB."),
+            ("k5", "how many videos in this", "Found 1 video, using 2.5 GB."),
+        ] {
+            assert_eq!(ask(conversation, text).0, answer, "{text}");
+        }
         ask("g", "dog photos");
         assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
     }
