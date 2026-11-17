@@ -759,11 +759,12 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
 /// tokens — so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf`
 /// yields `acme` + `invoice`.
 pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    // A name stored decomposed (e + U+0301) must tokenize like its composed twin:
+    // the combining mark is not alphanumeric and would split "résumé" into "r" "sum".
+    let stem = crate::pipeline::dbwriter::nfc_path_search(
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    )
+    .to_lowercase();
     stem.split(|c: char| !c.is_alphanumeric())
         .filter(|t| {
             t.chars().count() >= 3
@@ -1557,6 +1558,18 @@ mod tests {
     }
 
     // ── Non-image pass (RESTRUCTURE.md R1) ─────────────────────────────────
+
+    #[test]
+    fn filename_tokens_are_the_same_for_composed_and_decomposed_names() {
+        assert_eq!(
+            filename_tokens(Path::new("/a/re\u{301}sume\u{301}_u\u{308}ni\u{308}code_1.pdf")),
+            vec!["r\u{e9}sum\u{e9}".to_string(), "\u{fc}n\u{ef}code".to_string()]
+        );
+        assert_eq!(
+            filename_tokens(Path::new("/a/r\u{e9}sum\u{e9}_\u{fc}n\u{ef}code_1.pdf")),
+            vec!["r\u{e9}sum\u{e9}".to_string(), "\u{fc}n\u{ef}code".to_string()]
+        );
+    }
 
     #[test]
     fn filename_tokens_keep_content_drop_generic() {

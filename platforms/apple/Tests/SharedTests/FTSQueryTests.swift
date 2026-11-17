@@ -95,4 +95,13 @@ struct FTSQueryTests {
         #expect(Self.isLiteralPhraseQuery(out), "input \(input) → \(out)")
         #expect(!out.isEmpty)
     }
+
+    @Test("Prefix query marks terms with two or more letters or digits")
+    func prefixQuery() {
+        #expect(FTSQuery.prefixed("IMG_41") == "\"IMG_41\" *")
+        #expect(FTSQuery.prefixed("beach  4") == "\"beach\" * \"4\"")
+        #expect(FTSQuery.prefixed("a b") == "")
+        #expect(FTSQuery.prefixed(" - \" * ") == "")
+        #expect(FTSQuery.prefixed("say\"hi\"") == "\"say\"\"hi\"\"\" *")
+    }
 }

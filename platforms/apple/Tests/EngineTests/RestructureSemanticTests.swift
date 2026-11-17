@@ -252,6 +252,10 @@ struct RestructureSemanticTests {
         #expect(RestructureSemantic.filenameTokens("/a/acme_invoice_2023.pdf") == ["acme", "invoice"])
         #expect(RestructureSemantic.filenameTokens("/a/IMG_4821.heic").isEmpty)
         #expect(RestructureSemantic.filenameTokens("/a/Screenshot 2024-01-02.png").isEmpty)
+        let composed = ["r\u{e9}sum\u{e9}", "\u{fc}n\u{ef}code"]
+        #expect(RestructureSemantic.filenameTokens("/a/re\u{301}sume\u{301}_u\u{308}ni\u{308}code_1.pdf") == composed,
+                "a decomposed name tokenizes like its composed twin")
+        #expect(RestructureSemantic.filenameTokens("/a/r\u{e9}sum\u{e9}_\u{fc}n\u{ef}code_1.pdf") == composed)
     }
 
     /// The R1 fix: non-image files (no CLIP embedding — `clip` is empty) cluster by

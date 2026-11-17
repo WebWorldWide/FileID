@@ -638,7 +638,8 @@ public enum RestructureSemantic {
     /// "acme_invoice_2023.pdf" → ["acme","invoice"]. (RESTRUCTURE.md R1)
     static func filenameTokens(_ path: String) -> [String] {
         let base = (path as NSString).lastPathComponent
-        let stem = (base as NSString).deletingPathExtension.lowercased()
+        // Composed form first, so a name stored decomposed tokenizes and title-cases like its twin.
+        let stem = (base as NSString).deletingPathExtension.precomposedStringWithCanonicalMapping.lowercased()
         return stem.split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
             // Length is measured in Unicode SCALARS, not grapheme clusters, to match
