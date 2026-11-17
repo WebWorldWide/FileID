@@ -1208,7 +1208,7 @@ mod tests {
         for pair in segments[0].windows(2) {
             let (a, b) = (pair[0], pair[1]);
             assert!(
-                files[a].time_unix < files[b].time_unix || (files[a].time_unix == files[b].time_unix && a < b),
+                files[a].time_unix.total_cmp(&files[b].time_unix).then(a.cmp(&b)).is_lt(),
                 "{a} before {b}"
             );
         }
