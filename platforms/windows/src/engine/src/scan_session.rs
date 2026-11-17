@@ -2865,5 +2865,27 @@ mod tests {
         assert!(skip.contains("/v/embedded.mov"));
         assert!(skip.contains("/a/song.m4a"));
     }
+
+    #[test]
+    fn image_clip_gate_keeps_embeddingless_images_out_of_the_skip_set_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+                 failed INTEGER NOT NULL DEFAULT 0, content_hash BLOB);
+             CREATE TABLE clip_embeddings (file_id INTEGER PRIMARY KEY, embedding BLOB, model TEXT);
+             INSERT INTO files (id, path_text, kind, content_hash) VALUES
+                 (1, '/p/bare.jpg', 'image', X'00'), (2, '/p/embedded.jpg', 'image', X'00'),
+                 (3, '/p/note.txt', 'text', X'00'), (4, '/a/song.m4a', 'audio', X'00');
+             INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (2, X'00', 'clip');",
+        )
+        .unwrap();
+        let sql = format!("SELECT path_text FROM files WHERE failed = 0 {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_IMAGE_CLIP_GATE}");
+        let skip: std::collections::HashSet<String> =
+            conn.prepare(&sql).unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert!(!skip.contains("/p/bare.jpg"), "an image with no vector is walked again so it can be embedded");
+        assert!(skip.contains("/p/embedded.jpg"));
+        assert!(skip.contains("/p/note.txt"), "the gate is about images only");
+        assert!(skip.contains("/a/song.m4a"));
+    }
 }
 
