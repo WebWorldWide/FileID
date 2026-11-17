@@ -3361,7 +3361,8 @@ mod tests {
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         coord.request_cancel();
-        assert!(settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience).await.is_none());
+        let cancelled = tokio::time::timeout(Duration::from_secs(5), settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience));
+        assert!(cancelled.await.expect("a cancelled wait returns at once, not after its patience").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
