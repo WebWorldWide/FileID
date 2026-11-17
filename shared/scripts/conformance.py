@@ -23,7 +23,7 @@ A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
 macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
 {size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {hardware} (the Mac's benchmark hardware string), {clip_model} (the CLIP
-embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
+embedding model id both engines derive from the model manifest), {clip_index_job} (the id of the visual index job for that model) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
@@ -453,6 +453,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "clip_index_job":
+            return "catalog-index-" + hashlib.sha256(clip_model().encode()).hexdigest()
         if name == "hardware":
             return mac_hardware()
         if name == "bookmark":
