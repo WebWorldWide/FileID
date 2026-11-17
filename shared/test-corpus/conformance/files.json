@@ -121,8 +121,7 @@
   }
   ,{
     "name": "files-trash-put-back-restores-faces",
-    "description": "Trash snapshot keeps the file's face_prints rows, so put back restores the faces with their people assignment and recounts persons.file_count; Swift joins once its snapshot carries face_prints.",
-    "engines": ["rust"],
+    "description": "Trash snapshot keeps the file's face_prints rows, so put back restores the faces with their people assignment and recounts persons.file_count.",
     "requiresTestTrashRoot": ["darwin"],
     "tree": [
       {"path": "people/a.jpg", "content": "face a\n", "row": {"id": 1, "kind": "image"}},
