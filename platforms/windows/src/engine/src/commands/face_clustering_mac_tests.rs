@@ -293,3 +293,32 @@ fn auto_merge_does_not_join_people_who_share_a_photo() {
     let people: Vec<Option<i64>> = Catalog { conn, dir: catalog.dir }.assignments().into_iter().map(|(_, person)| person).collect();
     assert_eq!(people, vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
 }
+
+fn many_clusters(count: usize, size_of: impl Fn(usize) -> usize) -> BTreeMap<usize, Vec<usize>> {
+    (0..count).map(|id| (id, (0..size_of(id)).collect())).collect()
+}
+
+#[test]
+fn the_person_cap_keeps_every_protected_person_and_drops_the_smallest_others() {
+    let clusters = many_clusters(MAX_PERSONS + 3, |id| if id < 3 { 1 } else { 5 + id % 7 });
+    let protected: HashSet<usize> = (0..3).collect();
+    let (kept, truncated) = cap(clusters.clone(), &protected, 0).unwrap();
+    assert_eq!(kept.len(), MAX_PERSONS);
+    assert!((0..3).all(|id| kept.contains_key(&id)), "protected people survive even though they are the smallest");
+    assert_eq!(truncated, clusters.values().map(Vec::len).sum::<usize>() - kept.values().map(Vec::len).sum::<usize>());
+    let dropped_largest = clusters.iter().filter(|(id, _)| !kept.contains_key(id)).map(|(_, m)| m.len()).max().unwrap();
+    let kept_smallest = kept.iter().filter(|(id, _)| **id >= 3).map(|(_, m)| m.len()).min().unwrap();
+    assert!(dropped_largest <= kept_smallest, "only the smallest unprotected clusters are dropped");
+}
+
+#[test]
+fn people_already_kept_use_up_the_person_cap_and_an_overfull_protected_set_refuses() {
+    let clusters = many_clusters(10, |_| 4);
+    let (kept, truncated) = cap(clusters.clone(), &HashSet::new(), MAX_PERSONS - 6).unwrap();
+    assert_eq!((kept.len(), truncated), (6, 16), "only the six free slots are filled");
+    let all: HashSet<usize> = clusters.keys().copied().collect();
+    assert!(cap(clusters.clone(), &all, MAX_PERSONS - 6).is_err(), "ten protected people do not fit in six slots");
+    assert!(cap(clusters.clone(), &HashSet::new(), MAX_PERSONS + 1).is_err(), "preserved people over the cap refuse");
+    let (kept, truncated) = cap(clusters, &HashSet::new(), MAX_PERSONS - 10).unwrap();
+    assert_eq!((kept.len(), truncated), (10, 0), "a run that fits loses nothing");
+}

@@ -9,8 +9,8 @@ Categories: **a** pinned by a Rust unit test; **b** pinned by a shared conforman
 | Area | Tests | a | a+b / a* | b | c | d (open) |
 |---|---|---|---|---|---|---|
 | A data safety, restructure, writer, dispatch | 188 | 118 | 0 | 16 | 40 | 14 |
-| B scan, decode, residency, IPC sink, models | 196 | 92 | 0 | 1 | 52 | 51 |
-| C faces, takes, search, naming, Describe Files | 292 | 216 | 0 | 0 | 31 | 45 |
+| B scan, decode, residency, IPC sink, models | 196 | 91 | 4 | 1 | 52 | 48 |
+| C faces, takes, search, naming, Describe Files | 292 | 216 | 2 | 0 | 31 | 43 |
 | D chat, timeline, video, media tools | 117 | 58 | 19 | 3 | 18 | 19 |
 | **Total** | **793** | 484 | 19 | 20 | 141 | 129 |
 
@@ -424,20 +424,20 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
 | DiscoveryTests | smallTree | A walk returns the sorted, filtered files of a tree. | a | platforms/windows/src/engine/src/pipeline/discovery.rs::synthetic_tree_walk_prunes_noise_and_counts_files; scan.json scan-tiny-tree-catalogs-every-file |
-| DiscoveryTests | streamingPublishesEarlyProgress | Streaming discovery reports counts before the walk ends. | a | pipeline/discovery.rs::count_increments_before_channel_send ~ |
-| DiscoveryTests | skipsLargeFiles | Documents and images over the size cap are skipped; large streamed video is kept. | d | Rust walk has no size cap (unix_edge_cases_walk_to_completion keeps a 6 GiB mp4; no test of an oversize image/doc). Missing: walk a tree with an over-cap tif/pdf and assert the stated outcome (skip or keep) in discovery.rs |
-| DiscoveryTests | discoversTextData | Plain-text data extensions (csv, json, yaml...) are discovered as documents. | d | Only kind_from_extension_image_set/audio_and_model/unknown tested; no assertion that csv/json/log map to Doc. Missing: kind_from_extension_text_data_is_document |
+| DiscoveryTests | streamingPublishesEarlyProgress | Streaming discovery reports counts before the walk ends. | a | pipeline/discovery.rs::count_increments_before_channel_send (read round 16: asserts count == 100 with the receiver undrained, so a counter moved to the consumer fails it; progress in the middle of a walk is not asserted) |
+| DiscoveryTests | skipsLargeFiles | Documents and images over the size cap are skipped; large streamed video is kept. | d | Rust walk has no size cap (unix_edge_cases_walk_to_completion keeps a 6 GiB mp4; no test of an oversize image/doc). Missing: walk a tree with an over-cap tif/pdf and assert the stated outcome (skip or keep) in discovery.rs Round 16: Rust has no size cap by design (the walk keeps a 6 GiB mp4), so the Swift rule is not a Rust invariant; decide before pinning. |
+| DiscoveryTests | discoversTextData | Plain-text data extensions (csv, json, yaml...) are discovered as documents. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/discovery.rs::plain_text_data_and_camera_raw_extensions_classify_as_indexed_kinds. Was: only image, audio and model kinds were asserted |
 | DiscoveryTests | prunesExcludedFolders | User-excluded folders are pruned and siblings kept. | a | pipeline/discovery.rs::synthetic_tree_walk_honors_user_exclusions |
-| DiscoveryTests | skippedFileScannedAtIsBumped | An unchanged skipped file still gets scanned_at updated so later sweeps treat it as seen. | a | pipeline/dbwriter.rs bumps scanned_at (UPDATE at line 331); pin: discovery.rs::skipped_but_present_files_stay_in_the_seen_set (seen set only; ~ the scanned_at UPDATE itself has no direct test; see Gaps) |
-| DiscoveryTests | sizeMismatch | A changed size never skips a file. | d | discovery.rs:861-870 predicate has no unit test for size mismatch. Missing: predicate test over (size,mtime) matrix |
-| DiscoveryTests | equalMtimeSkips | Equal size and equal mtime skip the file. | a | pipeline/discovery.rs::skipped_but_present_files_stay_in_the_seen_set ~ |
-| DiscoveryTests | backdatedEditNotSkipped | A same-size edit with a different (older) mtime is reprocessed. | d | No Rust test for mtime inequality in the skip predicate (grep 'backdated' finds none). Silent stale rows on regression |
-| DiscoveryTests | bothNilSkips | Both-nil stored/disk mtime counts as unchanged. | d | Rust predicate treats stored None as 'not current'? (discovery.rs:866-870) - behaviour differs and is untested; decide and pin |
-| DiscoveryTests | nilVsPresentNotSkipped | A one-sided nil mtime is a change. | d | untested, same predicate |
-| DiscoveryTests | tinyDriftSkips | Sub-microsecond mtime drift still skips. | d | 1e-6 tolerance at discovery.rs:869 untested |
-| DiscoveryTests | commonCameraAndAudioFormatsAreIndexed | Common camera RAW and audio extensions classify as indexed kinds. | a | pipeline/discovery.rs::kind_from_extension_audio_and_model, kind_from_extension_image_set ~ (RAW extensions not asserted; see raw_preview.rs) |
+| DiscoveryTests | skippedFileScannedAtIsBumped | An unchanged skipped file still gets scanned_at updated so later sweeps treat it as seen. | a | pipeline/discovery.rs::skipped_but_present_files_stay_in_the_seen_set (read round 16: Rust does not bump scanned_at of a skipped row; the seen set keeps the row from being hidden, which is what this test pins. The only scanned_at touch is the heal-only path: pipeline/dbwriter.rs::heal_only_tests) |
+| DiscoveryTests | sizeMismatch | A changed size never skips a file. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix (also classify_entry_builds_full_payload_off_consumer). Failed when the size compare was removed |
+| DiscoveryTests | equalMtimeSkips | Equal size and equal mtime skip the file. | a | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix, classify_entry_builds_full_payload_off_consumer (read round 16: the unchanged file is skipped and still seen) |
+| DiscoveryTests | backdatedEditNotSkipped | A same-size edit with a different (older) mtime is reprocessed. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix (a stored time a day older or newer than the disk re-reads). Failed when the time compare was removed |
+| DiscoveryTests | bothNilSkips | Both-nil stored/disk mtime counts as unchanged. | a (closed round 16; was d; Rust differs from Swift) | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix pins the Rust rule: a row with no stored time is never current and is re-read (Swift skips it). Rust writes a time for every scanned row, so only an old or hand-edited catalog hits it; the cost is one re-read. Failed when the rule was flipped |
+| DiscoveryTests | nilVsPresentNotSkipped | A one-sided nil mtime is a change. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix (stored time missing, disk time present) |
+| DiscoveryTests | tinyDriftSkips | Sub-microsecond mtime drift still skips. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix (4e-7 s skips, 3e-6 s re-reads). Failed when the tolerance was widened to 1 s |
+| DiscoveryTests | commonCameraAndAudioFormatsAreIndexed | Common camera RAW and audio extensions classify as indexed kinds. | a | pipeline/discovery.rs::kind_from_extension_audio_and_model, kind_from_extension_image_set, plain_text_data_and_camera_raw_extensions_classify_as_indexed_kinds (RAW and audio extensions asserted since round 16) |
 | DiscoveryTests | symlinkedRootCanonicalizes | A symlinked scan root walks its target with child paths in the same form. | d | unix_edge_cases_walk_to_completion covers symlinks inside the tree, not a symlinked ROOT. Missing: root-is-symlink walk asserting child path prefix |
-| DiscoveryTests | shortfall | Unreadable folders and oversize files give one plain notice; a clean walk gives none. | a | scan_session.rs tests at ~1997-2003 (discovery_partial kind) + discovery.rs::unix_edge_cases_walk_to_completion error count |
+| DiscoveryTests | shortfall | Unreadable folders and oversize files give one plain notice; a clean walk gives none. | a | scan_session.rs::cloud_only_files_are_reported_in_the_swift_engines_words, an_unreachable_root_keeps_the_notice_for_a_disconnected_drive (read round 16: unreadable and cloud-only items give one notice in the Swift words, a clean walk gives none; the oversize-file half does not exist in Rust, which has no size cap) |
 
 ### DocumentAnalysisTests
 
@@ -450,20 +450,20 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | DocumentAnalysisTests | oneLetterTokens | One-letter tokens are not keywords. | a | platforms/windows/src/engine/src/util/keywords.rs::one_letter_tokens_are_not_keywords |
 | DocumentAnalysisTests | groundedFilename | Grounded filenames use only extracted words. | a | platforms/windows/src/engine/src/util/keywords.rs::grounded_filename_uses_three_to_five_source_words |
 | DocumentAnalysisTests | plainText | Plain text extraction is bounded. | a | pipeline/doc_extract.rs::extract_text_file_passes_through, truncate_respects_char_boundary |
-| DocumentAnalysisTests | longTextKeepsUTF8 | Long text files index up to 256 KiB and a cap inside a character does not corrupt it. | a | pipeline/doc_extract.rs::truncate_handles_cut_inside_multibyte_char (256 KiB value ~ not asserted) |
+| DocumentAnalysisTests | longTextKeepsUTF8 | Long text files index up to 256 KiB and a cap inside a character does not corrupt it. | a* | pipeline/doc_extract.rs::truncate_handles_cut_inside_multibyte_char (256 KiB value ~ not asserted) Read round 16: the test asserts the cut stays inside the cap and on a character, not the 256 KiB value itself. |
 | DocumentAnalysisTests | powerpoint | PowerPoint slide text and entities are extracted. | a | pipeline/doc_extract.rs::xml_text_runs_collects_only_target_elements, xml_text_runs_resolves_entities |
-| DocumentAnalysisTests | corruptPresentation | Corrupt presentations fail closed and promptly. | a | pipeline/doc_extract.rs::archive_entry_preflight_rejects_central_directory_amplification, archive_preflight_rejects_fake_eocd... ~ (promptness not asserted) |
+| DocumentAnalysisTests | corruptPresentation | Corrupt presentations fail closed and promptly. | a* | pipeline/doc_extract.rs::archive_entry_preflight_rejects_central_directory_amplification, archive_preflight_rejects_fake_eocd... ~ (promptness not asserted) Read round 16: both tests assert a refusal with a reason; promptness is not asserted. |
 | DocumentAnalysisTests | completedExtractionKeepsCircuitOpen | A finished extraction is not invalidated by its stale timeout. | c | Swift DocText timeout circuit; Rust extraction has no equivalent timer (disappears) |
 | DocumentAnalysisTests | xmlEntities | OOXML entities decode once. | a | pipeline/doc_extract.rs::xml_text_runs_resolves_entities |
 | DocumentAnalysisTests | pdfTextAndRaster | Text-layer PDFs extract text and render a bounded first page. | c | stays, moves to AppleKitTests: ScanDocuments.swift in FileIDAppleKit is the shared implementation (confirm ScanAdapterTests covers PDF text+raster; else gap) |
-| DocumentAnalysisTests | scanTagging | Scan tagging persists bounded document keywords and scores. | b | scan.json scan-mac-adapters-store-what-the-swift-scan-stores ~ (keyword bound/score not asserted per row) |
+| DocumentAnalysisTests | scanTagging | Scan tagging persists bounded document keywords and scores. | b | scan.json scan-mac-adapters-store-what-the-swift-scan-stores ~ (keyword bound/score not asserted per row) Read round 16: the case asserts the document keyword tags per file; the keyword count bound and scores are not asserted. |
 | DocumentAnalysisTests | corruptPDFTagging | A corrupt PDF stays retryable and keeps prior metadata. | d | dbwriter::stage_skipped_rescan_preserves_prior_metadata covers skipped stages only. Missing: scan a re-written corrupt PDF over an existing row, assert failed/retry and tags kept |
 | DocumentAnalysisTests | metadataLessAudio | Audio with no metadata degrades to a stable Audio tag. | d | scan-stores-the-kind-tag... uses tagged mp3 only. Missing: untagged audio -> only 'Audio' |
 | DocumentAnalysisTests | classifications | Every promised extension routes to the intended analysis kind. | d | No Rust test of extension->analysis kind for Describe Files (deep_scope.rs not matched). Missing table test in commands/deep_scope.rs |
 | DocumentAnalysisTests | prompts | Prompts are type-specific; text-only prompts forbid visual invention. | d | Only document_prompt_quotes_untrusted_instructions_as_json_data exists. Missing: prompt content assertions in pipeline/deep_analyze_naming.rs |
 | DocumentAnalysisTests | promptInjectionBoundary | Quoted document text cannot become model instructions. | a | pipeline/deep_analyze_naming.rs::document_prompt_quotes_untrusted_instructions_as_json_data |
 | DocumentAnalysisTests | textOnlyGrounding | Text-only results strip unsupported visual claims and ground names. | d | Missing: result post-filter test in pipeline/deep_analyze_naming.rs |
-| DocumentAnalysisTests | targetResolution | Target resolution includes documents and rejects unsupported files. | a | commands/deep_scope.rs tests ~ (not opened) |
+| DocumentAnalysisTests | targetResolution | Target resolution includes documents and rejects unsupported files. | d (moved from a, round 16) | commands/deep_scope.rs tests read round 16: they pin selection, exclusions and path boundaries only. Nothing asserts that documents are targets and unsupported kinds are refused. |
 
 ### TextReadingTests
 
@@ -479,7 +479,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | TextReadingTests | transcriptionTargetsUnreadTextBearingImagesAndScannedPDFs | Transcription targets unread text-bearing images and scanned PDFs. | a | pipeline/text_reading.rs::transcription_targets_unread_text_bearing_images_and_scanned_pdfs |
 | TextReadingTests | parseTranscriptionStripsMarkerAndRejectsNone | Transcription parsing strips the marker and rejects 'none'. | a | pipeline/text_reading.rs::parse_transcription_strips_marker_and_rejects_none |
 | TextReadingTests | scanStoresTheHandwritingFlagAndRescanKeepsATranscription | A scan stores the handwriting flag; a rescan keeps a stored transcription. | a | pipeline/text_reading.rs::stored_transcription_survives_rescan_until_the_file_changes (flag storage: dbwriter::vision_faces_and_text_reads_are_stored_as_the_swift_scan_stores_them) |
-| TextReadingTests | transcriptionIsSearchableAsHandwritingAndSurvivesRescanUntilTheFileChanges | Transcription is searchable as handwriting and survives rescan until the file changes. | a | pipeline/text_reading.rs::stored_transcription_survives_rescan_until_the_file_changes (searchability ~ not asserted) |
+| TextReadingTests | transcriptionIsSearchableAsHandwritingAndSurvivesRescanUntilTheFileChanges | Transcription is searchable as handwriting and survives rescan until the file changes. | a | pipeline/text_reading.rs::stored_transcription_survives_rescan_until_the_file_changes (read round 16: asserts the transcription is found by an ocr_fts MATCH, and gone after the file changes) |
 
 ### ArchiveNamesTests
 
@@ -496,7 +496,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | ContentHashTests | identicalEqual | Identical bytes hash equal regardless of path. | a | util/content_hash.rs::identical_content_hashes_equal_regardless_of_path |
 | ContentHashTests | differentDiffer | Different bytes hash differently. | a | util/content_hash.rs::different_content_hashes_differ |
 | ContentHashTests | compositeDeterministic | Composite hash is deterministic and differs from the full hash. | a | util/content_hash.rs::composite_path_is_deterministic_and_differs_from_full |
-| ContentHashTests | compositeEdge | Composite catches a differing edge byte. | a | util/content_hash.rs::composite_detects_a_changed_middle_byte_via_size_or_edges ~ (edge byte only if asserted) |
+| ContentHashTests | compositeEdge | Composite catches a differing edge byte. | a | util/content_hash.rs::composite_hash_notices_a_change_in_only_the_first_or_only_the_last_edge_byte (round 16: the older composite_detects_a_changed_middle_byte_via_size_or_edges changes both edges against each other, on a file smaller than one chunk, so it could not tell the edges apart). Failed when the tail read was removed |
 
 ### CaptureDateBackfillTests
 
@@ -518,7 +518,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | ScanCatchUpTests | visionContextRoundTrip | The stored classifier context yields the same combined tags as full output. | a | pipeline/catch_up.rs::the_context_reads_and_writes_the_swift_engines_json, the_context_keeps_exactly_what_the_tag_agreement_reads |
 | ScanCatchUpTests | writerSetsAndClearsMarker | The writer records what a file owes with its row and clears it on full re-analysis. | a | pipeline/dbwriter.rs::work_owed_is_stored_with_the_row_and_replaced_by_a_full_analysis |
 | ScanCatchUpTests | hiddenRowOwesNothing | A hidden (no longer present) row owes nothing. | a | pipeline/catch_up.rs::a_hidden_row_owes_nothing |
-| ScanCatchUpTests | v36MovesFailureMemory | Migration v36 moves failure memory out of scan_catchup and leaves owed rows. | a | db/migrations.rs tests ~ (not opened); shared/catalog/v36.sql is shared |
+| ScanCatchUpTests | v36MovesFailureMemory | Migration v36 moves failure memory out of scan_catchup and leaves owed rows. | a | db/migrations.rs::v36_moves_failure_memory_out_of_scan_catchup (read round 16: runs the real shared v36 SQL over failure, owed and unparseable rows and the cascade) |
 | ScanCatchUpTests | analysisClearsFailureMemory | A full analysis forgets a remembered failure. | a | dbwriter.rs::three_failures_of_the_same_file_are_remembered_and_a_success_forgets_them |
 | ScanCatchUpTests | healLookupUsesIndexes | The rename-heal lookup uses indexes, not a scan. | d | Rust heal tests check results (heal_lookup_*), not the query plan. Missing: EXPLAIN QUERY PLAN assertion in dbwriter.rs; cost: slow scans on 100k-file catalogs |
 | ScanCatchUpTests | twinInheritsMarker | A copy of an identical file inherits what the original owes. | a | dbwriter.rs::a_copy_owes_what_its_twin_owes_without_the_twins_own_year_and_camera_tags |
@@ -558,14 +558,14 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
-| ScanPipelinePerfTests | skipPredicateUnchanged | Unchanged file (same size and mtime) skips. | a | pipeline/discovery.rs::skipped_but_present_files_stay_in_the_seen_set ~ |
+| ScanPipelinePerfTests | skipPredicateUnchanged | Unchanged file (same size and mtime) skips. | a | platforms/windows/src/engine/src/pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix |
 | ScanPipelinePerfTests | skipPredicateModified | A changed mtime never skips. | d | see DiscoveryTests.backdatedEditNotSkipped |
 | ScanPipelinePerfTests | skipPredicateBackdatedMtime | A backdated same-size edit reprocesses. | d | same |
 | ScanPipelinePerfTests | skipPredicateSize | A size change never skips. | d | same |
 | ScanPipelinePerfTests | skipPredicateNilMtime | A one-sided nil mtime never skips. | d | same |
-| ScanPipelinePerfTests | discoverySkipSet | Incremental walk drops current files; failed/changed/unknown reprocess. | a | scan_session.rs::files_that_keep_failing_join_the_skip_set_with_their_stored_size_and_date, skip_set_excludes_hydrated_placeholder_keeps_scanned_file ~ (failed and changed not both asserted) |
+| ScanPipelinePerfTests | discoverySkipSet | Incremental walk drops current files; failed/changed/unknown reprocess. | a | scan_session.rs::files_that_keep_failing_join_the_skip_set_with_their_stored_size_and_date (read round 16: given-up, two-try, other-build, owed and settled rows), pipeline/discovery.rs::the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix (changed rows re-read), scan_session.rs::skip_set_excludes_hydrated_placeholder_keeps_scanned_file |
 | ScanPipelinePerfTests | streamingMatchesWalk | walkStreaming emits exactly the files walk returns. | c | Swift has two walk APIs; Rust has one streaming walk |
-| ScanPipelinePerfTests | decoupledCommitNoLoss | Draining more than two batches through the committer commits every row. | a | pipeline/dbwriter.rs::row_count_equals_distinct_paths, a_full_database_fails_the_batch_whole_and_the_writer_recovers ~ |
+| ScanPipelinePerfTests | decoupledCommitNoLoss | Draining more than two batches through the committer commits every row. | a (round 16) | platforms/windows/src/engine/src/pipeline/dbwriter.rs::the_writer_commits_every_row_across_more_than_two_batches_and_the_tail (round 16: sends two batches and a tail of 7 through run(); failed when the tail flush was removed). The earlier pins, row_count_equals_distinct_paths and a_full_database_fails_the_batch_whole_and_the_writer_recovers, never drive run() across batches |
 
 ### TaggingLoadSizeTests
 
@@ -612,8 +612,8 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | TwinReuseTests | (idle drop) | Results are dropped once the registry has been idle. | d | Missing: idle expiry test |
 | TwinReuseTests | (reset) | reset forgets results and releases waiters. | d | Missing: reset test; cost: stuck waiters between scans |
 | TwinReuseTests | (copy takes twin output, own path/dates/year) | A copy takes the twin's model output but keeps its own path, dates, inode and Year tag. | a | pipeline/dbwriter.rs::a_copy_takes_over_its_twins_rows_and_keeps_its_own_year |
-| TwinReuseTests | (copy keeps EXIF time and camera tag) | A copy with an EXIF capture time keeps that time and its camera tag. | a | dbwriter.rs::a_copy_takes_the_camera_and_location_its_bytes_share_with_the_twin ~ (EXIF time retention not asserted by name) |
-| TwinReuseTests | (only full-hash files participate) | Only files stored with a full-file hash take part. | d | Missing: twin_reuse/tagging test that a sampled-hash (over-cap) row is not reused; cost: wrong tags on near-identical large files |
+| TwinReuseTests | (copy keeps EXIF time and camera tag) | A copy with an EXIF capture time keeps that time and its camera tag. | a | platforms/windows/src/engine/src/pipeline/tagging_mac.rs::a_twin_row_keeps_its_own_dates_and_leaves_the_analysis_to_the_writer (EXIF capture time and the Year tag taken from it), pipeline/dbwriter.rs::a_copy_takes_the_camera_and_location_its_bytes_share_with_the_twin (camera and location; read round 16) |
+| TwinReuseTests | (only full-hash files participate) | Only files stored with a full-file hash take part. | d | Missing: twin_reuse/tagging test that a sampled-hash (over-cap) row is not reused; cost: wrong tags on near-identical large files Round 16: pipeline/dbwriter.rs::a_copy_never_takes_over_a_failed_row_a_non_image_a_sampled_hash_or_a_row_with_reuse_switched_off pins the length-32 guard; an over-cap composite hash is also 32 bytes, so the SQL cannot tell it from a full hash and the decoder claim path is untested. Still open. |
 | TwinReuseTests | (in-memory hash equals stored hash) | Hashing bytes in memory gives the stored file hash. | a | util/content_hash.rs::full_hash_is_sha256_for_cross_platform_parity; doc_extract extract_text_bytes_equivalent_to_path (analog) |
 | TwinReuseTests | (identical images analyzed once, jpg/heic) | Byte-identical images are analyzed once and each keeps its own row (jpg, heic). | a | tagging.rs::identical_images_all_complete_when_no_analysis_can_be_shared, a_copy_of_an_image_in_flight_is_hashed_but_not_decoded; dbwriter::coexisting_byte_identical_copies_stay_distinct_rows |
 | TwinReuseTests | (failed image not offered) | An image that fails is not offered to its copies. | a | tagging.rs::a_waiting_copy_reuses_a_finished_owner_and_decodes_only_when_it_failed |
@@ -624,23 +624,23 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 |---|---|---|---|---|
 | CatalogTwinReuseTests | (second copy takes stored analysis) | A second copy takes the stored analysis (tags, faces, text, embedding), own path and Year, no model run. | a | dbwriter.rs::a_copy_of_an_earlier_scan_is_served_from_the_catalog |
 | CatalogTwinReuseTests | (date change keeps row, faces, people) | A file whose date changed but bytes did not keeps its row, faces and people. | d | Closest: dbwriter::a_time_a_bit_apart_keeps_the_stored_number_and_a_real_change_updates_it. Missing: touch-only rescan keeps face_prints and person assignments |
-| CatalogTwinReuseTests | (owed row not reused) | A row the catch-up still owes work is not reused. | a | dbwriter.rs::a_copy_owes_what_its_twin_owes_without_the_twins_own_year_and_camera_tags ~ |
-| CatalogTwinReuseTests | (row by other models not reused) | A row made by other models is not reused. | d | Missing: dbwriter test with differing model key; cost: stale tags on model upgrade |
-| CatalogTwinReuseTests | (failed/other kinds/reuse off never reuse) | Failed rows, other kinds, and reuse switched off never reuse. | d | Missing: dbwriter tests for failed row, non-image kind, off switch |
+| CatalogTwinReuseTests | (owed row not reused) | A row the catch-up still owes work is not reused. | a | platforms/windows/src/engine/src/pipeline/dbwriter.rs::a_copy_owes_what_its_twin_owes_without_the_twins_own_year_and_camera_tags (read round 16: Rust does not skip a twin that owes work, the copy inherits the debt; the outcome, no stale tags kept, is pinned) |
+| CatalogTwinReuseTests | (row by other models not reused) | A row made by other models is not reused. | d | Missing: dbwriter test with differing model key; cost: stale tags on model upgrade Round 16: Rust does NOT hold this. The twin lookup (TWIN_LOOKUP_SQL, COMPLETE_IMAGE_SQL) has no model condition, so a copy takes tags a previous model wrote. Not fixed (a design decision, not a few lines). |
+| CatalogTwinReuseTests | (failed/other kinds/reuse off never reuse) | Failed rows, other kinds, and reuse switched off never reuse. | a (closed round 16; was d) | platforms/windows/src/engine/src/pipeline/dbwriter.rs::a_copy_never_takes_over_a_failed_row_a_non_image_a_sampled_hash_or_a_row_with_reuse_switched_off (failed, non-image, short hash, no tags or vector, reuse off, and an intact twin as the positive control). Failed when the twin SQL lost its failed/kind/length guard |
 
 ### ScanTaggingAdmissionTests
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
 | ScanTaggingAdmissionTests | (reports time blocked by interactive CPU) | Scan tagging reports time blocked by interactive CPU work. | d | Missing: resource_scheduler.rs test of blocked-time accounting; cost: presentation (progress telemetry) |
-| ScanTaggingAdmissionTests | (two files share one CPU unit) | Two scan files share one CPU unit; a third waits. | a | pipeline/tagging.rs::scan_files_wait_for_admission_instead_of_failing ~; resource_scheduler.rs::aggregate_budgets_cancellation_and_drop_release |
+| ScanTaggingAdmissionTests | (two files share one CPU unit) | Two scan files share one CPU unit; a third waits. | d (moved from a, round 16) | pipeline/tagging.rs::scan_files_wait_for_admission_instead_of_failing (read round 16: pins that scan files wait for memory instead of failing, not that two files share one CPU unit and a third waits); resource_scheduler.rs::aggregate_budgets_cancellation_and_drop_release is about leases, not scan files. Presentation and timing only. |
 
 ### ScanModelResidencyTests
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
 | ScanModelResidencyTests | freesAfterTheIdlePeriodAndNotBefore | Models free after the idle period and not before. | a | models/idle.rs::parks_after_the_idle_period_and_reloads_on_next_use |
-| ScanModelResidencyTests | useRestartsTheIdlePeriod | Use restarts the idle period. | a | models/idle.rs::a_model_in_use_is_never_parked_and_a_failed_load_retries ~ |
+| ScanModelResidencyTests | useRestartsTheIdlePeriod | Use restarts the idle period. | a | platforms/windows/src/engine/src/models/idle.rs::using_a_model_restarts_its_idle_period (round 16; failed when the use time update was removed), a_model_in_use_is_never_parked_and_a_failed_load_retries |
 | ScanModelResidencyTests | aRunningScanKeepsTheModelsAndTheIdlePeriodStartsAtItsEnd | A running scan keeps models; idle timing starts at its end. | a | pipeline/scan_models.rs::releasing_idle_models_keeps_adapter_models_a_running_scan_holds |
 | ScanModelResidencyTests | nestedHoldsNeedEveryEnd | Nested holds need every end before release. | a | pipeline/scan_models.rs::adapter_models_unload_with_the_last_holder |
 | ScanModelResidencyTests | aDescriptionModelLoadFreesIdleModelsOnceAndReloadStartsFresh | Loading a description model frees idle scan models once; reload starts fresh. | a | pipeline/scan_models.rs::a_resident_stack_is_reused_for_the_same_key_and_freed_for_another, releasing_for_another_model_is_counted |
@@ -651,7 +651,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
 | ModelResidencyTests | sharedMemoryAdmissionReservesSystemHeadroom | Shared-memory admission reserves system headroom. | a | util/model_memory.rs::shared_memory_admission_reserves_system_headroom |
-| ModelResidencyTests | modelSwitchWaitsForInferenceAndCancellationDoesNotStrandQueue | A model switch waits for inference; cancel does not strand the queue. | a | models/resident_owner_tests.rs, resident_service tests ~ (not opened); resource_scheduler.rs::cancelled_pending_admission_does_not_leak_or_block_following_work |
+| ModelResidencyTests | modelSwitchWaitsForInferenceAndCancellationDoesNotStrandQueue | A model switch waits for inference; cancel does not strand the queue. | a | models/resident_owner_tests.rs::resident_owner_waiting_checkout_cancel_preserves_current_job (read round 16: a sweep does not retire a busy lease, a cancelled waiting checkout leaves the current job and loads once), resource_scheduler.rs::cancelled_pending_admission_does_not_leak_or_block_following_work |
 | ModelResidencyTests | alreadyCancelledAdmissionsLeaveCapacityAvailable | Already-cancelled admissions leave capacity available. | a | resource_scheduler.rs::cancelled_pending_admission_does_not_leak_or_block_following_work |
 | ModelResidencyTests | cancellationDuringHandoffDoesNotLeakModelCapacity | Cancel during handoff does not leak capacity. | a | resource_scheduler.rs::aggregate_budgets_cancellation_and_drop_release |
 
@@ -668,7 +668,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | ResourceSchedulerTests | (lease released on failure) | Scheduled work releases its lease when the operation fails. | d | Missing: lease-on-error test through the scheduled-run wrapper |
 | ResourceSchedulerTests | (cancel releases lease) | Cancelling scheduled work releases its lease. | a | resource_scheduler.rs::patient_admission_is_bounded_cancellable_and_refuses_impossible_demands |
 | ResourceSchedulerTests | (observes cancel while retrying) | Scheduled work observes cancellation while retrying capacity. | a | resource_scheduler.rs::patient_admission_is_bounded_cancellable_and_refuses_impossible_demands |
-| ResourceSchedulerTests | (indexing defers to interactive) | Background indexing defers when resident interactive work owns the budget. | a | resource_scheduler.rs::resident_budget_conflict_is_deferred_instead_of_waiting_on_itself ~ |
+| ResourceSchedulerTests | (indexing defers to interactive) | Background indexing defers when resident interactive work owns the budget. | a | resource_scheduler.rs::interactive_waiters_precede_background_and_cancel_cleanly (read round 16: the interactive waiter is admitted first); resident_budget_conflict_is_deferred_instead_of_waiting_on_itself is a different rule (resident memory) |
 
 ### JobQueueTests
 
@@ -688,7 +688,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
-| IPCSinkCoalescingTests | (scanComplete survives progress flood) | A buffered scanComplete survives progress-flood coalescing. | a | ipc/sink.rs::terminal_phase_send_is_never_dropped_under_backpressure (phase; scanComplete itself not asserted ~); Rust sink does not coalesce, it drops progress via try_send |
+| IPCSinkCoalescingTests | (scanComplete survives progress flood) | A buffered scanComplete survives progress-flood coalescing. | a* | ipc/sink.rs::terminal_phase_send_is_never_dropped_under_backpressure (phase; scanComplete itself not asserted ~); Rust sink does not coalesce, it drops progress via try_send Read round 16: the test pins that send() awaits capacity where try_send drops, for a PhaseChanged; that the scan-complete event is emitted through send() is not tested. |
 
 ### IPCSinkEvictionTests
 
@@ -697,7 +697,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 | IPCSinkEvictionTests | (terminal completions pinned) | Every terminal completion event is classified critical. | d | Rust sink has no classification; terminal sends use send().await by call site. Missing: test that each terminal EventPayload is emitted via send (not try_send) in server.rs/commands; cost: app hangs waiting for a dropped *Complete |
 | IPCSinkEvictionTests | (progress not pinned) | Progress is evictable. | c | Swift classifier; Rust try_send drops progress by construction |
 | IPCSinkEvictionTests | (deepAnalyzeComplete + restructureApplyResult reach wire under flood) | Those terminals reach the wire under a progress flood. | d | terminal_phase_send test covers PhaseChanged only. Missing: same for DeepAnalyzeComplete/RestructureApplyResult; cost: stuck Describe/Organize UI after apply (data already moved) |
-| IPCSinkEvictionTests | (drainAndClose flushes terminal) | drainAndClose flushes a buffered terminal event then closes. | a | ipc/sink.rs::a_buffered_burst_reaches_the_stream_in_one_write_and_a_lone_event_is_not_held_back ~ (shutdown drain not asserted) |
+| IPCSinkEvictionTests | (drainAndClose flushes terminal) | drainAndClose flushes a buffered terminal event then closes. | a (closed round 16; was a ~) | platforms/windows/src/engine/src/ipc/sink.rs::closing_the_channel_writes_and_flushes_every_buffered_event_including_the_terminal_one (round 16: 50 events and a terminal one are buffered, the channel closes, every line is on the stream; failed when both flushes were removed) |
 
 ### IPCSinkRestructurePlanPinTests
 
@@ -710,7 +710,7 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
-| HardwareTests | intelNoSMTDoubleCount | Intel 6C/12T worker cap uses physical cores. | a | platform.rs::worker_cap_non_hybrid_8c ~ (formula differs from Swift: asserts 12 for 8c, not the 9 here) |
+| HardwareTests | intelNoSMTDoubleCount | Intel 6C/12T worker cap uses physical cores. | a | platform.rs::worker_cap_non_hybrid_8c (read round 16: asserts the Rust formula, physical cores + max(1, cores/2), giving 12 for 8 physical cores and 16 threads, not the Swift value; it does pin that logical threads are not double counted) |
 | HardwareTests | intelDegradedClampsToLogical | A degenerate SMT-doubled P count clamps to logical. | d | No Rust clamp test for Mac-hosted cap; Rust worker_cap is a separate formula |
 | HardwareTests | (M1 Pro keeps 14) | Apple Silicon M1 Pro keeps the tuned 14. | a | platform.rs::worker_cap_m1_pro_equivalent |
 | HardwareTests | (Ultra caps at 32) | Mac Studio Ultra caps at 32. | d | Missing Rust test for the 32 cap |
@@ -721,18 +721,18 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 
 | Suite | Test | Invariant | Cat | Rust pin |
 |---|---|---|---|---|
-| ModelBenchmarkTests | medianHandlesOddEvenAndNonFiniteRuns | Median handles odd, even and non-finite runs. | a | models/benchmark_tests.rs::median_handles_even_odd_and_empty (non-finite ~ not asserted) |
-| ModelBenchmarkTests | jsonValidityAcceptsFencedObjectsOnly | JSON validity accepts fenced objects only. | a | models/benchmark_tests.rs::answers_normalize_to_comparable_tokens ~ |
-| ModelBenchmarkTests | probeMatchesWholeWordsOnly | A probe matches whole words only. | a | benchmark_tests.rs::answers_normalize_to_comparable_tokens, probes_render_deterministically_with_expected_answers ~ |
+| ModelBenchmarkTests | medianHandlesOddEvenAndNonFiniteRuns | Median handles odd, even and non-finite runs. | a | models/benchmark_tests.rs::median_handles_even_odd_and_empty (read round 16: the NaN case is asserted) |
+| ModelBenchmarkTests | jsonValidityAcceptsFencedObjectsOnly | JSON validity accepts fenced objects only. | d (moved from a, round 16) | answers_normalize_to_comparable_tokens does not touch JSON validity. Rust scores the structured pass with pipeline/timeline_analysis.rs::parse_moments; no benchmark test asserts the valid-rate counting. Presentation only. |
+| ModelBenchmarkTests | probeMatchesWholeWordsOnly | A probe matches whole words only. | a* | models/benchmark_tests.rs::answers_normalize_to_comparable_tokens, probes_render_deterministically_with_expected_answers (read round 16: Rust compares the first meaningful word of the answer, a different rule from the Swift whole-word match; its own rule is pinned) |
 | ModelBenchmarkTests | workloadsCoverVisionOnlyForVisionModels | Vision workloads run only for vision models. | d | Missing: benchmark_server_tests.rs test that text-only models skip image probes |
 | ModelBenchmarkTests | syntheticCardIsRedAtTheCentreAndDeterministic | The synthetic card is red at the centre and deterministic. | a | benchmark_tests.rs::probes_render_deterministically_with_expected_answers |
 | ModelBenchmarkTests | fixedTileArchitecturesKeepTheirOwnImageSize | Fixed-tile architectures keep their own image size. | c | stays, moves to SharedTests (FileIDVLMCore/ModelBenchmarkRunner.swift is shared) |
 | ModelBenchmarkTests | mlxCacheCapScalesWithModelAndHonoursOverride | The MLX cache cap scales with model size and honours override. | c | stays, SharedTests (FileIDVLMCore) |
-| ModelBenchmarkTests | fingerprintNamesChipMemoryAndOS | The hardware fingerprint names chip, memory and OS. | a | models/benchmark.rs::mac_fingerprint ~ (stored_results_round_trip_in_the_swift_format); conformance models.json models-mac-benchmarks-shared-format |
+| ModelBenchmarkTests | fingerprintNamesChipMemoryAndOS | The hardware fingerprint names chip, memory and OS. | d (moved from a, round 16) | No test asserts the shape of mac_fingerprint (chip, GB, cores, macOS major.minor); stored_results_round_trip_in_the_swift_format uses fixed strings and the conformance case uses a {hardware} placeholder. A wrong string hides this Mac's stored results. Low rank. |
 | ModelBenchmarkTests | uninstalledModelIsRejectedWithoutDownloading | An uninstalled model is rejected without downloading. | d | Missing: commands/benchmark.rs test; cost: unexpected network download (violates no-egress rule) |
 | ModelBenchmarkTests | storeKeepsOnlyThisMachinesResults | The store keeps only this machine's results. | a | benchmark_tests.rs::stored_results_round_trip_in_the_swift_format, models.json models-mac-benchmarks-shared-format |
 | ModelBenchmarkTests | idleTimeoutDefaultsToFiveMinutesAndHonoursOverride | Idle timeout defaults to 5 minutes and honours override. | d | models/idle.rs tests use explicit durations. Missing: default and env override test |
-| ModelBenchmarkTests | peakMemoryIsDecimalGigabytes | Peak memory is reported in decimal GB. | a | benchmark_tests.rs::summary_reports_rates_and_omits_unmeasured_fields ~ |
+| ModelBenchmarkTests | peakMemoryIsDecimalGigabytes | Peak memory is reported in decimal GB. | a (closed round 16; was a ~) | models/benchmark_tests.rs::peak_memory_is_reported_in_decimal_gigabytes (failed when the divisor was 2^30) |
 
 ### CarefulTextReadTests
 
@@ -787,15 +787,15 @@ Rust paths are relative to platforms/windows/src/engine/src unless they start wi
 
 ### Totals
 
-a: 92, b: 1, c: 52, d: 51, total 196
+a: 91, a*: 4, b: 1, c: 52, d: 48, total 196 (round 16: 7 gaps closed, 4 rows moved from a to d, 4 narrowed to a*)
 
 ### Gaps (d), ranked
 
-1. ScanPipelinePerfTests / DiscoveryTests skip predicate (size, mtime, nil, drift): data loss/wrong results: an edited file whose mtime is backdated is silently skipped, stale tags and text stay. Suggest: discovery.rs unit test of the skip decision over a (size,mtime) matrix; first decide Rust both-nil behaviour.
+1. (Closed round 16, except that Rust and Swift differ on a stored nil time; see the Discovery rows.) ScanPipelinePerfTests / DiscoveryTests skip predicate (size, mtime, nil, drift): data loss/wrong results: an edited file whose mtime is backdated is silently skipped, stale tags and text stay. Suggest: discovery.rs unit test of the skip decision over a (size,mtime) matrix; first decide Rust both-nil behaviour.
 2. DiscoveryTests.skipsLargeFiles / discoversTextData: wrong results: oversize files either never indexed or OOM; text data indexed as Other. Suggest: discovery.rs: tempdir walk with oversize tif/pdf and csv/json; kind_from_extension table.
 3. IPCSinkEviction/RestructurePlanPin terminal events: wrong results: dropped DeepAnalyzeComplete/RestructureApplyResult/RestructurePlan leaves the app waiting after files were moved or plan never shown. Suggest: ipc/sink.rs or server.rs: flood with try_send fillers, assert each terminal payload is delivered via send().await.
-4. TwinReuse: model-generation, full-hash-only, cancel, budget, idle, reset: wrong results: stale or mis-shared tags/faces across copies; hang on cancel. Suggest: pipeline/twin_reuse.rs unit tests with the Registry directly.
-5. CatalogTwinReuse: other-model row, failed/kind/off, date-only change keeps faces: wrong results: faces and people dropped on touch, stale analysis after model upgrade. Suggest: pipeline/dbwriter.rs reuse tests with seeded rows.
+4. (Failed, non-image and short-hash twins closed round 16; the Rust registry holds one bool per hash, so the budget, idle and reset rows have no Rust equivalent; the model-generation rule is not held, see CatalogTwinReuse.) TwinReuse: model-generation, full-hash-only, cancel, budget, idle, reset: wrong results: stale or mis-shared tags/faces across copies; hang on cancel. Suggest: pipeline/twin_reuse.rs unit tests with the Registry directly.
+5. (failed/kind/off closed round 16; other-model row is an invariant Rust does not hold.) CatalogTwinReuse: other-model row, failed/kind/off, date-only change keeps faces: wrong results: faces and people dropped on touch, stale analysis after model upgrade. Suggest: pipeline/dbwriter.rs reuse tests with seeded rows.
 6. ModelBenchmark.uninstalledModelIsRejectedWithoutDownloading: network egress without consent. Suggest: commands/benchmark.rs: run on an empty models dir, assert error and no downloader call.
 7. SpeechPermission.bareProcessDoesNotAsk: crash of the hosted engine on speech use. Suggest: AppleKitTests: MediaSpeech canAsk against two synthetic bundles.
 8. TaggingLoadSize.largePDFBypassesExtraction: hang/OOM on huge PDFs in a scan. Suggest: pipeline/tagging_mac.rs: pdf_row with large=true yields no extraction.
@@ -805,6 +805,16 @@ a: 92, b: 1, c: 52, d: 51, total 196
 12. ScanDecodeAhead.pauseHoldsDecoders: wrong behaviour: pause does not stop decode. Suggest: tagging.rs pause-flag test.
 13. Hardware clamp/cap bounds, ResourceScheduler per-dimension and lease-on-failure, ModelBenchmark vision-only workloads and idle default, JobQueue ordering, ScanTaggingAdmission blocked time, ScanModelResidency empty sweep, SpeechPermission frame-step timing: presentation/perf only. Suggest: platform.rs, resource_scheduler.rs, models/idle.rs, job_queue.rs, benchmark_server_tests.rs, MediaAdapterTests.
 
+
+### Round 16: second pass over the "~" rows of area B
+
+Every row of this area carrying a "~", "not individually verified" or "not opened" (29 rows) was re-read against the Rust test it names. Result: 12 confirmed and the mark removed; 4 narrowed to a* (the sub-invariant is named in the row); 8 kept as a with a corrected reference or a test added this round; 1 kept as b with the unasserted part named (scanTagging); 4 moved from a to d (DocumentAnalysisTests.targetResolution, ScanTaggingAdmissionTests two-files-share-a-unit, ModelBenchmarkTests.jsonValidityAcceptsFencedObjectsOnly and fingerprintNamesChipMemoryAndOS). The other 167 rows of area B were not re-read.
+
+Closed in round 16 (each test shown to pass and to fail on a broken guard; all in files that are not digest-locked): the discovery skip decision over size, time, nil and drift (`pipeline/discovery.rs`), the text-data and RAW extension kinds, the writer committing every row across batches and the tail (`pipeline/dbwriter.rs`), a copy never taking over a failed, non-image, short-hash or empty twin (`pipeline/dbwriter.rs`), the sink flushing every buffered event on close (`ipc/sink.rs`), benchmark peak memory in decimal GB, the composite hash reading each edge (`util/content_hash.rs`), a model use restarting its idle period (`models/idle.rs`).
+
+Rust does not hold these Swift invariants (recorded, not fixed): a copy takes the tags of a twin written by another model; a stored nil modified time is re-read where Swift skips it; no file size cap on the walk.
+
+Shared Swift code whose only tests are in EngineTests: TaggingLoadSizeTests (FileIDImaging bounded decode) and JPEGPreviewTests (FileIDImaging MPF preview) import `FileIDEngine` and `FileIDImaging`. Neither AppleKitTests nor SharedTests has a test of either file, and SharedTests does not depend on FileIDImaging in Package.swift. When the engine tests are deleted these two suites need to move, with a Package.swift test-target dependency; not done here (Package.swift is outside this task).
 
 ## Area C: faces, takes, search, naming, Describe Files
 
@@ -817,7 +827,7 @@ Rows: 292 tests in 41 suites (counts verified with grep -cE '@Test|func test'; p
 |---|---|---|---|---|
 | FaceAlignTests | template to template fits identity | Fitting the template onto itself yields a=1, b=0, no translation. | a | models/face_align.rs::identity_fit |
 | FaceAlignTests | recovers a known scale + translation | A pure scale and shift is recovered by the similarity fit. | a | models/face_align.rs::translation_recovered (scale part also in shared_alignment_fixtures) |
-| FaceAlignTests | recovers a 90 degree rotation | A 90 degree rotation fits as a=0, /b/=1. | a | models/face_align.rs::shared_alignment_fixtures (shared/test-corpus/face-alignment.json); rotation case in the fixture not individually verified |
+| FaceAlignTests | recovers a 90 degree rotation | A 90 degree rotation fits as a=0, /b/=1. | a | models/face_align.rs::shared_alignment_fixtures (read round 16: the shared fixture case `rotation` expects [0, -1, 0, 0] and the loop asserts every case within 0.001) |
 
 ### FaceAnalysisCacheTests
 
@@ -853,7 +863,7 @@ Rows: 292 tests in 41 suites (counts verified with grep -cE '@Test|func test'; p
 | FaceClusteringMergeTests | protected micro-clusters bypass junk suppression | A named person's tiny low-quality cluster is not dropped as junk. | a | pipeline/face_clustering.rs::suppression_keeps_copied_content_when_protected + embedding_outlier_suppression_skips_protected_cluster |
 | FaceClusteringMergeTests | protected identity without current faces is preserved | A person whose faces are not in this pass keeps their row. | a | commands/face_clustering.rs::protected_owner_outside_pool_or_without_faces_is_preserved |
 | FaceClusteringMergeTests | stale persistence members fail before destructive SQL | If faces changed after planning, the write is refused before anything is deleted. | a | commands/face_clustering.rs::persistence_plan_rejects_missing_anchor_members + destructive_persistence_sql_rolls_back_atomically |
-| FaceClusteringMergeTests | preserved persons consume the hard person cap | Kept people count against the 8000 person limit. | d | MAX_PERSONS (face_clustering_mac.rs cap()) is untested. Add to face_clustering_mac_tests.rs: preserved near cap, assert error/slots. |
+| FaceClusteringMergeTests | preserved persons consume the hard person cap | Kept people count against the 8000 person limit. | a* (round 16) | platforms/windows/src/engine/src/commands/face_clustering_mac_tests.rs::people_already_kept_use_up_the_person_cap_and_an_overfull_protected_set_refuses (cap() subtracts the preserved count; that the caller passes the right count is not tested). Was: MAX_PERSONS untested |
 | FaceClusteringMergeTests | phase-zero unknown faces do not consume the eligible window | Faces of Unknown people do not use up the per-run face limit. | d | load_partition limit with is_unknown persons untested. Add to face_clustering_mac_tests.rs. |
 | FaceClusteringMergeTests | no-work clustering result can report preserved persons | A pass with nothing to cluster still reports the people that were kept. | d | Result shape for the no-work path untested (conformance people-clustering-mac... only covers a normal pass). Add to face_clustering_mac_tests.rs. |
 | FaceClusteringMergeTests | an is_unknown person is never auto-merged | Auto-merge never joins a person marked Unknown. | a (closed round 14; was d) | platforms/windows/src/engine/src/commands/face_clustering_mac_tests.rs::auto_merge_never_joins_a_person_marked_unknown (outcome; four independent guards, none alone is shown to fail it). Was: auto_merge (face_clustering_mac.rs:1252) has no test except the VP join; conformance covers merge SUGGESTIONS only. Add auto_merge tests to face_clustering_mac_tests.rs. |
@@ -883,7 +893,7 @@ Rows: 292 tests in 41 suites (counts verified with grep -cE '@Test|func test'; p
 | FaceClusterPersistenceTests | repeatedClusteringRetainsIdentitiesAndReferences | A second clustering pass keeps person ids and rewrites no face. | a | commands/face_clustering.rs::a_second_pass_keeps_person_ids_and_rewrites_no_face |
 | FaceClusterPersistenceTests | newClusterDoesNotClearOtherPeople | Adding a new cluster does not delete or reset existing people. | a | commands/face_clustering.rs::people_no_cluster_keeps_are_removed_and_their_faces_released + persisting_writes_only_faces_whose_person_changes |
 | FaceClusterPersistenceTests | failedPublicationRollsBackAssignmentsAndAnalysis | A failed write leaves assignments and analysis as they were. | a | commands/face_clustering.rs::destructive_persistence_sql_rolls_back_atomically |
-| FaceClusterPersistenceTests | personLimitPreservesExistingPeople | Hitting the person cap leaves existing people untouched. | d | MAX_PERSONS in apply()/cap() untested. Add to face_clustering_mac_tests.rs. |
+| FaceClusterPersistenceTests | personLimitPreservesExistingPeople | Hitting the person cap leaves existing people untouched. | a* (round 16) | platforms/windows/src/engine/src/commands/face_clustering_mac_tests.rs::the_person_cap_keeps_every_protected_person_and_drops_the_smallest_others, people_already_kept_use_up_the_person_cap_and_an_overfull_protected_set_refuses (cap(); failed when the slots, the take count or the protected keep was broken). The apply() check at "too many people" (existing + created) is not tested. Was: MAX_PERSONS untested |
 
 ### FaceLandmarkMatchTests
 
@@ -1312,12 +1322,12 @@ Rows: 292 tests in 41 suites (counts verified with grep -cE '@Test|func test'; p
 | 3 | CatalogVectorIndexTests | rolled back embedding writes do not advance the index checkpoint | Data loss / wrong file operations or wrongly merged/lost people: A rolled-back write is not counted as indexed. | Rust tests don't roll back an embedding write and check the checkpoint. Add to catalog_index_tests.rs. |
 | 4 | CatalogStoreTests | rejectsCrossFileChapterReplacementAndInvalidTiming | Data loss / wrong file operations or wrongly merged/lost people: A chapter can't replace another file's chapter and bad times are refused. | catalog.rs:218 validation has no unit test. Add to commands/catalog.rs. |
 | 5 | ReassignFaceTests | newPersonIsCreatedAndEmptiedUnnamedSourceIsRemoved | Data loss / wrong file operations or wrongly merged/lost people: Reassign to a new person creates it; an emptied unnamed source is deleted. | bulk.rs handle_reassign_face new-person path and source cleanup untested. Add to commands/bulk.rs tests. |
-| 6 | ReassignFaceTests | refusesMissingFaceStaleDestinationAndConflictingPayload | Data loss / wrong file operations or wrongly merged/lost people: Reassign is refused for a missing face, stale destination or contradictory payload. | Error branches of handle_reassign_face (bulk.rs ~2011-2081) untested. Add to commands/bulk.rs tests. |
-| 7 | FaceClusterPersistenceTests | personLimitPreservesExistingPeople | Data loss / wrong file operations or wrongly merged/lost people: Hitting the person cap leaves existing people untouched. | MAX_PERSONS in apply()/cap() untested. Add to face_clustering_mac_tests.rs. |
-| 8 | FaceClusteringMergeTests | preserved persons consume the hard person cap | Data loss / wrong file operations or wrongly merged/lost people: Kept people count against the 8000 person limit. | MAX_PERSONS (face_clustering_mac.rs cap()) is untested. Add to face_clustering_mac_tests.rs: preserved near cap, assert error/slots. |
+| 6 | ReassignFaceTests | refusesMissingFaceStaleDestinationAndConflictingPayload | Data loss / wrong file operations or wrongly merged/lost people: Reassign is refused for a missing face, stale destination or contradictory payload. | Error branches of handle_reassign_face (bulk.rs ~2011-2081) untested. Add to commands/bulk.rs tests. CLOSED in round 14 (see its row above); this list entry was stale. |
+| 7 | FaceClusterPersistenceTests | personLimitPreservesExistingPeople | Data loss / wrong file operations or wrongly merged/lost people: Hitting the person cap leaves existing people untouched. | MAX_PERSONS in apply()/cap() untested. Add to face_clustering_mac_tests.rs. CLOSED in round 16 as a*: the cap() function is pinned; the apply() "too many people" check is not. |
+| 8 | FaceClusteringMergeTests | preserved persons consume the hard person cap | Data loss / wrong file operations or wrongly merged/lost people: Kept people count against the 8000 person limit. | MAX_PERSONS (face_clustering_mac.rs cap()) is untested. Add to face_clustering_mac_tests.rs: preserved near cap, assert error/slots. CLOSED in round 16 as a*: the cap() function is pinned; the apply() "too many people" check is not. |
 | 9 | FaceClusteringMergeTests | mixed, legacy, stale and malformed face caches preserve identities | Data loss / wrong file operations or wrongly merged/lost people: If face vectors are mixed/legacy/stale, clustering refuses and every person and assignment is left unchanged. | CACHE_ERROR path (ensure_compatible_face_space in commands/face_clustering_mac.rs) has no test. Add to face_clustering_mac_tests.rs: two models in face_prints, run, assert error and unchanged assignments. |
-| 10 | FaceClusteringMergeTests | an is_unknown person is never auto-merged | Data loss / wrong file operations or wrongly merged/lost people: Auto-merge never joins a person marked Unknown. | auto_merge (face_clustering_mac.rs:1252) has no test except the VP join; conformance covers merge SUGGESTIONS only. Add auto_merge tests to face_clustering_mac_tests.rs. |
-| 11 | FaceClusteringMergeTests | a 'different' verdict pair is never auto-merged | Data loss / wrong file operations or wrongly merged/lost people: Auto-merge never joins two people the user said are different. | auto_merge untested for verdicts (pipeline consolidate_respects_blocked_pair covers the clustering stage, not auto_merge). Add to face_clustering_mac_tests.rs. |
+| 10 | FaceClusteringMergeTests | an is_unknown person is never auto-merged | Data loss / wrong file operations or wrongly merged/lost people: Auto-merge never joins a person marked Unknown. | auto_merge (face_clustering_mac.rs:1252) has no test except the VP join; conformance covers merge SUGGESTIONS only. Add auto_merge tests to face_clustering_mac_tests.rs. CLOSED in round 14 (see its row above); this list entry was stale. |
+| 11 | FaceClusteringMergeTests | a 'different' verdict pair is never auto-merged | Data loss / wrong file operations or wrongly merged/lost people: Auto-merge never joins two people the user said are different. | auto_merge untested for verdicts (pipeline consolidate_respects_blocked_pair covers the clustering stage, not auto_merge). Add to face_clustering_mac_tests.rs. CLOSED in round 14 (see its row above); this list entry was stale. |
 | 12 | FaceClusteringMergeTests | Disk changes after partition selection reject a merge commit | Data loss / wrong file operations or wrongly merged/lost people: If a photo changed after planning, the merge is not committed. | require_unchanged (face_clustering_mac.rs:288) / auto_merge guard line 1417 untested beyond deferral of a changed photo before clustering. Add to face_clustering_mac_tests.rs. |
 | 13 | FaceClusteringMergeTests | search overload leaves every person unchanged | Data loss / wrong file operations or wrongly merged/lost people: If the merge search exceeds its budget, no person is merged. | JOIN_EVALUATIONS/JOIN_EDGES limits untested. Add to face_clustering_mac_tests.rs. |
 | 14 | FaceClusteringMergeTests | persist re-reads identity under the writer lock | Data loss / wrong file operations or wrongly merged/lost people: Names/verdicts are re-read inside the write transaction so a concurrent rename is not lost. | The in-transaction re-read (face_clustering_mac.rs:1417) has no test for a rename between plan and commit. Add to face_clustering_mac_tests.rs. |
@@ -1357,6 +1367,10 @@ Rows: 292 tests in 41 suites (counts verified with grep -cE '@Test|func test'; p
 | 48 | CatalogVectorIndexTests | matching moments cannot crowd other files out of a Library result | Presentation or edge behavior: Many matches in one video don't push out other files. | No Rust test limits per-file moments in a Library result. Add to catalog_index_tests.rs or commands/catalog_search.rs. |
 | 49 | CatalogVectorIndexTests | concurrent refreshed queries retain complete graph ownership | Presentation or edge behavior: Queries during an index refresh see a whole graph. | catalog_index uses Arc<HnswMap>; no concurrent-refresh test. Add to catalog_index_tests.rs. |
 
+
+### Round 16: area C
+
+The only "not individually verified" row of this area (FaceAlignTests, 90 degree rotation) was read and confirmed: the shared fixture case asserts the fit. The partial rows named in their own text (face failure back-off window, running-sum Pass-2, hybrid search without a vector, the deep-analyze completion flag) already say what is not asserted and were not changed. Closed: the person cap function (`commands/face_clustering_mac_tests.rs`, two tests, failed when the slots, the take count and the protected keep were each broken). Gap-list entries 6, 10 and 11 were already closed in round 14 and are marked so. The rest of the ranked list below is open.
 
 ## Area D: chat, timeline, video and media tools
 
