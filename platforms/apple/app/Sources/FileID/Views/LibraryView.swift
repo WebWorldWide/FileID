@@ -189,6 +189,7 @@ struct LibraryView: View {
             .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
                 if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotClosePreview)) { _ in previewSelectedID = nil }
             #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
@@ -1027,8 +1028,11 @@ struct LibraryView: View {
                             if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: search reply status=\(response.status) hits=\(response.hits.count) message=\(response.message ?? "nil")\n".utf8)) }
                             #endif
                             let keywordRows = newRows
-                            let decision = LibrarySearchOutcome.decide(message: response.message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             let engineRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            let message = kind == nil ? response.message
+                                : LibrarySearchOutcome.narrowed(message: response.message, hitIDs: response.hits.map(\.fileID),
+                                                                keptIDs: Set(engineRows.map(\.id))) ?? response.message
+                            let decision = LibrarySearchOutcome.decide(message: message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             switch decision.source {
                             case .engine:
                                 let known = Set(engineRows.map(\.id))
@@ -1455,7 +1459,7 @@ private struct DetailRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
+                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(70), alignment: .leading)
                     Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
                     Spacer(minLength: 0)
                 }
@@ -1720,7 +1724,7 @@ private struct PDFPreview: View {
         .task(id: url) {
             // Off the main thread — PDFDocument open + page render can
             // cost real time on a big PDF.
-            if let data = await Task.detached(priority: .userInitiated) { () -> Data? in
+            if let data = await Task.detached(priority: .userInitiated, operation: { () -> Data? in
                 guard let doc = PDFDocument(url: url),
                       let page = doc.page(at: 0) else { return nil }
                 let bounds = page.bounds(for: .mediaBox)
@@ -1731,7 +1735,7 @@ private struct PDFPreview: View {
                     height: bounds.height * scale
                 ), for: .mediaBox)
                 return img.tiffRepresentation
-            }.value {
+            }).value {
                 pageImage = NSImage(data: data)
             }
         }

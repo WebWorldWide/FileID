@@ -84,13 +84,15 @@ private struct ProposalRow: View {
             HStack(alignment: .top, spacing: 10) {
                 ShotFan(shots: group.shots)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
-                            .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
-                        RelationChip(relation: group.relation)
+                    let title = Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
+                        .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 6) { title.fixedSize(); RelationChip(relation: group.relation).fixedSize() }
+                        VStack(alignment: .leading, spacing: 3) { title.fixedSize(); RelationChip(relation: group.relation) }
                     }
                     Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(TakeProposals.evidenceText(group.evidence))
                         .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)

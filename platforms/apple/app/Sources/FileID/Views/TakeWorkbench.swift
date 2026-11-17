@@ -355,7 +355,7 @@ struct TakeWorkbench: View {
     private func fieldRow<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
         HStack(spacing: 12) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: Theme.Font.scaled(44), alignment: .leading)
                 .accessibilityHidden(true)
             field()
         }
@@ -811,9 +811,9 @@ private struct TakeCard: View {
                 }
                 if let quality = take.qualityScore {
                     HStack(spacing: 8) {
-                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(64), alignment: .leading)
                         GrainProgressBar(progress: quality, tone: .neutral, height: 4)
-                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 44, alignment: .trailing)
+                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(44), alignment: .trailing)
                     }
                     .help("Sharpness \(Int((quality * 100).rounded())) out of 100")
                     .accessibilityElement(children: .ignore)

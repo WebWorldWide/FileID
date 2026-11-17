@@ -45,4 +45,15 @@ struct LibrarySearchOutcomeTests {
         #expect(d.source == .engine && d.addKeywordRows && d.hiddenWeaker == 0 && d.label == LibrarySearchOutcome.plainLabel)
         #expect(decide(nil) == d)
     }
+    @Test func aKindFilterRecountsTheSummaryForTheRowsItKeeps() {
+        let hits: [Int64] = [1, 2, 3, 4, 5, 6]
+        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [2, 5]) == "1 good match, 1 weaker.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [1, 2]) == "2 good matches.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [6]) == "No good matches, 1 weaker.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: []) == "No matches.")
+        #expect(LibrarySearchOutcome.narrowed(message: "Something else", hitIDs: hits, keptIDs: [1]) == nil)
+        let filtered = LibrarySearchOutcome.decide(message: LibrarySearchOutcome.narrowed(message: "8 good matches, 52 weaker.", hitIDs: hits, keptIDs: []),
+                                                   keywordCount: 0, showWeaker: false)
+        #expect(filtered.label == "No matches" && filtered.hiddenWeaker == 0)
+    }
 }

@@ -173,3 +173,36 @@ struct MediaToolsTests {
     }
 
 }
+
+@Suite("Photo export size")
+struct PhotoExportSizeTests {
+    @Test("A full-resolution camera photo above 32 megapixels previews and exports")
+    func exportsPhotoAboveThirtyTwoMegapixels() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("DSC00487.JPG")
+        let width = 7008, height = 4672
+        let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try #require(context.makeImage())
+        let destination = try #require(CGImageDestinationCreateWithURL(source as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        #expect(width * height > 32_000_000)
+
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?,1,100,0,'image','jpg')", arguments: [source.path]) }
+        let tools = MediaTools()
+        let recipe = ToolRecipe(kind: "photo", format: "jpeg", maxDimension: 2048)
+        let preview = await tools.handle(ToolRequest(requestID: "p", action: "preview", fileIDs: [1], destination: root.path, recipe: recipe), database: database)
+        #expect(preview.status == "ok", "\(preview.message)")
+        let result = await tools.handle(ToolRequest(requestID: "e", action: "execute", destination: root.path, operationID: preview.operationID), database: database)
+        #expect(result.status == "ok", "\(result.message)")
+        let output = URL(fileURLWithPath: try #require(result.outputs.first).outputPath)
+        let raster = try #require(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let exported = try #require(CGImageSourceCreateImageAtIndex(raster, 0, nil))
+        #expect(exported.width == 2048)
+    }
+}

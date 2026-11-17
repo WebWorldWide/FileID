@@ -111,9 +111,12 @@ struct Sidebar: View {
     /// The area whose pill is lit: the one holding the open page, none on Settings.
     nonisolated static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
 
-    /// A fall back to the Swift engine explains itself in Settings; the sidebar
-    /// keeps its card for errors nothing else explains.
-    nonisolated static func showsErrorCard(_ kind: String) -> Bool { kind != "engine_fallback" }
+    /// A fall back to the Swift engine explains itself in Settings and a stopped
+    /// folder plan on Organize Folders; the sidebar keeps its card for errors
+    /// nothing else explains.
+    nonisolated static func showsErrorCard(_ kind: String) -> Bool {
+        kind != "engine_fallback" && kind != "plan_restructure_cancelled"
+    }
 
     private var shouldShowEngineSection: Bool {
         if let err = engine.lastError, Self.showsErrorCard(err.kind) { return true }
@@ -195,7 +198,6 @@ struct Sidebar: View {
         .animation(Theme.quick, value: on)
     }
 
-    @ViewBuilder
     /// Readable titles for engine notices; the code stays in the log line, not on screen.
     nonisolated static func errorTitle(_ kind: String) -> String {
         switch kind {
@@ -208,12 +210,27 @@ struct Sidebar: View {
         case "command_decode_failed": return "FileID couldn't do that"
         case "plan_restructure_failed": return "The folder plan didn't finish"
         case "orphan_sweep_failed", "purge_excluded_failed": return "Cleaning up the library didn't finish"
-        case "model_load_failed": return "An AI model didn't load"
+        case "model_load_failed", "deep_load_failed": return "An AI model didn't load"
+        case "deep_model_too_big": return "This AI model is too big for this Mac"
+        case "deep_source_changed": return "A file changed while it was described"
+        case "deep_targets_failed": return "Describing files stopped"
+        case "deep_analyze_selection_too_large", "command_limit_exceeded": return "Too many files at once"
+        case "model_integrity_failed": return "An AI model download was damaged"
+        case "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed", "sentinel_write_failed",
+             "zip_extract_failed": return "The AI model couldn't be installed"
+        case "plan_restructure_db", "plan_restructure_store", "plan_restructure_invalid": return "The folder plan didn't finish"
+        case "restructure_undo_journal": return "The folder move didn't start"
+        case "library_busy": return "The scan is paused"
+        case "db_write_failed", "face_cluster_persist_failed", "face_print_persist_failed": return "The library couldn't be saved"
+        case "command_handler_panic", "oversized_ipc_frame", "invalid_face_review_request", "invalid_health_request",
+             "invalid_list_models_request", "invalid_list_roots_request": return "FileID couldn't do that"
+        case "not_applicable_on_platform": return "Not needed on a Mac"
         case "restructure_busy", "restructure_already_running": return "A folder move is already running"
         case "engine_exited": return "FileID's helper stopped"
         case "bookmark_unavailable": return "FileID can't reach that folder"
         case "ipc_frame_too_large": return "Too much to show at once"
-        case "unknown_model", "prewarm_failed", "models_not_installed", "vlm_model_missing", "models_dir_unavailable",
+        case "vlm_model_missing": return "This AI model isn't installed"
+        case "unknown_model", "prewarm_failed", "models_not_installed", "models_dir_unavailable",
              "llama_cpp_missing": return "The AI model couldn't be used"
         case "db_open_failed", "db_integrity_check_failed", "plan_restructure_db_unavailable": return "The library couldn't be opened"
         case "list_roots_failed": return "FileID can't reach that folder"
@@ -241,10 +258,25 @@ struct Sidebar: View {
             return "Quit and reopen FileID. If it keeps happening, use Start over in the folder menu."
         case "db_newer_than_engine": return "This library was made by a newer FileID. Update FileID."
         case "folder_access_denied", "bookmark_unavailable", "list_roots_failed": return "Choose the folder again so FileID can open it."
-        case "command_decode_failed": return "Try again. If it keeps happening, quit and reopen FileID."
-        case "plan_restructure_failed": return "Open Organize Folders and try again, or pick a smaller folder."
+        case "command_decode_failed", "command_handler_panic", "oversized_ipc_frame", "invalid_face_review_request",
+             "invalid_health_request", "invalid_list_models_request", "invalid_list_roots_request":
+            return "Try again. If it keeps happening, quit and reopen FileID."
+        case "plan_restructure_failed", "plan_restructure_db", "plan_restructure_store", "plan_restructure_invalid":
+            return "Open Organize Folders and try again, or pick a smaller folder."
+        case "deep_model_too_big": return "Choose a smaller model in Settings."
+        case "deep_source_changed": return "Scan the folder again, then describe it."
+        case "deep_targets_failed": return "Try again. If it keeps happening, quit and reopen FileID."
+        case "deep_analyze_selection_too_large", "command_limit_exceeded": return "Select fewer files and try again."
+        case "model_integrity_failed", "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed",
+             "sentinel_write_failed", "zip_extract_failed": return "Open Settings and download the model again."
+        case "restructure_undo_journal": return "Nothing was moved. Check there is free disk space, then try again."
+        case "library_busy": return "Resume or cancel the scan, then try again."
+        case "db_write_failed", "face_cluster_persist_failed", "face_print_persist_failed":
+            return "Check there is free disk space, then quit and reopen FileID."
+        case "not_applicable_on_platform": return "FileID already picks the fastest hardware by itself."
         case "orphan_sweep_failed", "purge_excluded_failed": return "Nothing was lost. Scan again to finish tidying up."
-        case "model_load_failed", "prewarm_failed", "unknown_model", "models_not_installed", "vlm_model_missing",
+        case "vlm_model_missing": return "Install it from Describe Files, then try again."
+        case "model_load_failed", "deep_load_failed", "prewarm_failed", "unknown_model", "models_not_installed",
              "models_dir_unavailable", "llama_cpp_missing": return "Open Settings and install the model again."
         case "restructure_busy", "restructure_already_running", "plan_restructure_library_busy", "scan_already_running":
             return "Wait for it to finish, then try again."

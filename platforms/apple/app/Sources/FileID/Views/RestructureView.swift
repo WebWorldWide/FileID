@@ -758,7 +758,7 @@ struct RestructureView: View {
 
     private var nothingToMoveCard: some View {
         notice(tone: Theme.delight, title: "Nothing to move",
-               body: "This library is already organized: every folder has a clear name and matching contents.") { EmptyView() }
+               body: "This folder is already organized: every folder in it has a clear name and matching contents.") { EmptyView() }
     }
 
     @ViewBuilder
@@ -1041,14 +1041,13 @@ struct RestructureView: View {
 
         // Up to 100k moves: mapping, grouping and the two catalog reads run off
         // the main actor; only the assignments below happen on it.
-        let libraryFiles = store.totalFiles
         let deselected = priorDeselectedIDs
         let skipped = skippedOutcomes
         let store = store
         planBuild?.cancel()
         planBuild = Task {
             let model = await Task.detached(priority: .userInitiated) {
-                Self.buildModel(from: plan, libraryFiles: libraryFiles,
+                Self.buildModel(from: plan, libraryFiles: store.countFiles(under: plan.libraryRoot),
                                 deselected: deselected, skipped: skipped, store: store)
             }.value
             guard !Task.isCancelled, let current = libraryRoot,

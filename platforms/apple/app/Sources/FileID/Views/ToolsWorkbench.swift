@@ -139,6 +139,29 @@ final class ToolsSession {
         selection.formIntersection(hits.map(\.fileID))
     }
 
+    /// A successful preview says what Export will do in plain words; the engine's sentence ("new file(s)",
+    /// "8-bit SDR") stays for everything else.
+    nonisolated static func plainMessage(action: String, status: String, message: String, outputs: Int) -> String {
+        guard action == "preview", status == "ok", outputs > 0 else { return message }
+        return outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
+                            : "Press Export to make \(outputs.formatted()) new files. Your originals stay as they are."
+    }
+
+    /// The query the last search reply answered; nil before the first search.
+    var answeredQuery: String?
+
+    /// The line under the search field when no result fits the mode: the intro before a search,
+    /// "nothing matches" after an empty one, and how to switch modes when the results are of the other kind.
+    var pickFilesNote: String {
+        if !allHits.isEmpty {
+            return "That search found \(allHits.count.formatted()) file\(allHits.count == 1 ? "" : "s"), but no \(kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again."
+        }
+        if let answeredQuery, !answeredQuery.isEmpty {
+            return "Nothing in the library matches “\(answeredQuery)”. Try part of a file name or a few words about what's in it."
+        }
+        return "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
+    }
+
     var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
 
     var recipe: ToolRecipe {
@@ -285,9 +308,7 @@ struct ToolsWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
             if session.hits.isEmpty {
-                MetaText(session.allHits.isEmpty
-                         ? "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
-                         : "That search found \(session.allHits.count.formatted()) file\(session.allHits.count == 1 ? "" : "s"), but no \(session.kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again.")
+                MetaText(session.pickFilesNote)
                     .padding(.horizontal, 14).padding(.bottom, 12)
             } else {
                 Hairline()
@@ -477,7 +498,7 @@ struct ToolsWorkbench: View {
     private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: alignment, spacing: 12) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: Theme.Font.scaled(92), alignment: .leading)
                 .padding(.top, alignment == .top ? 6 : 0)
                 .accessibilityHidden(label.isEmpty)
             content()
@@ -668,6 +689,7 @@ struct ToolsWorkbench: View {
         session.searchID = ""
         var seen = Set<Int64>()
         session.allHits = result.hits.filter { seen.insert($0.fileID).inserted }
+        session.answeredQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
         session.selection.removeAll()
         session.applyKindFilter()
         invalidate()
@@ -749,7 +771,7 @@ struct ToolsWorkbench: View {
     private func consume() {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }
         let action = session.pendingAction; session.pending = ""; session.pendingAction = ""
-        session.message = response.message
+        session.message = ToolsSession.plainMessage(action: action, status: response.status, message: response.message, outputs: response.outputs.count)
         if action == "capabilities" {
             session.capabilities = response.capabilities
             if !MediaToolChoice.available(response.capabilities).contains(where: { $0.0 == session.media.tool }) { session.media.tool = "export" }

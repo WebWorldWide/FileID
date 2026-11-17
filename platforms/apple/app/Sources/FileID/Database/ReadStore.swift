@@ -1343,6 +1343,19 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Files in the library under `root` and every folder below it, the set an Organize Folders plan
+    /// for that root covers. The range `root/` … `root0` holds exactly the paths below `root`
+    /// ('0' sorts right after '/').
+    public func countFiles(under root: String) -> Int {
+        guard let q = queue else { return 0 }
+        var base = root
+        while base.count > 1, base.hasSuffix("/") { base.removeLast() }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND path_text > ? AND path_text < ?",
+                             arguments: [base + "/", base + "0"]) ?? 0
+        }) ?? 0
+    }
+
     /// Count-only twin of `filesWithProposedNames` — the badge/refresh
     /// paths only need the number, and SELECT * deserialized up to
     /// 5000 full rows per refresh. The inner LIMIT keeps the cap

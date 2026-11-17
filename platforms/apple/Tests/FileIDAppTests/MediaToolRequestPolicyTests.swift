@@ -80,4 +80,22 @@ struct MediaToolRequestPolicyTests {
         #expect(choice.recipe?.format == "mov", "with both containers taken the choice stays and the engine's refusal is shown")
         #expect(MediaToolChoice.container(ofPath: "/v/notes.txt") == nil)
     }
+    @MainActor
+    @Test func anEmptySearchSaysNothingMatchedInsteadOfRepeatingTheIntro() {
+        let session = ToolsSession()
+        #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
+        session.answeredQuery = "IMG_41"
+        #expect(session.pickFilesNote == "Nothing in the library matches “IMG_41”. Try part of a file name or a few words about what's in it.")
+        session.allHits = [CatalogHit(fileID: 1, path: "/v/a.mov", kind: "video", text: "")]
+        session.applyKindFilter()
+        #expect(session.hits.isEmpty)
+        #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
+    }
+    @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
+        let engine = "Creates 2 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR."
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 2) == "Press Export to make 2 new files. Your originals stay as they are.")
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 1) == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(ToolsSession.plainMessage(action: "preview", status: "error", message: "No such file", outputs: 0) == "No such file")
+        #expect(ToolsSession.plainMessage(action: "execute", status: "ok", message: "Done", outputs: 1) == "Done")
+    }
 }

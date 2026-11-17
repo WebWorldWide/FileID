@@ -7,6 +7,7 @@
 //   FILEID_SELF_SHOT_PAGES=a,b     page names or slugs (default: every page)
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
+//   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
@@ -66,6 +67,7 @@ struct SelfShotPlan: Equatable {
     var dir: URL
     var pages: [String]
     var folder: URL?
+    var moreFolders: [URL] = []
     var settle: Double
     var windowSize: CGSize?
     var query: String?
@@ -80,7 +82,9 @@ struct SelfShotPlan: Equatable {
         let folder = environment["FILEID_SELF_SHOT_FOLDER"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
         return SelfShotPlan(dir: URL(fileURLWithPath: dir, isDirectory: true),
                             pages: parsePages(environment["FILEID_SELF_SHOT_PAGES"], available: available),
-                            folder: folder, settle: settle,
+                            folder: folder,
+                            moreFolders: (environment["FILEID_SELF_SHOT_MORE_FOLDERS"] ?? "").split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) },
+                            settle: settle,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
                             query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
                             clusterFaces: environment["FILEID_SELF_SHOT_CLUSTER"] == "1",
@@ -117,6 +121,7 @@ struct SelfShotPlan: Equatable {
 
 extension Notification.Name {
     static let selfShotOpenPreview = Notification.Name("FileID.selfShotOpenPreview")
+    static let selfShotClosePreview = Notification.Name("FileID.selfShotClosePreview")
     static let selfShotSendChat = Notification.Name("FileID.selfShotSendChat")
     static let selfShotFindMoments = Notification.Name("FileID.selfShotFindMoments")
 }
@@ -155,6 +160,14 @@ enum SelfShot {
                     let done = Date()
                     await waitUntil(timeout: 10) { store.totalFiles >= (engine.lastProgress?.processed ?? 0) }
                     FileHandle.standardError.write(Data("self-shot: files counter \(store.totalFiles) \(Int(Date().timeIntervalSince(done) * 1000)) ms after the scan completed\n".utf8))
+                    for more in plan.moreFolders {
+                        let before = store.totalFiles
+                        openFolder(more, true)
+                        await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
+                        await waitUntil(timeout: 900) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
+                        await waitUntil(timeout: 10) { store.totalFiles > before }
+                        note("scanned \(more.lastPathComponent): files counter \(before) -> \(store.totalFiles)")
+                    }
                 }
             }
             if plan.clusterFaces {
@@ -185,6 +198,8 @@ enum SelfShot {
                     try? await Task.sleep(for: .seconds(plan.settle))
                     if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()?.attachedSheet ?? window()); try? await Task.sleep(for: .seconds(0.6)) }
                     write(name: view.name, plan: plan, sheet: true)
+                    NotificationCenter.default.post(name: .selfShotClosePreview, object: nil)
+                    try? await Task.sleep(for: .seconds(0.8))
                     if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
                     try? await Task.sleep(for: .seconds(0.5))
                 } else {
@@ -258,7 +273,10 @@ enum SelfShot {
             NotificationCenter.default.post(name: .selfShotFindMoments, object: nil)
             try? await Task.sleep(for: .seconds(2))
             write(name: "moments-queued", plan: plan)
-            await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            await waitUntil(timeout: 10) { engine.catalogJobs.contains { $0.kind == "timelineSample" } }
+            if engine.catalogJobs.contains(where: { $0.kind == "timelineSample" }) {
+                await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            }
             note("timeline jobs: \(engine.catalogJobs.map { "\($0.kind) \($0.state)" }.joined(separator: ", "))")
             try? await Task.sleep(for: .seconds(3))
             write(name: "moments-timeline", plan: plan)
