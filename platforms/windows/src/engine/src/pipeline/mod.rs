@@ -27,6 +27,8 @@ pub mod restructure;
 pub mod restructure_apply;
 #[cfg(test)]
 mod restructure_case_tests;
+#[cfg(test)]
+mod restructure_folder_tests;
 pub mod restructure_feedback;
 pub mod restructure_respect;
 pub mod raw_preview;

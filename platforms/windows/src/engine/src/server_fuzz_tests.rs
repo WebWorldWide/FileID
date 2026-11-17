@@ -553,3 +553,98 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
     assert!(failures.is_empty(), "ipc fuzzer found {} failure signatures:\n{failures:#?}", failures.len());
 }
 
+
+async fn next_within(events: &mut tokio::sync::mpsc::Receiver<IpcEvent>) -> IpcEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await.expect("an event arrives").expect("sink open")
+}
+
+fn gap_dispatcher(db: Option<Writer>, sink: Sink) -> Dispatcher {
+    Dispatcher {
+        sink,
+        shutdown: Arc::new(Notify::new()),
+        command_shutdown_requested: Arc::default(),
+        db,
+        catalog_index: None,
+        db_path: std::path::PathBuf::new(),
+        scan_state: Arc::default(),
+        scan_active: Arc::default(),
+        scan_cancel_requested: Arc::default(),
+        deep_analyze_cancel: Arc::default(),
+        deep_analyze_active: Arc::default(),
+        face_cluster_active: Arc::default(),
+        restructure_cancellations: RestructureCancelRegistry::default(),
+        restructure_active: Arc::default(),
+        mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+        jobs: job_queue::JobQueue::new(),
+        http_client: crate::downloader::fail_closed_client(),
+    }
+}
+
+// With no catalog the app must still leave its scanning state: the error is
+// followed by the scan's terminal phase.
+#[tokio::test]
+async fn start_scan_with_no_database_answers_db_unavailable_then_a_terminal_phase() {
+    let (sink, mut events) = Sink::channel_for_test(8);
+    let d = gap_dispatcher(None, sink);
+    let line = serde_json::json!({
+        "id": "scan-1",
+        "payload": { "startScan": { "rootPath": "/tmp/does-not-matter", "rescan": false } }
+    })
+    .to_string();
+    handle_line(&d, &line).await;
+    let first = next_within(&mut events).await.payload;
+    assert!(
+        matches!(&first, EventPayload::Error(e) if e.inner.kind == "db_unavailable"),
+        "first event: {first:?}"
+    );
+    let second = next_within(&mut events).await.payload;
+    assert!(matches!(second, EventPayload::PhaseChanged(ref p) if p.inner == ScanPhase::Failed), "second event: {second:?}");
+    assert!(!d.scan_active.load(Ordering::Acquire), "no scan slot is left reserved");
+}
+
+// Two Organize Folders moves never run together: the second is refused loudly
+// and the first still finishes with its own result.
+#[tokio::test]
+async fn a_second_organize_folders_move_is_refused_while_the_first_runs_and_the_first_completes() {
+    let dir = std::env::temp_dir().join(format!("fileid-restructure-excl-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+    let (sink, mut events) = Sink::channel_for_test(64);
+    let d = gap_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let result = || {
+        IpcEvent::now(EventPayload::RestructureApplyResult(ipc::Wrap::new(ipc::RestructureApplyResult {
+            applied: 0,
+            failed: 0,
+            privilege_error: None,
+            cancelled: false,
+            planned: None,
+            remaining: None,
+            shortcut_undo_token: None,
+        })))
+    };
+    d.restructure_mutation("applyRestructure", "apply_restructure", "first", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+        let _ = finished.await;
+        sink.send(result()).await;
+    })
+    .await;
+    let ran_second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ran_second.clone();
+    d.restructure_mutation("undoRestructure", "undo_restructure", "second", (), move |_sink: Sink, _db, _payload: (), _cancel| async move {
+        flag.store(true, Ordering::Release);
+    })
+    .await;
+    let mut kinds = Vec::new();
+    for _ in 0..2 {
+        match next_within(&mut events).await.payload {
+            EventPayload::Error(e) => kinds.push(e.inner.kind.clone()),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(kinds, vec!["restructure_already_running".to_string(), "undo_restructure".to_string()]);
+    assert!(!ran_second.load(Ordering::Acquire), "the second move never started");
+    finish.send(()).unwrap();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(20), events.recv()).await.expect("the first move finishes").unwrap();
+    assert!(matches!(done.payload, EventPayload::RestructureApplyResult(_)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

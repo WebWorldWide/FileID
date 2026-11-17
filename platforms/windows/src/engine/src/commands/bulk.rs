@@ -1023,7 +1023,25 @@ fn checked_trash_one_with(
 
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
-    checked_trash_one_with(candidate, crate::shell::trash::trash_path_as)
+    checked_trash_one_with(candidate, |staging, original, identity| {
+        #[cfg(test)]
+        before_trash_move(original);
+        crate::shell::trash::trash_path_as(staging, original, identity)
+    })
+}
+
+/// Test seam: closures called with a file's path just before the engine asks the
+/// Trash backend to move it, so a test can look at the journal at that moment.
+#[cfg(test)]
+pub(crate) static BEFORE_TRASH_MOVE: parking_lot::Mutex<Vec<std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>>> =
+    parking_lot::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn before_trash_move(path: &std::path::Path) {
+    let hooks = BEFORE_TRASH_MOVE.lock().clone();
+    for hook in hooks {
+        hook(path);
+    }
 }
 
 /// macOS trashes in place, as the Swift engine does, so the Trash shows the
@@ -1036,6 +1054,8 @@ fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
         Ok(guards) => guards,
         Err(reason) => return CheckedTrashOutcome::Rejected(reason),
     };
+    #[cfg(test)]
+    before_trash_move(&candidate.path);
     match crate::shell::trash::trash_in_place(&candidate.path, candidate.source_identity) {
         Ok(landed) => CheckedTrashOutcome::TrashedAt(landed),
         Err(error) => CheckedTrashOutcome::Failed(error.to_string()),

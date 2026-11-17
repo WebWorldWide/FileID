@@ -939,4 +939,29 @@ mod tests {
             .unwrap();
         assert_eq!((files, evidence), (0, 0));
     }
+
+    #[test]
+    fn the_writer_and_a_read_connection_run_with_the_documented_pragmas() {
+        let path = std::env::temp_dir().join(format!("fileid-pragmas-{}.sqlite", std::process::id()));
+        let _guard = TempDb(path.clone());
+        let writer = open_writer(&path).expect("open_writer");
+        let pragma = |conn: &Connection, name: &str| -> i64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, rusqlite::types::Value>(0))
+                .map(|v| match v {
+                    rusqlite::types::Value::Integer(i) => i,
+                    rusqlite::types::Value::Text(t) if t.eq_ignore_ascii_case("wal") => 100,
+                    other => panic!("{name}: {other:?}"),
+                })
+                .unwrap()
+        };
+        assert_eq!(pragma(&writer, "journal_mode"), 100, "WAL");
+        assert_eq!(pragma(&writer, "synchronous"), 1, "NORMAL");
+        assert_eq!(pragma(&writer, "temp_store"), 2, "MEMORY");
+        assert_eq!(pragma(&writer, "foreign_keys"), 1);
+        let reader = open_read(&path).expect("open_read");
+        assert_eq!(pragma(&reader, "journal_mode"), 100, "a reader sees the WAL file");
+        assert_eq!(pragma(&reader, "temp_store"), 2, "MEMORY");
+        assert_eq!(pragma(&reader, "query_only"), 1);
+        assert!(reader.execute("CREATE TABLE nope (x)", []).is_err());
+    }
 }
