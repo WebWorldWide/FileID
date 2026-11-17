@@ -219,7 +219,7 @@ struct Sidebar: View {
         case "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed", "sentinel_write_failed",
              "zip_extract_failed": return "The AI model couldn't be installed"
         case "plan_restructure_db", "plan_restructure_store", "plan_restructure_invalid": return "The folder plan didn't finish"
-        case "restructure_undo_journal": return "The folder move didn't start"
+        case "restructure_undo_journal": return "The folder move stopped"
         case "library_busy": return "The scan is paused"
         case "db_write_failed", "face_cluster_persist_failed", "face_print_persist_failed": return "The library couldn't be saved"
         case "command_handler_panic", "oversized_ipc_frame", "invalid_face_review_request", "invalid_health_request",
@@ -269,7 +269,7 @@ struct Sidebar: View {
         case "deep_analyze_selection_too_large", "command_limit_exceeded": return "Select fewer files and try again."
         case "model_integrity_failed", "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed",
              "sentinel_write_failed", "zip_extract_failed": return "Open Settings and download the model again."
-        case "restructure_undo_journal": return "Nothing was moved. Check there is free disk space, then try again."
+        case "restructure_undo_journal": return "Some files may already have moved. Undo them from Organize Folders, check there is free disk space, then try again."
         case "library_busy": return "Resume or cancel the scan, then try again."
         case "db_write_failed", "face_cluster_persist_failed", "face_print_persist_failed":
             return "Check there is free disk space, then quit and reopen FileID."

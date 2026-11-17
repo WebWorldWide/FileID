@@ -143,12 +143,19 @@ final class ToolsSession {
     /// "8-bit SDR") stays for everything else.
     nonisolated static func plainMessage(action: String, status: String, message: String, outputs: Int) -> String {
         guard action == "preview", status == "ok", outputs > 0 else { return message }
-        return outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
-                            : "Press Export to make \(outputs.formatted()) new files. Your originals stay as they are."
+        let plain = outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
+                                 : "Press Export to make \(outputs.formatted()) new files. Your originals stay as they are."
+        return message.contains("8-bit SDR") ? plain + " Photo copies leave out details such as location and use standard 8-bit colors." : plain
     }
 
-    /// The query the last search reply answered; nil before the first search.
+    /// The query sent with the search still waiting for its reply.
+    var searchedQuery = ""
+    /// The query the last successful search reply answered; nil before the first search or after a failed one.
     var answeredQuery: String?
+
+    func recordSearchReply(status: String) {
+        answeredQuery = status == "ok" ? searchedQuery : nil
+    }
 
     /// The line under the search field when no result fits the mode: the intro before a search,
     /// "nothing matches" after an empty one, and how to switch modes when the results are of the other kind.
@@ -689,7 +696,7 @@ struct ToolsWorkbench: View {
         session.searchID = ""
         var seen = Set<Int64>()
         session.allHits = result.hits.filter { seen.insert($0.fileID).inserted }
-        session.answeredQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        session.recordSearchReply(status: result.status)
         session.selection.removeAll()
         session.applyKindFilter()
         invalidate()
@@ -760,6 +767,7 @@ struct ToolsWorkbench: View {
     private func search() {
         guard session.pending.isEmpty else { return }
         session.searchID = UUID().uuidString
+        session.searchedQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }
     private func send(_ request: ToolRequest) {

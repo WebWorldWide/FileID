@@ -35,6 +35,13 @@ struct EngineNoticeKindsTests {
         #expect(Sidebar.errorTitle("never_heard_of_it") == "Something went wrong")
     }
 
+    @Test("a folder move that stopped part way does not say nothing was moved")
+    func undoJournalWording() {
+        #expect(Sidebar.errorTitle("restructure_undo_journal") == "The folder move stopped")
+        #expect(Sidebar.errorText(kind: "restructure_undo_journal", message: "x")
+                == "Some files may already have moved. Undo them from Organize Folders, check there is free disk space, then try again.")
+    }
+
     @Test("Describe, model install, plan and save failures from either engine have their own title and sentence")
     func describeAndInstallTitles() {
         let kinds = ["deep_load_failed", "deep_model_too_big", "deep_source_changed", "deep_targets_failed",

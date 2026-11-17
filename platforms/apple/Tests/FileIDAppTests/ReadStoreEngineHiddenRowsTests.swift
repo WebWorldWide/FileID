@@ -76,6 +76,7 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(store.countFiles(under: "/lib/2021/") == 2)
         #expect(store.countFiles(under: "/lib") == 7)
         #expect(store.countFiles(under: "/nowhere") == 0)
+        #expect(store.countFiles(under: "/") == 8)
     }
 
     @Test("the hidden messages match what the engine writes")

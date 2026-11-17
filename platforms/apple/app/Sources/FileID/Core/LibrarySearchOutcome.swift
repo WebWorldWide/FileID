@@ -47,8 +47,9 @@ enum LibrarySearchOutcome {
     /// `hitIDs` is the engine's list in its order (good matches first). Nil when `message` is not a summary.
     static func narrowed(message: String?, hitIDs: [Int64], keptIDs: Set<Int64>) -> String? {
         guard let strength = Strength(message: message) else { return nil }
-        let good = hitIDs.prefix(strength.good).filter(keptIDs.contains).count
-        let weaker = hitIDs.dropFirst(strength.good).filter(keptIDs.contains).count
+        var seen = Set<Int64>()
+        let good = hitIDs.prefix(strength.good).filter { keptIDs.contains($0) && seen.insert($0).inserted }.count
+        let weaker = hitIDs.dropFirst(strength.good).filter { keptIDs.contains($0) && seen.insert($0).inserted }.count
         if good == 0 { return weaker == 0 ? "No matches." : "No good matches, \(weaker) weaker." }
         return "\(good) good \(good == 1 ? "match" : "matches")" + (weaker > 0 ? ", \(weaker) weaker." : ".")
     }

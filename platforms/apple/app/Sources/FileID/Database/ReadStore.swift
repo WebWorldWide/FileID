@@ -1350,9 +1350,11 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return 0 }
         var base = root
         while base.count > 1, base.hasSuffix("/") { base.removeLast() }
+        let prefix = base == "/" ? "/" : base + "/"
+        let upper = String(prefix.dropLast()) + "0"
         return (try? q.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND path_text > ? AND path_text < ?",
-                             arguments: [base + "/", base + "0"]) ?? 0
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND path_text >= ? AND path_text < ?",
+                             arguments: [prefix, upper]) ?? 0
         }) ?? 0
     }
 

@@ -51,6 +51,7 @@ struct LibrarySearchOutcomeTests {
         #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [1, 2]) == "2 good matches.")
         #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [6]) == "No good matches, 1 weaker.")
         #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: []) == "No matches.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: [1, 1, 2, 4, 4, 5], keptIDs: [1, 4]) == "1 good match, 1 weaker.")
         #expect(LibrarySearchOutcome.narrowed(message: "Something else", hitIDs: hits, keptIDs: [1]) == nil)
         let filtered = LibrarySearchOutcome.decide(message: LibrarySearchOutcome.narrowed(message: "8 good matches, 52 weaker.", hitIDs: hits, keptIDs: []),
                                                    keywordCount: 0, showWeaker: false)

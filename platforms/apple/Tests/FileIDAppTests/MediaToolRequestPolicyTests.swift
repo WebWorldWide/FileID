@@ -81,6 +81,17 @@ struct MediaToolRequestPolicyTests {
         #expect(MediaToolChoice.container(ofPath: "/v/notes.txt") == nil)
     }
     @MainActor
+    @Test func theNothingMatchedLineQuotesTheSearchThatWasSentAndOnlyWhenItSucceeded() {
+        let session = ToolsSession()
+        session.query = "IMG_41"
+        session.searchedQuery = "IMG_41"
+        session.query = "something typed afterwards"
+        session.recordSearchReply(status: "ok")
+        #expect(session.pickFilesNote.contains("“IMG_41”"))
+        session.recordSearchReply(status: "error")
+        #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
+    }
+    @MainActor
     @Test func anEmptySearchSaysNothingMatchedInsteadOfRepeatingTheIntro() {
         let session = ToolsSession()
         #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
@@ -93,8 +104,10 @@ struct MediaToolRequestPolicyTests {
     }
     @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
         let engine = "Creates 2 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR."
-        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 2) == "Press Export to make 2 new files. Your originals stay as they are.")
-        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 1) == "Press Export to make 1 new file. Your original stays as it is.")
+        let photoCaveat = " Photo copies leave out details such as location and use standard 8-bit colors."
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 2) == "Press Export to make 2 new files. Your originals stay as they are." + photoCaveat)
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 1) == "Press Export to make 1 new file. Your original stays as it is." + photoCaveat)
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: "Creates 1 new file(s). Originals are preserved.", outputs: 1) == "Press Export to make 1 new file. Your original stays as it is.")
         #expect(ToolsSession.plainMessage(action: "preview", status: "error", message: "No such file", outputs: 0) == "No such file")
         #expect(ToolsSession.plainMessage(action: "execute", status: "ok", message: "Done", outputs: 1) == "Done")
     }
