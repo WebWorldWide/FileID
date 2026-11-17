@@ -7,6 +7,7 @@
 //   FILEID_SELF_SHOT_PAGES=a,b     page names or slugs (default: every page)
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
+//   FILEID_SELF_SHOT_NO_SCAN=1     open FILEID_SELF_SHOT_FOLDER without scanning it (a folder chosen but not yet read)
 //   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
@@ -68,6 +69,7 @@ struct SelfShotPlan: Equatable {
     var pages: [String]
     var folder: URL?
     var moreFolders: [URL] = []
+    var openOnly = false
     var settle: Double
     var windowSize: CGSize?
     var query: String?
@@ -84,6 +86,7 @@ struct SelfShotPlan: Equatable {
                             pages: parsePages(environment["FILEID_SELF_SHOT_PAGES"], available: available),
                             folder: folder,
                             moreFolders: (environment["FILEID_SELF_SHOT_MORE_FOLDERS"] ?? "").split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) },
+                            openOnly: environment["FILEID_SELF_SHOT_NO_SCAN"] == "1",
                             settle: settle,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
                             query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
@@ -148,7 +151,7 @@ enum SelfShot {
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
             if let folder = plan.folder {
                 await waitUntil(timeout: 3) { store.totalFiles > 0 }
-                let needsScan = store.totalFiles == 0
+                let needsScan = store.totalFiles == 0 && !plan.openOnly
                 openFolder(folder, needsScan)
                 if needsScan {
                     await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }

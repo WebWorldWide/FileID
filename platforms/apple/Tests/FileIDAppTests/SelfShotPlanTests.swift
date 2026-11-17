@@ -17,6 +17,11 @@ struct SelfShotPlanTests {
         #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_CLUSTER": "1"], available: all)?.clusterFaces == true)
     }
 
+    @Test func no_scan_is_opt_in() {
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x"], available: all)?.openOnly == false)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_NO_SCAN": "1"], available: all)?.openOnly == true)
+    }
+
     @Test func slugs() {
         #expect(SelfShotPlan.slug("Search & Moments") == "search-moments")
         #expect(SelfShotPlan.slug("Deep Analyze") == "deep-analyze")
