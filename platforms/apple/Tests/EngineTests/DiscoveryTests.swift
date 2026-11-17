@@ -342,7 +342,8 @@ struct FileTypeTableTests {
 
 @Suite("Discovery shortfall notice")
 struct DiscoveryShortfallTests {
-    @Test("unreadable folders and oversized files produce one plain notice; a clean walk none")
+    @Test("unreadable folders and oversized files produce one plain notice; a clean walk none",
+          .enabled(if: getuid() != 0, "root can read a mode 000 directory"))
     func shortfall() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDShortfall-\(UUID().uuidString)")
         let locked = tmp.appendingPathComponent("locked")

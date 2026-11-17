@@ -319,7 +319,7 @@ public actor Discovery {
     ) async -> Int {
         // `.fileSizeKey` is deliberately not prefetched: on exFAT volumes the batched
         // fetch fails with EINVAL for some directories and the enumerator then drops
-        // the rest of that directory. The size is read per file instead.
+        // the rest of that directory. The size comes from the per-file stat instead.
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey, .creationDateKey]
         // Without an errorHandler the enumerator SILENTLY drops any entry it
         // can't read (permission denied, a NAS share that drops mid-scan, a file
@@ -376,7 +376,10 @@ public actor Discovery {
             if url.path.hasPrefix(Self.engineStatePrefix) { return .other }
             let ext = url.pathExtension
             guard FileTypes.isCataloged(name: url.lastPathComponent) else { return .other }
-            let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            // One stat gives the size, the inode, the cloud flag and the modification time as the
+            // catalog stores it (seconds plus nanoseconds, not a Date's rounding).
+            let identity = Self.identity(of: url)
+            let size = identity.size ?? 0
             let fileKind = FileTypes.kind(forExtension: ext)
             // Video, audio and other files are never decoded whole, so the size cap does not apply.
             let streamed = fileKind == .video || fileKind == .audio || fileKind == .other
@@ -393,9 +396,6 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row; a lookup miss
             // fails safe (the file is processed).
-            // One stat gives the inode, the cloud flag and the modification time as the
-            // catalog stores it (seconds plus nanoseconds, not a Date's rounding).
-            let identity = Self.identity(of: url)
             if let skip, let entry = skip[PathFingerprint(url.path)],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
@@ -544,8 +544,8 @@ public actor Discovery {
     /// for cross-platform DB byte-parity. `stat` (follows symlinks) so a
     /// symlinked regular file resolves to its target's identity, matching the
     /// Windows CreateFileW path; nil on any error (heal simply won't fire).
-    /// Computed only for KEPT files (post incremental-skip), so the extra syscall
-    /// is paid once per file already bound for the ANE/Vision/CLIP/OCR pass.
+    /// Computed once per cataloged file, before the size cap and the incremental
+    /// skip, so the walk pays a single stat per file.
     ///
     /// CAUTION: unlike the Windows NTFS file_ref, st_ino carries NO
     /// sequence/generation number — APFS/HFS reuse an inode freely after a file is
@@ -558,18 +558,18 @@ public actor Discovery {
         identity(of: url).inode
     }
 
-    /// One `stat` for both the inode and SF_DATALESS, the flag macOS sets on a
+    /// One `stat` for the inode, the size and SF_DATALESS, the flag macOS sets on a
     /// file whose contents live only in iCloud (or another file provider).
     /// `modified` is the Rust engine's value, including 0 for a time before 1970 (its discovery
     /// stores 0 there); it is nil only when the stat fails.
-    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool, modified: Double?) {
+    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool, modified: Double?, size: Int64?) {
         var st = stat()
         let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
             guard let rep else { return false }
             return stat(rep, &st) == 0
         }
-        guard ok else { return (nil, false, nil) }
-        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0, FileModificationTime.unixSeconds(st) ?? 0)
+        guard ok else { return (nil, false, nil, nil) }
+        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0, FileModificationTime.unixSeconds(st) ?? 0, Int64(st.st_size))
     }
 
     /// True when no row sits at `path` yet and a successfully scanned row with the
