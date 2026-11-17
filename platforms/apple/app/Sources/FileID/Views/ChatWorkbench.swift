@@ -36,6 +36,7 @@ struct ChatWorkbench: View {
 
     private var isPage: Bool { onClose == nil }
     private var readiness: LibraryReadiness { LibraryReadiness(catalogedFiles: store.totalFiles, scanPhase: engine.lastProgress?.phase) }
+    private var chosenFolderName: String? { handoff.libraryRoot?.lastPathComponent }
     private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
     private var followsDescribe: Bool { chatModelKind.isEmpty || chatModelKind == describeKind }
     private var activeModelKind: String { followsDescribe ? describeKind : chatModelKind }
@@ -195,16 +196,20 @@ struct ChatWorkbench: View {
     private var needsScanState: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(readiness.chatTitle).font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
-            Text(readiness.chatMessage)
+            Text(readiness.chatMessage(chosenFolder: chosenFolderName))
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
             if readiness == .needsScan {
-                Button { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) } label: {
-                    Label("Choose a folder to scan", systemImage: "folder.badge.plus")
+                Button {
+                    if let folder = handoff.libraryRoot { engine.startScan(rootURL: folder) }
+                    else { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                } label: {
+                    Label(LibraryReadiness.scanButtonTitle(chosenFolder: chosenFolderName), systemImage: handoff.libraryRoot == nil ? "folder.badge.plus" : "play.fill")
+                        .lineLimit(1).truncationMode(.middle)
                 }
                 .buttonStyle(.dsPrimary)
                 .padding(.top, 4)
-                .accessibilityHint("Opens the folder picker. FileID reads the folder you choose.")
+                .accessibilityHint(chosenFolderName == nil ? "Opens the folder picker. FileID reads the folder you choose." : "FileID reads this folder. Nothing in it is moved or changed.")
             } else {
                 IndeterminateBar().frame(width: 120).padding(.top, 4).accessibilityHidden(true)
             }

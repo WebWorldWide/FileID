@@ -171,11 +171,15 @@ struct CatalogWorkbench: View {
                 if hits.isEmpty && pendingAction != "search", let readiness = libraryReadiness, !readiness.hasFiles {
                     VStack(spacing: 10) {
                         MetaText(readiness == .reading
-                                 ? "FileID is reading your files. Search opens as soon as the first ones are read."
+                                 ? "FileID is reading your files. Search opens as soon as the first files are read."
                                  : "Scan a folder first. Search looks through the files FileID has scanned.")
                             .multilineTextAlignment(.center)
                         if readiness == .needsScan {
-                            Button("Choose a folder to scan") { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                            let folder = ChatHandoff.shared.libraryRoot
+                            Button(LibraryReadiness.scanButtonTitle(chosenFolder: folder?.lastPathComponent)) {
+                                if let folder { engine.startScan(rootURL: folder) }
+                                else { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                            }
                                 .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
                         }
                     }

@@ -15,6 +15,7 @@ struct MainWindow: View {
     @AppStorage(LibraryScope.storageKey) private var scopeRootID: Int = 0
     @AppStorage(TextSize.storageKey) private var textSizeRaw: String = TextSize.standard.rawValue
     @State private var pickedURL: URL?
+    @State private var scanCounterThrottle = ScanCounterThrottle()
     @State private var isDragHovering = false
     @State private var chatPresented = false
     private let toasts = ToastCenter.shared
@@ -208,6 +209,9 @@ struct MainWindow: View {
             .onChange(of: scopeRootID) { _, _ in applyScope(engine.libraryRoots) }
             // The counts in the sidebar and page header must catch up when a scan ends on any
             // page, not only while the Library page is the one on screen.
+            .onChange(of: engine.lastProgress?.processed) { _, _ in
+                if scanCounterThrottle.shouldRefresh(scanPhase: engine.lastProgress?.phase, now: Date()) { store.openIfPossible() }
+            }
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
                 // A first scan creates the catalog after launch, so the reader may not be open yet.
                 store.openIfPossible()

@@ -147,10 +147,19 @@ final class ModelInstaller: ModelInstalling {
         if !isDir.boolValue {
             return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
+        // Lists each folder itself: on exFAT the URL enumerator prefetching sizes fails with EINVAL
+        // for some folders and then drops their contents without a word.
         var total: Int64 = 0
-        if let entries = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-            for case let file as URL in entries {
-                total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        var pending = [url]
+        while let directory = pending.popLast() {
+            guard let children = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { continue }
+            for child in children {
+                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                if values?.isDirectory == true {
+                    pending.append(child)
+                } else {
+                    total += Int64(values?.fileSize ?? 0)
+                }
             }
         }
         return total
