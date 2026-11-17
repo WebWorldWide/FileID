@@ -41,6 +41,7 @@ async fn the_plan_publishes_confidence_counts_that_match_its_moves_and_sum_to_th
     let _ = std::fs::remove_dir_all(&root);
 
     assert!(!plan.moves.is_empty());
+    assert!(plan.moves.iter().any(|m| m.confidence.eq_ignore_ascii_case("auto")), "the fixture has auto moves");
     let counts = plan.confidence_counts.expect("the plan carries confidence counts");
     let tally = |name: &str| plan.moves.iter().filter(|m| m.confidence.eq_ignore_ascii_case(name)).count() as u64;
     assert_eq!((counts.auto, counts.review, counts.ask), (tally("auto"), tally("review"), tally("ask")));
