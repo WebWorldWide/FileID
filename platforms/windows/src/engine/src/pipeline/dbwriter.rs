@@ -3072,6 +3072,42 @@ mod twin_reuse_tests {
         assert_eq!(owed(&conn, "/lib/b.jpg"), None);
     }
 
+    fn copy_after_spoiling_the_twin(spoil: &str, switch_off: bool) -> (i64, i64, i64) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [31u8; 32];
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock().execute_batch(spoil).unwrap();
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.reuse_twin = !switch_off;
+        writer.flush(&mut vec![copy], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let db = conn.lock();
+        db.query_row(
+            "SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id), (SELECT count(*) FROM clip_embeddings WHERE file_id = f.id) \
+             FROM files f WHERE path_text = '/lib/b.jpg'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_copy_never_takes_over_a_failed_row_a_non_image_a_sampled_hash_or_a_row_with_reuse_switched_off() {
+        let none = (1, 0, 0);
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET failed = 1", false), none, "failed twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET kind = 'video'", false), none, "non-image twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET content_hash = substr(content_hash, 1, 16)", false), none, "sampled or short hash");
+        assert_eq!(
+            copy_after_spoiling_the_twin("DELETE FROM tags; DELETE FROM clip_embeddings", false),
+            none,
+            "a twin that kept no tag and no vector"
+        );
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", true);
+        assert_eq!((failed, tags, clips), (0, 0, 0), "reuse off: the copy keeps only its own row and gets nothing of the twin's");
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", false);
+        assert_eq!((failed, tags, clips), (0, 3, 1), "positive control: the intact twin is taken over");
+    }
+
     #[test]
     fn a_copy_of_an_earlier_scan_is_served_from_the_catalog() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
