@@ -1988,6 +1988,58 @@ mod tests {
         assert_eq!(decoded[0].source_revision, "fixture");
     }
 
+    #[test]
+    fn a_chapter_export_refuses_markers_edited_added_or_deleted_after_its_preview() {
+        let mut fixture = Fixture::new();
+        fixture
+            .conn
+            .execute("INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('gift',1,1,2,'Gift','','r','user',1,1,0)", [])
+            .unwrap();
+        let mut request = fixture.request("vtt");
+        request.recipe.as_mut().unwrap().kind = "chapters".into();
+        let edits = [
+            "UPDATE catalog_chapters SET title='Cake' WHERE id='gift'",
+            "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('song',1,3,4,'Song','','r','user',1,1,0)",
+            "DELETE FROM catalog_chapters WHERE id='song'",
+        ];
+        for edit in edits {
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            let output = std::path::PathBuf::from(&preview.outputs[0].output_path);
+            fixture.conn.execute(edit, []).unwrap();
+            let message = match execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")) {
+                Ok(result) => {
+                    assert_eq!(result.status, "error", "{edit}");
+                    result.message
+                }
+                Err(error) => error.to_string(),
+            };
+            assert!(message.contains("Chapter markers changed"), "{edit}: {message}");
+            assert!(!output.exists(), "{edit}: nothing is written");
+        }
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let text = fs::read_to_string(&exported.outputs[0].output_path).unwrap();
+        assert!(text.contains("Cake") && !text.contains("Song"), "{text}");
+    }
+
+    #[test]
+    fn an_export_stores_the_recipe_it_ran_beside_its_lineage() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let (original, role, recipe): (i64, String, String) = fixture
+            .conn
+            .query_row("SELECT original_id,role,recipe_json FROM catalog_assets", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((original, role.as_str()), (1, "export"));
+        let stored: serde_json::Value = serde_json::from_str(&recipe).unwrap();
+        assert_eq!(stored, serde_json::to_value(request.recipe.as_ref().unwrap()).unwrap());
+        assert_eq!(serde_json::from_value::<ToolRecipe>(stored).unwrap().max_dimension, 16);
+    }
+
     use media_recipes::{MediaProbe, MediaRuntime};
 
     struct FakeMedia {
