@@ -3360,3 +3360,157 @@ mod failure_memory_tests {
     }
 }
 
+
+#[cfg(test)]
+mod rescan_preservation_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    const PATH: &str = "/lib/IMG_0001.jpg";
+
+    fn scan(modified_unix: f64) -> TaggedFile {
+        TaggedFile::bare(&DiscoveredFile {
+            path: PathBuf::from(PATH),
+            kind: FileKind::Image,
+            size_bytes: 4,
+            modified_unix,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        })
+    }
+
+    fn analysed(modified_unix: f64, tags: &[&str], ocr: &str) -> TaggedFile {
+        let mut file = scan(modified_unix);
+        file.tags = tags.iter().map(|tag| ((*tag).to_string(), None)).collect();
+        file.tags_evaluated = true;
+        file.faces_evaluated = true;
+        file.ocr_stage_ran = true;
+        file.ocr_text = Some(ocr.to_string());
+        file
+    }
+
+    fn flush(writer: &DbWriter, file: TaggedFile, batch: u32) {
+        writer.flush(&mut vec![file], &mut 0, &mut 0, &mut 0, batch).unwrap();
+    }
+
+    struct Seeded {
+        conn: Arc<Mutex<Connection>>,
+        writer: DbWriter,
+        file_id: i64,
+        face_id: i64,
+        person_id: i64,
+    }
+
+    /// A scanned file with an automatic tag, OCR text, one face the user has
+    /// named, and a tag the user typed.
+    fn seeded() -> Seeded {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        flush(&writer, analysed(1_700_000_000.0, &["beach"], "alpha bravo"), 0);
+        let (file_id, face_id, person_id) = {
+            let db = conn.lock();
+            let file_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+            db.execute("INSERT INTO persons (name, file_count, created_at) VALUES ('Mom', 1, 0)", []).unwrap();
+            let person_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES (?1, ?2, X'01', '{}')",
+                params![file_id, person_id],
+            )
+            .unwrap();
+            let face_id = db.last_insert_rowid();
+            db.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'keepme', 'user')", [file_id]).unwrap();
+            (file_id, face_id, person_id)
+        };
+        Seeded { conn, writer, file_id, face_id, person_id }
+    }
+
+    fn state(seed: &Seeded) -> (Option<i64>, Vec<String>, Vec<Option<i64>>, Vec<String>, i64) {
+        let db = seed.conn.lock();
+        let id = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).ok();
+        let tags = db
+            .prepare("SELECT tag || ':' || source FROM tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let people = db
+            .prepare("SELECT person_id FROM face_prints ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let text = db
+            .prepare("SELECT text FROM ocr_text ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let failed = db.query_row("SELECT failed FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+        (id, tags, people, text, failed)
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_row_id_and_the_people_the_user_named() {
+        let seed = seeded();
+        let before = state(&seed);
+        assert_eq!(before.2, vec![Some(seed.person_id)]);
+
+        // The same file again with the face stage skipped (the usual state of
+        // a scan that reads only what changed).
+        let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+        again.faces_evaluated = false;
+        flush(&seed.writer, again, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "files.id survives a rewrite");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the named face stays named");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(seed.conn.lock().query_row("SELECT id FROM face_prints", [], |r| r.get::<_, i64>(0)).unwrap(), seed.face_id);
+    }
+
+    #[test]
+    fn a_changed_file_whose_stages_did_not_run_keeps_its_tags_people_and_text() {
+        let seed = seeded();
+        // A read that timed out, or models that were not ready: the file
+        // changed, nothing was produced, no stage ran.
+        let changed = scan(1_700_000_060.0);
+        flush(&seed.writer, changed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id));
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()], "tags survive");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the person assignment survives");
+        assert_eq!(after.3, vec!["alpha bravo".to_string()], "the text survives");
+        assert_eq!(after.4, 0);
+    }
+
+    #[test]
+    fn a_failed_read_of_a_changed_file_records_the_failure_and_keeps_what_was_found_before() {
+        let seed = seeded();
+        let mut failed = scan(1_700_000_060.0);
+        failed.failed = true;
+        failed.error_message = Some("image decode: broken".to_string());
+        flush(&seed.writer, failed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "the row is not replaced");
+        assert_eq!(after.4, 1, "the failure is recorded");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(after.2, vec![Some(seed.person_id)]);
+        assert_eq!(after.3, vec!["alpha bravo".to_string()]);
+
+        // The next good read clears the failure and replaces the old results.
+        flush(&seed.writer, analysed(1_700_000_060.0, &["sunset"], "charlie"), 2);
+        let healed = state(&seed);
+        assert_eq!(healed.0, Some(seed.file_id));
+        assert_eq!(healed.4, 0);
+        assert_eq!(healed.1, vec!["keepme:user".to_string(), "sunset:auto".to_string()], "automatic tags are replaced, the user's stay");
+        assert_eq!(healed.3, vec!["charlie".to_string()]);
+    }
+}
