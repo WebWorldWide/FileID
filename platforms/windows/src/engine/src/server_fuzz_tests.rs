@@ -584,8 +584,7 @@ async fn start_scan_with_no_database_answers_db_unavailable_then_a_terminal_phas
     let d = gap_dispatcher(None, sink);
     let line = serde_json::json!({
         "id": "scan-1",
-        "type": "startScan",
-        "payload": { "rootPath": "/tmp/does-not-matter", "rescan": false }
+        "payload": { "startScan": { "rootPath": "/tmp/does-not-matter", "rescan": false } }
     })
     .to_string();
     handle_line(&d, &line).await;
