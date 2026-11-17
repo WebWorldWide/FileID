@@ -166,33 +166,33 @@
             "value": [
               {
                 "fileID": 13,
-                "source": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D1.ARW",
-                "destination": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW"
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D1.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW}"
               },
               {
                 "fileID": 14,
-                "source": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D2.ARW",
-                "destination": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D2.ARW"
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D2.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D2.ARW}"
               },
               {
                 "fileID": 15,
-                "source": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D3.ARW",
-                "destination": "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D3.ARW"
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D3.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D3.ARW}"
               },
               {
                 "fileID": 33,
-                "source": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D1.ARW",
-                "destination": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW"
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D1.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW}"
               },
               {
                 "fileID": 34,
-                "source": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D2.ARW",
-                "destination": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D2.ARW"
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D2.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D2.ARW}"
               },
               {
                 "fileID": 35,
-                "source": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D3.ARW",
-                "destination": "{root}/\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D3.ARW"
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D3.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D3.ARW}"
               }
             ]
           }
@@ -247,10 +247,10 @@
         "db": "SELECT path_text FROM files WHERE id IN (13,33) ORDER BY id",
         "expect": [
           [
-            "{root}/Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW"
+            "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW}"
           ],
           [
-            "{root}/\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW"
+            "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW}"
           ]
         ]
       },
@@ -437,53 +437,53 @@
             "value": [
               {
                 "fileID": 1,
-                "source": "{root}/Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf",
-                "destination": "{root}/R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf"
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf}"
               },
               {
                 "fileID": 2,
-                "source": "{root}/Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf",
-                "destination": "{root}/R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf"
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf}"
               },
               {
                 "fileID": 3,
-                "source": "{root}/Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf",
-                "destination": "{root}/R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf"
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf}"
               },
               {
                 "fileID": 4,
-                "source": "{root}/Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf",
-                "destination": "{root}/R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf"
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf}"
               },
               {
                 "fileID": 5,
-                "source": "{root}/Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf",
-                "destination": "{root}/R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf"
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf}"
               },
               {
                 "fileID": 11,
-                "source": "{root}/Downloads/fa\u00e7ade_\u00f1o\u00f1o_0.pdf",
-                "destination": "{root}/Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_0.pdf"
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_0.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_0.pdf}"
               },
               {
                 "fileID": 12,
-                "source": "{root}/Downloads/fa\u00e7ade_\u00f1o\u00f1o_1.pdf",
-                "destination": "{root}/Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_1.pdf"
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_1.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_1.pdf}"
               },
               {
                 "fileID": 13,
-                "source": "{root}/Downloads/fa\u00e7ade_\u00f1o\u00f1o_2.pdf",
-                "destination": "{root}/Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_2.pdf"
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_2.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_2.pdf}"
               },
               {
                 "fileID": 14,
-                "source": "{root}/Downloads/fa\u00e7ade_\u00f1o\u00f1o_3.pdf",
-                "destination": "{root}/Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_3.pdf"
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_3.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_3.pdf}"
               },
               {
                 "fileID": 15,
-                "source": "{root}/Downloads/fa\u00e7ade_\u00f1o\u00f1o_4.pdf",
-                "destination": "{root}/Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_4.pdf"
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_4.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_4.pdf}"
               }
             ]
           }
