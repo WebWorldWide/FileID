@@ -203,10 +203,18 @@ mod tests {
 
     #[test]
     fn curated_lead_then_measured_then_smallest_that_fit() {
-        let shown = choices(&catalog(), "qwen2_5_vl_7b", resolve, |id| id.contains("gemma"));
+        let shown = choices(&catalog(), "qwen2_5_vl_7b", resolve, |id| {
+            id.contains("gemma")
+        });
         assert_eq!(
             ids(&shown),
-            ["qwen2_5_vl_7b", "gemma_3_4b", "cat_measured", "cat_gemma", "cat_small"]
+            [
+                "qwen2_5_vl_7b",
+                "gemma_3_4b",
+                "cat_measured",
+                "cat_gemma",
+                "cat_small"
+            ]
         );
         assert!(shown[0].curated && shown[1].curated && !shown[2].curated);
     }
@@ -215,7 +223,10 @@ mod tests {
     fn non_commercial_and_unreviewed_terms_are_never_offered() {
         let shown = choices(&catalog(), "qwen2_5_vl_7b", resolve, |_| false);
         assert!(!ids(&shown).contains(&"cat_nc"));
-        assert!(!ids(&shown).contains(&"gemma_3_4b"), "terms without a policy to show");
+        assert!(
+            !ids(&shown).contains(&"gemma_3_4b"),
+            "terms without a policy to show"
+        );
         assert!(!ids(&shown).contains(&"cat_gemma"));
         let mut llama = item("cat_small", "candidate", "Llama-3.2", 1.0, true);
         assert!(!offerable(&llama, |_| true));
@@ -228,7 +239,9 @@ mod tests {
         let shown = choices(&catalog(), "cat_huge", resolve, |_| true);
         let huge = shown.iter().find(|choice| choice.id == "cat_huge").unwrap();
         assert!(!huge.fits);
-        assert!(!ids(&choices(&catalog(), "qwen2_5_vl_7b", resolve, |_| true)).contains(&"cat_huge"));
+        assert!(
+            !ids(&choices(&catalog(), "qwen2_5_vl_7b", resolve, |_| true)).contains(&"cat_huge")
+        );
     }
 
     #[test]
@@ -247,7 +260,10 @@ mod tests {
                 measured_secs_per_image: None,
             })
             .collect();
-        assert_eq!(leading_count(&many, "qwen2_5_vl_7b"), 2 + LEADING_CATALOG_ROWS);
+        assert_eq!(
+            leading_count(&many, "qwen2_5_vl_7b"),
+            2 + LEADING_CATALOG_ROWS
+        );
         assert_eq!(leading_count(&many[..3], "x"), 3);
         let mut tail = many.clone();
         tail[11].id = "late";
@@ -258,15 +274,24 @@ mod tests {
     fn rows_state_memory_speed_license_and_terms() {
         let shown = choices(&catalog(), "qwen2_5_vl_7b", resolve, |_| true);
         let by = |id: &str| shown.iter().find(|choice| choice.id == id).unwrap().clone();
-        assert_eq!(by("qwen2_5_vl_7b").stats(), "Needs ≈ 8.0 GB memory · about 7 s a photo · Apache-2.0");
-        assert_eq!(by("cat_measured").stats(), "Needs ≈ 9.0 GB memory · measured 2.5 s a photo · MIT");
+        assert_eq!(
+            by("qwen2_5_vl_7b").stats(),
+            "Needs ≈ 8.0 GB memory · about 7 s a photo · Apache-2.0"
+        );
+        assert_eq!(
+            by("cat_measured").stats(),
+            "Needs ≈ 9.0 GB memory · measured 2.5 s a photo · MIT"
+        );
         assert_eq!(by("cat_measured").secs_per_image(), 2.5);
         assert_eq!(
             by("cat_gemma").stats(),
             "Needs ≈ 3.0 GB memory · speed not measured yet · Gemma · terms shown before download"
         );
         assert_eq!(by("cat_small").badge(), "3.0 GB download");
-        let ready = VlmChoice { installed: true, ..by("cat_small") };
+        let ready = VlmChoice {
+            installed: true,
+            ..by("cat_small")
+        };
         assert_eq!(ready.badge(), "Ready");
     }
 }

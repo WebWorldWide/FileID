@@ -27,21 +27,43 @@ pub(super) fn noun(kinds: &[&str], count: usize) -> String {
     } else {
         "file"
     };
-    if count == 1 { base.to_owned() } else { format!("{base}s") }
+    if count == 1 {
+        base.to_owned()
+    } else {
+        format!("{base}s")
+    }
 }
 
 impl ChatScope {
     pub(super) fn selected(ids: &[i64], kinds: &[&str]) -> Option<Self> {
         let mut seen = std::collections::HashSet::new();
-        let unique: Vec<i64> = ids.iter().copied().filter(|id| *id > 0 && seen.insert(*id)).take(MAX_SCOPE).collect();
-        (!unique.is_empty()).then(|| Self { label: format!("{} selected {}", unique.len(), noun(kinds, unique.len())), file_ids: unique })
+        let unique: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0 && seen.insert(*id))
+            .take(MAX_SCOPE)
+            .collect();
+        (!unique.is_empty()).then(|| Self {
+            label: format!("{} selected {}", unique.len(), noun(kinds, unique.len())),
+            file_ids: unique,
+        })
     }
 
     /// The matches of a scoped answer, which become the next question's scope.
     pub(super) fn narrowed(hits: &[fileid_engine::ipc::CatalogHit]) -> Option<Self> {
-        let yes: Vec<i64> = hits.iter().filter(|hit| hit.selection_match.as_deref() == Some("yes")).map(|hit| hit.file_id).collect();
+        let yes: Vec<i64> = hits
+            .iter()
+            .filter(|hit| hit.selection_match.as_deref() == Some("yes"))
+            .map(|hit| hit.file_id)
+            .collect();
         let count = yes.len();
-        (count > 0).then(|| Self { file_ids: yes, label: format!("{count} {} from the last answer", if count == 1 { "match" } else { "matches" }) })
+        (count > 0).then(|| Self {
+            file_ids: yes,
+            label: format!(
+                "{count} {} from the last answer",
+                if count == 1 { "match" } else { "matches" }
+            ),
+        })
     }
 }
 
@@ -62,8 +84,14 @@ pub(super) fn scope() -> Option<ChatScope> {
 pub(super) fn set_scope(scope: Option<ChatScope>) {
     let watchers: Vec<Rc<dyn Fn()>> = SHARED.with_borrow_mut(|shared| {
         shared.scope = scope;
-        shared.scope_watchers.retain(|watcher| watcher.strong_count() > 0);
-        shared.scope_watchers.iter().filter_map(Weak::upgrade).collect()
+        shared
+            .scope_watchers
+            .retain(|watcher| watcher.strong_count() > 0);
+        shared
+            .scope_watchers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
     });
     for watcher in watchers {
         watcher();
@@ -79,7 +107,9 @@ pub(super) fn ask_about(anchor: &impl gtk::prelude::IsA<gtk::Widget>, ids: &[i64
     use gtk::prelude::*;
     if let Some(scope) = ChatScope::selected(ids, kinds) {
         set_scope(Some(scope));
-        let _ = anchor.as_ref().activate_action("win.navigate", Some(&"chat".to_variant()));
+        let _ = anchor
+            .as_ref()
+            .activate_action("win.navigate", Some(&"chat".to_variant()));
     }
 }
 
@@ -150,11 +180,31 @@ mod tests {
     #[test]
     fn a_scope_is_deduplicated_capped_and_labelled_by_kind() {
         let scope = ChatScope::selected(&[3, 3, 0, 4], &["image", "image"]).unwrap();
-        assert_eq!(scope, ChatScope { file_ids: vec![3, 4], label: "2 selected photos".into() });
-        assert_eq!(ChatScope::selected(&[5], &["video"]).unwrap().label, "1 selected video");
-        assert_eq!(ChatScope::selected(&[5, 6], &["video", "image"]).unwrap().label, "2 selected files");
+        assert_eq!(
+            scope,
+            ChatScope {
+                file_ids: vec![3, 4],
+                label: "2 selected photos".into()
+            }
+        );
+        assert_eq!(
+            ChatScope::selected(&[5], &["video"]).unwrap().label,
+            "1 selected video"
+        );
+        assert_eq!(
+            ChatScope::selected(&[5, 6], &["video", "image"])
+                .unwrap()
+                .label,
+            "2 selected files"
+        );
         assert!(ChatScope::selected(&[], &[]).is_none());
-        assert_eq!(ChatScope::selected(&(1..=2500).collect::<Vec<_>>(), &[]).unwrap().file_ids.len(), MAX_SCOPE);
+        assert_eq!(
+            ChatScope::selected(&(1..=2500).collect::<Vec<_>>(), &[])
+                .unwrap()
+                .file_ids
+                .len(),
+            MAX_SCOPE
+        );
     }
 
     #[test]
@@ -169,7 +219,13 @@ mod tests {
             page: None,
             selection_match: Some(verdict.into()),
         };
-        assert_eq!(ChatScope::narrowed(&[hit(1, "unsure"), hit(2, "yes")]).unwrap(), ChatScope { file_ids: vec![2], label: "1 match from the last answer".into() });
+        assert_eq!(
+            ChatScope::narrowed(&[hit(1, "unsure"), hit(2, "yes")]).unwrap(),
+            ChatScope {
+                file_ids: vec![2],
+                label: "1 match from the last answer".into()
+            }
+        );
         assert!(ChatScope::narrowed(&[hit(1, "unsure")]).is_none());
         let heard = Rc::new(std::cell::Cell::new(0));
         let count = heard.clone();

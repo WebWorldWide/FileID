@@ -12,11 +12,11 @@ use gtk::glib;
 use super::workbench_state::*;
 use super::workbenches::{Engine, LINUX_TOOL_UNDO_SAFETY_ACCEPTED, TOOL_UNDO_UNAVAILABLE_REASON};
 use crate::engine_client::{
-    read_file_row, texture_from_decoded, DecodedImage, EngineState, FileRow, QueryChannel, QuerySpec,
-    ThumbReply,
+    DecodedImage, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply, read_file_row,
+    texture_from_decoded,
 };
 use crate::shell::status::Tone;
-use crate::spring::{animate_with, Spring};
+use crate::spring::{Spring, animate_with};
 use crate::v3;
 
 const KINDS: [&str; 3] = ["photo", "video", "chapters"];
@@ -44,16 +44,23 @@ const PROXY_SIDES: [(&str, u32); 2] = [("640 px", 640), ("960 px", 960)];
 const ROTATIONS: [(&str, u32); 3] = [("90° right", 90), ("180°", 180), ("90° left", 270)];
 
 /// Export, plus each common-media tool the engine reports available.
-pub(super) fn available_video_tools(capabilities: &[ToolCapability]) -> Vec<(&'static str, &'static str)> {
+pub(super) fn available_video_tools(
+    capabilities: &[ToolCapability],
+) -> Vec<(&'static str, &'static str)> {
     VIDEO_TOOLS
         .iter()
         .copied()
-        .filter(|(id, _)| *id == "export" || capabilities.iter().any(|c| c.id == *id && c.available))
+        .filter(|(id, _)| {
+            *id == "export" || capabilities.iter().any(|c| c.id == *id && c.available)
+        })
         .collect()
 }
 
 pub(super) fn source_container(path: &str) -> Option<usize> {
-    let extension = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    let extension = std::path::Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
     match extension.as_str() {
         "mp4" | "m4v" => Some(0),
         "mov" => Some(1),
@@ -62,9 +69,18 @@ pub(super) fn source_container(path: &str) -> Option<usize> {
 }
 
 /// `rgba` turned `quarter_turns` × 90° clockwise.
-pub(super) fn turn_rgba(rgba: &[u8], width: usize, height: usize, quarter_turns: u32) -> (Vec<u8>, usize, usize) {
+pub(super) fn turn_rgba(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    quarter_turns: u32,
+) -> (Vec<u8>, usize, usize) {
     let turns = quarter_turns % 4;
-    let (out_width, out_height) = if turns % 2 == 1 { (height, width) } else { (width, height) };
+    let (out_width, out_height) = if turns % 2 == 1 {
+        (height, width)
+    } else {
+        (width, height)
+    };
     let mut out = vec![0; rgba.len()];
     for y in 0..height {
         for x in 0..width {
@@ -117,7 +133,10 @@ impl RecipeChoice {
     /// and MOV for an exact trim (MP4 only).
     pub fn disabled_containers(&self, sources: &[&str]) -> Vec<usize> {
         let mut disabled: Vec<usize> = match self.tool {
-            "remux" => sources.iter().filter_map(|path| source_container(path)).collect(),
+            "remux" => sources
+                .iter()
+                .filter_map(|path| source_container(path))
+                .collect(),
             "trim" if self.trim_exact => vec![1],
             _ => vec![],
         };
@@ -214,7 +233,10 @@ impl RecipeChoice {
         let recipe = self.recipe();
         let files = format!("{files} file{}", if files == 1 { "" } else { "s" });
         if let Some(tool) = self.media_tool() {
-            let label = VIDEO_TOOLS.iter().find(|(id, _)| *id == tool).map_or(tool, |(_, label)| label);
+            let label = VIDEO_TOOLS
+                .iter()
+                .find(|(id, _)| *id == tool)
+                .map_or(tool, |(_, label)| label);
             let mut parts = vec![files, label.to_owned(), recipe.format.to_uppercase()];
             match tool {
                 "trim" => {
@@ -244,8 +266,14 @@ impl RecipeChoice {
 
     pub fn frame_ratio(&self, photo_aspect: Option<f64>) -> f64 {
         if self.media_tool().is_some() {
-            let ratio = photo_aspect.filter(|a| a.is_finite() && *a > 0.0).unwrap_or(16.0 / 9.0);
-            return if self.preview_turns() % 2 == 1 { 1.0 / ratio } else { ratio };
+            let ratio = photo_aspect
+                .filter(|a| a.is_finite() && *a > 0.0)
+                .unwrap_or(16.0 / 9.0);
+            return if self.preview_turns() % 2 == 1 {
+                1.0 / ratio
+            } else {
+                ratio
+            };
         }
         match KINDS[self.kind.min(2)] {
             "photo" => photo_aspect
@@ -435,12 +463,15 @@ impl ToolsUi {
         }));
         let exporting = busy && self.running.borrow().is_some();
         self.undo.set_visible(!exporting);
-        self.cancel.set_visible(exporting && (recipe.kind == "video" || self.choice.borrow().media_tool().is_some()));
+        self.cancel.set_visible(
+            exporting && (recipe.kind == "video" || self.choice.borrow().media_tool().is_some()),
+        );
         let sources = self.selected_paths();
         let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
         let disabled = self.choice.borrow().disabled_containers(&sources);
         for index in 0..CONTAINERS.len() {
-            self.media_format.set_enabled(index, !disabled.contains(&index));
+            self.media_format
+                .set_enabled(index, !disabled.contains(&index));
         }
         self.busy.set_visible(busy);
         let detail = s
@@ -563,7 +594,11 @@ impl ToolsUi {
         self.selected
             .borrow()
             .iter()
-            .filter_map(|id| rows.iter().find(|(file, _)| file.id == *id).map(|(file, _)| file.path.clone()))
+            .filter_map(|id| {
+                rows.iter()
+                    .find(|(file, _)| file.id == *id)
+                    .map(|(file, _)| file.path.clone())
+            })
             .collect()
     }
 
@@ -574,7 +609,8 @@ impl ToolsUi {
         let media = choice.media_tool();
         self.tool_row.set_visible(kind == "video");
         self.photo_rows.set_visible(kind == "photo");
-        self.video_rows.set_visible(kind == "video" && media.is_none());
+        self.video_rows
+            .set_visible(kind == "video" && media.is_none());
         self.media_rows.set_visible(media.is_some());
         self.trim_rows.set_visible(media == Some("trim"));
         self.proxy_row.set_visible(media == Some("proxy"));
@@ -689,11 +725,20 @@ impl ToolsUi {
         let decoded = if turns == 0 {
             decoded
         } else {
-            let (rgba, width, height) =
-                turn_rgba(&decoded.rgba, decoded.width as usize, decoded.height as usize, turns);
-            DecodedImage { width: width as u32, height: height as u32, rgba }
+            let (rgba, width, height) = turn_rgba(
+                &decoded.rgba,
+                decoded.width as usize,
+                decoded.height as usize,
+                turns,
+            );
+            DecodedImage {
+                width: width as u32,
+                height: height as u32,
+                rgba,
+            }
         };
-        self.picture.set_paintable(Some(&texture_from_decoded(decoded)));
+        self.picture
+            .set_paintable(Some(&texture_from_decoded(decoded)));
     }
 
     fn animate_frame(&self) {
@@ -828,10 +873,11 @@ impl ToolsUi {
             self.picture.set_paintable(None::<&gtk::gdk::Texture>);
             return;
         };
-        let rx = self
-            .engine
-            .borrow()
-            .request_preview(row.path.clone(), super::util::decode_px(&self.picture, 900), row.kind == "video");
+        let rx = self.engine.borrow().request_preview(
+            row.path.clone(),
+            super::util::decode_px(&self.picture, 900),
+            row.kind == "video",
+        );
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
@@ -1026,8 +1072,13 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let trim_end = v3::number_field(0.0, 21_600.0, 0.1, 2);
     let start_here = v3::ghost("Set from playhead");
     let end_here = v3::ghost("Set from playhead");
-    for (label, field, button) in [("Start", &trim_start, &start_here), ("End", &trim_end, &end_here)] {
-        field.update_property(&[gtk::accessible::Property::Label(&format!("{label} time in seconds"))]);
+    for (label, field, button) in [
+        ("Start", &trim_start, &start_here),
+        ("End", &trim_end, &end_here),
+    ] {
+        field.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{label} time in seconds"
+        ))]);
         button.set_tooltip_text(Some("Use the player's current time"));
         let row = v3::hbox(8);
         row.append(field);
@@ -1386,7 +1437,10 @@ fn wire(
     root.add_controller(keys);
     let weak = Rc::downgrade(ui);
     root.connect_map(move |_| {
-        if let Some(ui) = weak.upgrade().filter(|ui| ui.rows.borrow().is_empty() && !ui.loading.get()) {
+        if let Some(ui) = weak
+            .upgrade()
+            .filter(|ui| ui.rows.borrow().is_empty() && !ui.loading.get())
+        {
             ui.find_files();
         }
     });
@@ -1444,7 +1498,8 @@ fn wire_media(ui: &Rc<ToolsUi>, start_here: &gtk::Button, end_here: &gtk::Button
         button.connect_clicked(move |_| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(seconds) = ui.playhead() else {
-                ui.status.set_label("Tick a video that can play here first.");
+                ui.status
+                    .set_label("Tick a video that can play here first.");
                 return;
             };
             let seconds = (seconds * 100.0).round() / 100.0;
@@ -1501,7 +1556,9 @@ fn media_note(choice: &RecipeChoice) -> &'static str {
         Some("remux") => {
             "Moves the video and sound into the other container without re-encoding. The container a file already has is greyed out."
         }
-        Some("audio") => "Saves the soundtrack as AAC in an M4A file. Videos without sound are refused.",
+        Some("audio") => {
+            "Saves the soundtrack as AAC in an M4A file. Videos without sound are refused."
+        }
         Some("proxy") => {
             "A small H.264 copy for quick previews, linked to its original. Smaller videos aren't enlarged."
         }
@@ -1568,14 +1625,24 @@ fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
 
 fn plain_kind_detail(kind: &str) -> &'static str {
     match kind {
-        "trim" => "Keeps the part between the start and end times as a new file. Your original video stays as it is.",
-        "remux" => "Puts the same video and sound in a different container. Your original video stays as it is.",
+        "trim" => {
+            "Keeps the part between the start and end times as a new file. Your original video stays as it is."
+        }
+        "remux" => {
+            "Puts the same video and sound in a different container. Your original video stays as it is."
+        }
         "audio" => "Saves the soundtrack as a new audio file. Your original video stays as it is.",
-        "proxy" => "Makes a small preview copy linked to the original. Your original video stays as it is.",
+        "proxy" => {
+            "Makes a small preview copy linked to the original. Your original video stays as it is."
+        }
         "rotate" => "Saves a copy that plays the other way up. Your original video stays as it is.",
-        "video" => "Makes a new MP4 at the size and shape you choose. Your original video stays as it is.",
+        "video" => {
+            "Makes a new MP4 at the size and shape you choose. Your original video stays as it is."
+        }
         "chapters" => "Saves a video's chapters as a file other apps can read.",
-        _ => "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is.",
+        _ => {
+            "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is."
+        }
     }
 }
 
@@ -1589,7 +1656,10 @@ mod tests {
         assert_eq!(kind_for(&["video"]), Some(1));
         assert_eq!(kind_for(&["image", "video"]), None);
         assert_eq!(kind_for(&[]), None);
-        assert_eq!(handoff_status(1, 1), "Chat chose 1 file. Pick a format, then Preview.");
+        assert_eq!(
+            handoff_status(1, 1),
+            "Chat chose 1 file. Pick a format, then Preview."
+        );
         assert_eq!(
             handoff_status(100, 250),
             "Chat chose 250 files; the first 100 are ticked. Up to 100 files per export."
@@ -1626,62 +1696,128 @@ mod tests {
 
     #[test]
     fn tool_picker_hides_unavailable_tools() {
-        let ids = |caps: &[ToolCapability]| available_video_tools(caps).into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        let ids = |caps: &[ToolCapability]| {
+            available_video_tools(caps)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(ids(&[]), ["export"]);
-        let all: Vec<_> = ["trim", "remux", "audio", "proxy", "rotate"].map(|id| capability(id, true)).into();
-        assert_eq!(ids(&all), ["export", "trim", "remux", "audio", "proxy", "rotate"]);
+        let all: Vec<_> = ["trim", "remux", "audio", "proxy", "rotate"]
+            .map(|id| capability(id, true))
+            .into();
         assert_eq!(
-            ids(&[capability("trim", false), capability("rotate", true), capability("photo", true)]),
+            ids(&all),
+            ["export", "trim", "remux", "audio", "proxy", "rotate"]
+        );
+        assert_eq!(
+            ids(&[
+                capability("trim", false),
+                capability("rotate", true),
+                capability("photo", true)
+            ]),
             ["export", "rotate"]
         );
     }
 
     #[test]
     fn video_tools_send_only_the_fields_their_recipe_takes() {
-        let mut video = RecipeChoice { frame: 2, ..choice(1) };
+        let mut video = RecipeChoice {
+            frame: 2,
+            ..choice(1)
+        };
         video.trim_start = 1.0;
         video.rotation = 2;
         let export = video.recipe();
-        assert_eq!((export.kind.as_str(), export.video_aspect_ratio.as_deref()), ("video", Some("9:16")));
-        assert!(export.trim_start_seconds.is_none() && export.trim_mode.is_none() && export.rotation_degrees.is_none());
+        assert_eq!(
+            (export.kind.as_str(), export.video_aspect_ratio.as_deref()),
+            ("video", Some("9:16"))
+        );
+        assert!(
+            export.trim_start_seconds.is_none()
+                && export.trim_mode.is_none()
+                && export.rotation_degrees.is_none()
+        );
 
         video.adopt_tool("trim", &["/v/clip.mov"]);
         video.trim_start = 1.25;
         video.trim_end = 4.5;
         let trim = video.recipe();
-        assert_eq!((trim.kind.as_str(), trim.format.as_str(), trim.max_dimension), ("trim", "mov", 1920));
-        assert_eq!((trim.trim_start_seconds, trim.trim_end_seconds, trim.trim_mode.as_deref()), (Some(1.25), Some(4.5), Some("keyframe")));
-        assert!(trim.video_aspect_ratio.is_none() && trim.allow_upscale.is_none() && trim.rotation_degrees.is_none());
+        assert_eq!(
+            (trim.kind.as_str(), trim.format.as_str(), trim.max_dimension),
+            ("trim", "mov", 1920)
+        );
+        assert_eq!(
+            (
+                trim.trim_start_seconds,
+                trim.trim_end_seconds,
+                trim.trim_mode.as_deref()
+            ),
+            (Some(1.25), Some(4.5), Some("keyframe"))
+        );
+        assert!(
+            trim.video_aspect_ratio.is_none()
+                && trim.allow_upscale.is_none()
+                && trim.rotation_degrees.is_none()
+        );
         video.trim_exact = true;
         assert_eq!(video.recipe().format, "mp4");
         assert_eq!(video.disabled_containers(&["/v/clip.mov"]), [1]);
 
         video.adopt_tool("audio", &[]);
         let audio = video.recipe();
-        assert_eq!((audio.kind.as_str(), audio.format.as_str()), ("audio", "m4a"));
+        assert_eq!(
+            (audio.kind.as_str(), audio.format.as_str()),
+            ("audio", "m4a")
+        );
         assert!(audio.trim_start_seconds.is_none() && audio.trim_mode.is_none());
 
         video.adopt_tool("proxy", &[]);
         video.proxy = 1;
         let proxy = video.recipe();
-        assert_eq!((proxy.kind.as_str(), proxy.format.as_str(), proxy.max_dimension), ("proxy", "mp4", 960));
+        assert_eq!(
+            (
+                proxy.kind.as_str(),
+                proxy.format.as_str(),
+                proxy.max_dimension
+            ),
+            ("proxy", "mp4", 960)
+        );
 
         video.adopt_tool("rotate", &["/v/clip.mp4"]);
         for (index, degrees, turns) in [(0, 90, 1), (1, 180, 2), (2, 270, 3)] {
             video.rotation = index;
             let rotate = video.recipe();
-            assert_eq!((rotate.kind.as_str(), rotate.format.as_str(), rotate.rotation_degrees), ("rotate", "mp4", Some(degrees)));
+            assert_eq!(
+                (
+                    rotate.kind.as_str(),
+                    rotate.format.as_str(),
+                    rotate.rotation_degrees
+                ),
+                ("rotate", "mp4", Some(degrees))
+            );
             assert_eq!(video.preview_turns(), turns);
         }
         assert_eq!(video.summary(1), "1 file · Rotate · MP4 · 90° left");
         video.rotation = 0;
         assert_eq!(video.frame_ratio(Some(16.0 / 9.0)), 9.0 / 16.0);
-        assert_eq!(RecipeChoice { kind: 0, ..video.clone() }.recipe().kind, "photo");
+        assert_eq!(
+            RecipeChoice {
+                kind: 0,
+                ..video.clone()
+            }
+            .recipe()
+            .kind,
+            "photo"
+        );
     }
 
     #[test]
     fn remux_greys_out_the_container_the_sources_already_have() {
-        let mut video = RecipeChoice { container: 1, ..choice(1) };
+        let mut video = RecipeChoice {
+            container: 1,
+            ..choice(1)
+        };
         video.adopt_tool("remux", &["/v/clip.MOV"]);
         assert_eq!(video.disabled_containers(&["/v/clip.MOV"]), [1]);
         assert_eq!(video.recipe().format, "mp4");
@@ -1701,7 +1837,10 @@ mod tests {
         let (turned, _, _) = turn_rgba(&rgba, 2, 1, 3);
         assert_eq!(turned, [0, 255, 0, 255, 255, 0, 0, 255]);
         let (turned, width, height) = turn_rgba(&rgba, 2, 1, 2);
-        assert_eq!((width, height, turned), (2, 1, vec![0, 255, 0, 255, 255, 0, 0, 255]));
+        assert_eq!(
+            (width, height, turned),
+            (2, 1, vec![0, 255, 0, 255, 255, 0, 0, 255])
+        );
     }
 
     #[test]

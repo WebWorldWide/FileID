@@ -56,13 +56,19 @@ fn tint_rgb(tint: Option<usize>) -> (f64, f64, f64) {
 }
 
 fn swatch(rgb: (f64, f64, f64), icon: &str) -> gtk::Overlay {
-    let tile = gtk::DrawingArea::builder().content_width(24).content_height(24).build();
+    let tile = gtk::DrawingArea::builder()
+        .content_width(24)
+        .content_height(24)
+        .build();
     tile.set_draw_func(move |_, cr, w, h| {
         v3::draw_round_rect(cr, 0.0, 0.0, f64::from(w), f64::from(h), 6.0);
         cr.set_source_rgba(rgb.0, rgb.1, rgb.2, 0.22);
         let _ = cr.fill();
     });
-    let overlay = gtk::Overlay::builder().child(&tile).valign(gtk::Align::Center).build();
+    let overlay = gtk::Overlay::builder()
+        .child(&tile)
+        .valign(gtk::Align::Center)
+        .build();
     let glyph = gtk::Image::from_icon_name(icon);
     glyph.set_pixel_size(12);
     overlay.add_overlay(&glyph);
@@ -76,12 +82,14 @@ impl MapView {
         meta.add_css_class("numeric");
         panel.trailing.append(&meta);
         let mode = v3::Segmented::new(&["Map", "Tree"], 0);
-        mode.root
-            .set_tooltip_text(Some("Map traces where files go; Tree shows the folders now and after side by side"));
+        mode.root.set_tooltip_text(Some(
+            "Map traces where files go; Tree shows the folders now and after side by side",
+        ));
         panel.trailing.append(&mode.root);
         let body = v3::vbox(8);
         body.add_css_class("v3-panel-pad");
-        let hint = v3::meta("Hover a folder or ribbon to trace its files. Click to see the exact list.");
+        let hint =
+            v3::meta("Hover a folder or ribbon to trace its files. Click to see the exact list.");
         body.append(&hint);
 
         // ── Map ────────────────────────────────────────────────────────────
@@ -99,7 +107,10 @@ impl MapView {
         to_count.set_xalign(1.0);
         header.append(&to_count);
         map.append(&header);
-        let ribbons = gtk::DrawingArea::builder().hexpand(true).content_height(320).build();
+        let ribbons = gtk::DrawingArea::builder()
+            .hexpand(true)
+            .content_height(320)
+            .build();
         let nodes = gtk::Fixed::new();
         let overlay = gtk::Overlay::builder().child(&ribbons).build();
         overlay.add_overlay(&nodes);
@@ -112,7 +123,11 @@ impl MapView {
         let filter = v3::Segmented::new(&["All", "Moves", "New folders"], 0);
         tree_head.append(&filter.root);
         tree_head.append(&v3::spacer());
-        for (letter, tone, label) in [("=", Tone::Done, "Unchanged"), ("M", Tone::Warning, "Moved"), ("+", Tone::Gold, "New folder")] {
+        for (letter, tone, label) in [
+            ("=", Tone::Done, "Unchanged"),
+            ("M", Tone::Warning, "Moved"),
+            ("+", Tone::Gold, "New folder"),
+        ] {
             tree_head.append(&letter_badge(letter, tone));
             tree_head.append(&v3::label(label, &["v3-meta-115"]));
         }
@@ -124,9 +139,7 @@ impl MapView {
         panes.append(&proposed_pane);
         tree.append(&panes);
 
-        let stack = gtk::Stack::builder()
-            .vhomogeneous(false)
-            .build();
+        let stack = gtk::Stack::builder().vhomogeneous(false).build();
         stack.add_named(&map, Some("map"));
         stack.add_named(&tree, Some("tree"));
         body.append(&stack);
@@ -166,7 +179,8 @@ impl MapView {
             let Some(view) = weak.upgrade() else { return };
             let tree = index == 1;
             crate::motion::show_child(&view.stack, if tree { "tree" } else { "map" });
-            view.panel.set_title(if tree { "Now → After" } else { "Folder map" });
+            view.panel
+                .set_title(if tree { "Now → After" } else { "Folder map" });
             view.hint.set_text(if tree {
                 "Click any folder to see its files."
             } else {
@@ -184,7 +198,13 @@ impl MapView {
         let draw_height = self.height.clone();
         self.ribbons.set_draw_func(move |_, cr, width, _| {
             let hover = bus.upgrade().and_then(|bus| bus.current());
-            draw_ribbons(cr, &state.borrow(), f64::from(width), draw_height.get(), hover.as_ref());
+            draw_ribbons(
+                cr,
+                &state.borrow(),
+                f64::from(width),
+                draw_height.get(),
+                hover.as_ref(),
+            );
         });
         let weak = Rc::downgrade(self);
         self.ribbons.connect_resize(move |_, _, _| {
@@ -233,8 +253,10 @@ impl MapView {
             super::restructure_model::plural(sources.len(), "folder"),
             super::restructure_model::plural(dests.len(), "folder")
         ));
-        self.from_count.set_text(&format!("FROM  {}", layout.sources.len()));
-        self.to_count.set_text(&format!("{}  TO", layout.dests.len()));
+        self.from_count
+            .set_text(&format!("FROM  {}", layout.sources.len()));
+        self.to_count
+            .set_text(&format!("{}  TO", layout.dests.len()));
         let height = map_height(&layout);
         self.height.set(height);
         self.ribbons.set_content_height(height as i32);
@@ -281,9 +303,15 @@ impl MapView {
                 name.add_css_class("tone-muted");
             }
             text.append(&name);
-            text.append(&v3::label(&super::restructure_model::plural(node.count, "file"), &["v3-map-node-count"]));
+            text.append(&v3::label(
+                &super::restructure_model::plural(node.count, "file"),
+                &["v3-map-node-count"],
+            ));
             content.append(&text);
-            let button = gtk::Button::builder().child(&content).css_classes(["v3-map-node"]).build();
+            let button = gtk::Button::builder()
+                .child(&content)
+                .css_classes(["v3-map-node"])
+                .build();
             let spoken = format!("{} {}", if node.source { "From" } else { "To" }, node.label);
             button.update_property(&[
                 gtk::accessible::Property::Label(&spoken),
@@ -306,10 +334,16 @@ impl MapView {
             };
             button.connect_clicked(move |_| drill(target.clone()));
             if !node.is_rollup() {
-                let enter = if node.source { Hover::Source(node.key.clone()) } else { Hover::Bucket(node.key.clone()) };
+                let enter = if node.source {
+                    Hover::Source(node.key.clone())
+                } else {
+                    Hover::Bucket(node.key.clone())
+                };
                 let lit_layout = self.layout.clone();
                 let lit_node = node.clone();
-                self.bus.track(&button, enter, move |hover| node_lit(&lit_layout.borrow(), &lit_node, Some(hover)));
+                self.bus.track(&button, enter, move |hover| {
+                    node_lit(&lit_layout.borrow(), &lit_node, Some(hover))
+                });
             }
             self.nodes.put(&button, 0.0, 0.0);
             buttons.push((node.clone(), button));
@@ -332,9 +366,17 @@ impl MapView {
             } else {
                 (&layout.dests, &dest_slots)
             };
-            let Some(index) = column.iter().position(|n| n.id == node.id) else { continue };
-            let Some(&(top, h)) = slots_for.get(index) else { continue };
-            let x = if node.source { 0.0 } else { (width - NODE_WIDTH).max(0.0) };
+            let Some(index) = column.iter().position(|n| n.id == node.id) else {
+                continue;
+            };
+            let Some(&(top, h)) = slots_for.get(index) else {
+                continue;
+            };
+            let x = if node.source {
+                0.0
+            } else {
+                (width - NODE_WIDTH).max(0.0)
+            };
             button.set_size_request(NODE_WIDTH as i32, h.max(28.0) as i32);
             self.nodes.move_(button, x, top);
         }
@@ -354,13 +396,18 @@ impl MapView {
         let source_slots = slots(&layout.sources, height);
         let dest_slots = slots(&layout.dests, height);
         let mid = |nodes: &[Node], slots: &[(f64, f64)], id: &str| {
-            nodes.iter().position(|n| n.id == id).and_then(|i| slots.get(i)).map(|(top, h)| top + h / 2.0)
+            nodes
+                .iter()
+                .position(|n| n.id == id)
+                .and_then(|i| slots.get(i))
+                .map(|(top, h)| top + h / 2.0)
         };
         let mut best: Option<(f64, &Flow)> = None;
         for flow in &layout.flows {
-            let (Some(y0), Some(y1)) =
-                (mid(&layout.sources, &source_slots, &flow.source_id), mid(&layout.dests, &dest_slots, &flow.dest_id))
-            else {
+            let (Some(y0), Some(y1)) = (
+                mid(&layout.sources, &source_slots, &flow.source_id),
+                mid(&layout.dests, &dest_slots, &flow.dest_id),
+            ) else {
                 continue;
             };
             let dy = (bezier_y(x, x0, x1, y0, y1) - y).abs();
@@ -377,7 +424,10 @@ impl MapView {
                     flow.bucket,
                     super::restructure_model::plural(flow.count, "file")
                 )));
-                self.bus.set(Some(Hover::Flow(flow.source_folder.clone(), flow.bucket.clone())));
+                self.bus.set(Some(Hover::Flow(
+                    flow.source_folder.clone(),
+                    flow.bucket.clone(),
+                )));
             }
             None => {
                 self.overlay.set_tooltip_text(None);
@@ -404,7 +454,11 @@ impl MapView {
         }
         let mut sources: Vec<(String, String, u64, Option<bool>)> = Vec::new();
         if filter == 0 {
-            sources.extend(staying.iter().map(|(full, shown, count)| (full.clone(), shown.clone(), *count, None)));
+            sources.extend(
+                staying
+                    .iter()
+                    .map(|(full, shown, count)| (full.clone(), shown.clone(), *count, None)),
+            );
         }
         for (folder, (count, junk)) in &moving {
             if filter == 2 && !junk {
@@ -413,9 +467,17 @@ impl MapView {
             let shown = v3::file_name(folder);
             sources.push((folder.to_string(), shown, *count as u64, Some(*junk)));
         }
-        let mut dests: Vec<(String, u64, bool)> = buckets.iter().map(|(b, c)| (b.to_string(), *c as u64, false)).collect();
+        let mut dests: Vec<(String, u64, bool)> = buckets
+            .iter()
+            .map(|(b, c)| (b.to_string(), *c as u64, false))
+            .collect();
         if filter == 0 {
-            dests.splice(0..0, staying.iter().map(|(_, shown, count)| (shown.clone(), *count, true)));
+            dests.splice(
+                0..0,
+                staying
+                    .iter()
+                    .map(|(_, shown, count)| (shown.clone(), *count, true)),
+            );
         }
         for (full, shown, count, kind) in sources.iter().take(TREE_ROW_CAP) {
             let (letter, tone) = match kind {
@@ -424,37 +486,87 @@ impl MapView {
                 Some(true) => ("M", Tone::Gold),
             };
             let tip = match kind {
-                None => format!("Stays put: {} unchanged.", super::restructure_model::plural(*count as usize, "file")),
-                Some(false) => format!("Tidy: {} moving out.", super::restructure_model::plural(*count as usize, "file")),
-                Some(true) => format!("Reorganize: all {} moving.", super::restructure_model::plural(*count as usize, "file")),
+                None => format!(
+                    "Stays put: {} unchanged.",
+                    super::restructure_model::plural(*count as usize, "file")
+                ),
+                Some(false) => format!(
+                    "Tidy: {} moving out.",
+                    super::restructure_model::plural(*count as usize, "file")
+                ),
+                Some(true) => format!(
+                    "Reorganize: all {} moving.",
+                    super::restructure_model::plural(*count as usize, "file")
+                ),
             };
-            let row = self.tree_row(letter, tone, shown, *count, &tip, kind.map(|_| Drill::Source(full.clone())));
+            let row = self.tree_row(
+                letter,
+                tone,
+                shown,
+                *count,
+                &tip,
+                kind.map(|_| Drill::Source(full.clone())),
+            );
             let folder = full.clone();
             let lit = folder.clone();
-            self.bus.track(&row, Hover::Source(folder), move |hover| hover.touches_source(&lit));
+            self.bus.track(&row, Hover::Source(folder), move |hover| {
+                hover.touches_source(&lit)
+            });
             self.today.append(&row);
         }
         if sources.len() > TREE_ROW_CAP {
-            self.today.append(&v3::meta(&format!("+ {} more", sources.len() - TREE_ROW_CAP)));
+            self.today.append(&v3::meta(&format!(
+                "+ {} more",
+                sources.len() - TREE_ROW_CAP
+            )));
         }
         for (bucket, count, existing) in dests.iter().take(TREE_ROW_CAP) {
-            let (letter, tone) = if *existing { ("=", Tone::Done) } else { ("+", Tone::Gold) };
-            let tip = if *existing {
-                format!("Existing folder: {} staying.", super::restructure_model::plural(*count as usize, "file"))
+            let (letter, tone) = if *existing {
+                ("=", Tone::Done)
             } else {
-                format!("New folder: {} landing here.", super::restructure_model::plural(*count as usize, "file"))
+                ("+", Tone::Gold)
             };
-            let row = self.tree_row(letter, tone, bucket, *count, &tip, (!existing).then(|| Drill::Bucket(bucket.clone())));
+            let tip = if *existing {
+                format!(
+                    "Existing folder: {} staying.",
+                    super::restructure_model::plural(*count as usize, "file")
+                )
+            } else {
+                format!(
+                    "New folder: {} landing here.",
+                    super::restructure_model::plural(*count as usize, "file")
+                )
+            };
+            let row = self.tree_row(
+                letter,
+                tone,
+                bucket,
+                *count,
+                &tip,
+                (!existing).then(|| Drill::Bucket(bucket.clone())),
+            );
             let lit = bucket.clone();
-            self.bus.track(&row, Hover::Bucket(bucket.clone()), move |hover| hover.touches_bucket(&lit));
+            self.bus
+                .track(&row, Hover::Bucket(bucket.clone()), move |hover| {
+                    hover.touches_bucket(&lit)
+                });
             self.proposed.append(&row);
         }
         if dests.len() > TREE_ROW_CAP {
-            self.proposed.append(&v3::meta(&format!("+ {} more", dests.len() - TREE_ROW_CAP)));
+            self.proposed
+                .append(&v3::meta(&format!("+ {} more", dests.len() - TREE_ROW_CAP)));
         }
     }
 
-    fn tree_row(&self, letter: &str, tone: Tone, name: &str, count: u64, tip: &str, drill: Option<Drill>) -> gtk::Widget {
+    fn tree_row(
+        &self,
+        letter: &str,
+        tone: Tone,
+        name: &str,
+        count: u64,
+        tip: &str,
+        drill: Option<Drill>,
+    ) -> gtk::Widget {
         let content = v3::hbox(6);
         content.append(&letter_badge(letter, tone));
         let icon = gtk::Image::from_icon_name("folder-symbolic");
@@ -468,7 +580,10 @@ impl MapView {
         content.append(&number);
         match drill {
             Some(drill) => {
-                let button = gtk::Button::builder().child(&content).css_classes(["v3-tree-row", tone.css()]).build();
+                let button = gtk::Button::builder()
+                    .child(&content)
+                    .css_classes(["v3-tree-row", tone.css()])
+                    .build();
                 button.set_tooltip_text(Some(tip));
                 let on_drill = self.on_drill.clone();
                 button.connect_clicked(move |_| on_drill(drill.clone()));
@@ -510,7 +625,13 @@ fn tree_pane(title: &str, subtitle: &str) -> (gtk::Box, gtk::Box) {
     (pane, rows)
 }
 
-fn draw_ribbons(cr: &gtk::cairo::Context, layout: &MapLayout, width: f64, height: f64, hover: Option<&Hover>) {
+fn draw_ribbons(
+    cr: &gtk::cairo::Context,
+    layout: &MapLayout,
+    width: f64,
+    height: f64,
+    hover: Option<&Hover>,
+) {
     if layout.flows.is_empty() || width <= NODE_WIDTH * 2.0 {
         return;
     }
@@ -518,7 +639,11 @@ fn draw_ribbons(cr: &gtk::cairo::Context, layout: &MapLayout, width: f64, height
     let source_slots = slots(&layout.sources, height);
     let dest_slots = slots(&layout.dests, height);
     let mid = |nodes: &[Node], slots: &[(f64, f64)], id: &str| {
-        nodes.iter().position(|n| n.id == id).and_then(|i| slots.get(i)).map(|(top, h)| top + h / 2.0)
+        nodes
+            .iter()
+            .position(|n| n.id == id)
+            .and_then(|i| slots.get(i))
+            .map(|(top, h)| top + h / 2.0)
     };
     let alpha = |flow: &Flow| -> f64 {
         match hover {
@@ -546,7 +671,9 @@ fn draw_ribbons(cr: &gtk::cairo::Context, layout: &MapLayout, width: f64, height
             }
             Some(Hover::Outcome(outcome)) => {
                 let lit = layout.nodes_by_outcome.get(outcome);
-                if lit.is_some_and(|set| set.contains(&flow.source_id) && set.contains(&flow.dest_id)) {
+                if lit
+                    .is_some_and(|set| set.contains(&flow.source_id) && set.contains(&flow.dest_id))
+                {
                     0.45
                 } else {
                     0.04
@@ -558,9 +685,10 @@ fn draw_ribbons(cr: &gtk::cairo::Context, layout: &MapLayout, width: f64, height
     ordered.sort_by(|a, b| alpha(a).total_cmp(&alpha(b)));
     cr.set_line_cap(gtk::cairo::LineCap::Round);
     for flow in ordered {
-        let (Some(y0), Some(y1)) =
-            (mid(&layout.sources, &source_slots, &flow.source_id), mid(&layout.dests, &dest_slots, &flow.dest_id))
-        else {
+        let (Some(y0), Some(y1)) = (
+            mid(&layout.sources, &source_slots, &flow.source_id),
+            mid(&layout.dests, &dest_slots, &flow.dest_id),
+        ) else {
             continue;
         };
         let (r, g, b) = tint_rgb(flow.tint);

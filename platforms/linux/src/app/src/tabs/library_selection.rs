@@ -58,7 +58,10 @@ mod tests {
         assert_eq!(view(&[(7, 100)]), PaneView::One(7));
         assert_eq!(
             view(&[(1, 1_000), (4, 2_500), (9, -1)]),
-            PaneView::Many { count: 3, bytes: 3_500 }
+            PaneView::Many {
+                count: 3,
+                bytes: 3_500
+            }
         );
         assert_eq!(many_title(1_204), "1,204 files");
         assert_eq!(many_detail(0), format!("{} in all", file_size_i64(0)));

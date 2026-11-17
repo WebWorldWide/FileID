@@ -19,7 +19,11 @@ impl LibraryScope {
     pub fn new(root_id: Option<i64>, roots: &[LibraryRoot]) -> Option<Self> {
         let id = root_id?;
         let root = roots.iter().find(|root| root.id == id)?.clone();
-        let others: Vec<String> = roots.iter().filter(|other| other.id != id).map(|other| other.path.clone()).collect();
+        let others: Vec<String> = roots
+            .iter()
+            .filter(|other| other.id != id)
+            .map(|other| other.path.clone())
+            .collect();
         let rule = RootScope::new(&root.path, &others);
         Some(Self { root, rule })
     }
@@ -74,7 +78,11 @@ pub fn location_count_text(count: usize) -> String {
 /// Spoken name of one location row in the switcher.
 pub fn spoken(root: &LibraryRoot) -> String {
     let offline = if root.online { "" } else { ", offline" };
-    format!("{}, {}{offline}", root.display, file_count_text(root.file_count))
+    format!(
+        "{}, {}{offline}",
+        root.display,
+        file_count_text(root.file_count)
+    )
 }
 
 #[derive(Default)]
@@ -127,7 +135,8 @@ fn notify() {
 fn apply() {
     let changed = STATE.with(|state| {
         let mut state = state.borrow_mut();
-        let next = LibraryScope::new(crate::app_settings::library_scope_root_id(), &state.roots).map(Rc::new);
+        let next = LibraryScope::new(crate::app_settings::library_scope_root_id(), &state.roots)
+            .map(Rc::new);
         let changed = next.as_deref() != state.current.as_deref();
         state.current = next;
         if changed {
@@ -170,7 +179,9 @@ pub fn apply_roots(roots: Vec<LibraryRoot>) {
 
 /// Re-reads the locations (the same read-only listing Settings ▸ Locations uses).
 pub fn refresh() {
-    let rx = crate::engine_client::read_db(|conn| fileid_engine::commands::roots::list(conn).unwrap_or_default());
+    let rx = crate::engine_client::read_db(|conn| {
+        fileid_engine::commands::roots::list(conn).unwrap_or_default()
+    });
     gtk::glib::MainContext::default().spawn_local(async move {
         if let Ok(roots) = rx.recv().await {
             apply_roots(roots);
@@ -191,7 +202,12 @@ mod tests {
         LibraryRoot {
             id,
             path: path.into(),
-            display: path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).into(),
+            display: path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .into(),
             kind: "external".into(),
             enabled: true,
             online,
@@ -214,13 +230,27 @@ mod tests {
     #[test]
     fn a_scope_keeps_its_own_files_not_lookalikes_or_deeper_locations() {
         let scope = LibraryScope::new(Some(1), &roots()).unwrap();
-        for inside in ["/m/Camera", "/m/Camera/a.jpg", "/m/Camera/2020/b.jpg", "/m/Camera/Synced2/c.jpg"] {
+        for inside in [
+            "/m/Camera",
+            "/m/Camera/a.jpg",
+            "/m/Camera/2020/b.jpg",
+            "/m/Camera/Synced2/c.jpg",
+        ] {
             assert!(scope.contains(inside), "{inside}");
         }
-        for outside in ["/m/Camera2/a.jpg", "/m/Cameras/a.jpg", "/m/Camera/Synced/d.jpg", "/elsewhere/e.jpg"] {
+        for outside in [
+            "/m/Camera2/a.jpg",
+            "/m/Cameras/a.jpg",
+            "/m/Camera/Synced/d.jpg",
+            "/elsewhere/e.jpg",
+        ] {
             assert!(!scope.contains(outside), "{outside}");
         }
-        assert!(LibraryScope::new(Some(3), &roots()).unwrap().contains("/m/Camera/Synced/d.jpg"));
+        assert!(
+            LibraryScope::new(Some(3), &roots())
+                .unwrap()
+                .contains("/m/Camera/Synced/d.jpg")
+        );
         assert!(LibraryScope::new(Some(9), &roots()).is_none());
         assert!(LibraryScope::new(None, &roots()).is_none());
     }
@@ -236,11 +266,21 @@ mod tests {
     #[test]
     fn the_title_bar_names_the_location() {
         let all = roots();
-        assert_eq!(title(LibraryScope::new(Some(2), &all).as_ref(), &all, Some("Pictures")), "Camera2");
+        assert_eq!(
+            title(
+                LibraryScope::new(Some(2), &all).as_ref(),
+                &all,
+                Some("Pictures")
+            ),
+            "Camera2"
+        );
         assert_eq!(title(None, &all, Some("Pictures")), "All locations");
         assert_eq!(title(None, &[], Some("Pictures")), "Pictures");
         assert_eq!(title(None, &[], None), "Choose a folder");
-        assert_eq!(spoken(&root(5, "/media/Card", 1204, false)), "Card, 1,204 files, offline");
+        assert_eq!(
+            spoken(&root(5, "/media/Card", 1204, false)),
+            "Card, 1,204 files, offline"
+        );
         assert_eq!(spoken(&root(6, "/home/a/One", 1, true)), "One, 1 file");
         assert_eq!(location_count_text(1), "1 location");
     }

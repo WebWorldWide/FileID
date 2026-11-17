@@ -3,8 +3,8 @@
 // flows, two barycentric passes to cut crossings, proportional slots, and
 // the hover bus shared by the map, tree, recommendations and Staying put.
 
-use std::cell::RefCell;
 use fileid_engine::util::display::plural;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
@@ -85,13 +85,17 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
     let mut source_counts: HashMap<&str, (usize, bool)> = HashMap::new();
     let mut dest_counts: HashMap<&str, usize> = HashMap::new();
     for item in items {
-        let entry = source_counts.entry(&item.source_folder).or_insert((0, true));
+        let entry = source_counts
+            .entry(&item.source_folder)
+            .or_insert((0, true));
         entry.0 += 1;
         entry.1 &= item.outcome == Outcome::Reorganize;
         *dest_counts.entry(&item.bucket).or_default() += 1;
     }
-    let mut all_sources: Vec<(&str, usize, bool)> =
-        source_counts.into_iter().map(|(folder, (count, junk))| (folder, count, junk)).collect();
+    let mut all_sources: Vec<(&str, usize, bool)> = source_counts
+        .into_iter()
+        .map(|(folder, (count, junk))| (folder, count, junk))
+        .collect();
     all_sources.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     let mut all_dests: Vec<(&str, usize)> = dest_counts.into_iter().collect();
     all_dests.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
@@ -148,7 +152,8 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
 
     let visible_source_ids: HashSet<String> = sources.iter().map(|n| n.id.clone()).collect();
     let visible_dest_ids: HashSet<String> = dests.iter().map(|n| n.id.clone()).collect();
-    let tint_by_dest: HashMap<String, Option<usize>> = dests.iter().map(|n| (n.id.clone(), n.tint)).collect();
+    let tint_by_dest: HashMap<String, Option<usize>> =
+        dests.iter().map(|n| (n.id.clone(), n.tint)).collect();
     let source_id = |folder: &str| {
         let id = format!("src:{folder}");
         if visible_source_ids.contains(&id) {
@@ -186,8 +191,14 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
                 });
             }
         }
-        dests_for_source.entry(item.source_folder.clone()).or_default().insert(item.bucket.clone());
-        sources_for_dest.entry(item.bucket.clone()).or_default().insert(item.source_folder.clone());
+        dests_for_source
+            .entry(item.source_folder.clone())
+            .or_default()
+            .insert(item.bucket.clone());
+        sources_for_dest
+            .entry(item.bucket.clone())
+            .or_default()
+            .insert(item.source_folder.clone());
         let lit = nodes_by_outcome.entry(item.outcome).or_default();
         lit.insert(src);
         lit.insert(dst);
@@ -195,29 +206,45 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
     let total = flows.iter().map(|f| f.count).sum();
 
     for _ in 0..2 {
-        let dest_index: HashMap<&str, usize> = dests.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+        let dest_index: HashMap<&str, usize> = dests
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id.as_str(), i))
+            .collect();
         let weight = |id: &str, by_source: bool, index: &HashMap<&str, usize>| -> f64 {
             let (sum, weighted) = flows
                 .iter()
-                .filter(|f| if by_source { f.source_id == id } else { f.dest_id == id })
+                .filter(|f| {
+                    if by_source {
+                        f.source_id == id
+                    } else {
+                        f.dest_id == id
+                    }
+                })
                 .fold((0usize, 0.0), |(sum, weighted), f| {
                     let other = if by_source { &f.dest_id } else { &f.source_id };
-                    (sum + f.count, weighted + f.count as f64 * *index.get(other.as_str()).unwrap_or(&0) as f64)
+                    (
+                        sum + f.count,
+                        weighted + f.count as f64 * *index.get(other.as_str()).unwrap_or(&0) as f64,
+                    )
                 });
-            if sum == 0 {
-                0.0
-            } else {
-                weighted / sum as f64
-            }
+            if sum == 0 { 0.0 } else { weighted / sum as f64 }
         };
-        let mut keyed: Vec<(f64, Node)> =
-            sources.drain(..).map(|n| (weight(&n.id, true, &dest_index), n)).collect();
+        let mut keyed: Vec<(f64, Node)> = sources
+            .drain(..)
+            .map(|n| (weight(&n.id, true, &dest_index), n))
+            .collect();
         keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
         sources = keyed.into_iter().map(|(_, n)| n).collect();
-        let source_index: HashMap<&str, usize> =
-            sources.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
-        let mut keyed: Vec<(f64, Node)> =
-            dests.drain(..).map(|n| (weight(&n.id, false, &source_index), n)).collect();
+        let source_index: HashMap<&str, usize> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id.as_str(), i))
+            .collect();
+        let mut keyed: Vec<(f64, Node)> = dests
+            .drain(..)
+            .map(|n| (weight(&n.id, false, &source_index), n))
+            .collect();
         keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
         dests = keyed.into_iter().map(|(_, n)| n).collect();
     }
@@ -358,12 +385,18 @@ pub fn node_lit(layout: &MapLayout, node: &Node, hover: Option<&Hover>) -> bool 
             if node.source {
                 node.key == *folder
             } else {
-                layout.dests_for_source.get(folder).is_some_and(|set| set.contains(&node.key))
+                layout
+                    .dests_for_source
+                    .get(folder)
+                    .is_some_and(|set| set.contains(&node.key))
             }
         }
         Some(Hover::Bucket(bucket)) => {
             if node.source {
-                layout.sources_for_dest.get(bucket).is_some_and(|set| set.contains(&node.key))
+                layout
+                    .sources_for_dest
+                    .get(bucket)
+                    .is_some_and(|set| set.contains(&node.key))
             } else {
                 node.key == *bucket
             }
@@ -375,7 +408,10 @@ pub fn node_lit(layout: &MapLayout, node: &Node, hover: Option<&Hover>) -> bool 
                 node.key == *bucket
             }
         }
-        Some(Hover::Outcome(outcome)) => layout.nodes_by_outcome.get(outcome).is_some_and(|set| set.contains(&node.id)),
+        Some(Hover::Outcome(outcome)) => layout
+            .nodes_by_outcome
+            .get(outcome)
+            .is_some_and(|set| set.contains(&node.id)),
     }
 }
 
@@ -401,8 +437,15 @@ impl HoverBus {
         }
         self.current.replace(hover.clone());
         use gtk::prelude::*;
-        self.tracked.borrow_mut().retain(|(widget, _)| widget.upgrade().is_some());
-        let tracked: Vec<_> = self.tracked.borrow().iter().map(|(w, p)| (w.clone(), p.clone())).collect();
+        self.tracked
+            .borrow_mut()
+            .retain(|(widget, _)| widget.upgrade().is_some());
+        let tracked: Vec<_> = self
+            .tracked
+            .borrow()
+            .iter()
+            .map(|(w, p)| (w.clone(), p.clone()))
+            .collect();
         for (widget, predicate) in tracked {
             if let Some(widget) = widget.upgrade() {
                 if hover.as_ref().is_some_and(|h| predicate(h)) {
@@ -426,7 +469,9 @@ impl HoverBus {
         lit: impl Fn(&Hover) -> bool + 'static,
     ) {
         use gtk::prelude::*;
-        self.tracked.borrow_mut().push((widget.upcast_ref::<gtk::Widget>().downgrade(), Rc::new(lit)));
+        self.tracked
+            .borrow_mut()
+            .push((widget.upcast_ref::<gtk::Widget>().downgrade(), Rc::new(lit)));
         let motion = gtk::EventControllerMotion::new();
         let bus: Weak<Self> = Rc::downgrade(self);
         let enter = on_enter.clone();
@@ -438,9 +483,10 @@ impl HoverBus {
         let bus: Weak<Self> = Rc::downgrade(self);
         motion.connect_leave(move |_| {
             if let Some(bus) = bus.upgrade()
-                && bus.current().as_ref() == Some(&on_enter) {
-                    bus.set(None);
-                }
+                && bus.current().as_ref() == Some(&on_enter)
+            {
+                bus.set(None);
+            }
         });
         widget.add_controller(motion);
     }
@@ -455,7 +501,11 @@ mod tests {
     use super::*;
 
     fn item(source: &str, bucket: &str, outcome: Outcome) -> MapItem {
-        MapItem { source_folder: source.into(), bucket: bucket.into(), outcome }
+        MapItem {
+            source_folder: source.into(),
+            bucket: bucket.into(),
+            outcome,
+        }
     }
 
     #[test]
@@ -466,7 +516,11 @@ mod tests {
             item("/l/Trips", "Documents", Outcome::Tidy),
         ];
         for i in 0..10 {
-            items.push(item(&format!("/l/f{i}"), &format!("B{i}"), Outcome::Reorganize));
+            items.push(item(
+                &format!("/l/f{i}"),
+                &format!("B{i}"),
+                Outcome::Reorganize,
+            ));
         }
         let layout = compute(&items);
         assert_eq!(layout.total, 13);
@@ -475,15 +529,36 @@ mod tests {
         assert!(layout.sources.last().unwrap().is_rollup());
         assert!(layout.dests.last().unwrap().is_rollup());
         assert_eq!(layout.rollup_sources.len(), 12 - TOP_N);
-        let untitled = layout.sources.iter().find(|n| n.key == "/l/Untitled").unwrap();
-        assert_eq!((untitled.label.as_str(), untitled.count, untitled.junk), ("Untitled", 2, true));
-        assert!(!layout.sources.iter().find(|n| n.key == "/l/Trips").unwrap().junk);
-        let flow = layout.flows.iter().find(|f| f.source_folder == "/l/Untitled").unwrap();
+        let untitled = layout
+            .sources
+            .iter()
+            .find(|n| n.key == "/l/Untitled")
+            .unwrap();
+        assert_eq!(
+            (untitled.label.as_str(), untitled.count, untitled.junk),
+            ("Untitled", 2, true)
+        );
+        assert!(
+            !layout
+                .sources
+                .iter()
+                .find(|n| n.key == "/l/Trips")
+                .unwrap()
+                .junk
+        );
+        let flow = layout
+            .flows
+            .iter()
+            .find(|f| f.source_folder == "/l/Untitled")
+            .unwrap();
         assert_eq!(flow.count, 2);
         assert!(flow.tint.is_some());
         let tidy = &layout.nodes_by_outcome[&Outcome::Tidy];
         assert!(tidy.contains("src:/l/Trips"));
-        assert!(tidy.contains(OTHER_DEST), "Documents sorts into the rollup behind B0..B9");
+        assert!(
+            tidy.contains(OTHER_DEST),
+            "Documents sorts into the rollup behind B0..B9"
+        );
     }
 
     #[test]
@@ -496,12 +571,18 @@ mod tests {
         let layout = compute(&items);
         let src: Vec<_> = layout.sources.iter().map(|n| n.key.as_str()).collect();
         let dst: Vec<_> = layout.dests.iter().map(|n| n.key.as_str()).collect();
-        assert_eq!(src.iter().position(|s| *s == "/l/A"), dst.iter().position(|d| *d == "Zeta"));
+        assert_eq!(
+            src.iter().position(|s| *s == "/l/A"),
+            dst.iter().position(|d| *d == "Zeta")
+        );
     }
 
     #[test]
     fn slots_fit_the_column_with_gaps() {
-        let layout = compute(&[item("/l/A", "X", Outcome::Tidy), item("/l/B", "Y", Outcome::Tidy)]);
+        let layout = compute(&[
+            item("/l/A", "X", Outcome::Tidy),
+            item("/l/B", "Y", Outcome::Tidy),
+        ]);
         let height = map_height(&layout);
         assert_eq!(height, 320.0);
         let slots = slots(&layout.sources, height);
@@ -524,7 +605,10 @@ mod tests {
 
     #[test]
     fn hover_lights_connected_nodes() {
-        let layout = compute(&[item("/l/A", "X", Outcome::Tidy), item("/l/B", "Y", Outcome::Reorganize)]);
+        let layout = compute(&[
+            item("/l/A", "X", Outcome::Tidy),
+            item("/l/B", "Y", Outcome::Reorganize),
+        ]);
         let a = layout.sources.iter().find(|n| n.key == "/l/A").unwrap();
         let x = layout.dests.iter().find(|n| n.key == "X").unwrap();
         let y = layout.dests.iter().find(|n| n.key == "Y").unwrap();
@@ -532,7 +616,11 @@ mod tests {
         assert!(node_lit(&layout, a, Some(&hover)));
         assert!(node_lit(&layout, x, Some(&hover)));
         assert!(!node_lit(&layout, y, Some(&hover)));
-        assert!(node_lit(&layout, y, Some(&Hover::Outcome(Outcome::Reorganize))));
+        assert!(node_lit(
+            &layout,
+            y,
+            Some(&Hover::Outcome(Outcome::Reorganize))
+        ));
         assert!(Hover::Flow("/l/A".into(), "X".into()).touches_bucket("X"));
         assert!(!node_lit(&layout, a, None));
     }

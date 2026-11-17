@@ -3,8 +3,8 @@ use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use super::status::{percent, Job, JobAction, Status, Tone};
-use super::{grouped, matching_pages, set_tone, Action, GrainBar};
+use super::status::{Job, JobAction, Status, Tone, percent};
+use super::{Action, GrainBar, grouped, matching_pages, set_tone};
 use crate::v3::{hbox, label, section as section_label, spacer, vbox};
 
 #[derive(Debug, PartialEq)]
@@ -273,7 +273,9 @@ impl TitleBar {
             .tooltip_text("Open chat beside this page (Ctrl+Shift+K)")
             .valign(gtk::Align::Center)
             .build();
-        chat.update_property(&[gtk::accessible::Property::Label("Open chat beside this page")]);
+        chat.update_property(&[gtk::accessible::Property::Label(
+            "Open chat beside this page",
+        )]);
         let act_chat = act.clone();
         chat.connect_clicked(move |_| act_chat(Action::ToggleChat));
         header.pack_end(&chat);
@@ -477,7 +479,11 @@ impl TitleBar {
             self.chat.remove_css_class("active");
         }
         self.chat.set_sensitive(!on_chat_page);
-        let label = if open { "Close chat (Ctrl+Shift+K)" } else { "Open chat beside this page (Ctrl+Shift+K)" };
+        let label = if open {
+            "Close chat (Ctrl+Shift+K)"
+        } else {
+            "Open chat beside this page (Ctrl+Shift+K)"
+        };
         self.chat.set_tooltip_text(Some(label));
     }
 
@@ -528,9 +534,10 @@ impl TitleBar {
         let activity = status.activity();
         set_tone(&self.activity_dot, activity.tone);
         self.activity_label.set_text(activity.label);
-        self.activity_label.set_tooltip_text((!status.engine_ready).then_some(
-            "FileID is starting its background helper. This takes a few seconds.",
-        ));
+        self.activity_label.set_tooltip_text(
+            (!status.engine_ready)
+                .then_some("FileID is starting its background helper. This takes a few seconds."),
+        );
         self.activity_bar.set(activity.fraction, activity.tone);
         self.activity_pct.set_visible(!activity.idle);
         self.activity_pct.set_text(&percent(activity.fraction));
@@ -577,23 +584,36 @@ impl TitleBar {
         } else {
             self.folder_name.remove_css_class("empty");
         }
-        let spoken = if empty { title.to_owned() } else { format!("Location: {title}") };
+        let spoken = if empty {
+            title.to_owned()
+        } else {
+            format!("Location: {title}")
+        };
         self.folder_button.update_property(&[
             gtk::accessible::Property::Label(&spoken),
-            gtk::accessible::Property::Description("Chooses which location Library, Search & Moments and Chat show"),
+            gtk::accessible::Property::Description(
+                "Chooses which location Library, Search & Moments and Chat show",
+            ),
         ]);
         if self.folder_name.text() == title {
             return;
         }
-        let first = self.folder_name.text().is_empty() || self.folder_name.text() == "Choose a folder";
+        let first =
+            self.folder_name.text().is_empty() || self.folder_name.text() == "Choose a folder";
         self.folder_name.set_text(title);
         if !first {
             let name = self.folder_name.downgrade();
-            let _ = crate::spring::animate_with(crate::spring::Spring::Tight, &self.folder_name, 0.4, 1.0, move |value| {
-                if let Some(name) = name.upgrade() {
-                    name.set_opacity(value);
-                }
-            });
+            let _ = crate::spring::animate_with(
+                crate::spring::Spring::Tight,
+                &self.folder_name,
+                0.4,
+                1.0,
+                move |value| {
+                    if let Some(name) = name.upgrade() {
+                        name.set_opacity(value);
+                    }
+                },
+            );
         }
     }
 
@@ -603,7 +623,15 @@ impl TitleBar {
         let shape: ScopeShape = (
             roots
                 .iter()
-                .map(|root| (root.id, root.display.clone(), root.path.clone(), root.file_count, root.online))
+                .map(|root| {
+                    (
+                        root.id,
+                        root.display.clone(),
+                        root.path.clone(),
+                        root.file_count,
+                        root.online,
+                    )
+                })
                 .collect(),
             current,
         );
@@ -699,11 +727,17 @@ impl TitleBar {
         row.update_state(&[gtk::accessible::State::Selected(Some(selected))]);
         if selected && newly_selected {
             let check_weak = check.downgrade();
-            let _ = crate::spring::animate_with(crate::spring::Spring::Tight, &check, 0.0, 1.0, move |value| {
-                if let Some(check) = check_weak.upgrade() {
-                    check.set_opacity(value);
-                }
-            });
+            let _ = crate::spring::animate_with(
+                crate::spring::Spring::Tight,
+                &check,
+                0.0,
+                1.0,
+                move |value| {
+                    if let Some(check) = check_weak.upgrade() {
+                        check.set_opacity(value);
+                    }
+                },
+            );
         }
         let act = self.act.clone();
         let popover = self.folder_popover.clone();

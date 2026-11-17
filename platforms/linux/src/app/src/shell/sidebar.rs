@@ -3,8 +3,8 @@ use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use super::status::{ScanControls, Status, Tone, STAGES};
-use super::{set_tone, Action, Area, GrainBar};
+use super::status::{STAGES, ScanControls, Status, Tone};
+use super::{Action, Area, GrainBar, set_tone};
 use crate::v3::{hbox, label, spacer, vbox};
 
 struct NavRow {
@@ -55,7 +55,12 @@ impl StatRow {
         let trailing = label("", &["stat-trailing"]);
         trailing.set_visible(false);
         root.append(&trailing);
-        Self { root, key, value, trailing }
+        Self {
+            root,
+            key,
+            value,
+            trailing,
+        }
     }
 
     fn set(&self, key: &str, value: &str, trailing: Option<&str>, tone: Tone) {
@@ -108,9 +113,7 @@ impl Sidebar {
         let (switcher, area_buttons, pill, pill_pos) = area_switcher(&act);
         root.append(&switcher);
 
-        let area_stack = gtk::Stack::builder()
-            .vhomogeneous(false)
-            .build();
+        let area_stack = gtk::Stack::builder().vhomogeneous(false).build();
         let mut rows = Vec::new();
         for area in Area::ALL {
             let list = vbox(2);
@@ -242,7 +245,8 @@ impl Sidebar {
         match text {
             Some(text) => {
                 self.note_label.set_text(text);
-                self.note_label.set_tooltip_text(Some(detail.unwrap_or(text)));
+                self.note_label
+                    .set_tooltip_text(Some(detail.unwrap_or(text)));
                 self.note.set_visible(true);
             }
             None => self.note.set_visible(false),
@@ -258,9 +262,7 @@ impl Sidebar {
             .chain(state.pending.iter().map(|job| (job, false)))
             .collect();
         self.queue.root.set_visible(!jobs.is_empty());
-        self.queue
-            .count
-            .set_text(&queue_count(state.pending.len()));
+        self.queue.count.set_text(&queue_count(state.pending.len()));
         self.queue.eta.set_text(
             &state
                 .total_eta_seconds
@@ -418,7 +420,12 @@ fn queue_section() -> QueueSection {
     let rows = vbox(4);
     root.append(&rows);
     root.update_property(&[gtk::accessible::Property::Label("Queue")]);
-    QueueSection { root, count, eta, rows }
+    QueueSection {
+        root,
+        count,
+        eta,
+        rows,
+    }
 }
 
 fn queue_row(job: &fileid_engine::ipc::QueuedJob, running: bool) -> gtk::Box {
@@ -448,7 +455,8 @@ fn queue_row(job: &fileid_engine::ipc::QueuedJob, running: bool) -> gtk::Box {
     row.update_property(&[gtk::accessible::Property::Label(&format!(
         "{state}: {}{}",
         job.title,
-        eta.map(|eta| format!(", {eta} remaining")).unwrap_or_default()
+        eta.map(|eta| format!(", {eta} remaining"))
+            .unwrap_or_default()
     ))]);
     row
 }
@@ -616,8 +624,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     scan.set_tooltip_text(Some(
         "Read every file in this folder (Ctrl+R). Nothing is moved or changed.",
     ));
-    let (rescan, rescan_content) =
-        icon_button("view-refresh-symbolic", "Rescan", &["secondary"]);
+    let (rescan, rescan_content) = icon_button("view-refresh-symbolic", "Rescan", &["secondary"]);
     let (pause, _) = icon_button("media-playback-pause-symbolic", "Pause", &["secondary"]);
     let (resume, _) = icon_button(
         "media-playback-start-symbolic",

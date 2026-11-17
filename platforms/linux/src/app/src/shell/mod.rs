@@ -332,7 +332,10 @@ mod tests {
             page("settings").unwrap().tooltip(),
             "Appearance, AI models and storage (Ctrl+,)"
         );
-        assert_eq!(page("deep-analyze").unwrap().crumb(), "Analyze / Describe Files");
+        assert_eq!(
+            page("deep-analyze").unwrap().crumb(),
+            "Analyze / Describe Files"
+        );
         assert_eq!(
             page("cleanup").unwrap().tooltip(),
             "Find extra copies and move them to Trash (Ctrl+7)"
@@ -363,7 +366,10 @@ mod tests {
     #[test]
     fn page_search_matches_titles_ids_and_summaries() {
         assert_eq!(matching_pages("").len(), PAGES.len());
-        let ids: Vec<_> = matching_pages("organize").iter().map(|page| page.id).collect();
+        let ids: Vec<_> = matching_pages("organize")
+            .iter()
+            .map(|page| page.id)
+            .collect();
         assert_eq!(ids, ["restructure"]);
         assert_eq!(matching_pages("CHAT")[0].id, "chat");
         assert_eq!(matching_pages("restructure")[0].id, "restructure");

@@ -54,7 +54,9 @@ impl ReviewFilter {
             ReviewFilter::Drill(Drill::Source(source)) => folder() == *source,
             ReviewFilter::Drill(Drill::Bucket(target)) => bucket(movement, root) == *target,
             ReviewFilter::Drill(Drill::Sources(sources)) => sources.contains(&folder()),
-            ReviewFilter::Drill(Drill::Buckets(targets)) => targets.contains(&bucket(movement, root)),
+            ReviewFilter::Drill(Drill::Buckets(targets)) => {
+                targets.contains(&bucket(movement, root))
+            }
         }
     }
 }
@@ -236,9 +238,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let cell = v3::vbox(4);
         cell.add_css_class("v3-metric");
         let head = v3::hbox(6);
-        head.append(
-            &v3::dot(tone.css()),
-        );
+        head.append(&v3::dot(tone.css()));
         head.append(&v3::label(label, &["v3-meta"]));
         cell.append(&head);
         let value = v3::mono("0", "s20");
@@ -307,7 +307,8 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     staying_header.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
     staying.append(&staying_header);
     let staying_rows = v3::vbox(0);
-    let staying_list = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &staying_rows);
+    let staying_list =
+        crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &staying_rows);
     staying.append(&staying_list);
     content.append(&staying);
 
@@ -611,7 +612,11 @@ impl Ui {
         let root = self.root.borrow().clone().unwrap_or_default();
         let items: Vec<MapItem> = moves
             .iter()
-            .map(|m| MapItem { source_folder: v3::parent_name(&m.source), bucket: bucket(m, &root), outcome: outcome(m) })
+            .map(|m| MapItem {
+                source_folder: v3::parent_name(&m.source),
+                bucket: bucket(m, &root),
+                outcome: outcome(m),
+            })
             .collect();
         self.map.set_data(items, library.staying.clone());
         self.render_staying();
@@ -633,7 +638,9 @@ impl Ui {
         let row = v3::hbox(12);
         row.add_css_class("v3-rec");
         if let Some(group) = group {
-            self.bus.track(&row, Hover::Outcome(group), move |hover| *hover == Hover::Outcome(group));
+            self.bus.track(&row, Hover::Outcome(group), move |hover| {
+                *hover == Hover::Outcome(group)
+            });
         }
         let skipped = group.is_some_and(|g| self.skipped.borrow().contains(&g));
         if skipped {
@@ -896,10 +903,11 @@ impl Ui {
             let row = v3::list_row(10);
             row.add_css_class("v3-staying-row");
             let lit = full.clone();
-            self.bus.track(&row, Hover::Source(full.clone()), move |hover| hover.touches_source(&lit));
-            row.append(
-                &v3::dot("tone-done"),
-            );
+            self.bus
+                .track(&row, Hover::Source(full.clone()), move |hover| {
+                    hover.touches_source(&lit)
+                });
+            row.append(&v3::dot("tone-done"));
             let name = v3::mono(folder, "s12");
             name.set_hexpand(true);
             row.append(&name);
@@ -953,9 +961,7 @@ impl Ui {
         for (name, indices) in &buckets {
             list.append(&self.bucket_section(name, indices, indices));
         }
-        column.append(
-            &v3::scroller(&list),
-        );
+        column.append(&v3::scroller(&list));
         dialog.set_child(Some(&column));
         let close = dialog.downgrade();
         done.connect_clicked(move |_| {
@@ -1129,7 +1135,12 @@ impl Ui {
         };
         let entry = crate::changes::record(
             u64::from(applied),
-            || format!("{} into new folders", crate::changes::count_label("Moved", u64::from(applied), "file")),
+            || {
+                format!(
+                    "{} into new folders",
+                    crate::changes::count_label("Moved", u64::from(applied), "file")
+                )
+            },
             Some(reverse),
         );
         slot.set(entry);
@@ -1177,7 +1188,9 @@ impl Ui {
         }
         let dialog = adw::AlertDialog::new(
             Some(&format!("Move {}?", plural(moves.len(), "file"))),
-            Some("The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was."),
+            Some(
+                "The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was.",
+            ),
         );
         dialog.add_responses(&[("cancel", "Cancel"), ("move", "Move files")]);
         dialog.set_response_appearance("move", adw::ResponseAppearance::Destructive);
@@ -1360,7 +1373,10 @@ fn is_restructure_error(kind: &str) -> bool {
     kind.contains("restructure")
         || matches!(
             kind,
-            "db_unavailable" | "command_limit_exceeded" | "command_decode_failed" | "oversized_frame"
+            "db_unavailable"
+                | "command_limit_exceeded"
+                | "command_decode_failed"
+                | "oversized_frame"
         )
 }
 
@@ -1381,7 +1397,11 @@ mod review_tests {
         ] {
             assert!(is_restructure_error(kind), "{kind}");
         }
-        for kind in ["vlm_server_payload_rejected", "deep_analyze_failed", "model_download_failed"] {
+        for kind in [
+            "vlm_server_payload_rejected",
+            "deep_analyze_failed",
+            "model_download_failed",
+        ] {
             assert!(!is_restructure_error(kind), "{kind}");
         }
     }
@@ -1401,6 +1421,9 @@ mod review_tests {
         assert!(!ReviewFilter::Drill(Drill::Buckets(vec!["Docs".into()])).keeps(&movement, "/lib"));
         assert!(ReviewFilter::Group(Outcome::Reorganize).keeps(&movement, "/lib"));
         assert!(!ReviewFilter::Group(Outcome::Tidy).keeps(&movement, "/lib"));
-        assert_eq!(ReviewFilter::Drill(Drill::Bucket("Docs".into())).title(), "To Docs");
+        assert_eq!(
+            ReviewFilter::Drill(Drill::Bucket("Docs".into())).title(),
+            "To Docs"
+        );
     }
 }

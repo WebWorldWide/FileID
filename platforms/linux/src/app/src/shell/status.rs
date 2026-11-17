@@ -494,8 +494,8 @@ impl Status {
             .eta_seconds
             .filter(|s| *s > 0.0 && self.scan_running())
             .map(|s| format!("{} left", format_eta(s)));
-        let rate = (p.files_per_second > 0.0)
-            .then(|| format!("{:.0} files a second", p.files_per_second));
+        let rate =
+            (p.files_per_second > 0.0).then(|| format!("{:.0} files a second", p.files_per_second));
         let memory_tone = if p.resident_mb > 1200 {
             Tone::Warning
         } else {

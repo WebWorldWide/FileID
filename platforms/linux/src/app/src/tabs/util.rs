@@ -41,7 +41,9 @@ const MAX_SCALE: i32 = 4;
 /// Decode size for `dim` logical pixels on a display at `scale`: sharp on
 /// HiDPI, never past `MAX_DECODE_PX` (and never below `dim`).
 pub(super) fn hidpi_px(dim: i32, scale: i32) -> i32 {
-    dim.saturating_mul(scale.clamp(1, MAX_SCALE)).min(MAX_DECODE_PX).max(dim)
+    dim.saturating_mul(scale.clamp(1, MAX_SCALE))
+        .min(MAX_DECODE_PX)
+        .max(dim)
 }
 
 /// `hidpi_px` at the scale of the widget the image will be drawn in.

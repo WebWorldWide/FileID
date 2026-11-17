@@ -11,10 +11,10 @@ use fileid_engine::ipc::*;
 use gtk::glib;
 
 use super::moments_dates::DateFilter;
-use super::moments_timeline::{chapter_state, read_coverage, ChapterState, Coverage, Timeline};
+use super::moments_timeline::{ChapterState, Coverage, Timeline, chapter_state, read_coverage};
 use super::workbench_state::*;
-use super::workbenches::{is_playable_media, Engine};
-use crate::engine_client::{texture_from_decoded, EngineState, ThumbReply};
+use super::workbenches::{Engine, is_playable_media};
+use crate::engine_client::{EngineState, ThumbReply, texture_from_decoded};
 use crate::shell::status::Tone;
 use crate::v3;
 
@@ -198,19 +198,21 @@ impl CatalogUi {
                 ui.timeline
                     .set_duration((duration > 0.0).then_some(duration));
                 if let Some(seconds) = ui.pending_seek.take()
-                    && stream.is_seekable() {
-                        stream.seek((seconds * 1_000_000.0) as i64);
-                    }
+                    && stream.is_seekable()
+                {
+                    stream.seek((seconds * 1_000_000.0) as i64);
+                }
             });
             self.video.set_media_stream(Some(&media));
             self.media_stack.set_visible_child_name("video");
         } else if is_image(&hit.path) {
             self.picture.set_paintable(None::<&gtk::gdk::Texture>);
             self.media_stack.set_visible_child_name("image");
-            let rx = self
-                .engine
-                .borrow()
-                .request_preview(hit.path.clone(), super::util::decode_px(&self.picture, 1600), false);
+            let rx = self.engine.borrow().request_preview(
+                hit.path.clone(),
+                super::util::decode_px(&self.picture, 1600),
+                false,
+            );
             let picture = self.picture.downgrade();
             glib::MainContext::default().spawn_local(async move {
                 if let (Ok(ThumbReply::Image(decoded)), Some(picture)) =
@@ -314,8 +316,9 @@ impl CatalogUi {
             rows.push(self.chapter_row(chapter));
         }
         if rows.is_empty() {
-            let empty =
-                v3::meta("No chapters yet. Press Find moments for suggestions, or add your own at the current time.");
+            let empty = v3::meta(
+                "No chapters yet. Press Find moments for suggestions, or add your own at the current time.",
+            );
             empty.set_wrap(true);
             empty.add_css_class("v3-row-pad");
             self.chapters.append(&empty);
@@ -579,9 +582,17 @@ impl CatalogUi {
         }
         let targets = ask_targets(&self.found.borrow(), &picked);
         self.ask.set_sensitive(!targets.is_empty());
-        let label = if picked.is_empty() { "Ask about these".to_owned() } else { format!("Ask about {}", targets.len()) };
+        let label = if picked.is_empty() {
+            "Ask about these".to_owned()
+        } else {
+            format!("Ask about {}", targets.len())
+        };
         self.ask.set_label(&label);
-        self.ask.update_property(&[gtk::accessible::Property::Label(&format!("{label}: open Chat with {} results attached", targets.len()))]);
+        self.ask
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "{label}: open Chat with {} results attached",
+                targets.len()
+            ))]);
     }
 
     /// Ctrl+click adds or removes a result, Shift+click picks a range.
@@ -605,7 +616,18 @@ impl CatalogUi {
         let targets = ask_targets(&found, &self.picked.borrow());
         let kinds: Vec<&str> = targets
             .iter()
-            .map(|id| found.iter().find(|hit| hit.file_id == *id).map_or("image", |hit| if super::workbenches::is_playable_media(&hit.path) { "video" } else { "image" }))
+            .map(|id| {
+                found
+                    .iter()
+                    .find(|hit| hit.file_id == *id)
+                    .map_or("image", |hit| {
+                        if super::workbenches::is_playable_media(&hit.path) {
+                            "video"
+                        } else {
+                            "image"
+                        }
+                    })
+            })
             .collect();
         super::chat_handoff::ask_about(&self.ask, &targets, &kinds);
     }
@@ -667,7 +689,10 @@ impl CatalogUi {
         let weak = Rc::downgrade(self);
         modified.connect_pressed(move |gesture, _, _, _| {
             let state = gesture.current_event_state();
-            let (control, shift) = (state.contains(gtk::gdk::ModifierType::CONTROL_MASK), state.contains(gtk::gdk::ModifierType::SHIFT_MASK));
+            let (control, shift) = (
+                state.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+                state.contains(gtk::gdk::ModifierType::SHIFT_MASK),
+            );
             if !(control || shift) {
                 return;
             }
@@ -704,7 +729,10 @@ impl CatalogUi {
             format!("{active} job{}", if active == 1 { "" } else { "s" })
         }));
         if jobs.is_empty() {
-            let empty = v3::wrapped("Nothing waiting. Pick a video and press Find moments.", &["v3-meta"]);
+            let empty = v3::wrapped(
+                "Nothing waiting. Pick a video and press Find moments.",
+                &["v3-meta"],
+            );
             empty.add_css_class("v3-row-pad");
             self.jobs.append(&empty);
         }
@@ -871,7 +899,9 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     best_takes.set_tooltip_text(Some(super::takes_groups_model::search_tooltip(&[])));
     let ask = v3::ghost("Ask about these");
     ask.set_sensitive(false);
-    ask.set_tooltip_text(Some("Open Chat with these results attached (Ctrl+click picks some, Shift+click a range)"));
+    ask.set_tooltip_text(Some(
+        "Open Chat with these results attached (Ctrl+click picks some, Shift+click a range)",
+    ));
     count_row.append(&ask);
     count_row.append(&best_takes);
     top.append(&count_row);
@@ -1029,7 +1059,10 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     detail.append(&jobs_panel.root);
 
     let detail_stack = gtk::Stack::builder().vhomogeneous(false).build();
-    let empty = v3::dashed_notice("Find a moment", "Type a word on the left and press Enter. Pick a result to play it, see which parts FileID has looked at, and add or fix chapters.");
+    let empty = v3::dashed_notice(
+        "Find a moment",
+        "Type a word on the left and press Enter. Pick a result to play it, see which parts FileID has looked at, and add or fix chapters.",
+    );
     empty.add_css_class("v3-page-pad-inner");
     detail_stack.add_named(&empty, Some("empty"));
     detail_stack.add_named(&detail, Some("detail"));
@@ -1460,7 +1493,10 @@ mod tests {
         let mut other = hit("image", None, None);
         other.file_id = 2;
         let found = vec![first, moment, other];
-        assert_eq!(ask_targets(&found, &std::collections::BTreeSet::new()), vec![1, 2]);
+        assert_eq!(
+            ask_targets(&found, &std::collections::BTreeSet::new()),
+            vec![1, 2]
+        );
         assert_eq!(ask_targets(&found, &[2].into_iter().collect()), vec![2]);
     }
 
@@ -1491,7 +1527,10 @@ mod tests {
             hit_kind(&hit("passage", None, Some(2))).0,
             "Text in document"
         );
-        assert_eq!(hit_kind(&hit("passage", Some(30.0), None)).0, "Speech or text");
+        assert_eq!(
+            hit_kind(&hit("passage", Some(30.0), None)).0,
+            "Speech or text"
+        );
         assert_eq!(hit_kind(&hit("passage", None, None)).0, "Text in image");
         assert_eq!(
             hit_kind(&hit("ocrText", None, None)),

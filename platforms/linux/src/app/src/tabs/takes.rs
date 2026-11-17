@@ -263,7 +263,9 @@ fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk:
     let zoom_button = v3::ghost("Zoom to face");
     zoom_button.set_tooltip_text(Some("Z"));
     let ask_button = v3::ghost("Ask about all");
-    ask_button.set_tooltip_text(Some("Open Chat with these tries attached, then ask for the exact moment you want"));
+    ask_button.set_tooltip_text(Some(
+        "Open Chat with these tries attached, then ask for the exact moment you want",
+    ));
     strip_head.append(&ask_button);
     strip_head.append(&zoom_button);
     filmstrip.append(&strip_head);
@@ -946,7 +948,10 @@ impl Ui {
         self.refresh_zoom_button(&group);
         let (_, ask) = model::ask_targets(&qualities, &keep);
         self.ask_button.set_label(&ask);
-        self.ask_button.update_property(&[gtk::accessible::Property::Label(&format!("{ask}: open Chat with these tries attached"))]);
+        self.ask_button
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "{ask}: open Chat with these tries attached"
+            ))]);
         let Some((best_index, other_index)) = model::compare_pair(&qualities, focused) else {
             return;
         };
@@ -981,7 +986,11 @@ impl Ui {
             return;
         };
         let (ids, _) = model::ask_targets(&self.qualities.borrow(), &self.keep.borrow());
-        let kind = if group.kind == "videos" { "video" } else { "image" };
+        let kind = if group.kind == "videos" {
+            "video"
+        } else {
+            "image"
+        };
         super::chat_handoff::ask_about(&self.ask_button, &ids, &vec![kind; ids.len()]);
     }
 
@@ -1214,7 +1223,11 @@ impl Ui {
             result.messages.iter().filter(|item| !item.ok).collect();
         let why = super::cleanup::trash_failure_details(&refused);
         if result.succeeded == 0 {
-            let why = if why.is_empty() { "Nothing was moved.".to_owned() } else { why };
+            let why = if why.is_empty() {
+                "Nothing was moved.".to_owned()
+            } else {
+                why
+            };
             self.toast(&format!("Couldn't move to Trash. {why}"));
             return;
         }
@@ -1243,15 +1256,30 @@ impl Ui {
                 let slot = Rc::new(Cell::new(None::<u64>));
                 let reverse: crate::changes::Reverse = {
                     let weak = Rc::downgrade(self);
-                    let (batch_id, group, reopen, slot) = (batch_id.clone(), group.clone(), reopen.clone(), slot.clone());
+                    let (batch_id, group, reopen, slot) = (
+                        batch_id.clone(),
+                        group.clone(),
+                        reopen.clone(),
+                        slot.clone(),
+                    );
                     Rc::new(move || {
-                        weak.upgrade()
-                            .is_some_and(|ui| ui.restore_trash(&batch_id, &group, reopen.clone(), slot.get()))
+                        weak.upgrade().is_some_and(|ui| {
+                            ui.restore_trash(&batch_id, &group, reopen.clone(), slot.get())
+                        })
                     })
                 };
                 let entry = crate::changes::record(
                     u64::from(result.succeeded),
-                    || format!("{} to Trash", crate::changes::count_label("Moved", u64::from(result.succeeded), "file")),
+                    || {
+                        format!(
+                            "{} to Trash",
+                            crate::changes::count_label(
+                                "Moved",
+                                u64::from(result.succeeded),
+                                "file"
+                            )
+                        )
+                    },
                     Some(reverse),
                 );
                 slot.set(entry);

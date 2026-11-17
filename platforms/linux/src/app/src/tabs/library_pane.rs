@@ -11,12 +11,13 @@ use gtk::glib;
 
 use super::offline_roots::OfflineRoots;
 use super::util::{decode_px, fmt_date, icon_for_kind, icon_paintable};
+use crate::engine_client::{EngineClient, FileRow, ThumbReply, texture_from_decoded};
 use fileid_engine::util::display::file_size_i64;
-use crate::engine_client::{texture_from_decoded, EngineClient, FileRow, ThumbReply};
 
 const PANE_PREVIEW_PX: i32 = 1024;
 const TAG_LIMIT: i64 = 24;
-pub(super) const OFFLINE_NOTE: &str = "Its drive or folder isn't connected. Tags and descriptions are kept.";
+pub(super) const OFFLINE_NOTE: &str =
+    "Its drive or folder isn't connected. Tags and descriptions are kept.";
 
 /// Tooltips for Show in Files and Open: why they're off while offline.
 pub(super) fn action_tips(offline: bool) -> (&'static str, &'static str) {
@@ -211,12 +212,17 @@ impl SelectedPane {
             .build();
         body.append(&folder);
         let offline_note = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        offline_note.append(&crate::v3::pill("OFFLINE", crate::shell::status::Tone::Warning));
+        offline_note.append(&crate::v3::pill(
+            "OFFLINE",
+            crate::shell::status::Tone::Warning,
+        ));
         let note = crate::v3::wrapped(OFFLINE_NOTE, &["meta"]);
         note.set_hexpand(true);
         offline_note.append(&note);
         offline_note.set_visible(false);
-        offline_note.update_property(&[gtk::accessible::Property::Label(&format!("Offline. {OFFLINE_NOTE}"))]);
+        offline_note.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Offline. {OFFLINE_NOTE}"
+        ))]);
         body.append(&offline_note);
         let facts = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.append(&facts);
@@ -265,7 +271,8 @@ impl SelectedPane {
             .width_request(300)
             .child(&body)
             .build();
-        let revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Left, &scroller);
+        let revealer =
+            crate::motion::SpringRevealer::with_child(crate::motion::Slide::Left, &scroller);
 
         let pane = Rc::new(Self {
             revealer,
@@ -310,8 +317,15 @@ impl SelectedPane {
     /// The selected files the Ask button attaches to the next chat question.
     pub fn set_picked(&self, picked: Vec<(i64, String)>) {
         let count = picked.len();
-        self.ask.set_label(&if count == 1 { "Ask about this file".to_owned() } else { format!("Ask about {count} files") });
-        self.ask.update_property(&[gtk::accessible::Property::Label(&format!("Ask Chat about the {count} selected files"))]);
+        self.ask.set_label(&if count == 1 {
+            "Ask about this file".to_owned()
+        } else {
+            format!("Ask about {count} files")
+        });
+        self.ask
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "Ask Chat about the {count} selected files"
+            ))]);
         self.picked.replace(picked);
     }
 
@@ -353,17 +367,19 @@ impl SelectedPane {
         self.frame.set_visible(false);
         self.actions.set_visible(false);
         self.set_offline(false);
-        self.name.set_text(&super::library_selection::many_title(count));
+        self.name
+            .set_text(&super::library_selection::many_title(count));
         let detail = super::library_selection::many_detail(bytes);
         self.folder.set_text(&detail);
         self.folder.set_tooltip_text(None);
         while let Some(child) = self.facts.first_child() {
             self.facts.remove(&child);
         }
-        self.revealer.update_property(&[gtk::accessible::Property::Label(&format!(
-            "{} selected, {detail}",
-            super::library_selection::many_title(count)
-        ))]);
+        self.revealer
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "{} selected, {detail}",
+                super::library_selection::many_title(count)
+            ))]);
         self.revealer.set_reveal_child(true);
     }
 
@@ -384,8 +400,10 @@ impl SelectedPane {
         self.facts
             .append(&kv_row("Size", &file_size_i64(row.size_bytes)));
         if let Some(name) = row.proposed_name.as_ref().filter(|name| !name.is_empty()) {
-            self.facts
-                .append(&kv_row("Suggested name", &format!("{name}.{}", row.extension)));
+            self.facts.append(&kv_row(
+                "Suggested name",
+                &format!("{name}.{}", row.extension),
+            ));
         }
         if let Some(caption) = row
             .description
@@ -548,7 +566,10 @@ mod tests {
 
     #[test]
     fn offline_files_explain_why_files_and_open_are_off() {
-        assert_eq!(action_tips(false), ("Show in Files", "Open in the default app"));
+        assert_eq!(
+            action_tips(false),
+            ("Show in Files", "Open in the default app")
+        );
         let (reveal, open) = action_tips(true);
         assert!(reveal.starts_with("Reconnect the drive"));
         assert!(open.starts_with("Reconnect the drive"));

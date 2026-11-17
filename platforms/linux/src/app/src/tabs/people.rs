@@ -31,10 +31,13 @@ use gtk::glib::clone;
 use super::face_queues::{self, Queue};
 use super::face_review;
 use super::people_actions as actions;
-use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
+use crate::engine_client::{
+    CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply, texture_from_decoded,
+};
 use fileid_engine::ipc::{
-    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload,
-    MergeClustersPayload, ReassignFacePayload, RenamePersonPayload, RevertMergePayload,
+    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload,
+    MarkPersonsDifferentPayload, MergeClustersPayload, ReassignFacePayload, RenamePersonPayload,
+    RevertMergePayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -200,7 +203,12 @@ where
     V: Clone,
 {
     fn new(budget: usize) -> Self {
-        Self { values: HashMap::new(), order: VecDeque::new(), budget, held: 0 }
+        Self {
+            values: HashMap::new(),
+            order: VecDeque::new(),
+            budget,
+            held: 0,
+        }
     }
 
     fn get(&mut self, key: &K) -> Option<V> {
@@ -223,7 +231,9 @@ where
         self.held += bytes;
         self.order.push_back(key);
         while self.held > self.budget {
-            let Some(evicted) = self.order.pop_front() else { break };
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
             if let Some((_, freed)) = self.values.remove(&evicted) {
                 self.held -= freed;
             }
@@ -846,10 +856,8 @@ fn refresh_view(ui: &Rc<Ui>) {
             "These people were marked unknown. Use Show them below to review their photos.",
         ));
     } else {
-        ui.no_clusters_page.set_title(&format!(
-            "{total_faces} face{} found",
-            plural(total_faces),
-        ));
+        ui.no_clusters_page
+            .set_title(&format!("{total_faces} face{} found", plural(total_faces),));
         ui.no_clusters_page.set_description(Some(
             "Press Group faces to sort them into one card per person. It takes a few seconds. Then click a card to type that person's name.",
         ));
@@ -1079,7 +1087,8 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                             finish_person_action(&ui, "markPersonsAsUnknown");
                             set_status(
                                 &ui,
-                                "Couldn't mark as unknown: FileID restarted. Try again.".to_string(),
+                                "Couldn't mark as unknown: FileID restarted. Try again."
+                                    .to_string(),
                             );
                             update_bulk_strip(&ui);
                             break;
@@ -1091,7 +1100,8 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                     finish_person_action(&ui, "markPersonsAsUnknown");
                     set_status(
                         &ui,
-                        "Couldn't mark as unknown: FileID didn't answer in time. Try again.".to_string(),
+                        "Couldn't mark as unknown: FileID didn't answer in time. Try again."
+                            .to_string(),
                     );
                     update_bulk_strip(&ui);
                 }
@@ -1114,12 +1124,18 @@ struct CardState {
 /// For each wanted card, the index of a card already on screen that shows
 /// exactly that, or `None` when one has to be built.
 fn reuse_plan(shown: &[CardState], wanted: &[CardState]) -> Vec<Option<usize>> {
-    let mut by_id: HashMap<i64, usize> = shown.iter().enumerate().map(|(index, card)| (card.person.id, index)).collect();
+    let mut by_id: HashMap<i64, usize> = shown
+        .iter()
+        .enumerate()
+        .map(|(index, card)| (card.person.id, index))
+        .collect();
     wanted
         .iter()
         .map(|card| {
             let index = *by_id.get(&card.person.id)?;
-            (shown[index] == *card).then(|| by_id.remove(&card.person.id)).flatten()
+            (shown[index] == *card)
+                .then(|| by_id.remove(&card.person.id))
+                .flatten()
         })
         .collect()
 }
@@ -1142,15 +1158,29 @@ fn rebuild_grid(ui: &Rc<Ui>) {
             mode,
         })
         .collect();
-    let shown: Vec<CardState> = ui.cards.borrow().iter().map(|(state, _)| state.clone()).collect();
+    let shown: Vec<CardState> = ui
+        .cards
+        .borrow()
+        .iter()
+        .map(|(state, _)| state.clone())
+        .collect();
     if shown == wanted {
         return;
     }
     let plan = reuse_plan(&shown, &wanted);
-    let mut old: Vec<Option<gtk::FlowBoxChild>> = ui.cards.take().into_iter().map(|(_, child)| Some(child)).collect();
+    let mut old: Vec<Option<gtk::FlowBoxChild>> = ui
+        .cards
+        .take()
+        .into_iter()
+        .map(|(_, child)| Some(child))
+        .collect();
     // An unchanged run at the front stays where it is, so a face landing
     // mid-scan (appended) never touches the cards already there.
-    let kept = plan.iter().enumerate().take_while(|(index, from)| **from == Some(*index)).count();
+    let kept = plan
+        .iter()
+        .enumerate()
+        .take_while(|(index, from)| **from == Some(*index))
+        .count();
     for child in old.iter().skip(kept).flatten() {
         ui.grid.remove(child);
     }
@@ -1339,7 +1369,13 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = request_face_thumbnail(&ui.engine, pic, key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
+    let rx = request_face_thumbnail(
+        &ui.engine,
+        pic,
+        key.path.clone(),
+        key.bbox.clone(),
+        CARD_THUMB_PX,
+    );
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -1444,8 +1480,14 @@ fn show_review_count(ui: &Ui, slot: usize, count: i64) {
     counts[slot] = count;
     ui.review_counts.set(counts);
     let waiting = counts.iter().sum::<i64>();
-    ui.review_button.set_label(&face_review::button_text(waiting));
-    ui.review_button.update_property(&[gtk::accessible::Property::Label(&face_review::header_text(waiting))]);
+    ui.review_button
+        .set_label(&face_review::button_text(waiting));
+    ui.review_button
+        .update_property(
+            &[gtk::accessible::Property::Label(&face_review::header_text(
+                waiting,
+            ))],
+        );
     ui.review_button.set_visible(waiting > 0);
 }
 
@@ -1472,7 +1514,9 @@ fn review_panel(ui: &Rc<Ui>, person: Option<i64>) -> Rc<face_review::ReviewPanel
     let panel_weak = Rc::downgrade(&panel);
     let last = Cell::new(None::<i64>);
     panel.connect_total(move |total| {
-        let changed = last.replace(Some(total)).is_some_and(|previous| previous != total);
+        let changed = last
+            .replace(Some(total))
+            .is_some_and(|previous| previous != total);
         if let Some(panel) = panel_weak.upgrade()
             && person.is_some()
         {
@@ -1656,7 +1700,8 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     let dialog = adw::Dialog::new();
     publish_selection(ui, Some(pid));
     let closing = Rc::downgrade(ui);
-    let review_slot: Rc<RefCell<Option<Rc<face_review::ReviewPanel>>>> = Rc::new(RefCell::new(None));
+    let review_slot: Rc<RefCell<Option<Rc<face_review::ReviewPanel>>>> =
+        Rc::new(RefCell::new(None));
     let review_keep = review_slot.clone();
     dialog.connect_closed(move |_| {
         review_keep.borrow_mut().take();
@@ -1789,7 +1834,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     // photos", then "Move to another person…").
     let select_mode = Rc::new(Cell::new(false));
     let select_btn = crate::v3::secondary("Select photos", false);
-    select_btn.set_tooltip_text(Some("Move photos that show someone else to the right person"));
+    select_btn.set_tooltip_text(Some(
+        "Move photos that show someone else to the right person",
+    ));
     let picked_label = crate::v3::mono("", "v3-mono-11");
     let move_btn = crate::v3::primary("Move to another person…", true);
     let cancel_select = crate::v3::secondary("Cancel", false);
@@ -1886,8 +1933,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     {
         let ui = ui.clone();
         let source_name = person.display_name();
-        let (photos, multi_selection, leave_select, move_status) =
-            (photos.downgrade(), multi_selection.downgrade(), leave_select.clone(), move_status.downgrade());
+        let (photos, multi_selection, leave_select, move_status) = (
+            photos.downgrade(),
+            multi_selection.downgrade(),
+            leave_select.clone(),
+            move_status.downgrade(),
+        );
         move_btn.connect_clicked(move |button| {
             let (Some(photos), Some(multi)) = (photos.upgrade(), multi_selection.upgrade()) else {
                 return;
@@ -1900,7 +1951,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             if faces.is_empty() {
                 return;
             }
-            let (photos, leave_select, move_status) = (photos.downgrade(), leave_select.clone(), move_status.clone());
+            let (photos, leave_select, move_status) = (
+                photos.downgrade(),
+                leave_select.clone(),
+                move_status.clone(),
+            );
             let done: Rc<dyn Fn(String)> = Rc::new(move |text| {
                 leave_select();
                 if let Some(label) = move_status.upgrade() {
@@ -2254,7 +2309,8 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                             show_person_dialog_error(
                                 &ui,
                                 &error_label,
-                                "Couldn't mark as unknown: FileID restarted. Try again.".to_string(),
+                                "Couldn't mark as unknown: FileID restarted. Try again."
+                                    .to_string(),
                             );
                             handled = true;
                             break;
@@ -2293,7 +2349,8 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let Some(photos) = photos_weak.upgrade() else {
             return;
         };
-        let items: Vec<glib::BoxedAnyObject> = files.into_iter().map(glib::BoxedAnyObject::new).collect();
+        let items: Vec<glib::BoxedAnyObject> =
+            files.into_iter().map(glib::BoxedAnyObject::new).collect();
         photos.splice(0, photos.n_items(), &items);
     });
 
@@ -2345,7 +2402,13 @@ fn open_move_target_picker(
     anchor: &gtk::Button,
     done: Rc<dyn Fn(String)>,
 ) {
-    let mut targets: Vec<PersonRow> = ui.persons.borrow().iter().filter(|p| p.id != source).cloned().collect();
+    let mut targets: Vec<PersonRow> = ui
+        .persons
+        .borrow()
+        .iter()
+        .filter(|p| p.id != source)
+        .cloned()
+        .collect();
     targets.sort_by(|a, b| {
         b.has_any_name()
             .cmp(&a.has_any_name())
@@ -2363,8 +2426,14 @@ fn open_move_target_picker(
     body.set_margin_bottom(16);
     body.set_margin_start(16);
     body.set_margin_end(16);
-    body.append(&crate::v3::label(&actions::move_title(faces.len()), &["title-3"]));
-    body.append(&crate::v3::wrapped(&actions::move_hint(source_name), &["dim-label"]));
+    body.append(&crate::v3::label(
+        &actions::move_title(faces.len()),
+        &["title-3"],
+    ));
+    body.append(&crate::v3::wrapped(
+        &actions::move_hint(source_name),
+        &["dim-label"],
+    ));
     let listbox = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])
@@ -2403,10 +2472,12 @@ fn open_move_target_picker(
                 })
                 .collect();
             set_status(&ui, "Moving photos…".to_string());
-            let (ui, faces, done, target_name) = (ui.clone(), faces.len(), done.clone(), target_name.clone());
+            let (ui, faces, done, target_name) =
+                (ui.clone(), faces.len(), done.clone(), target_name.clone());
             glib::MainContext::default().spawn_local(async move {
                 let timeout = 30 + (faces / 10) as u32;
-                let results = actions::send_and_collect(&ui.engine, payloads, "reassignFace", timeout).await;
+                let results =
+                    actions::send_and_collect(&ui.engine, payloads, "reassignFace", timeout).await;
                 let text = match results {
                     Some(results) => {
                         let moved: usize = results.iter().map(|r| r.succeeded as usize).sum();
@@ -2485,13 +2556,20 @@ fn bind_photo_tile(engine: &Rc<RefCell<EngineClient>>, item: &gtk::ListItem) {
     else {
         return;
     };
-    let Some((pic, name)) = photo_tile_parts(item) else { return };
+    let Some((pic, name)) = photo_tile_parts(item) else {
+        return;
+    };
     name.set_text(&crate::v3::file_name(&face.path));
-    name.set_tooltip_text(Some(&format!("File #{}, face #{}", face.file_id, face.face_id)));
+    name.set_tooltip_text(Some(&format!(
+        "File #{}, face #{}",
+        face.file_id, face.face_id
+    )));
     pic.set_paintable(None::<&gtk::gdk::Texture>);
     let cancel = CancelToken::default();
     let key = item.as_ptr() as usize;
-    if let Some(previous) = PHOTO_TOKENS.with_borrow_mut(|tokens| tokens.insert(key, cancel.clone())) {
+    if let Some(previous) =
+        PHOTO_TOKENS.with_borrow_mut(|tokens| tokens.insert(key, cancel.clone()))
+    {
         previous.store(true, std::sync::atomic::Ordering::Release);
     }
     let (thumbnail_path, thumbnail_bbox) =
@@ -2617,7 +2695,10 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                         let status = if sent == sources.len() {
                             format!("Combining {total} cards into one…")
                         } else {
-                            format!("Merged {sent} of {} cards. FileID restarted before the rest.", sources.len())
+                            format!(
+                                "Merged {sent} of {} cards. FileID restarted before the rest.",
+                                sources.len()
+                            )
                         };
                         set_status(&ui3, status);
                         set_mode(&ui3, Mode::Normal);
@@ -2655,7 +2736,11 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             destination,
             source_name: name(source),
             destination_name: name(destination),
-            faces: faces.iter().find(|(id, _)| *id == source).map(|(_, f)| f.clone()).unwrap_or_default(),
+            faces: faces
+                .iter()
+                .find(|(id, _)| *id == source)
+                .map(|(_, f)| f.clone())
+                .unwrap_or_default(),
             operation: None,
             entry: None,
         };
@@ -2672,13 +2757,22 @@ fn send_merges(ui: &Rc<Ui>, destination: i64, sources: &[i64], faces: &[(i64, Ve
             }
         };
         ui.merge_journal.borrow_mut().push_back(record);
-        super::merge_ledger::sent(super::merge_ledger::Owner::People, command_id, source, destination);
+        super::merge_ledger::sent(
+            super::merge_ledger::Owner::People,
+            command_id,
+            source,
+            destination,
+        );
         sent += 1;
     }
     sent
 }
 
-fn take_journaled(journal: &mut VecDeque<MergeRecord>, source: i64, destination: i64) -> Option<MergeRecord> {
+fn take_journaled(
+    journal: &mut VecDeque<MergeRecord>,
+    source: i64,
+    destination: i64,
+) -> Option<MergeRecord> {
     let index = journal
         .iter()
         .position(|record| record.source == source && record.destination == destination)?;
@@ -2698,7 +2792,11 @@ fn abandon_merges(ui: &Rc<Ui>) {
         }
     }
     if waiting > 0 {
-        set_status(ui, "FileID restarted before the merge finished. Check the cards, then try again.".to_string());
+        set_status(
+            ui,
+            "FileID restarted before the merge finished. Check the cards, then try again."
+                .to_string(),
+        );
         schedule_reload_burst(ui);
     }
 }
@@ -2708,7 +2806,10 @@ fn refresh_undo_merge(ui: &Rc<Ui>) {
     ui.undo_merge_button.set_visible(last.is_some());
     if let Some(record) = last {
         ui.undo_merge_button
-            .set_tooltip_text(Some(&actions::undo_merge_label(&record.source_name, &record.destination_name)));
+            .set_tooltip_text(Some(&actions::undo_merge_label(
+                &record.source_name,
+                &record.destination_name,
+            )));
     }
 }
 
@@ -2737,7 +2838,12 @@ fn record_merge_change(ui: &Rc<Ui>, record: &MergeRecord) -> Option<u64> {
     };
     let entry = crate::changes::record(
         1,
-        || format!("Merged {} into {}", record.source_name, record.destination_name),
+        || {
+            format!(
+                "Merged {} into {}",
+                record.source_name, record.destination_name
+            )
+        },
         Some(reverse),
     );
     slot.set(entry);
@@ -2760,7 +2866,10 @@ fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bo
     glib::MainContext::default().spawn_local(async move {
         let forget = |ui: &Rc<Ui>| {
             ui.merge_undo.borrow_mut().retain(|r| {
-                r.source != record.source || r.destination != record.destination || r.faces != record.faces || r.operation != record.operation
+                r.source != record.source
+                    || r.destination != record.destination
+                    || r.faces != record.faces
+                    || r.operation != record.operation
             });
             refresh_undo_merge(ui);
         };
@@ -2776,11 +2885,16 @@ fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bo
                     schedule_reload_burst(&ui);
                 }
                 Some(page) => {
-                    let detail = page.message.unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
+                    let detail = page
+                        .message
+                        .unwrap_or_else(|| "FileID didn't confirm it.".to_owned());
                     if page.status == "refused" {
                         forget(&ui);
                         if let Some(id) = entry {
-                            crate::changes::set_status(id, crate::changes::Status::NotUndoable(detail.clone()));
+                            crate::changes::set_status(
+                                id,
+                                crate::changes::Status::NotUndoable(detail.clone()),
+                            );
                         }
                     } else {
                         crate::changes::settle_failed(entry, &detail);
@@ -2789,7 +2903,10 @@ fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bo
                 }
                 None => {
                     crate::changes::settle_failed(entry, "FileID restarted. Try again.");
-                    set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again."));
+                    set_status(
+                        &ui,
+                        actions::undo_merge_failed("FileID restarted. Try again."),
+                    );
                 }
             }
             return;
@@ -2812,7 +2929,10 @@ fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bo
             }
             None => {
                 crate::changes::settle_failed(entry, "FileID restarted. Try again.");
-                set_status(&ui, actions::undo_merge_failed("FileID restarted. Try again."));
+                set_status(
+                    &ui,
+                    actions::undo_merge_failed("FileID restarted. Try again."),
+                );
             }
         }
     });
@@ -2926,7 +3046,9 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
         .build();
     if displayable.is_empty() {
         let none = gtk::Label::builder()
-            .label("Every card is clearly a different person. Check again after adding more photos.")
+            .label(
+                "Every card is clearly a different person. Check again after adding more photos.",
+            )
             .wrap(true)
             .xalign(0.0)
             .css_classes(["dim-label"])
@@ -2976,11 +3098,13 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                         glib::MainContext::default().spawn_local(async move {
                             let faces = faces_rx.recv().await.unwrap_or_default();
                             if send_merges(&ui2, target_id, &[source_id], &faces) == 1 {
-                                ui2.pending_suggestions.borrow_mut().push_back(PendingSuggestion {
-                                    row: row_weak,
-                                    button: button_weak,
-                                    dialog: dialog_weak,
-                                });
+                                ui2.pending_suggestions
+                                    .borrow_mut()
+                                    .push_back(PendingSuggestion {
+                                        row: row_weak,
+                                        button: button_weak,
+                                        dialog: dialog_weak,
+                                    });
                             } else {
                                 ui2.merge_results_pending.set(0);
                                 if let Some(button) = button_weak.upgrade() {
@@ -2993,7 +3117,8 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                     });
                 }
             ));
-            let (c, ui2, row_weak, button_weak) = (*c, ui.clone(), row.downgrade(), merge_btn.downgrade());
+            let (c, ui2, row_weak, button_weak) =
+                (*c, ui.clone(), row.downgrade(), merge_btn.downgrade());
             different_btn.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 if let Some(merge) = button_weak.upgrade() {
@@ -3005,14 +3130,25 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                     source_anchor_face_id: c.fa,
                     destination_anchor_face_id: c.fb,
                 });
-                let (ui3, row_weak, button_weak, different) =
-                    (ui2.clone(), row_weak.clone(), button_weak.clone(), button.downgrade());
+                let (ui3, row_weak, button_weak, different) = (
+                    ui2.clone(),
+                    row_weak.clone(),
+                    button_weak.clone(),
+                    button.downgrade(),
+                );
                 glib::MainContext::default().spawn_local(async move {
-                    let results =
-                        actions::send_and_collect(&ui3.engine, vec![payload], "markPersonsDifferent", 20).await;
+                    let results = actions::send_and_collect(
+                        &ui3.engine,
+                        vec![payload],
+                        "markPersonsDifferent",
+                        20,
+                    )
+                    .await;
                     match results.as_deref().and_then(<[_]>::first) {
                         Some(result) if result.failed == 0 && result.succeeded > 0 => {
-                            ui3.suggestions.borrow_mut().retain(|s| s.a != c.a || s.b != c.b);
+                            ui3.suggestions
+                                .borrow_mut()
+                                .retain(|s| s.a != c.a || s.b != c.b);
                             if let Some(row) = row_weak.upgrade() {
                                 row.set_visible(false);
                             }
@@ -3047,7 +3183,11 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
     dialog.present(Some(&ui.anchor));
 }
 
-fn build_suggestion_row(pa: &PersonRow, pb: &PersonRow, sim: f32) -> (gtk::Box, gtk::Button, gtk::Button) {
+fn build_suggestion_row(
+    pa: &PersonRow,
+    pb: &PersonRow,
+    sim: f32,
+) -> (gtk::Box, gtk::Button, gtk::Button) {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
@@ -3350,9 +3490,10 @@ pub(super) fn request_face_thumbnail(
     let cancel = CancelToken::default();
     let on_destroy = cancel.clone();
     pic.connect_destroy(move |_| on_destroy.store(true, std::sync::atomic::Ordering::Release));
-    engine
-        .borrow()
-        .request_decode(move || cropped_texture(&path, bbox.as_deref(), max_px), cancel)
+    engine.borrow().request_decode(
+        move || cropped_texture(&path, bbox.as_deref(), max_px),
+        cancel,
+    )
 }
 
 fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
@@ -3470,11 +3611,7 @@ fn norm(s: &str) -> Option<String> {
 }
 
 fn plural(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 fn sim_markup(s: f32) -> String {
@@ -3589,7 +3726,10 @@ mod tests {
             deferred_faces: Some(3),
             review_queued: None,
         };
-        assert_eq!(super::face_grouping_status(&result),"Processed 1 face. 7 people in library. 3 faces await analysis; existing assignments were kept.");
+        assert_eq!(
+            super::face_grouping_status(&result),
+            "Processed 1 face. 7 people in library. 3 faces await analysis; existing assignments were kept."
+        );
         result.deferred_faces = None;
         assert_eq!(
             super::face_grouping_status(&result),
@@ -3649,12 +3789,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        assert!(super::read_person_files_at_path(&db_path, 3)
-            .unwrap()
-            .is_empty());
-        assert!(super::read_person_files_at_path(&db_path, 4)
-            .unwrap()
-            .is_empty());
+        assert!(
+            super::read_person_files_at_path(&db_path, 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::read_person_files_at_path(&db_path, 4)
+                .unwrap()
+                .is_empty()
+        );
         conn.execute_batch("UPDATE persons SET representative_face_id=5 WHERE id=1")
             .unwrap();
         let ignored_anchor = super::read_snapshot_at_path(&db_path).unwrap();
@@ -3741,7 +3885,10 @@ mod tests {
     #[test]
     fn face_clustering_lifecycle_is_generation_owned_and_terminal_driven() {
         let mut lifecycle = FaceClusteringLifecycle::new(false);
-        assert_eq!(lifecycle.begin(), Err("FileID is still getting ready. Try again in a moment."));
+        assert_eq!(
+            lifecycle.begin(),
+            Err("FileID is still getting ready. Try again in a moment.")
+        );
         lifecycle.on_ready();
         let first = lifecycle.begin().unwrap();
         assert!(lifecycle.is_active());
@@ -3869,14 +4016,21 @@ mod tests {
         assert!(cache.get(&201).is_none());
         assert_eq!(cache.get(&200), Some(200));
         cache.insert(200, 7, 10);
-        assert_eq!((cache.len(), cache.held(), cache.get(&200)), (1, 10, Some(7)));
+        assert_eq!(
+            (cache.len(), cache.held(), cache.get(&200)),
+            (1, 10, Some(7))
+        );
     }
 
     #[test]
     fn unchanged_people_cards_are_kept_and_only_changed_ones_rebuilt() {
-        use super::{reuse_plan, CardState, Mode, PersonRow};
+        use super::{CardState, Mode, PersonRow, reuse_plan};
         let card = |id: i64, faces: i64| CardState {
-            person: PersonRow { id, face_count: faces, ..PersonRow::default() },
+            person: PersonRow {
+                id,
+                face_count: faces,
+                ..PersonRow::default()
+            },
             mode: Mode::Normal,
             checked: false,
         };

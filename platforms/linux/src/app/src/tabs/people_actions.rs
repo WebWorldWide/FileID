@@ -45,7 +45,9 @@ pub(super) async fn send_and_collect(
     });
     let mut results = Vec::new();
     while results.len() < sent {
-        let Ok(event) = subscription.0.recv().await else { break };
+        let Ok(event) = subscription.0.recv().await else {
+            break;
+        };
         match &*event {
             EngineEvent::BulkActionResult(result) if result.action == action => {
                 results.push(result.clone())
@@ -67,16 +69,23 @@ pub(super) async fn undo_merge_operation(
 ) -> Option<FaceReviewPage> {
     let subscription = Subscription(engine.borrow_mut().subscribe());
     let request_id = super::face_review::request_id();
-    let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload { request_id: request_id.clone(), operation_id: operation });
+    let payload = CommandPayload::UndoFaceReview(UndoFaceReviewPayload {
+        request_id: request_id.clone(),
+        operation_id: operation,
+    });
     engine.borrow_mut().send(payload).ok()?;
     let closer = subscription.0.closer();
     glib::timeout_add_seconds_local_once(timeout_secs, move || {
         closer.close();
     });
     loop {
-        let Ok(event) = subscription.0.recv().await else { return None };
+        let Ok(event) = subscription.0.recv().await else {
+            return None;
+        };
         match &*event {
-            EngineEvent::FaceReview(page) if page.request_id == request_id => return Some(page.clone()),
+            EngineEvent::FaceReview(page) if page.request_id == request_id => {
+                return Some(page.clone());
+            }
             EngineEvent::Exited => return None,
             _ => {}
         }
@@ -152,7 +161,10 @@ pub(super) const MERGE_CONFIRM_HEADING: &str = "Merge these people?";
 pub(super) const MERGE_CONFIRM_BODY: &str = "You can undo this right after.";
 
 /// Every People merge asks first; `merge` runs only on the Merge answer.
-pub(super) fn confirm_merge(anchor: &impl gtk::prelude::IsA<gtk::Widget>, merge: impl FnOnce() + 'static) {
+pub(super) fn confirm_merge(
+    anchor: &impl gtk::prelude::IsA<gtk::Widget>,
+    merge: impl FnOnce() + 'static,
+) {
     use adw::prelude::*;
     let dialog = adw::AlertDialog::new(Some(MERGE_CONFIRM_HEADING), Some(MERGE_CONFIRM_BODY));
     dialog.add_responses(&[("cancel", "Cancel"), ("merge", "Merge")]);

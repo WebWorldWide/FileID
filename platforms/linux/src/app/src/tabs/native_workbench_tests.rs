@@ -168,12 +168,10 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| {
         text(&catalog).contains("Reviewed marker") && !text(&catalog).contains("Changed marker")
     });
-    assert!(!job_buttons(&catalog)
-        .into_iter()
-        .any(|b| matches!(
-            b.label().as_deref(),
-            Some("Pause" | "Resume" | "Retry" | "Cancel")
-        )));
+    assert!(!job_buttons(&catalog).into_iter().any(|b| matches!(
+        b.label().as_deref(),
+        Some("Pause" | "Resume" | "Retry" | "Cancel")
+    )));
     let read = fileid_engine::db::open_read(&db_path).unwrap();
     assert_eq!(
         read.query_row(
@@ -213,7 +211,9 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     stack.set_visible_child_name("tools");
     tools_ui.use_destination(destination.to_str().unwrap());
     let first_check = |root: &gtk::Widget| {
-        descendants(root).into_iter().find_map(|w| w.downcast::<gtk::CheckButton>().ok())
+        descendants(root)
+            .into_iter()
+            .find_map(|w| w.downcast::<gtk::CheckButton>().ok())
     };
     wait(|| first_check(&tools).is_some());
     first_check(&tools).unwrap().set_active(true);
@@ -256,9 +256,11 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     button(&tools, "Export").emit_clicked();
     wait(|| text(&tools).contains("Export complete"));
     let chapter_export = destination.join("photo-fixture - Chapters.json");
-    assert!(std::fs::read_to_string(&chapter_export)
-        .unwrap()
-        .contains("Reviewed marker"));
+    assert!(
+        std::fs::read_to_string(&chapter_export)
+            .unwrap()
+            .contains("Reviewed marker")
+    );
     button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
         wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
@@ -270,7 +272,8 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     let preserved_files = count(&read, "files");
 
     stack.set_visible_child_name("chat");
-    chat.activate_action("chat.ask", Some(&"photo-fixture".to_variant())).unwrap();
+    chat.activate_action("chat.ask", Some(&"photo-fixture".to_variant()))
+        .unwrap();
     button(&chat, "Send").emit_clicked();
     wait(|| text(&chat).contains("photo-fixture") && text(&chat).contains("You"));
     wait(|| text(&chat).contains("photo-fixture.png"));

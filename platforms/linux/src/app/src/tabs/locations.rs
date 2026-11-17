@@ -10,7 +10,7 @@ use fileid_engine::ipc::LibraryRoot;
 use gtk::glib;
 
 use super::workbenches::Engine;
-use crate::engine_client::{read_db, EngineState};
+use crate::engine_client::{EngineState, read_db};
 use crate::shell::status::Tone;
 use crate::v3;
 
@@ -25,7 +25,10 @@ pub(super) fn relative(seconds_ago: f64) -> String {
         2_592_000..31_536_000 => (seconds / 2_592_000, "month"),
         _ => (seconds / 31_536_000, "year"),
     };
-    format!("scanned {count} {unit}{} ago", if count == 1 { "" } else { "s" })
+    format!(
+        "scanned {count} {unit}{} ago",
+        if count == 1 { "" } else { "s" }
+    )
 }
 
 pub(super) fn summary(root: &LibraryRoot, now: f64) -> String {
@@ -74,9 +77,15 @@ impl Locations {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
         let request_id = format!("locations-{generation}");
-        let request = fileid_engine::ipc::ListRootsPayload { request_id: request_id.clone() };
+        let request = fileid_engine::ipc::ListRootsPayload {
+            request_id: request_id.clone(),
+        };
         let sent = self.engine.borrow().is_ready()
-            && self.engine.borrow_mut().send(fileid_engine::ipc::CommandPayload::ListRoots(request)).is_ok();
+            && self
+                .engine
+                .borrow_mut()
+                .send(fileid_engine::ipc::CommandPayload::ListRoots(request))
+                .is_ok();
         if sent {
             *self.request.borrow_mut() = request_id;
             return;
@@ -96,7 +105,8 @@ impl Locations {
     fn render(self: &Rc<Self>, roots: Option<Vec<LibraryRoot>>) {
         v3::clear(&self.list);
         let Some(roots) = roots else {
-            self.status.set_label("FileID couldn't read its locations. Press Refresh to try again.");
+            self.status
+                .set_label("FileID couldn't read its locations. Press Refresh to try again.");
             self.status.set_visible(true);
             return;
         };
@@ -112,7 +122,8 @@ impl Locations {
         let home = std::env::var("HOME").ok();
         for (index, root) in roots.iter().enumerate() {
             if index > 0 {
-                self.list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+                self.list
+                    .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
             }
             self.list.append(&self.row(root, now, home.as_deref()));
         }
@@ -225,12 +236,16 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
             let waiting = !this.request.borrow().is_empty();
             match &*event {
                 EngineState::ScanComplete(_) if this.list.is_mapped() => this.refresh(),
-                EngineState::RootsList(list) if waiting && list.request_id == *this.request.borrow() => {
+                EngineState::RootsList(list)
+                    if waiting && list.request_id == *this.request.borrow() =>
+                {
                     this.request.borrow_mut().clear();
                     this.render(Some(list.roots.clone()));
                 }
                 EngineState::Error { kind, .. }
-                    if waiting && (kind == "list_roots_failed" || kind == "invalid_list_roots_request") =>
+                    if waiting
+                        && (kind == "list_roots_failed"
+                            || kind == "invalid_list_roots_request") =>
                 {
                     this.request.borrow_mut().clear();
                     this.render(None);
@@ -284,9 +299,15 @@ mod tests {
 
     #[test]
     fn paths_under_home_are_abbreviated() {
-        assert_eq!(abbreviated("/home/ada/Pictures", Some("/home/ada")), "~/Pictures");
+        assert_eq!(
+            abbreviated("/home/ada/Pictures", Some("/home/ada")),
+            "~/Pictures"
+        );
         assert_eq!(abbreviated("/home/ada", Some("/home/ada")), "~");
-        assert_eq!(abbreviated("/home/adam/Pictures", Some("/home/ada")), "/home/adam/Pictures");
+        assert_eq!(
+            abbreviated("/home/adam/Pictures", Some("/home/ada")),
+            "/home/adam/Pictures"
+        );
         assert_eq!(abbreviated("/media/x", Some("/")), "/media/x");
         assert_eq!(abbreviated("/media/x", None), "/media/x");
     }

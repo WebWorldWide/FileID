@@ -134,16 +134,16 @@ pub fn library_under(conn: &rusqlite::Connection, root: &str, moved_from: &[Stri
     let mut folders: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     if let Ok(mut stmt) = conn.prepare(
         "SELECT path_text FROM files WHERE failed = 0 AND substr(path_text, 1, length(?1)) = ?1",
-    )
-        && let Ok(rows) = stmt.query_map([&prefix], |row| row.get::<_, String>(0)) {
-            for path in rows.flatten() {
-                let folder = std::path::Path::new(&path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                *folders.entry(folder).or_default() += 1;
-            }
+    ) && let Ok(rows) = stmt.query_map([&prefix], |row| row.get::<_, String>(0))
+    {
+        for path in rows.flatten() {
+            let folder = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            *folders.entry(folder).or_default() += 1;
         }
+    }
     let moved: std::collections::HashSet<&str> = moved_from.iter().map(String::as_str).collect();
     let staying = folders
         .into_iter()
@@ -154,7 +154,11 @@ pub fn library_under(conn: &rusqlite::Connection, root: &str, moved_from: &[Stri
                 .unwrap_or(&folder)
                 .trim_start_matches('/')
                 .to_owned();
-            let shown = if relative.is_empty() { "(library root)".to_owned() } else { relative };
+            let shown = if relative.is_empty() {
+                "(library root)".to_owned()
+            } else {
+                relative
+            };
             (folder, shown, count)
         })
         .collect();
@@ -265,6 +269,9 @@ mod tests {
         .unwrap();
         let library = library_under(&conn, "/lib", &["/lib/Untitled".to_owned()]);
         assert_eq!((library.indexed, library.images_without_clip), (3, 1));
-        assert_eq!(library.staying, vec![("/lib/Trips".to_owned(), "Trips".to_owned(), 2)]);
+        assert_eq!(
+            library.staying,
+            vec![("/lib/Trips".to_owned(), "Trips".to_owned(), 2)]
+        );
     }
 }

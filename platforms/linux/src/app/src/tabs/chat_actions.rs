@@ -5,9 +5,9 @@
 use std::path::Path;
 
 use fileid_engine::ipc::{
-    BulkActionResult, ChatAction, DeepAnalyzeComplete, RestructureApplyResult, RestructureMove,
-    RestructurePlan, ScanPhase, ScanProgress, CHAT_ACTION_KINDS, CHAT_JOBS, CHAT_PAGES,
-    CHAT_SETTINGS,
+    BulkActionResult, CHAT_ACTION_KINDS, CHAT_JOBS, CHAT_PAGES, CHAT_SETTINGS, ChatAction,
+    DeepAnalyzeComplete, RestructureApplyResult, RestructureMove, RestructurePlan, ScanPhase,
+    ScanProgress,
 };
 
 pub(super) const CONFIRMING: [&str; 6] = [
@@ -24,7 +24,10 @@ pub(super) const SETTING_UNAVAILABLE: &str =
 
 /// The settings Chat can change on Linux.
 pub(super) fn setting_supported(setting: Option<&str>) -> bool {
-    matches!(setting, Some("backgroundMotion" | "cleanupAutoTag" | "chatSummaries"))
+    matches!(
+        setting,
+        Some("backgroundMotion" | "cleanupAutoTag" | "chatSummaries")
+    )
 }
 
 pub(super) fn setting_value(setting: &str) -> bool {
@@ -59,7 +62,9 @@ fn present(ids: &Option<Vec<i64>>) -> bool {
 /// is unknown or whose fields are missing never gets a card.
 pub(super) fn runnable(action: &ChatAction) -> bool {
     let listed = |value: &Option<String>, allowed: &[&str]| {
-        value.as_deref().is_none_or(|value| allowed.contains(&value))
+        value
+            .as_deref()
+            .is_none_or(|value| allowed.contains(&value))
     };
     let basics = CHAT_ACTION_KINDS.contains(&action.kind.as_str())
         && action.requires_confirmation == needs_confirmation(&action.kind)
@@ -92,14 +97,20 @@ pub(super) fn runnable(action: &ChatAction) -> bool {
         }),
         "namePerson" => {
             action.person_id.is_some()
-                && action.name.as_deref().is_some_and(|name| !name.trim().is_empty())
+                && action
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty())
         }
         "mergePeople" => match (action.person_id, &action.person_ids) {
             (Some(target), Some(sources)) => !sources.is_empty() && !sources.contains(&target),
             _ => false,
         },
         "openPage" => action.page.is_some(),
-        "search" => action.query.as_deref().is_some_and(|query| !query.trim().is_empty()),
+        "search" => action
+            .query
+            .as_deref()
+            .is_some_and(|query| !query.trim().is_empty()),
         "changeSetting" => action.setting.is_some() && action.value.is_some(),
         "stopJob" => action.job.is_some(),
         "exportFiles" => present(&action.file_ids),
@@ -189,7 +200,12 @@ pub(super) fn section(action: &ChatAction) -> &'static str {
 pub(super) fn can_stop(kind: &str) -> bool {
     matches!(
         kind,
-        "scanFolder" | "rescan" | "describeFiles" | "applyFolderLayout" | "undoLastMove" | "suggestFolderLayout"
+        "scanFolder"
+            | "rescan"
+            | "describeFiles"
+            | "applyFolderLayout"
+            | "undoLastMove"
+            | "suggestFolderLayout"
     )
 }
 
@@ -222,9 +238,10 @@ impl PlanSummary {
 }
 
 fn file_name(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
+    Path::new(path).file_name().map_or_else(
+        || path.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// The current layout for the action's folder, narrowed to its Auto tier so
@@ -233,7 +250,11 @@ pub(super) fn plan_summary(plan: &RestructurePlan, path: Option<&str>) -> Option
     if path.is_some_and(|path| path != plan.library_root) {
         return None;
     }
-    let auto: Vec<&RestructureMove> = plan.moves.iter().filter(|m| m.confidence == "auto").collect();
+    let auto: Vec<&RestructureMove> = plan
+        .moves
+        .iter()
+        .filter(|m| m.confidence == "auto")
+        .collect();
     let count = match &plan.plan_id {
         Some(_) => plan
             .confidence_counts
@@ -258,7 +279,11 @@ pub(super) fn plan_summary(plan: &RestructurePlan, path: Option<&str>) -> Option
             let relative = folder
                 .strip_prefix(root)
                 .map_or(folder.as_str(), |rest| rest.trim_matches('/'));
-            let relative = if relative.is_empty() { "top folder" } else { relative };
+            let relative = if relative.is_empty() {
+                "top folder"
+            } else {
+                relative
+            };
             format!("{} → {relative}", file_name(&m.source))
         })
         .collect();
@@ -343,15 +368,19 @@ pub(super) fn facts(action: &ChatAction, plan: Option<&PlanSummary>) -> Facts {
 }
 
 /// Whether the card's button stays disabled, and why.
-pub(super) fn unavailable(action: &ChatAction, plan: Option<&PlanSummary>, describe_runtime: bool) -> Option<&'static str> {
+pub(super) fn unavailable(
+    action: &ChatAction,
+    plan: Option<&PlanSummary>,
+    describe_runtime: bool,
+) -> Option<&'static str> {
     match action.kind.as_str() {
-        "applyFolderLayout" if plan.is_none() => {
-            Some("Ask Chat to organize this folder first.")
+        "applyFolderLayout" if plan.is_none() => Some("Ask Chat to organize this folder first."),
+        "describeFiles" if !describe_runtime => {
+            Some("Describing needs the llama.cpp runtime, which isn't in this installation.")
         }
-        "describeFiles" if !describe_runtime => Some(
-            "Describing needs the llama.cpp runtime, which isn't in this installation.",
-        ),
-        "changeSetting" if !setting_supported(action.setting.as_deref()) => Some(SETTING_UNAVAILABLE),
+        "changeSetting" if !setting_supported(action.setting.as_deref()) => {
+            Some(SETTING_UNAVAILABLE)
+        }
         _ => None,
     }
 }
@@ -393,7 +422,10 @@ pub(super) fn trash_summary(trashed: u64, freed_bytes: i64, changed: u64, failed
         ));
     }
     if failed > 0 {
-        text.push_str(&format!(" · {} couldn't be moved", crate::shell::grouped(failed)));
+        text.push_str(&format!(
+            " · {} couldn't be moved",
+            crate::shell::grouped(failed)
+        ));
     }
     text.push('.');
     text
@@ -436,7 +468,10 @@ pub(super) fn apply_summary(result: &RestructureApplyResult) -> String {
     }
     let mut text = format!("Moved {}", files(result.applied.into()));
     if result.failed > 0 {
-        text.push_str(&format!(" · {} couldn't move", crate::shell::grouped(result.failed.into())));
+        text.push_str(&format!(
+            " · {} couldn't move",
+            crate::shell::grouped(result.failed.into())
+        ));
     }
     text.push('.');
     text
@@ -445,7 +480,10 @@ pub(super) fn apply_summary(result: &RestructureApplyResult) -> String {
 pub(super) fn undo_move_summary(result: &RestructureApplyResult) -> String {
     let mut text = format!("Moved {} back", files(result.applied.into()));
     if result.failed > 0 {
-        text.push_str(&format!(" · {} couldn't move back", crate::shell::grouped(result.failed.into())));
+        text.push_str(&format!(
+            " · {} couldn't move back",
+            crate::shell::grouped(result.failed.into())
+        ));
     }
     text.push('.');
     text
@@ -477,10 +515,16 @@ pub(super) fn scan_progress(progress: &ScanProgress) -> Option<String> {
     }
 }
 
-pub(super) fn scan_finished(phase: ScanPhase, progress: Option<&ScanProgress>, processed: Option<u64>) -> String {
+pub(super) fn scan_finished(
+    phase: ScanPhase,
+    progress: Option<&ScanProgress>,
+    processed: Option<u64>,
+) -> String {
     match phase {
         ScanPhase::Cancelled => "Scan stopped. Files found so far stay in the library.".to_owned(),
-        ScanPhase::Failed => "The scan didn't finish. Scan again to pick up where it left off.".to_owned(),
+        ScanPhase::Failed => {
+            "The scan didn't finish. Scan again to pick up where it left off.".to_owned()
+        }
         _ => {
             let processed = processed.or(progress.map(|p| p.processed));
             let failed = progress.map_or(0, |p| p.failed);
@@ -489,7 +533,10 @@ pub(super) fn scan_finished(phase: ScanPhase, progress: Option<&ScanProgress>, p
             };
             let mut text = format!("Scan finished · {}", files(processed));
             if failed > 0 {
-                text.push_str(&format!(" · {} couldn't be read", crate::shell::grouped(failed)));
+                text.push_str(&format!(
+                    " · {} couldn't be read",
+                    crate::shell::grouped(failed)
+                ));
             }
             text.push('.');
             text
@@ -506,7 +553,10 @@ pub(super) fn describe_finished(done: &DeepAnalyzeComplete) -> String {
     }
     let mut text = format!("Described {}", files(done.processed));
     if done.failed > 0 {
-        text.push_str(&format!(" · {} couldn't be described", crate::shell::grouped(done.failed)));
+        text.push_str(&format!(
+            " · {} couldn't be described",
+            crate::shell::grouped(done.failed)
+        ));
     }
     text.push('.');
     text
@@ -522,9 +572,13 @@ pub(super) fn is_folder_error(kind: &str) -> bool {
 
 pub(super) fn folder_error_text(kind: &str, message: &str) -> String {
     match kind {
-        "restructure_busy" => "Another folder job is already running. Wait for it to finish, then try again.".to_owned(),
+        "restructure_busy" => {
+            "Another folder job is already running. Wait for it to finish, then try again."
+                .to_owned()
+        }
         "plan_restructure_root" => crate::engine_errors::sentence(kind, message),
-        _ => "This didn't finish. Check Organize Folders to see what changed, then try again.".to_owned(),
+        _ => "This didn't finish. Check Organize Folders to see what changed, then try again."
+            .to_owned(),
     }
 }
 
@@ -543,7 +597,9 @@ mod tests {
             folder_error_text("plan_restructure_root", "root not found"),
             "This folder isn't available. Reconnect it, then try again."
         );
-        assert!(folder_error_text("plan_restructure_failed", "").starts_with("This didn't finish."));
+        assert!(
+            folder_error_text("plan_restructure_failed", "").starts_with("This didn't finish.")
+        );
         assert!(folder_error_text("restructure_busy", "").starts_with("Another folder job"));
     }
 
@@ -590,13 +646,19 @@ mod tests {
         trash.keeper_file_ids = Some(vec![1, 1]);
         assert!(runnable(&trash));
         trash.requires_confirmation = false;
-        assert!(!runnable(&trash), "a destructive kind that skips confirmation never runs");
+        assert!(
+            !runnable(&trash),
+            "a destructive kind that skips confirmation never runs"
+        );
         let mut open = action("openPage");
         open.page = Some("people".into());
         assert!(runnable(&open));
         open.requires_confirmation = true;
         assert!(!runnable(&open));
-        assert!(!runnable(&action("formatDisk")), "unknown kinds are dropped");
+        assert!(
+            !runnable(&action("formatDisk")),
+            "unknown kinds are dropped"
+        );
         for kind in CHAT_ACTION_KINDS {
             assert_eq!(needs_confirmation(kind), CONFIRMING.contains(&kind));
         }
@@ -611,9 +673,15 @@ mod tests {
         trash.keeper_file_ids = Some(vec![3]);
         assert!(!runnable(&trash), "every copy needs a keeper");
         let mut rename = action("renameToSuggested");
-        rename.renames = Some(vec![ChatRename { file_id: 1, new_name: "../x".into() }]);
+        rename.renames = Some(vec![ChatRename {
+            file_id: 1,
+            new_name: "../x".into(),
+        }]);
         assert!(!runnable(&rename));
-        rename.renames = Some(vec![ChatRename { file_id: 1, new_name: "Beach.jpg".into() }]);
+        rename.renames = Some(vec![ChatRename {
+            file_id: 1,
+            new_name: "Beach.jpg".into(),
+        }]);
         assert!(runnable(&rename));
         let mut merge = action("mergePeople");
         merge.person_id = Some(4);
@@ -665,7 +733,10 @@ mod tests {
         assert!(facts.size.is_some());
         assert_eq!(facts.examples, ["a.jpg", "b.jpg", "c.jpg → Photos"]);
         assert_eq!(facts.more.as_deref(), Some("and 1,201 more"));
-        assert_eq!(facts.undo.as_deref(), Some("Undo: Put them back from Trash."));
+        assert_eq!(
+            facts.undo.as_deref(),
+            Some("Undo: Put them back from Trash.")
+        );
         trash.file_count = Some(2);
         trash.examples = Some(vec!["/p/a.jpg".into(), "/p/b.jpg".into()]);
         assert_eq!(super::facts(&trash, None).more, None);
@@ -681,58 +752,131 @@ mod tests {
         let summary = plan_summary(&stored, Some("/lib")).unwrap();
         assert_eq!(summary.count, 2);
         assert_eq!(summary.moves.len(), 2);
-        assert_eq!(summary.examples, ["a.jpg → Photos/2024", "b.pdf → top folder"]);
+        assert_eq!(
+            summary.examples,
+            ["a.jpg → Photos/2024", "b.pdf → top folder"]
+        );
         assert!(plan_summary(&stored, Some("/other")).is_none());
         let mut apply = action("applyFolderLayout");
         apply.path = Some("/lib".into());
         assert_eq!(primary_title(&apply, Some(&summary)), "Move 2 files");
         assert!(card_detail(&apply, None).starts_with("There's no suggested layout"));
-        assert_eq!(unavailable(&apply, None, true), Some("Ask Chat to organize this folder first."));
+        assert_eq!(
+            unavailable(&apply, None, true),
+            Some("Ask Chat to organize this folder first.")
+        );
         assert_eq!(unavailable(&apply, Some(&summary), true), None);
         let review_only = plan(vec![mv("/lib/c.jpg", "/lib/Photos/c.jpg", "review")]);
-        assert!(plan_summary(&review_only, None).is_none(), "nothing in the Auto tier means nothing to apply");
+        assert!(
+            plan_summary(&review_only, None).is_none(),
+            "nothing in the Auto tier means nothing to apply"
+        );
         let mut paged = plan(vec![mv("/lib/a.jpg", "/lib/Photos/a.jpg", "auto")]);
         paged.plan_id = Some("p1".into());
-        paged.confidence_counts = Some(RestructureConfidenceCounts { auto: 40, review: 2, ask: 0, unknown: 0 });
+        paged.confidence_counts = Some(RestructureConfidenceCounts {
+            auto: 40,
+            review: 2,
+            ask: 0,
+            unknown: 0,
+        });
         let summary = plan_summary(&paged, None).unwrap();
-        assert_eq!((summary.count, summary.moves.len(), summary.plan_id.as_deref()), (40, 0, Some("p1")));
+        assert_eq!(
+            (
+                summary.count,
+                summary.moves.len(),
+                summary.plan_id.as_deref()
+            ),
+            (40, 0, Some("p1"))
+        );
     }
 
     #[test]
     fn names_split_first_then_the_rest() {
         assert_eq!(split_name("Ada"), (Some("Ada".into()), None));
-        assert_eq!(split_name("  Ada  Lovelace King "), (Some("Ada".into()), Some("Lovelace King".into())));
+        assert_eq!(
+            split_name("  Ada  Lovelace King "),
+            (Some("Ada".into()), Some("Lovelace King".into()))
+        );
         assert_eq!(split_name(" "), (None, None));
     }
 
     #[test]
     fn result_lines_read_like_macos() {
         let freed = fileid_engine::util::display::file_size_i64(0);
-        assert_eq!(trash_summary(1, 0, 0, 0), format!("Moved 1 copy to Trash · freed {freed}."));
+        assert_eq!(
+            trash_summary(1, 0, 0, 0),
+            format!("Moved 1 copy to Trash · freed {freed}.")
+        );
         let line = trash_summary(3, 1_000, 1, 2);
         assert!(line.starts_with("Moved 3 copies to Trash · freed "));
-        assert!(line.ends_with(" · 1 skipped because the file changed since the scan · 2 couldn't be moved."));
-        assert_eq!(rename_summary(4, 1, 2), "Renamed 4 files · 1 failed · 2 skipped because their suggestion changed.");
+        assert!(line.ends_with(
+            " · 1 skipped because the file changed since the scan · 2 couldn't be moved."
+        ));
+        assert_eq!(
+            rename_summary(4, 1, 2),
+            "Renamed 4 files · 1 failed · 2 skipped because their suggestion changed."
+        );
         assert_eq!(rename_summary(1, 0, 0), "Renamed 1 file.");
-        let result = BulkActionResult { command_id: None, action: "trashFiles:batch-9".into(), succeeded: 1, failed: 0, messages: vec![] };
+        let result = BulkActionResult {
+            command_id: None,
+            action: "trashFiles:batch-9".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![],
+        };
         assert_eq!(trash_batch(&result).as_deref(), Some("batch-9"));
         assert!(is_trash_result(&result));
-        let plain = BulkActionResult { command_id: None, action: "trashFiles".into(), ..result };
+        let plain = BulkActionResult {
+            command_id: None,
+            action: "trashFiles".into(),
+            ..result
+        };
         assert_eq!(trash_batch(&plain), None);
-        let applied = RestructureApplyResult { applied: 5, failed: 1, privilege_error: None, cancelled: false, planned: None, remaining: None, shortcut_undo_token: None };
+        let applied = RestructureApplyResult {
+            applied: 5,
+            failed: 1,
+            privilege_error: None,
+            cancelled: false,
+            planned: None,
+            remaining: None,
+            shortcut_undo_token: None,
+        };
         assert_eq!(apply_summary(&applied), "Moved 5 files · 1 couldn't move.");
-        assert_eq!(undo_move_summary(&applied), "Moved 5 files back · 1 couldn't move back.");
-        let done = DeepAnalyzeComplete { processed: 12, failed: 0, total_seconds: 3.0, model_kind: "m".into(), cancelled: false };
+        assert_eq!(
+            undo_move_summary(&applied),
+            "Moved 5 files back · 1 couldn't move back."
+        );
+        let done = DeepAnalyzeComplete {
+            processed: 12,
+            failed: 0,
+            total_seconds: 3.0,
+            model_kind: "m".into(),
+            cancelled: false,
+        };
         assert_eq!(describe_finished(&done), "Described 12 files.");
-        assert_eq!(scan_finished(ScanPhase::Completed, None, Some(1_500)), "Scan finished · 1,500 files.");
-        assert_eq!(scan_finished(ScanPhase::Cancelled, None, None), "Scan stopped. Files found so far stay in the library.");
+        assert_eq!(
+            scan_finished(ScanPhase::Completed, None, Some(1_500)),
+            "Scan finished · 1,500 files."
+        );
+        assert_eq!(
+            scan_finished(ScanPhase::Cancelled, None, None),
+            "Scan stopped. Files found so far stay in the library."
+        );
     }
 
     #[test]
     fn suggestions_must_still_match_the_card() {
-        assert!(suggestion_matches(Some(" Beach day "), "/p/IMG_1.JPG", "Beach day.JPG"));
+        assert!(suggestion_matches(
+            Some(" Beach day "),
+            "/p/IMG_1.JPG",
+            "Beach day.JPG"
+        ));
         assert!(suggestion_matches(Some("Notes"), "/p/README", "Notes"));
-        assert!(!suggestion_matches(Some("Sunset"), "/p/IMG_1.JPG", "Beach day.JPG"));
+        assert!(!suggestion_matches(
+            Some("Sunset"),
+            "/p/IMG_1.JPG",
+            "Beach day.JPG"
+        ));
         assert!(!suggestion_matches(None, "/p/IMG_1.JPG", "Beach day.JPG"));
     }
 
