@@ -232,7 +232,7 @@ pub(crate) mod tests {
                 let mut exact: Vec<(f32, usize)> =
                     vectors.iter().enumerate().map(|(id, v)| (v.iter().zip(target).map(|(a, b)| (a - b) * (a - b)).sum(), id)).collect();
                 exact.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                let expected: HashSet<usize> = exact[..10].iter().map(|(_, id)| *id).collect();
+                let expected: std::collections::HashSet<usize> = exact[..10].iter().map(|(_, id)| *id).collect();
                 found.iter().filter(|id| expected.contains(id)).count() as f64 / 10.0
             })
             .collect();
