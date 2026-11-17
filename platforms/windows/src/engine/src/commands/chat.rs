@@ -1000,11 +1000,13 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     // becomes the full set of files it describes.
     let wants_all = question.measure != "list" || question.explicit_order || question.duplicates;
     if question.structured() && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
-        if !plan.query.is_empty()
+        if chat_facts::asks_for_anyone(&plan.query) {
+            structured.with_faces = true;
+        } else if !plan.query.is_empty()
             && let Some(ids) = chat_facts::subject_ids(conn, &plan.query)?
         {
             structured.ids = Some(ids);
-            structured.subject = Some(plan.query.clone());
+            structured.subject = Some(plan.query.trim_end_matches(['?', '!', '.', ',']).to_owned());
         }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
@@ -1733,6 +1735,33 @@ mod tests {
         }
         ask("g", "dog photos");
         assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
+    }
+
+    #[test]
+    fn counting_photos_of_people_counts_photos_with_a_face_not_the_word() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Kyle','Kyle',0,0);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES
+             (1,'/lib/a.jpg',1,1000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (2,'/lib/b.jpg',2,1000,1688472000,0,'image','jpg','A crowd'),
+             (3,'/lib/c.jpg',3,1000,1688472000,0,'image','jpg','Many people at a market'),
+             (4,'/lib/d.jpg',4,1000,1688472000,0,'image','jpg','A tree'),
+             (5,'/lib/people.docx',5,1000,1688472000,0,'doc','docx',NULL),
+             (6,'/lib/e.mov',6,1000,1688472000,0,'video','mov',NULL);
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES
+             (1,1,X'00','[0,0,1,1]',0),(2,NULL,X'00','[0,0,1,1]',0),(4,NULL,X'00','[0,0,1,1]',1),(6,NULL,X'00','[0,0,1,1]',0);",
+        )
+        .unwrap();
+        let mut ask = |text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            execute(&mut conn, &request).unwrap().message
+        };
+        assert_eq!(ask("how many photos of people do I have?"), "Found 2 photos with people, using 2.0 KB.");
+        assert_eq!(ask("how many pictures with faces?"), "Found 2 photos with people, using 2.0 KB.");
+        assert_eq!(ask("how many files have people in them"), "Found 3 files with people, using 3.0 KB.");
+        assert_eq!(ask("how many photos of Kyle"), "Found 1 photo of Kyle, using 1.0 KB.");
+        assert_eq!(ask("how many photos of people at a market?"), "Found 1 photo matching “people market”, using 1.0 KB.");
     }
 
     #[test]
