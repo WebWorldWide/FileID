@@ -21,6 +21,8 @@ pub(crate) mod person_merge;
 pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;
+#[cfg(test)]
+mod restructure_plan_counts_tests;
 pub(crate) mod scan;
 pub(crate) mod thumbnail;
 pub(crate) mod trash;

@@ -864,6 +864,17 @@ fn time_features(time_unix: f64) -> [f32; 5] {
 
 // ── Clustering (reuse identity_clustering) ──────────────────────────────────
 
+/// The `k` most similar neighbours, most similar first, ties by index.
+fn top_k_neighbours(mut hits: Vec<Neighbor>, k: usize) -> Vec<Neighbor> {
+    let cmp = |a: &Neighbor, b: &Neighbor| b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx));
+    if hits.len() > k {
+        hits.select_nth_unstable_by(k, cmp);
+        hits.truncate(k);
+    }
+    hits.sort_by(cmp);
+    hits
+}
+
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
 fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
@@ -877,19 +888,7 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
 
     // Bounded top-k: O(n) partition instead of an O(n log n) full sort of all n-1
     // neighbors when only k are used; sort just the k kept.
-    let top_k = |mut hits: Vec<Neighbor>| {
-        let cmp = |a: &Neighbor, b: &Neighbor| {
-            b.similarity
-                .total_cmp(&a.similarity)
-                .then_with(|| a.idx.cmp(&b.idx))
-        };
-        if hits.len() > k {
-            hits.select_nth_unstable_by(k, cmp);
-            hits.truncate(k);
-        }
-        hits.sort_by(cmp);
-        hits
-    };
+    let top_k = |hits: Vec<Neighbor>| top_k_neighbours(hits, k);
     // Below HNSW_MIN every list is computed once, in parallel, before clustering:
     // the clusterer asks for each file's neighbours up to three times, and the
     // per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400
@@ -1591,5 +1590,39 @@ mod tests {
         let dirs: std::collections::HashSet<_> =
             moves.iter().filter_map(|m| m.destination.parent().map(|p| p.to_path_buf())).collect();
         assert_eq!(dirs.len(), 2, "two content groups → two folders: {dirs:?}");
+    }
+
+    #[test]
+    fn the_k_nearest_selection_matches_a_full_sort_for_several_k() {
+        let n = 300usize;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32) / 16_777_216.0 - 0.5
+        };
+        let vectors: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..48).map(|_| next()).collect();
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                v.iter_mut().for_each(|x| *x /= norm);
+                v
+            })
+            .collect();
+        for query in [0usize, 17, 299] {
+            let all: Vec<Neighbor> = (0..n)
+                .filter(|&j| j != query)
+                .map(|j| Neighbor { idx: j, similarity: vectors[query].iter().zip(&vectors[j]).map(|(a, b)| a * b).sum() })
+                .collect();
+            let mut reference = all.clone();
+            reference.sort_by(|a, b| b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx)));
+            for k in [1, 5, n - 1] {
+                let got = top_k_neighbours(all.clone(), k);
+                let got: Vec<_> = got.iter().map(|h| (h.idx, h.similarity.to_bits())).collect();
+                let want: Vec<_> = reference.iter().take(k).map(|h| (h.idx, h.similarity.to_bits())).collect();
+                assert_eq!(got, want, "query {query}, k {k}");
+            }
+        }
     }
 }
