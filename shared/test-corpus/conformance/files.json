@@ -119,4 +119,27 @@
       {"label": "counts after trash", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 1, 2], [2, 0, null]]}
     ]
   }
+  ,{
+    "name": "files-trash-put-back-loses-faces",
+    "description": "KNOWN DEFECT, pinned as measured on the Rust engine: the Trash snapshot keeps files, tags, CLIP and take rows but not face_prints, so Trash drops the file's faces (foreign-key cascade) and put back restores files.has_faces=1 with no face rows. Its people lose the file and the faces are not detected again until the file changes. Fixing it means adding face_prints to both engines' Trash snapshot, then this case flips to the faces coming back.",
+    "engines": ["rust"],
+    "requiresTestTrashRoot": ["darwin"],
+    "tree": [
+      {"path": "people/a.jpg", "content": "face a\n", "row": {"id": 1, "kind": "image"}},
+      {"path": "people/b.jpg", "content": "face b\n", "row": {"id": 2, "kind": "image"}}
+    ],
+    "sql": [
+      "INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')",
+      "UPDATE files SET has_faces = 1 WHERE id IN (1,2)",
+      "INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(1,'Alex',123,1,2),(2,'Sam',123,3,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.9),(2,2,1,X'00','[0,0,1,1]',X'0000803f',0.8),(3,1,2,X'00','[0,0,1,1]',X'0000803f',0.7)"
+    ],
+    "steps": [
+      {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "restore", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
+      {"label": "faces after put back", "db": "SELECT id,file_id,person_id FROM face_prints ORDER BY id", "expect": [[2, 2, 1]]},
+      {"label": "files after put back", "db": "SELECT id,has_faces FROM files ORDER BY id", "expect": [[1, 1], [2, 1]]},
+      {"label": "people after put back", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 1, 2], [2, 0, null]]}
+    ]
+  }
 ]
