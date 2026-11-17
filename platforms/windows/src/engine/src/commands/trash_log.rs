@@ -571,6 +571,36 @@ mod tests {
         }
     }
 
+    /// A row a killed trashFiles left behind is dropped at startup and its
+    /// people are recounted.
+    #[test]
+    fn a_dropped_trashed_row_recounts_its_people() {
+        let gone = std::env::temp_dir().join(format!("fileid-gone-{}", uuid::Uuid::new_v4())).join("face.jpg");
+        let gone_path = gone.to_string_lossy().into_owned();
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 9_001, &gone_path, "image");
+        crate::db::test_support::insert_file(&conn, 9_002, "/kept/other.jpg", "image");
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,9001,1,X'00','[]'),(2,9002,1,X'00','[]'),(3,9001,2,X'00','[]');",
+        )
+        .unwrap();
+        let mut entry = make_entry(&format!("recount-{}", uuid::Uuid::new_v4()));
+        entry.items[0].file_id = 9_001;
+        entry.items[0].original_path = gone_path.clone();
+        append(&entry).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        let dropped = reconcile_trashed_rows(&db, |item| (item.original_path == gone_path).then(|| std::path::PathBuf::from("/Trash/face.jpg")));
+
+        assert_eq!(dropped, 1);
+        let conn = db.lock();
+        let mut stmt = conn.prepare("SELECT id,file_count,representative_face_id FROM persons ORDER BY id").unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
     #[test]
     fn entry_serde_round_trip() {
         let mut entry = make_entry("batch-1");
