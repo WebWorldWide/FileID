@@ -758,7 +758,7 @@ struct RestructureView: View {
 
     private var nothingToMoveCard: some View {
         notice(tone: Theme.delight, title: "Nothing to move",
-               body: "This library is already organized: every folder has a clear name and matching contents.") { EmptyView() }
+               body: "This folder is already organized: every folder in it has a clear name and matching contents.") { EmptyView() }
     }
 
     @ViewBuilder

@@ -908,6 +908,7 @@ private struct CopyTile: View {
                     .background(Circle().fill(.black.opacity(0.4)))
             }
             .buttonStyle(.plain)
+            .help(isSelected ? "Keep this copy instead" : "Choose this copy for Trash")
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
