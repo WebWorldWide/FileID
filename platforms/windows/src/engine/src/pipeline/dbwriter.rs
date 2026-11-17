@@ -257,6 +257,13 @@ impl DbWriter {
         } else {
             vec![Vec::new(); buffer.len()]
         };
+        // A failure for a file deleted or renamed after the walk listed it: a new
+        // row would name a missing file and, stamped with this scan's time, survive
+        // the orphan sweep. Checked off the writer lock for the same reason as above.
+        let vanished: Vec<bool> = buffer
+            .iter()
+            .map(|f| f.failed && !f.heal_only && matches!(f.path.try_exists(), Ok(false)))
+            .collect();
 
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
@@ -268,6 +275,9 @@ impl DbWriter {
             let mut heal_recheck_stmt = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)")
                 .context("preparing rename-heal recheck")?;
+            let mut row_at_path_stmt = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1)")
+                .context("preparing row-at-path check")?;
             let mut heal_only_check_stmt = tx
                 .prepare_cached(HEAL_ONLY_CHECK_SQL)
                 .context("preparing heal-only check")?;
@@ -438,6 +448,17 @@ impl DbWriter {
                     ) {
                         *heavy += 1;
                     }
+                    continue;
+                }
+
+                if vanished[i]
+                    && healed.is_none()
+                    && !row_at_path_stmt
+                        .query_row(params![path_text], |r| r.get::<_, bool>(0))
+                        .context("row-at-path check")?
+                {
+                    *failed += 1;
+                    *total += 1;
                     continue;
                 }
 
@@ -3215,14 +3236,18 @@ mod rescan_preservation_tests {
     }
 
     #[test]
-    #[ignore = "finding: the Rust writer stores a failed row for a file deleted after discovery (the Swift writer skips it)"]
     fn a_file_deleted_after_discovery_gets_no_failed_row_but_a_broken_one_does() {
         let dir = std::env::temp_dir().join(format!("fileid-vanish-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (gone, broken) = (dir.join("deleted.jpg"), dir.join("broken.jpg"));
+        let (gone, broken, known) = (dir.join("deleted.jpg"), dir.join("broken.jpg"), dir.join("known.jpg"));
         std::fs::write(&broken, b"not a jpeg").unwrap();
+        std::fs::write(&known, b"jpeg").unwrap();
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut first = analysed(1_700_000_000.0, &["beach"], "alpha");
+        first.path = known.clone();
+        writer.flush(&mut vec![first], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        std::fs::remove_file(&known).unwrap();
         let failure = |path: &PathBuf| {
             let mut file = scan(1_700_000_000.0);
             file.path = path.clone();
@@ -3230,17 +3255,24 @@ mod rescan_preservation_tests {
             file.error_message = Some("Could not decode image".to_string());
             file
         };
-        writer.flush(&mut vec![failure(&gone), failure(&broken)], &mut 0, &mut 0, &mut 0, 0).unwrap();
-        let paths: Vec<String> = conn
+        let (mut total, mut failed) = (0, 0);
+        writer
+            .flush(&mut vec![failure(&gone), failure(&broken), failure(&known)], &mut total, &mut 0, &mut failed, 1)
+            .unwrap();
+        let rows: Vec<(String, bool)> = conn
             .lock()
-            .prepare("SELECT path_text FROM files")
+            .prepare("SELECT path_text, failed FROM files ORDER BY path_text")
             .unwrap()
-            .query_map([], |r| r.get(0))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
+        let tags: i64 = conn.lock().query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(paths, vec![broken.to_string_lossy().into_owned()]);
+        let text = |p: &PathBuf| p.to_string_lossy().into_owned();
+        assert_eq!(rows, vec![(text(&broken), true), (text(&known), true)], "a known file that went missing keeps its row for the orphan sweep");
+        assert_eq!(tags, 1, "the known file's tags survive its failed read");
+        assert_eq!((total, failed), (3, 3), "the vanished file still counts as a failure of this scan");
     }
 
     fn unit_vector() -> Vec<f32> {
