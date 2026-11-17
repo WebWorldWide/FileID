@@ -136,14 +136,26 @@ fn reserve_collision_free_destination(
 }
 
 fn ipc_move_is_noop(move_: &IpcMove) -> bool {
-    roots_equal(&move_.source, &move_.destination)
+    names_the_same_file(&move_.source, &move_.destination)
 }
 
 fn proposed_move_is_noop(move_: &restructure::ProposedMove) -> bool {
-    roots_equal(
+    names_the_same_file(
         &move_.source.to_string_lossy(),
         &move_.destination.to_string_lossy(),
     )
+}
+
+// A case-only spelling is the same file only where the volume says so: on a
+// case-sensitive volume it is a real rename.
+fn names_the_same_file(source: &str, destination: &str) -> bool {
+    if source == destination {
+        return true;
+    }
+    match (std::fs::canonicalize(source), std::fs::canonicalize(destination)) {
+        (Ok(source), Ok(destination)) => source == destination,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -558,6 +570,10 @@ fn persist_rule_chunk(
             .unwrap_or_else(|| Path::new(""))
             .to_string_lossy()
             .into_owned();
+        insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
+        if proposed_move_is_noop(&move_) {
+            continue;
+        }
         insert_move.execute(rusqlite::params![
             *sequence,
             move_.file_id,
@@ -568,7 +584,6 @@ fn persist_rule_chunk(
             move_.confidence.as_str(),
             move_.reason,
         ])?;
-        insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
         *sequence += 1;
     }
     chunk.clear();
@@ -723,7 +738,6 @@ fn plan_large_library_in_with_cancel(
                 "SELECT r.category, COUNT(*) AS n
                   FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
                   WHERE t.tier <> 'Anchor'
-                    AND r.source COLLATE NOCASE <> r.destination
                   GROUP BY r.category ORDER BY n DESC, r.category ASC",
             )?;
             
@@ -739,8 +753,7 @@ fn plan_large_library_in_with_cancel(
         let total_moves: i64 = plan_db.query_row(
             "SELECT COUNT(*) FROM raw_moves r
               JOIN folder_tiers t ON t.folder=r.source_folder
-              WHERE t.tier <> 'Anchor'
-                AND r.source COLLATE NOCASE <> r.destination",
+              WHERE t.tier <> 'Anchor'",
             [],
             |row| row.get(0),
         )?;
@@ -753,8 +766,7 @@ fn plan_large_library_in_with_cancel(
                                   THEN 1 ELSE 0 END),0)
              FROM raw_moves r
              JOIN folder_tiers t ON t.folder=r.source_folder
-             WHERE t.tier <> 'Anchor'
-               AND r.source COLLATE NOCASE <> r.destination",
+             WHERE t.tier <> 'Anchor'",
             [],
             |row| {
                 Ok(RestructureConfidenceCounts {
@@ -785,7 +797,6 @@ fn plan_large_library_in_with_cancel(
                         r.confidence,r.reason
                  FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
                  WHERE t.tier <> 'Anchor'
-                   AND r.source COLLATE NOCASE <> r.destination
                  ORDER BY r.seq",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -3073,5 +3084,44 @@ mod tests {
         assert!(plan.moves.iter().all(|m| m.tier.as_deref() != Some("Anchor")), "{:?}", plan.moves);
         let tiles = plan.folder_classifications.expect("folder tiles");
         assert_eq!(tiles.anchor_folders, 1, "only Event/Photos/RAWs stays as kept");
+    }
+
+    // On a case-insensitive volume `misc/` and `Misc/` are one folder, so the
+    // move is a no-op; on a case-sensitive one they are two and the move is real.
+    #[tokio::test]
+    async fn both_planners_follow_the_volumes_case_rules_for_a_case_only_destination() {
+        let root = std::env::temp_dir().join(format!("fileid-case-planner-{}", uuid::Uuid::new_v4()));
+        let source = root.join("misc").join("a.bin");
+        let destination = root.join("Misc").join("a.bin");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"image").unwrap();
+        let case_insensitive = destination.exists();
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, created_at, modified_at, scanned_at, kind, extension, failed)
+             VALUES (1, ?1, 1, 5, 1710504000.0, 1710504000.0, 1710504000.0, 'other', 'bin', 0)",
+            rusqlite::params![source.to_string_lossy()],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let root_text = root.to_string_lossy().into_owned();
+
+        let large = plan_large_library_in(&db, &root_text, &root.join("plans")).unwrap();
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let payload = ipc::PlanRestructurePayload { library_root: root_text.clone(), supports_paged_plans: false };
+        handle_plan_restructure(sink, db, payload, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let small = loop {
+            match events.recv().await.expect("plan event").payload {
+                EventPayload::RestructurePlan(plan) => break plan.inner,
+                EventPayload::Error(err) => panic!("planning failed: {}", err.inner.message),
+                _ => {}
+            }
+        };
+        let _ = std::fs::remove_dir_all(&root);
+
+        let destinations = |moves: &[IpcMove]| moves.iter().map(|m| m.destination.clone()).collect::<Vec<_>>();
+        let expected = if case_insensitive { Vec::new() } else { vec![destination.to_string_lossy().into_owned()] };
+        assert_eq!(destinations(&small.moves), expected, "small planner, case-insensitive volume: {case_insensitive}");
+        assert_eq!(destinations(&large.moves), expected, "stored planner, case-insensitive volume: {case_insensitive}");
     }
 }
