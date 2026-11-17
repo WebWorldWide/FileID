@@ -175,6 +175,11 @@ fn summary_model(requested: Option<&str>) -> Option<String> {
     }
 }
 
+/// The earlier turns come before the request, never after it.
+fn with_history(history: &str, evidence: &str) -> String {
+    format!("{history}{evidence}")
+}
+
 /// Retrieval embeds the query and scans stored vectors; that must not hold the
 /// single writer connection, so it runs on a fresh read-only one when the
 /// database has a file path (in-memory test databases fall back to the writer).
@@ -227,15 +232,15 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     let answer = if crate::apple::vlm::model_spec(model).is_ok() {
         // The Swift engine's chat answer: the evidence system prompt is its own
         // message and the reply streams (`DeepAnalyze.answerCatalog`).
-        let prompt = format!("{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let prompt = with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
         summarize_mlx(sink, &database, &request, &hits, model, &prompt, cancel.clone()).await
     } else {
-        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{}", with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details)));
         summarize(model, &plain, cancel.clone()).await
     };
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     let answer = {
-        let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details));
+        let plain = format!("{EVIDENCE_SYSTEM}\n\n{}", with_history(&history, &evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE, &details)));
         summarize(model, &plain, cancel.clone()).await
     };
     let cancelled = cancel.load(Ordering::Acquire);
@@ -1754,5 +1759,49 @@ mod tests {
             super::super::chat_search::SearchPlan::resolve("Please show me my birthday videos", None).query,
             "birthday"
         );
+    }
+
+    fn plain_hit(file_id: i64, evidence_id: Option<&str>) -> CatalogHit {
+        CatalogHit {
+            file_id,
+            path: format!("/p/{file_id}.mov"),
+            kind: "chapter".into(),
+            text: String::new(),
+            evidence_id: evidence_id.map(str::to_owned),
+            start_seconds: None,
+            page: None,
+            selection_match: None,
+        }
+    }
+
+    #[test]
+    fn rank_fusion_rewards_agreement_keeps_the_evidence_id_and_breaks_ties_by_first_appearance() {
+        let ids = |hits: Vec<CatalogHit>| -> Vec<String> {
+            hits.into_iter().map(|h| h.evidence_id.unwrap_or_else(|| format!("file:{}", h.file_id))).collect()
+        };
+        let a = vec![plain_hit(1, Some("chapter:1")), plain_hit(2, None)];
+        let b = vec![plain_hit(2, None), plain_hit(3, Some("chapter:3"))];
+        assert_eq!(ids(fuse(vec![a, b])), vec!["file:2", "chapter:1", "chapter:3"], "the hit both lists found comes first");
+        let one = vec![plain_hit(1, None)];
+        let two = vec![plain_hit(2, None)];
+        assert_eq!(ids(fuse(vec![one, two])), vec!["file:1", "file:2"], "equal scores keep first appearance");
+        let same_file_two_moments = vec![plain_hit(7, Some("chapter:a")), plain_hit(7, Some("chapter:b"))];
+        assert_eq!(fuse(vec![same_file_two_moments, vec![]]).len(), 2, "evidence items of one file are not merged");
+    }
+
+    #[test]
+    fn earlier_turns_come_before_the_request_in_the_prompt() {
+        let history = history_block(&[("user".to_owned(), "winter photos".to_owned())], 4, 300);
+        let prompt = with_history(&history, &evidence_prompt("only the ones with snow", &[], 3, &HashMap::new()));
+        let earlier = prompt.find("Earlier in this conversation:").expect("history present");
+        let request = prompt.find("Request: only the ones with snow").expect("request present");
+        assert!(earlier < request);
+    }
+
+    #[test]
+    fn a_summary_never_wakes_a_model_kind_that_is_not_a_known_installed_one() {
+        for kind in ["../../etc/passwd", "not_a_model", "", "qwen2_5_vl_7b\0x"] {
+            assert_eq!(summary_model(Some(kind)), None, "{kind:?}");
+        }
     }
 }

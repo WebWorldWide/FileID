@@ -201,3 +201,29 @@ fn transcripts_strip_model_framing() {
     assert_eq!(transcript_text("[SILENCE]"), "");
     assert_eq!(transcript_text("<asr_text>Hi</asr_text>"), "Hi");
 }
+
+#[test]
+fn similar_captions_confirm_no_chapter_change() {
+    let captions: Vec<Caption> = (0..5)
+        .map(|i| Caption { seconds: f64::from(i) * 10.0, text: "A birthday cake with candles on a table".into() })
+        .collect();
+    assert!(chapter_suggestions(1, "rev", "v", 50.0, &captions).is_empty());
+}
+
+#[test]
+fn moment_chapters_need_finite_increasing_frame_times_inside_the_window() {
+    let window = Window { start: 0.0, end: 10.0, times: vec![] };
+    let moments = vec![Moment { title: "Jump".into(), summary: String::new(), first_frame: 0, last_frame: 1 }];
+    assert_eq!(moment_chapters(&moments, &[0.0, 1.0, 2.0], &window, 1, "r", "v").len(), 1, "positive control");
+    for times in [
+        vec![0.0, f64::NAN, 2.0],
+        vec![0.0, f64::INFINITY, 2.0],
+        vec![2.0, 1.0, 0.0],
+        vec![0.0, 1.0, 1.0],
+        vec![0.0, 1.0, 11.0],
+        vec![-1.0, 1.0, 2.0],
+        vec![0.0],
+    ] {
+        assert!(moment_chapters(&moments, &times, &window, 1, "r", "v").is_empty(), "{times:?}");
+    }
+}

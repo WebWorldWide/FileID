@@ -1210,6 +1210,35 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn a_photo_export_refuses_video_only_options_and_every_video_choice_it_cannot_honour() {
+        let recipe = |kind: &str, format: &str, dimension: u32, edit: &dyn Fn(&mut ToolRecipe)| {
+            let mut recipe = ToolRecipe {
+                kind: kind.into(),
+                format: format.into(),
+                max_dimension: dimension,
+                allow_upscale: None,
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
+            };
+            edit(&mut recipe);
+            recipe
+        };
+        assert!(supports(&recipe("photo", "png", 64, &|_| {})), "positive control");
+        assert!(!supports(&recipe("photo", "png", 8193, &|_| {})), "8193 px is over the limit");
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_aspect_ratio = Some("9:16".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_framing = Some("fit".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_stabilization = Some(true))));
+        assert!(!supports(&recipe("chapters", "json", 64, &|r| r.allow_upscale = Some(true))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_aspect_ratio = Some("10:3".into()))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_framing = Some("zoom".into()))));
+    }
+
+    #[test]
     fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
         let mut fixture = Fixture::new();
         let request = fixture.request("png");
