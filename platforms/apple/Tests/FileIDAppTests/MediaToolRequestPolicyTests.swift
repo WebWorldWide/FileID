@@ -91,4 +91,11 @@ struct MediaToolRequestPolicyTests {
         #expect(session.hits.isEmpty)
         #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
     }
+    @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
+        let engine = "Creates 2 new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR."
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 2) == "Press Export to make 2 new files. Your originals stay as they are.")
+        #expect(ToolsSession.plainMessage(action: "preview", status: "ok", message: engine, outputs: 1) == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(ToolsSession.plainMessage(action: "preview", status: "error", message: "No such file", outputs: 0) == "No such file")
+        #expect(ToolsSession.plainMessage(action: "execute", status: "ok", message: "Done", outputs: 1) == "Done")
+    }
 }
