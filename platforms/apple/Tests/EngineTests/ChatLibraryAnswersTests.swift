@@ -113,6 +113,17 @@ struct ChatLibraryAnswersTests {
         }
     }
 
+    @Test func aCountOverThisLibraryCountsTheKindInsteadOfSearchingForThis() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let question = ChatIntent.question("How many videos are in this library?")
+        let plan = ChatSearchPlan.resolve(question.reduced)
+        #expect(plan.query == "")
+        #expect(plan.kinds == ["video"])
+        let message = try await database.pool.read { db in try ChatFacts.answer(db, question, ChatFacts.Filter(kinds: plan.kinds, subject: plan.query)).0 }
+        #expect(message == "Found 1 video, using 50.0 KB.")
+    }
+
     @Test func ordinaryQuestionsAreNotCapturedAsLibraryQuestions() {
         #expect(ChatIntent.question("how many files in my library").measure == "count")
         #expect(ChatIntent.question("photos of my library dog").measure == "list")
