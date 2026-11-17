@@ -339,6 +339,16 @@ impl DbWriter {
                 )
                 .context("preparing twin children check")?;
             let mut own_clip = tx.prepare_cached(OWN_CLIP_SQL).context("preparing own clip read")?;
+            let mut own_complete_stmt = tx
+                .prepare_cached(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1 AND content_hash = ?2 AND {} \
+                     AND NOT EXISTS (SELECT 1 FROM scan_catchup c WHERE c.file_id = files.id))",
+                    crate::pipeline::twin_reuse::COMPLETE_IMAGE_SQL
+                ))
+                .context("preparing own row check")?;
+            let mut has_clip = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?1)")
+                .context("preparing twin vector check")?;
             let mut own_clip_restore = tx.prepare_cached(OWN_CLIP_RESTORE_SQL).context("preparing own clip restore")?;
             let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
             let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
@@ -469,6 +479,15 @@ impl DbWriter {
                         .optional()
                         .with_context(|| format!("own clip read for {}", crate::platform::redact_path_for_log(&f.path)))?,
                     _ => None,
+                };
+                // The file's own row already holds an analysis of these bytes (a
+                // touch or a restore changed only the date): it stays as it is, with
+                // the people the user named, unless only another copy has a vector.
+                let own_complete = match f.content_hash.as_ref() {
+                    Some(hash) if f.reuse_twin => own_complete_stmt
+                        .query_row(params![path_text, hash.as_slice()], |r| r.get::<_, bool>(0))
+                        .with_context(|| format!("own row check for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                    _ => false,
                 };
 
                 let (file_id, stored_modified): (i64, Option<f64>) = file_stmt
@@ -638,6 +657,14 @@ impl DbWriter {
                             .optional()
                             .with_context(|| format!("twin lookup for {}", crate::platform::redact_path_for_log(&f.path)))?,
                         None => None,
+                    };
+                    let twin = match twin {
+                        Some(_) if own_complete && kept_clip.is_some() => None,
+                        Some(twin_id) if own_complete => has_clip
+                            .query_row(params![twin_id], |r| r.get::<_, bool>(0))
+                            .context("twin vector check")?
+                            .then_some(twin_id),
+                        twin => twin,
                     };
                     let redacted = || crate::platform::redact_path_for_log(&f.path);
                     if let Some(twin_id) = twin {
@@ -2813,6 +2840,67 @@ mod twin_reuse_tests {
         assert_eq!(vectors, 1, "a date change with the same bytes must not cost the file its vector");
     }
 
+    fn face_rows(conn: &Arc<Mutex<Connection>>, path: &str) -> Vec<String> {
+        conn.lock()
+            .prepare(
+                "SELECT fp.id || '|' || COALESCE(fp.person_id, 'none') || '|' || fp.bbox FROM face_prints fp \
+                 JOIN files f ON f.id = fp.file_id WHERE f.path_text = ?1 ORDER BY fp.id",
+            )
+            .unwrap()
+            .query_map(params![path], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn touched_file_keeps(other_copy: bool) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        let mut first = vec![analyzed("/lib/own.jpg", hash)];
+        if other_copy {
+            first.push(analyzed("/lib/backup/own.jpg", hash));
+        }
+        writer.flush(&mut first, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let file_id: i64 = {
+            let db = conn.lock();
+            let file_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = '/lib/own.jpg'", [], |r| r.get(0)).unwrap();
+            db.execute("INSERT INTO persons (name, file_count, created_at) VALUES ('Ada', 1, 0)", []).unwrap();
+            db.execute("UPDATE face_prints SET person_id = ?1 WHERE file_id = ?2", params![db.last_insert_rowid(), file_id]).unwrap();
+            db.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'holiday', 'user')", params![file_id]).unwrap();
+            file_id
+        };
+        let faces_before = face_rows(&conn, "/lib/own.jpg");
+        assert!(faces_before.len() == 1 && !faces_before[0].contains("none"));
+
+        let mut touched = reused("/lib/own.jpg", hash, "Year_2020");
+        touched.modified_unix += 3_600.0;
+        writer.flush(&mut vec![touched], &mut 0, &mut 0, &mut 0, 1).unwrap();
+
+        let db = conn.lock();
+        let (id, failed, user_tags, vectors): (i64, i64, i64, i64) = db
+            .query_row(
+                "SELECT f.id, f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id AND source = 'user'), \
+                 (SELECT count(*) FROM clip_embeddings WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        drop(db);
+        assert_eq!((id, failed, user_tags, vectors), (file_id, 0, 1, 1), "other copy: {other_copy}");
+        assert_eq!(face_rows(&conn, "/lib/own.jpg"), faces_before, "face rows and their people survive; other copy: {other_copy}");
+    }
+
+    #[test]
+    fn a_file_whose_date_changed_but_bytes_did_not_keeps_its_row_faces_and_people() {
+        touched_file_keeps(false);
+    }
+
+    #[test]
+    fn a_touched_file_with_a_copy_elsewhere_keeps_its_own_faces_and_people() {
+        touched_file_keeps(true);
+    }
+
     fn tags_only(path: &str, hash: [u8; 32]) -> TaggedFile {
         let mut file = image(path, hash);
         file.tags = vec![("Year_2020".to_owned(), None)];
@@ -3000,6 +3088,15 @@ mod failure_memory_tests {
             .unwrap()
     }
 
+    /// A failure is only recorded for a file that is still on disk.
+    fn on_disk(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("fileid-failure-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, b"broken").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     fn given_up(conn: &Arc<Mutex<Connection>>) -> Vec<String> {
         let db = conn.lock();
         let mut stmt = db.prepare(catch_up::GIVEN_UP_SQL).unwrap();
@@ -3010,19 +3107,20 @@ mod failure_memory_tests {
     fn three_failures_of_the_same_file_are_remembered_and_a_success_forgets_them() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let broken = on_disk("broken.jpg");
         for attempt in 1..=3 {
-            writer.flush(&mut vec![file("/lib/broken.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
-            assert_eq!(memory(&conn, "/lib/broken.jpg"), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
+            writer.flush(&mut vec![file(&broken, true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            assert_eq!(memory(&conn, &broken), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
             assert_eq!(given_up(&conn).len(), usize::from(attempt == 3));
         }
         let (failed, message): (i64, String) = conn
             .lock()
-            .query_row("SELECT failed, error_message FROM files WHERE path_text = '/lib/broken.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT failed, error_message FROM files WHERE path_text = ?1", [&broken], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((failed, message.as_str()), (1, "image decode: broken"), "the row the Library lists as unreadable is kept");
 
-        writer.flush(&mut vec![file("/lib/broken.jpg", false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
-        assert_eq!(memory(&conn, "/lib/broken.jpg"), None);
+        writer.flush(&mut vec![file(&broken, false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, &broken), None);
         assert!(given_up(&conn).is_empty());
     }
 
@@ -3030,25 +3128,26 @@ mod failure_memory_tests {
     fn a_changed_file_or_engine_starts_counting_again_and_transient_failures_never_count() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let (a, offline) = (on_disk("a.jpg"), on_disk("offline.jpg"));
         for attempt in 0..3 {
-            writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            writer.flush(&mut vec![file(&a, true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
         }
-        assert_eq!(given_up(&conn), vec!["/lib/a.jpg".to_string()]);
+        assert_eq!(given_up(&conn), vec![a.clone()]);
 
         // Edited on disk: the next failure is the first for the new content.
-        let mut edited = file("/lib/a.jpg", true);
+        let mut edited = file(&a, true);
         edited.modified_unix += 60.0;
         writer.flush(&mut vec![edited], &mut 0, &mut 0, &mut 0, 3).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert_eq!(memory(&conn, &a).map(|m| m.1), Some(1));
         assert!(given_up(&conn).is_empty());
 
         // Failures recorded by another engine build do not count for this one.
         conn.lock().execute("UPDATE scan_failures SET attempts = 3, engine_build = 'fileid-engine 0.0.1 portable'", []).unwrap();
         assert!(given_up(&conn).is_empty());
-        let mut again = file("/lib/a.jpg", true);
+        let mut again = file(&a, true);
         again.modified_unix += 60.0;
         writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 4).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert_eq!(memory(&conn, &a).map(|m| m.1), Some(1));
 
         // The stored row changed without a scan (size differs): not given up.
         conn.lock().execute("UPDATE scan_failures SET attempts = 3", []).unwrap();
@@ -3056,19 +3155,20 @@ mod failure_memory_tests {
         conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
         assert!(given_up(&conn).is_empty());
 
-        let mut transient = file("/lib/offline.jpg", true);
+        let mut transient = file(&offline, true);
         transient.failure_is_transient = true;
         for attempt in 5..9 {
             writer.flush(&mut vec![transient.clone()], &mut 0, &mut 0, &mut 0, attempt).unwrap();
         }
-        assert_eq!(memory(&conn, "/lib/offline.jpg"), None);
+        assert_eq!(memory(&conn, &offline), None);
     }
 
     #[test]
     fn a_failure_replaces_work_owed_from_an_earlier_scan() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
-        writer.flush(&mut vec![file("/lib/a.jpg", false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let a = on_disk("a.jpg");
+        writer.flush(&mut vec![file(&a, false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
         conn.lock()
             .execute(
                 "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
@@ -3076,8 +3176,8 @@ mod failure_memory_tests {
                 [],
             )
             .unwrap();
-        writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| (m.0, m.1)), Some((4, 1)));
+        writer.flush(&mut vec![file(&a, true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(memory(&conn, &a).map(|m| (m.0, m.1)), Some((4, 1)));
     }
 }
 
