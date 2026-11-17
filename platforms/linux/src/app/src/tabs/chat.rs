@@ -10,6 +10,7 @@ use fileid_engine::ipc::*;
 use gtk::glib;
 
 use super::chat_cards::Cards;
+use super::chat_scan_first::{self, Invitation, Library};
 use super::moments::hit_kind;
 use super::workbench_state::*;
 use super::workbenches::{is_playable_media, Engine};
@@ -32,6 +33,15 @@ struct ChatUi {
     status: gtk::Label,
     messages: gtk::Box,
     empty: gtk::Box,
+    intro: gtk::Box,
+    intro_body: gtk::Label,
+    intro_button: gtk::Button,
+    invitation: RefCell<Option<Invitation>>,
+    reading_note: gtk::Label,
+    /// Unknown until the first catalog read, so Chat does not flash the invitation.
+    library_files: Cell<Option<u64>>,
+    library_scan_running: Cell<bool>,
+    library_counting: Cell<bool>,
     busy: gtk::Box,
     composer: gtk::TextView,
     placeholder: gtk::Label,
@@ -119,7 +129,72 @@ impl ChatUi {
             self.scope_row.append(&super::chat_selection::chip(scope));
         }
         self.scope_row.set_visible(scope.is_some());
-        self.placeholder.set_label(if scope.is_some() { "Ask about the selected files" } else { "Ask about your files" });
+        self.sync_scan_first();
+    }
+
+    fn sync_scan_first(&self) {
+        let folder = crate::app_settings::last_folder().and_then(|path| {
+            path.file_name().map(|name| name.to_string_lossy().into_owned())
+        });
+        // Until the first catalog read, show plain chat rather than flash the invitation.
+        let files = self.library_files.get().unwrap_or(u64::MAX);
+        let state = chat_scan_first::state(Library {
+            files,
+            scan_running: self.library_scan_running.get(),
+            folder: folder.as_deref(),
+        });
+        let invitation = state.intro.as_ref().and_then(|intro| intro.invitation.clone());
+        if let Some(intro) = &state.intro {
+            self.intro_body.set_label(&intro.body);
+        }
+        if let Some(invitation) = &invitation {
+            self.intro_button.set_label(&invitation.button());
+        }
+        self.intro_button.set_visible(invitation.is_some());
+        self.invitation.replace(invitation);
+        let show_intro = state.intro.is_some() && !self.has_messages.get();
+        self.intro.set_visible(show_intro);
+        self.empty.set_visible(!show_intro && !self.has_messages.get());
+        self.composer.set_sensitive(state.composer_enabled);
+        self.send.set_sensitive(state.composer_enabled);
+        self.placeholder.set_label(if !state.composer_enabled {
+            chat_scan_first::NO_LIBRARY_PLACEHOLDER
+        } else if super::chat_handoff::scope().is_some() {
+            "Ask about the selected files"
+        } else {
+            "Ask about your files"
+        });
+        self.reading_note.set_label(state.note.unwrap_or(""));
+        self.reading_note.set_visible(state.note.is_some());
+    }
+
+    fn refresh_library(self: &Rc<Self>) {
+        if self.library_counting.replace(true) {
+            return;
+        }
+        let rx = crate::engine_client::read_db(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .map_or(0, |count| count.max(0) as u64)
+        });
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let files = rx.recv().await.unwrap_or(0);
+            let Some(ui) = weak.upgrade() else { return };
+            ui.library_counting.set(false);
+            ui.library_files.set(Some(files));
+            ui.sync_scan_first();
+        });
+    }
+
+    fn start_invitation(&self) {
+        let folder = crate::app_settings::last_folder();
+        let invitation = self.invitation.borrow().clone();
+        let _ = match (invitation, folder) {
+            (Some(Invitation::ScanFolder(_)), Some(path)) => self
+                .intro_button
+                .activate_action("win.scan-folder", Some(&path.to_string_lossy().to_variant())),
+            _ => self.intro_button.activate_action("win.pick-folder", None),
+        };
     }
 
     fn selection_strip(self: &Rc<Self>, hits: &[CatalogHit]) -> gtk::Box {
@@ -146,7 +221,7 @@ impl ChatUi {
         }
         v3::clear(&self.messages);
         self.has_messages.set(!response.messages.is_empty());
-        self.empty.set_visible(response.messages.is_empty());
+        self.sync_scan_first();
         self.clear.set_sensitive(!response.messages.is_empty());
         self.clear.set_tooltip_text(Some(if response.messages.is_empty() {
             "Nothing to clear yet"
@@ -447,6 +522,14 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     let suggestions = v3::vbox(6);
     suggestions.set_halign(gtk::Align::Start);
     empty.append(&suggestions);
+    let intro = v3::vbox(10);
+    intro.set_visible(false);
+    intro.append(&v3::label("Scan a folder to start chatting", &["v3-serif-34"]));
+    let intro_body = v3::wrapped("", &["v3-body", "tone-text2"]);
+    intro.append(&intro_body);
+    let intro_button = v3::primary("Choose a folder to scan", false);
+    intro_button.set_halign(gtk::Align::Start);
+    intro.append(&intro_button);
     let busy = v3::hbox(8);
     let busy_bar = v3::busy_bar(60);
     busy_bar.set_visible(true);
@@ -458,6 +541,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     busy.set_visible(false);
     let thread = v3::vbox(20);
     thread.add_css_class(if compact { "v3-inspector-pad" } else { "v3-page-pad" });
+    thread.append(&intro);
     thread.append(&empty);
     thread.append(&messages);
     let overlay = adw::ToastOverlay::new();
@@ -534,6 +618,9 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     model_chip.update_property(&[gtk::accessible::Property::Label("Chat model: none")]);
     options.append(&model_chip);
     composer_box.append(&options);
+    let reading_note = v3::wrapped("", &["v3-meta"]);
+    reading_note.set_visible(false);
+    composer_box.append(&reading_note);
     let status = v3::wrapped("", &["v3-meta"]);
     composer_box.append(&status);
     column.append(&composer_box);
@@ -603,6 +690,14 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
         status,
         messages,
         empty,
+        intro,
+        intro_body,
+        intro_button,
+        invitation: RefCell::new(None),
+        reading_note,
+        library_files: Cell::new(None),
+        library_scan_running: Cell::new(false),
+        library_counting: Cell::new(false),
         busy,
         composer,
         placeholder,
@@ -623,6 +718,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     });
     ui.render_scope();
     ui.render_sources(Vec::new());
+    ui.refresh_library();
     for text in SUGGESTIONS {
         let content = v3::hbox(8);
         let caption = v3::label(text, &[]);
@@ -729,10 +825,18 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     // reloads it so both show what the other added.
     let weak = Rc::downgrade(ui);
     root.connect_map(move |_| {
-        if let Some(ui) = weak.upgrade()
-            && ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
+        if let Some(ui) = weak.upgrade() {
+            ui.refresh_library();
+            if ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
                 ui.dispatch("history");
             }
+        }
+    });
+    let weak = Rc::downgrade(ui);
+    ui.intro_button.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            ui.start_invitation();
+        }
     });
     let weak = Rc::downgrade(ui);
     ui.composer.buffer().connect_changed(move |buffer| {
@@ -812,7 +916,27 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
             match &*event {
-                EngineState::Ready => ui.dispatch("history"),
+                EngineState::Ready => {
+                    ui.dispatch("history");
+                    ui.refresh_library();
+                }
+                EngineState::ScanPhase(phase) => {
+                    ui.library_scan_running.set(matches!(
+                        phase,
+                        ScanPhase::Discovering | ScanPhase::Tagging | ScanPhase::PostScan
+                    ));
+                    ui.sync_scan_first();
+                    ui.refresh_library();
+                }
+                EngineState::Progress(_) | EngineState::BatchLanded(_) => {
+                    if ui.library_files.get() == Some(0) {
+                        ui.refresh_library();
+                    }
+                }
+                EngineState::ScanComplete(_) => {
+                    ui.library_scan_running.set(false);
+                    ui.refresh_library();
+                }
                 EngineState::ChatResponse(response) => {
                     let deferred = ui.state.borrow_mut().finish(response);
                     if let Some(request) = deferred {
