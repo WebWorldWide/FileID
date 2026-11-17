@@ -1,0 +1,63 @@
+{
+ "capturedFrom": "cross-trash-swift-trashes-rust-puts-back",
+ "conversation": "70e643b9-0c85-4a00-a04f-7f826ed48a92",
+ "dirs": [
+  "docs"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900919,
+    501351127
+   ],
+   "path": "docs/stay.txt"
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900919,
+    655971218
+   ],
+   "path": "FileID/log-hmac.key"
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900919,
+    655481927
+   ],
+   "path": "FileID/trash-journal.json",
+   "template": true
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900919,
+    656554051
+   ],
+   "path": "FileID/trash_log.json",
+   "template": true
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900919,
+    501201752
+   ],
+   "path": "Trash/trash me.txt"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "batch": "3b9efb48-5871-4b13-b00d-5ecf56e09ba9"
+ },
+ "writtenBy": "swift"
+}

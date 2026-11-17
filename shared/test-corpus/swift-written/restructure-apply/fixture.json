@@ -1,0 +1,266 @@
+{
+ "capturedFrom": "cross-restructure-swift-apply-rust-undo",
+ "conversation": "40133c01-2631-403d-9701-9c90c5d3f584",
+ "dirs": [
+  "DCIM",
+  "DCIM/100MSDCF",
+  "Kyle Baseball Game 9-19-26",
+  "Kyle Baseball Game 9-19-26/Photos",
+  "Kyle Baseball Game 9-19-26/Photos/JPEGs",
+  "Kyle Baseball Game 9-19-26/Photos/RAWs",
+  "Photos",
+  "Photos/2026",
+  "Photos/2026/2026-10-04",
+  "Recipes"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196382464
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196480964
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K2.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196573589
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K3.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196665172
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196755422
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196847547
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196987297
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    197080922
+   ],
+   "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K2.ARW"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    195688256
+   ],
+   "path": "Photos/2026/2026-10-04/DSC00001.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    195829006
+   ],
+   "path": "Photos/2026/2026-10-04/DSC00002.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    195939755
+   ],
+   "path": "Photos/2026/2026-10-04/DSC00003.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196037797
+   ],
+   "path": "Photos/2026/2026-10-04/DSC00004.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    196125881
+   ],
+   "path": "Photos/2026/2026-10-04/DSC00005.JPG"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    197209380
+   ],
+   "path": "Recipes/lasagna.txt"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900924,
+    197294589
+   ],
+   "path": "Recipes/pesto.txt"
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900924,
+    419321289
+   ],
+   "path": "FileID/path-moves.ndjson",
+   "template": true
+  },
+  {
+   "area": "state",
+   "mtimeNs": [
+    1794900924,
+    413031499
+   ],
+   "path": "FileID/restructure_undo.ndjson",
+   "template": true
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "plan": {
+   "categoryCounts": [
+    {
+     "category": "2026-10-04",
+     "count": 5
+    },
+    {
+     "category": "RAWs",
+     "count": 3
+    }
+   ],
+   "confidenceCounts": {
+    "ask": 0,
+    "auto": 8,
+    "review": 0,
+    "unknown": 0
+   },
+   "folderClassifications": {
+    "anchorFolders": 2,
+    "junkFolders": 0,
+    "mixedFolders": 2
+   },
+   "libraryRoot": "{root}",
+   "moves": [
+    {
+     "category": "2026-10-04",
+     "confidence": "auto",
+     "destination": "{root}/Photos/2026/2026-10-04/DSC00001.JPG",
+     "fileID": 1,
+     "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event.",
+     "source": "{root}/DCIM/100MSDCF/DSC00001.JPG",
+     "tier": "Mixed"
+    },
+    {
+     "category": "2026-10-04",
+     "confidence": "auto",
+     "destination": "{root}/Photos/2026/2026-10-04/DSC00002.JPG",
+     "fileID": 2,
+     "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event.",
+     "source": "{root}/DCIM/100MSDCF/DSC00002.JPG",
+     "tier": "Mixed"
+    },
+    {
+     "category": "2026-10-04",
+     "confidence": "auto",
+     "destination": "{root}/Photos/2026/2026-10-04/DSC00003.JPG",
+     "fileID": 3,
+     "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event.",
+     "source": "{root}/DCIM/100MSDCF/DSC00003.JPG",
+     "tier": "Mixed"
+    },
+    {
+     "category": "2026-10-04",
+     "confidence": "auto",
+     "destination": "{root}/Photos/2026/2026-10-04/DSC00004.JPG",
+     "fileID": 4,
+     "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event.",
+     "source": "{root}/DCIM/100MSDCF/DSC00004.JPG",
+     "tier": "Mixed"
+    },
+    {
+     "category": "2026-10-04",
+     "confidence": "auto",
+     "destination": "{root}/Photos/2026/2026-10-04/DSC00005.JPG",
+     "fileID": 5,
+     "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event.",
+     "source": "{root}/DCIM/100MSDCF/DSC00005.JPG",
+     "tier": "Mixed"
+    },
+    {
+     "category": "RAWs",
+     "confidence": "auto",
+     "destination": "{root}/Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW",
+     "fileID": 13,
+     "reason": "A RAW file in a JPEG folder; moved to its sibling RAWs folder.",
+     "source": "{root}/Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
+     "tier": "Mixed"
+    },
+    {
+     "category": "RAWs",
+     "confidence": "auto",
+     "destination": "{root}/Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW",
+     "fileID": 14,
+     "reason": "A RAW file in a JPEG folder; moved to its sibling RAWs folder.",
+     "source": "{root}/Kyle Baseball Game 9-19-26/Photos/JPEGs/D2.ARW",
+     "tier": "Mixed"
+    },
+    {
+     "category": "RAWs",
+     "confidence": "auto",
+     "destination": "{root}/Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW",
+     "fileID": 15,
+     "reason": "A RAW file in a JPEG folder; moved to its sibling RAWs folder.",
+     "source": "{root}/Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW",
+     "tier": "Mixed"
+    }
+   ],
+   "truncated": false
+  }
+ },
+ "writtenBy": "swift"
+}

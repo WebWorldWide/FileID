@@ -1,0 +1,253 @@
+{
+ "capturedFrom": "cross-takes-grouping-swift-then-rust",
+ "conversation": "cc418638-32e4-464b-893b-8190c99d7859",
+ "dirs": [
+  "party",
+  "shoot",
+  "walk"
+ ],
+ "files": [
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    967107717
+   ],
+   "path": "party/b1.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    967206925
+   ],
+   "path": "party/b2.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    966682967
+   ],
+   "path": "shoot/a1.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    966846550
+   ],
+   "path": "shoot/a2.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    966960258
+   ],
+   "path": "shoot/a3.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    967341883
+   ],
+   "path": "walk/c1.jpg"
+  },
+  {
+   "area": "tree",
+   "mtimeNs": [
+    1794900917,
+    967434342
+   ],
+   "path": "walk/c2.jpg"
+  }
+ ],
+ "format": 1,
+ "pragmas": {
+  "application_id": 0,
+  "auto_vacuum": 0,
+  "journal_mode": "wal",
+  "page_size": 4096,
+  "user_version": 0
+ },
+ "vars": {
+  "files": [
+   [
+    1,
+    "photos-b91afb922b8a6e0b",
+    "6:4745315168093593122|4652007308841189376|Phone A||{root}/shoot/a1.jpg"
+   ],
+   [
+    2,
+    "photos-b91afb922b8a6e0b",
+    "6:4745315168093593808|4652244803352788992|Phone A||{root}/shoot/a2.jpg"
+   ],
+   [
+    3,
+    "photos-b91afb922b8a6e0b",
+    "6:4745315168093594285|4652376744748122112|Phone A||{root}/shoot/a3.jpg"
+   ],
+   [
+    4,
+    "photos-94841574fde2fe0c",
+    "6:4745315168093594904|4666173416653455360|Phone A||{root}/party/b1.jpg"
+   ],
+   [
+    5,
+    "photos-94841574fde2fe0c",
+    "6:4745315168093595320|4666173966409269248|Camera B||{root}/party/b2.jpg"
+   ],
+   [
+    6,
+    "photos-674d8700cc7c1067",
+    "6:4745315168093595886|4671226772094713856|||{root}/walk/c1.jpg"
+   ],
+   [
+    7,
+    "photos-674d8700cc7c1067",
+    "6:4745315168093596274|4671237767210991616|Phone A||{root}/walk/c2.jpg"
+   ]
+  ],
+  "stamps": [
+   [
+    "takes-17f8af97ad4a7f76",
+    "photos-b91afb922b8a6e0b",
+    "repeatedAttempts",
+    "[1,2]",
+    "[\"captureSession\",\"visualSimilarity\",\"sameCamera\"]",
+    1794900918.113884
+   ],
+   [
+    "takes-c73bcaadd9498526",
+    "photos-94841574fde2fe0c",
+    "alternateViews",
+    "[4,5]",
+    "[\"captureSession\",\"visualSimilarity\",\"simultaneousCameras\"]",
+    1794900918.115119
+   ],
+   [
+    "takes-d6acb9a68e9239c2",
+    "photos-674d8700cc7c1067",
+    "uncertain",
+    "[6,7]",
+    "[\"captureSession\",\"visualSimilarity\",\"cameraDetailsMissing\"]",
+    1794900918.116158
+   ]
+  ],
+  "swiftGroups": {
+   "chapters": [],
+   "hits": [],
+   "jobs": [
+    {
+     "createdAt": 1794900918.105164,
+     "fileIDs": [],
+     "id": "take-grouping",
+     "kind": "takeGrouping",
+     "progress": 1,
+     "state": "completed",
+     "updatedAt": 1794900918.116586
+    }
+   ],
+   "requestID": "bcd96220-2450-402c-8b2b-5c682f9f98c7",
+   "status": "ok",
+   "takeGroups": [
+    {
+     "capturedAt": 20040,
+     "evidence": [
+      "captureSession",
+      "visualSimilarity",
+      "cameraDetailsMissing"
+     ],
+     "groupKey": "takes-d6acb9a68e9239c2",
+     "kind": "photos",
+     "relation": "uncertain",
+     "shots": [
+      {
+       "capturedAt": 20000,
+       "fileIDs": [
+        6
+       ],
+       "path": "{root}/walk/c1.jpg",
+       "primaryFileID": 6
+      },
+      {
+       "capturedAt": 20040,
+       "fileIDs": [
+        7
+       ],
+       "path": "{root}/walk/c2.jpg",
+       "primaryFileID": 7
+      }
+     ],
+     "similarity": 0.96,
+     "status": "open"
+    },
+    {
+     "capturedAt": 9001,
+     "evidence": [
+      "captureSession",
+      "visualSimilarity",
+      "simultaneousCameras"
+     ],
+     "groupKey": "takes-c73bcaadd9498526",
+     "kind": "photos",
+     "relation": "alternateViews",
+     "shots": [
+      {
+       "capturedAt": 9000,
+       "fileIDs": [
+        4
+       ],
+       "path": "{root}/party/b1.jpg",
+       "primaryFileID": 4
+      },
+      {
+       "capturedAt": 9001,
+       "fileIDs": [
+        5
+       ],
+       "path": "{root}/party/b2.jpg",
+       "primaryFileID": 5
+      }
+     ],
+     "similarity": 0.96,
+     "status": "open"
+    },
+    {
+     "capturedAt": 1030,
+     "evidence": [
+      "captureSession",
+      "visualSimilarity",
+      "sameCamera"
+     ],
+     "groupKey": "takes-17f8af97ad4a7f76",
+     "kind": "photos",
+     "relation": "repeatedAttempts",
+     "shots": [
+      {
+       "capturedAt": 1000,
+       "fileIDs": [
+        1
+       ],
+       "path": "{root}/shoot/a1.jpg",
+       "primaryFileID": 1
+      },
+      {
+       "capturedAt": 1030,
+       "fileIDs": [
+        2
+       ],
+       "path": "{root}/shoot/a2.jpg",
+       "primaryFileID": 2
+      }
+     ],
+     "similarity": 0.96,
+     "status": "open"
+    }
+   ]
+  }
+ },
+ "writtenBy": "swift"
+}

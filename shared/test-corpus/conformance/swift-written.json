@@ -1,0 +1,2789 @@
+[
+ {
+  "name": "swift-written-tools-chapters-vtt",
+  "description": "The Rust engine executes a chapter-marker export (VTT) that the Swift engine previewed and recorded, then undoes it; the video is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "tools-chapters-vtt",
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}/out"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": "{std_path:out/Clip - Chapters.vtt}"
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported",
+    "fs": {
+     "exists": [
+      "out/Clip - Chapters.vtt"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   },
+   {
+    "label": "rust undoes",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}/out"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, video intact",
+    "fs": {
+     "absent": [
+      "out/Clip - Chapters.vtt"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-tools-photo-jpeg",
+  "description": "The Rust engine executes a JPEG photo export that the Swift engine previewed and recorded, lists it in its history and undoes it; the source is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "tools-photo-jpeg",
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": {
+        "$var": "out"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported",
+    "fs": {
+     "exists": [
+      {
+       "$var": "out"
+      }
+     ],
+     "sha256": {
+      "Picture.png": "{sha256:Picture.png}"
+     }
+    }
+   },
+   {
+    "label": "rust history",
+    "tool": {
+     "action": "history"
+    },
+    "expect": {
+     "status": "ok",
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "rust undo",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "undone history",
+    "tool": {
+     "action": "history"
+    },
+    "expect": {
+     "operationID": {
+      "$var": "op"
+     },
+     "outputs": [
+      {
+       "state": "undone",
+       "message": {
+        "$tol": "present"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, source intact",
+    "fs": {
+     "absent": [
+      {
+       "$var": "out"
+      }
+     ],
+     "sha256": {
+      "Picture.png": "{sha256:Picture.png}"
+     }
+    }
+   },
+   {
+    "label": "no catalog assets",
+    "db": "SELECT COUNT(*) FROM catalog_assets",
+    "expect": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-tools-photo-png-enlarge",
+  "description": "The Rust engine executes a PNG photo export with upscaling that the Swift engine previewed and recorded, lists it in its history and undoes it; the source is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "tools-photo-png-enlarge",
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": {
+        "$var": "out"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported",
+    "fs": {
+     "exists": [
+      {
+       "$var": "out"
+      }
+     ],
+     "sha256": {
+      "Picture.png": "{sha256:Picture.png}"
+     },
+     "pngSize": [
+      [
+       {
+        "$var": "out"
+       },
+       64,
+       32
+      ]
+     ]
+    }
+   },
+   {
+    "label": "rust history",
+    "tool": {
+     "action": "history"
+    },
+    "expect": {
+     "status": "ok",
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "rust undo",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "undone history",
+    "tool": {
+     "action": "history"
+    },
+    "expect": {
+     "operationID": {
+      "$var": "op"
+     },
+     "outputs": [
+      {
+       "state": "undone",
+       "message": {
+        "$tol": "present"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, source intact",
+    "fs": {
+     "absent": [
+      {
+       "$var": "out"
+      }
+     ],
+     "sha256": {
+      "Picture.png": "{sha256:Picture.png}"
+     }
+    }
+   },
+   {
+    "label": "no catalog assets",
+    "db": "SELECT COUNT(*) FROM catalog_assets",
+    "expect": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-video-fit",
+  "description": "The app-hosted Rust engine executes a 1:1 fit video export that the Swift engine previewed and recorded, then undoes it; the source is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "video-fit",
+  "appHosted": true,
+  "os": [
+   "darwin"
+  ],
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": {
+        "$var": "out"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported, source intact",
+    "fs": {
+     "exists": [
+      "Clip - Export - 1x1 Fit.mp4"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   },
+   {
+    "label": "rust undo",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, source intact",
+    "fs": {
+     "absent": [
+      "Clip - Export - 1x1 Fit.mp4"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "swift-written-media-rotate",
+  "description": "The app-hosted Rust engine executes a 90 degree rotation that the Swift engine previewed and recorded, then undoes it; the source is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "media-rotate",
+  "appHosted": true,
+  "os": [
+   "darwin"
+  ],
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": {
+        "$var": "out"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported, source intact",
+    "fs": {
+     "exists": [
+      "Clip - Rotated 90.mov"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   },
+   {
+    "label": "rust undo",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, source intact",
+    "fs": {
+     "absent": [
+      "Clip - Rotated 90.mov"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "swift-written-media-trim",
+  "description": "The app-hosted Rust engine executes a keyframe trim that the Swift engine previewed and recorded, then undoes it; the source is never modified. Seeded from the catalog the Swift engine wrote.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "media-trim",
+  "appHosted": true,
+  "os": [
+   "darwin"
+  ],
+  "steps": [
+   {
+    "label": "rust executes",
+    "tool": {
+     "action": "execute",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "completed",
+       "outputPath": {
+        "$var": "out"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "label": "exported, source intact",
+    "fs": {
+     "exists": [
+      "Clip - Trim.mp4"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   },
+   {
+    "label": "rust undo",
+    "tool": {
+     "action": "undo",
+     "operationID": {
+      "$var": "op"
+     },
+     "destination": "{root}"
+    },
+    "expect": {
+     "status": "ok",
+     "outputs": [
+      {
+       "state": "undone"
+      }
+     ]
+    }
+   },
+   {
+    "label": "output removed, source intact",
+    "fs": {
+     "absent": [
+      "Clip - Trim.mp4"
+     ],
+     "sha256": {
+      "Clip.mov": "{sha256:Clip.mov}"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "swift-written-catalog-chapter-edit",
+  "description": "A chapter the Swift engine saved is found by Rust evidence search, edited by Rust and restored by Rust Undo, while face provenance, refresh failures and corrections the Swift-written catalog holds survive.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "catalog-chapter-edit",
+  "steps": [
+   {
+    "label": "rust first hit is the chapter",
+    "catalog": {
+     "action": "search",
+     "query": "Grandma presents"
+    },
+    "expect": {
+     "hits": [
+      {
+       "fileID": 1,
+       "startSeconds": 8.0
+      }
+     ]
+    }
+   },
+   {
+    "label": "rust edits chapter",
+    "catalog": {
+     "action": "saveChapter",
+     "chapter": {
+      "id": "gift",
+      "fileID": 1,
+      "startSeconds": 10.0,
+      "endSeconds": 12.0,
+      "title": "Gift Unwrapped",
+      "summary": "Grandma opens presents",
+      "sourceRevision": "untrusted",
+      "modelVersion": "untrusted",
+      "confidence": 0.0,
+      "userEdited": false,
+      "stale": true
+     }
+    },
+    "expect": {
+     "status": "ok",
+     "chapters": [
+      {
+       "startSeconds": 10.0,
+       "title": "Gift Unwrapped"
+      }
+     ]
+    }
+   },
+   {
+    "label": "rust undo restores",
+    "catalog": {
+     "action": "undoChapterEdit",
+     "fileID": 1
+    },
+    "expect": {
+     "status": "ok",
+     "chapters": [
+      {
+       "startSeconds": 8.0,
+       "title": "Gift Opening",
+       "stale": false,
+       "modelVersion": "user"
+      }
+     ]
+    }
+   },
+   {
+    "label": "person name",
+    "db": "SELECT name FROM persons WHERE id=7",
+    "expect": [
+     [
+      "Confirmed Person"
+     ]
+    ]
+   },
+   {
+    "label": "refresh failure",
+    "db": "SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4",
+    "expect": [
+     [
+      "next-weight",
+      "next-processing",
+      2,
+      280.0,
+      "no_embedding"
+     ]
+    ]
+   },
+   {
+    "label": "face provenance",
+    "db": "SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4",
+    "expect": [
+     [
+      7,
+      "fixture-weight-hash",
+      "fixture-alignment",
+      "fixture-revision",
+      512
+     ]
+    ]
+   },
+   {
+    "label": "user correction",
+    "db": "SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'",
+    "expect": [
+     [
+      "manual face marker",
+      1,
+      0
+     ]
+    ]
+   },
+   {
+    "label": "face embedding projection",
+    "db": "SELECT model,dimension,hex(vector)=hex((SELECT arcface_embedding FROM face_prints WHERE id=4)) FROM catalog_embeddings WHERE entity_id='faceprint:4'",
+    "expect": [
+     [
+      "fixture-weight-hash|fixture-alignment",
+      128,
+      1
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-chat-history",
+  "description": "A conversation the Swift engine stored is read by Rust: history persists, contextual media follow-ups resolve against the earlier subject, clear deletes it, and source files are never touched.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "chat-history",
+  "steps": [
+   {
+    "label": "rust sees history",
+    "chat": {
+     "action": "history"
+    },
+    "expect": {
+     "messages": {
+      "$tol": "count",
+      "value": 2
+     }
+    }
+   },
+   {
+    "label": "rust follow-up",
+    "chat": {
+     "action": "send",
+     "text": "only videos",
+     "useModel": false
+    },
+    "expect": {
+     "hits": [
+      {
+       "fileID": 2
+      }
+     ],
+     "message": "Found 1 match for “birthday” (videos).",
+     "messages": {
+      "$tol": "count",
+      "value": 4
+     }
+    }
+   },
+   {
+    "label": "rust follow-up",
+    "chat": {
+     "action": "send",
+     "text": "now photos",
+     "useModel": false
+    },
+    "expect": {
+     "hits": [
+      {
+       "fileID": 3
+      }
+     ],
+     "message": "Found 1 match for “birthday” (photos).",
+     "messages": {
+      "$tol": "count",
+      "value": 6
+     }
+    }
+   },
+   {
+    "label": "clear",
+    "chat": {
+     "action": "clear"
+    },
+    "expect": {
+     "messages": []
+    }
+   },
+   {
+    "label": "source untouched",
+    "fs": {
+     "contents": {
+      "birthday.txt": "Birthday gift opening"
+     }
+    }
+   },
+   {
+    "label": "chat deleted",
+    "db": "SELECT (SELECT COUNT(*) FROM catalog_chat),(SELECT COUNT(*) FROM files)",
+    "expect": [
+     [
+      0,
+      3
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-takes-grouping",
+  "description": "Related-take proposals written by the Swift job are current for the Rust job: session keys and file fingerprints match byte for byte, so an unchanged rerun redoes nothing and Rust reads the same groups.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "takes-grouping",
+  "steps": [
+   {
+    "label": "rust reads the same groups",
+    "catalog": {
+     "action": "takeGroupProposals"
+    },
+    "expect": {
+     "status": "ok",
+     "takeGroups": {
+      "$var": "swiftGroups.takeGroups"
+     }
+    }
+   },
+   {
+    "label": "rust reruns",
+    "catalog": {
+     "action": "enqueueTakeGrouping"
+    },
+    "expect": {
+     "status": "ok"
+    }
+   },
+   {
+    "label": "rust job finishes",
+    "catalog": {
+     "action": "takeGroupProposals"
+    },
+    "until": 20,
+    "expect": {
+     "status": "ok",
+     "jobs": [
+      {
+       "id": "take-grouping",
+       "kind": "takeGrouping",
+       "state": "completed",
+       "progress": 1
+      }
+     ],
+     "takeGroups": {
+      "$tol": "count",
+      "value": 3
+     }
+    }
+   },
+   {
+    "label": "rust redid nothing",
+    "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
+    "expect": {
+     "$var": "stamps"
+    }
+   },
+   {
+    "label": "rust keeps the fingerprints",
+    "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id",
+    "expect": {
+     "$var": "files"
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-names-learned-style",
+  "description": "Smart-name style samples the Swift engine recorded are read by Rust: it adds a third sample, derives the same preferences, applies them to a name and resets them.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "names-learned-style",
+  "steps": [
+   {
+    "label": "rust adds the third",
+    "catalog": {
+     "action": "learnNames",
+     "naming": {
+      "style": "short",
+      "maxLength": 40
+     },
+     "nameEdits": [
+      {
+       "fileID": 53,
+       "proposed": "snow-day.jpg",
+       "applied": "Snow_Day.jpg"
+      }
+     ]
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "exact",
+      "value": [
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "namePreference",
+        "text": "_",
+        "evidenceID": "separator"
+       },
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "namePreference",
+        "text": "title",
+        "evidenceID": "case"
+       },
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "nameSamples",
+        "text": "3"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "rust applies them",
+    "catalog": {
+     "action": "proposeNames",
+     "fileIDs": [
+      54
+     ],
+     "naming": {
+      "style": "short",
+      "maxLength": 40,
+      "learn": true
+     }
+    },
+    "expect": {
+     "status": "ok",
+     "hits": [
+      {
+       "fileID": 54,
+       "text": "Kids_Playing_Soccer.jpg",
+       "evidenceID": "proposedName|learned:separator,case"
+      }
+     ]
+    }
+   },
+   {
+    "label": "rust sees the same preferences",
+    "catalog": {
+     "action": "namePreferences"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "exact",
+      "value": [
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "namePreference",
+        "text": "_",
+        "evidenceID": "separator"
+       },
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "namePreference",
+        "text": "title",
+        "evidenceID": "case"
+       },
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "nameSamples",
+        "text": "3"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "rust resets",
+    "catalog": {
+     "action": "resetNamePreferences"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "exact",
+      "value": [
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "nameSamples",
+        "text": "0"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "rust sees no samples",
+    "catalog": {
+     "action": "namePreferences"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "exact",
+      "value": [
+       {
+        "fileID": 0,
+        "path": "",
+        "kind": "nameSamples",
+        "text": "0"
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-trash-journal-imported",
+  "description": "A Trash batch the Swift engine made (test Trash root) is put back by the app-hosted Rust engine, which imports Swift's trash-journal.json (the Rust log and its key the Swift engine also wrote are left out, so the import is what restores): file and catalog rows (tags included) restored.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "trash-journal",
+  "appHosted": true,
+  "requiresTestTrashRoot": true,
+  "fixtureOmit": [
+   "FileID/trash_log.json",
+   "FileID/log-hmac.key"
+  ],
+  "steps": [
+   {
+    "label": "in the test Trash",
+    "fs": {
+     "absent": [
+      "docs/trash me.txt"
+     ],
+     "inTestTrash": [
+      "trash me.txt"
+     ]
+    }
+   },
+   {
+    "label": "row and tag dropped",
+    "db": "SELECT COUNT(*) FROM tags WHERE file_id=1",
+    "expect": [
+     [
+      0
+     ]
+    ]
+   },
+   {
+    "label": "rust puts back",
+    "command": {
+     "restoreFromTrash": {
+      "batchID": {
+       "$var": "batch"
+      }
+     }
+    },
+    "await": "bulkActionResult",
+    "expect": {
+     "action": "restoreFromTrash",
+     "succeeded": 1,
+     "failed": 0
+    }
+   },
+   {
+    "label": "file back",
+    "fs": {
+     "contents": {
+      "docs/trash me.txt": "recoverable\n",
+      "docs/stay.txt": "stays\n"
+     }
+    }
+   },
+   {
+    "label": "row and tag back",
+    "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1",
+    "expect": [
+     [
+      1,
+      "{path:docs/trash me.txt}",
+      "keep me"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-trash-log-dual-written",
+  "description": "A Trash batch the Swift engine made (test Trash root) is put back by the app-hosted Rust engine from the signed trash_log.json and log-hmac.key the Swift engine dual-wrote beside trash-journal.json: file and catalog rows (tags included) restored.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "trash-journal",
+  "appHosted": true,
+  "requiresTestTrashRoot": true,
+  "steps": [
+   {
+    "label": "in the test Trash",
+    "fs": {
+     "absent": [
+      "docs/trash me.txt"
+     ],
+     "inTestTrash": [
+      "trash me.txt"
+     ]
+    }
+   },
+   {
+    "label": "row and tag dropped",
+    "db": "SELECT COUNT(*) FROM tags WHERE file_id=1",
+    "expect": [
+     [
+      0
+     ]
+    ]
+   },
+   {
+    "label": "rust puts back",
+    "command": {
+     "restoreFromTrash": {
+      "batchID": {
+       "$var": "batch"
+      }
+     }
+    },
+    "await": "bulkActionResult",
+    "expect": {
+     "action": "restoreFromTrash",
+     "succeeded": 1,
+     "failed": 0
+    }
+   },
+   {
+    "label": "file back",
+    "fs": {
+     "contents": {
+      "docs/trash me.txt": "recoverable\n",
+      "docs/stay.txt": "stays\n"
+     }
+    }
+   },
+   {
+    "label": "row and tag back",
+    "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1",
+    "expect": [
+     [
+      1,
+      "{path:docs/trash me.txt}",
+      "keep me"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-scan-mtimes-chapter",
+  "description": "A catalog the Swift engine scanned (stored modified times at nanosecond precision) is rescanned by Rust: every stored time stays the same number, a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "scan-mtimes-chapter",
+  "steps": [
+   {
+    "label": "rust plain rescan analyses nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "times unchanged by the plain rescan",
+    "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+    "expect": {
+     "$var": "first"
+    }
+   },
+   {
+    "label": "rust forced rescan",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}",
+      "rescan": true
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "expect": {
+     "totalFiles": 6,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "times unchanged by the forced rescan",
+    "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
+    "expect": {
+     "$var": "first"
+    }
+   },
+   {
+    "label": "the reviewed chapter is current",
+    "db": "SELECT id,stale,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "kept",
+      0,
+      1
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-scan-image-hashes",
+  "description": "The app-hosted Rust engine rescans a catalog the Swift engine scanned and stores the same CoreGraphics dHash, EXIF camera and capture time for a camera JPEG, a HEIC and a screenshot.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "scan-image-hashes",
+  "appHosted": true,
+  "os": [
+   "darwin"
+  ],
+  "steps": [
+   {
+    "label": "rust rescans",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}",
+      "rescan": true
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 240,
+    "abortOnError": true,
+    "expect": {
+     "processedFiles": 3,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "same hashes",
+    "db": "SELECT path_text,phash,camera_model,round(created_at,3) FROM files ORDER BY path_text",
+    "expect": {
+     "$var": "hashes"
+    }
+   }
+  ]
+ },
+ {
+  "name": "swift-written-face-queues",
+  "description": "A merge the Swift engine journaled is undone by Rust from the shared operation log; Rust then splits a person and accepts all of another's suggestions and undoes both, back to the starting rows.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "face-queues",
+  "steps": [
+   {
+    "label": "rust undoes the merge",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-2",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-2"
+    },
+    "expect": {
+     "status": "ok",
+     "personID": 2,
+     "otherPersonID": 1,
+     "total": 1
+    }
+   },
+   {
+    "label": "rust splits",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-3",
+      "personID": 5,
+      "resolution": "split"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-3"
+    },
+    "expect": {
+     "status": "ok"
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "rust accepts all",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-4",
+      "personID": 2,
+      "resolution": "acceptAll"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-4"
+    },
+    "expect": {
+     "status": "ok",
+     "acceptedFaceIDs": [
+      30
+     ]
+    },
+    "save": {
+     "name": "op3",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "rust undoes the split",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-5",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-5"
+    },
+    "expect": {
+     "status": "ok",
+     "personID": 5,
+     "total": 1
+    }
+   },
+   {
+    "label": "rust undoes accept all",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-6",
+      "operationID": {
+       "$var": "op3"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-6"
+    },
+    "expect": {
+     "status": "ok",
+     "acceptedFaceIDs": [
+      30
+     ]
+    }
+   },
+   {
+    "label": "back to start",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM face_prints WHERE person_id=5), (SELECT person_id FROM face_prints WHERE id=30), (SELECT COUNT(*) FROM face_verifications), (SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
+    "expect": [
+     [
+      1,
+      6,
+      null,
+      0,
+      3
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-face-review",
+  "description": "A suggestion the Swift engine accepted is listed and undone by Rust from the shared operation log; Rust then rejects one and undoes that, back to the starting rows.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "face-review",
+  "steps": [
+   {
+    "label": "rust lists",
+    "command": {
+     "listFaceReview": {
+      "requestID": "x-2"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-2"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    }
+   },
+   {
+    "label": "rust undoes",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-3",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-3"
+    },
+    "expect": {
+     "status": "ok",
+     "faceID": 3,
+     "total": 3
+    }
+   },
+   {
+    "label": "rust rejects",
+    "command": {
+     "resolveFaceReview": {
+      "requestID": "x-4",
+      "faceID": 3,
+      "personID": 1,
+      "resolution": "reject"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-4"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    },
+    "save": {
+     "name": "op2",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "rust lists",
+    "command": {
+     "listFaceReview": {
+      "requestID": "x-5"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-5"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 2
+    }
+   },
+   {
+    "label": "rust undoes",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "x-6",
+      "operationID": {
+       "$var": "op2"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "x-6"
+    },
+    "expect": {
+     "status": "ok",
+     "total": 3
+    }
+   },
+   {
+    "label": "back to start",
+    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=3),(SELECT COUNT(*) FROM face_identity_constraints),(SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
+    "expect": [
+     [
+      null,
+      0,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "suggestion back",
+    "db": "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at FROM face_review_candidates WHERE face_id=3",
+    "expect": [
+     [
+      3,
+      1,
+      0.81,
+      "suggested",
+      2,
+      0.2,
+      "m|p",
+      100
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-people-merge",
+  "description": "A person merge journaled by the Swift engine is offered for undo and undone by the Rust engine: faces, names, representative faces and the verified verdict come back, and a second undo is refused.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "people-merge",
+  "steps": [
+   {
+    "label": "offered",
+    "command": {
+     "listFaceReview": {
+      "requestID": "m-1",
+      "queue": "mergeUndo"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-1"
+    },
+    "expect": {
+     "status": "ok",
+     "queue": "mergeUndo",
+     "total": 1,
+     "personID": 1,
+     "otherPersonID": 2,
+     "operationID": {
+      "$tol": "present"
+     }
+    },
+    "save": {
+     "name": "op",
+     "path": "operationID"
+    }
+   },
+   {
+    "label": "undo the last merge",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "m-2",
+      "operationID": "lastPersonMerge"
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-2"
+    },
+    "expect": {
+     "action": "undo",
+     "status": "ok",
+     "queue": "mergeUndo",
+     "personID": 1,
+     "otherPersonID": 2,
+     "total": 0,
+     "operationID": {
+      "$var": "op"
+     }
+    }
+   },
+   {
+    "label": "restored",
+    "db": "SELECT id,name,title,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+    "expect": [
+     [
+      1,
+      null,
+      null,
+      null,
+      1,
+      1,
+      1
+     ],
+     [
+      2,
+      "Alex",
+      "Aunt",
+      "Alex",
+      0,
+      3,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "faces",
+    "db": "SELECT id,person_id FROM face_prints ORDER BY id",
+    "expect": [
+     [
+      1,
+      1
+     ],
+     [
+      2,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "verdict",
+    "db": "SELECT person_a,person_b,same_person,vlm_model,face_a,face_b FROM face_verifications",
+    "expect": [
+     [
+      1,
+      2,
+      0,
+      "user-verified",
+      1,
+      2
+     ]
+    ]
+   },
+   {
+    "label": "undone",
+    "db": "SELECT state FROM catalog_operations",
+    "expect": [
+     [
+      "undone"
+     ]
+    ]
+   },
+   {
+    "label": "again",
+    "command": {
+     "undoFaceReview": {
+      "requestID": "m-3",
+      "operationID": {
+       "$var": "op"
+      }
+     }
+    },
+    "await": "faceReview",
+    "filter": {
+     "requestID": "m-3"
+    },
+    "expect": {
+     "action": "undo",
+     "status": "refused",
+     "message": "There is nothing to undo for this suggestion."
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-restructure-apply",
+  "description": "Rust reads the undo journal (Swift's headerless restructure_undo.ndjson) and path-moves.ndjson the Swift engine wrote when it applied the respect-stage moves, and undoes them: files, rows and the empty event folders come back, a second undo does nothing, and Rust plans the same moves again.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "restructure-apply",
+  "steps": [
+   {
+    "label": "rust undoes",
+    "command": {
+     "undoRestructure": {
+      "libraryRoot": "{root}"
+     }
+    },
+    "await": "restructureApplyResult",
+    "timeout": 120,
+    "abortOnError": true,
+    "expect": {
+     "applied": 8,
+     "failed": 0
+    }
+   },
+   {
+    "label": "restored on disk",
+    "fs": {
+     "exists": [
+      "DCIM/100MSDCF/DSC00001.JPG",
+      "DCIM/100MSDCF/DSC00005.JPG",
+      "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
+      "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW",
+      "Recipes/lasagna.txt"
+     ],
+     "absent": [
+      "Photos",
+      "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"
+     ],
+     "contents": {
+      "DCIM/100MSDCF/DSC00001.JPG": "dsc1",
+      "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"
+     }
+    }
+   },
+   {
+    "label": "restored in catalog",
+    "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:DCIM/100MSDCF/DSC00001.JPG}"
+     ],
+     [
+      5,
+      "{path:DCIM/100MSDCF/DSC00005.JPG}"
+     ],
+     [
+      13,
+      "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"
+     ],
+     [
+      15,
+      "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"
+     ]
+    ]
+   },
+   {
+    "label": "rust second undo is a no-op",
+    "command": {
+     "undoRestructure": {
+      "libraryRoot": "{root}"
+     }
+    },
+    "await": "restructureApplyResult",
+    "timeout": 120,
+    "abortOnError": true,
+    "expect": {
+     "applied": 0,
+     "failed": 0
+    }
+   },
+   {
+    "label": "rust plans the same moves again",
+    "command": {
+     "planRestructure": {
+      "libraryRoot": "{root}"
+     }
+    },
+    "await": "restructurePlan",
+    "timeout": 120,
+    "abortOnError": true,
+    "expect": {
+     "moves": {
+      "$tol": "count",
+      "value": 8
+     }
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-path-moves-repaired",
+  "description": "Two renames the Swift engine journaled in path-moves.ndjson (intent lines, no done lines, as a kill before the done line leaves them) while their catalog rows still name the old path are repaired when the Rust engine starts: the rows point at the new paths and the journal is cleared. Derived from the Swift-written restructure fixture: its done lines are dropped and two rows put back to their old paths.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "restructure-apply",
+  "fixtureOmit": [
+   "FileID/restructure_undo.ndjson"
+  ],
+  "fixtureDropLines": {
+   "FileID/path-moves.ndjson": [
+    "\"done\""
+   ]
+  },
+  "sql": [
+   "UPDATE files SET path_text='{path:DCIM/100MSDCF/DSC00001.JPG}' WHERE id=1",
+   "UPDATE files SET path_text='{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}' WHERE id=13"
+  ],
+  "steps": [
+   {
+    "label": "rows repaired at start",
+    "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Photos/2026/2026-10-04/DSC00001.JPG}"
+     ],
+     [
+      13,
+      "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}"
+     ]
+    ]
+   },
+   {
+    "label": "journal cleared",
+    "fs": {
+     "absent": [
+      "{state}/FileID/path-moves.ndjson"
+     ]
+    }
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-mlx-install-record",
+  "description": "The Rust engine accepts the MLX install the Swift engine recorded (its installed marker and its verified-identity record, which escapes '/' in paths) without a download.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "mlx-install-record",
+  "appHosted": true,
+  "os": [
+   "darwin"
+  ],
+  "env": {
+   "FILEID_HF_CACHE_ROOT": "{root}/hf"
+  },
+  "steps": [
+   {
+    "label": "rust verifies",
+    "command": {
+     "prewarmModel": {
+      "modelKind": "qwen3_vl_2b"
+     }
+    },
+    "await": "modelDownloadProgress",
+    "filter": {
+     "modelKind": "qwen3_vl_2b",
+     "fraction": 1.0
+    }
+   },
+   {
+    "label": "records",
+    "fs": {
+     "exists": [
+      "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
+      "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
+     ],
+     "contents": {
+      "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
+     }
+    }
+   },
+   {
+    "label": "shutdown",
+    "shutdown": {
+     "exitCode": 0
+    }
+   }
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v20",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v20 (v0.1.0, the oldest build released) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v20",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": []
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": []
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v21",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v21 (the first catalog schema) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v21",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": []
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v28",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v28 (mid-chain) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v28",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "{root}",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": [
+     [
+      1,
+      "generated"
+     ]
+    ]
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ },
+ {
+  "name": "swift-written-older-catalog-v35",
+  "description": "The Rust engine opens a catalog the Swift engine wrote at schema v35 (the version before the current one) and brings it to v36 with every row intact: files with their sizes, times, hashes and inodes, tags, a person and face, text and its search, the library root, chapters and take scores where that version has them; a rescan then finds nothing to do. Built by shared/scripts/make_older_catalogs.py with the Swift engine's own migrator.",
+  "engines": [
+   "rust"
+  ],
+  "start": "rust",
+  "fixture": "older-catalog-v35",
+  "steps": [
+   {
+    "label": "migrated to the current version",
+    "db": "SELECT COUNT(*) FROM grdb_migrations",
+    "expect": [
+     [
+      36
+     ]
+    ]
+   },
+   {
+    "label": "the current schema",
+    "schemaOf": "trash-journal"
+   },
+   {
+    "label": "files kept",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   },
+   {
+    "label": "tags kept",
+    "db": "SELECT file_id,tag,source,score FROM tags ORDER BY file_id,tag,source",
+    "expect": [
+     [
+      1,
+      "generated",
+      "user",
+      null
+     ],
+     [
+      1,
+      "outdoor",
+      "clip",
+      0.91
+     ],
+     [
+      2,
+      "notes",
+      "auto",
+      0.5
+     ]
+    ]
+   },
+   {
+    "label": "person and face kept",
+    "db": "SELECT p.id,p.name,p.file_count,f.id,f.file_id,f.person_id FROM persons p JOIN face_prints f ON f.person_id=p.id",
+    "expect": [
+     [
+      1,
+      "Alex",
+      1,
+      1,
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "label": "text kept",
+    "db": "SELECT file_id,text FROM ocr_text",
+    "expect": [
+     [
+      2,
+      "Quarterly notes from the generated library"
+     ]
+    ]
+   },
+   {
+    "label": "library root",
+    "db": "SELECT path,display,kind FROM library_roots",
+    "expect": [
+     [
+      "{root}",
+      "Generated library",
+      "internal"
+     ]
+    ]
+   },
+   {
+    "label": "chapters",
+    "db": "SELECT id,file_id,title,user_edited FROM catalog_chapters",
+    "expect": [
+     [
+      "generated-chapter",
+      3,
+      "Generated chapter",
+      1
+     ]
+    ]
+   },
+   {
+    "label": "take quality",
+    "db": "SELECT file_id,version FROM take_quality",
+    "expect": [
+     [
+      1,
+      "generated"
+     ]
+    ]
+   },
+   {
+    "label": "search finds the text",
+    "catalog": {
+     "action": "search",
+     "query": "Quarterly notes"
+    },
+    "expect": {
+     "status": "ok",
+     "hits": {
+      "$tol": "contains",
+      "value": [
+       {
+        "fileID": 2,
+        "kind": "ocrText",
+        "text": "Quarterly notes from the generated library"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "label": "a rescan changes nothing",
+    "command": {
+     "startScan": {
+      "rootPath": "{root}"
+     }
+    },
+    "await": "scanComplete",
+    "timeout": 120,
+    "abortOnError": true,
+    "benignErrors": [
+     "rescan_no_changes",
+     "deep_analyze_unavailable"
+    ],
+    "expect": {
+     "processedFiles": 0,
+     "failedFiles": 0
+    }
+   },
+   {
+    "label": "files unchanged by it",
+    "db": "SELECT id,path_text,size_bytes,modified_at,kind,extension,has_faces,has_text,lower(hex(content_hash)),file_ref FROM files ORDER BY id",
+    "expect": [
+     [
+      1,
+      "{path:Pictures/Picture.png}",
+      "{size:Pictures/Picture.png}",
+      "{mtime:Pictures/Picture.png}",
+      "image",
+      "png",
+      1,
+      0,
+      "{sha256:Pictures/Picture.png}",
+      "{inode:Pictures/Picture.png}"
+     ],
+     [
+      2,
+      "{path:Documents/Notes.txt}",
+      "{size:Documents/Notes.txt}",
+      "{mtime:Documents/Notes.txt}",
+      "doc",
+      "txt",
+      0,
+      1,
+      "{sha256:Documents/Notes.txt}",
+      "{inode:Documents/Notes.txt}"
+     ],
+     [
+      3,
+      "{path:Documents/Report.pdf}",
+      "{size:Documents/Report.pdf}",
+      "{mtime:Documents/Report.pdf}",
+      "doc",
+      "pdf",
+      0,
+      1,
+      "{sha256:Documents/Report.pdf}",
+      "{inode:Documents/Report.pdf}"
+     ]
+    ]
+   }
+  ],
+  "os": [
+   "darwin"
+  ]
+ }
+]

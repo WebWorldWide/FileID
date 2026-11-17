@@ -1,0 +1,9 @@
+{"library_root":"{root}","version":3}
+{"source_identity":{"file":{inode:Photos/2026/2026-10-04/DSC00001.JPG},"volume":{device}},"from":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00001.JPG","to":"{root:json}\/DCIM\/100MSDCF\/DSC00001.JPG","file_id":1}
+{"from":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00002.JPG","source_identity":{"volume":{device},"file":{inode:Photos/2026/2026-10-04/DSC00002.JPG}},"file_id":2,"to":"{root:json}\/DCIM\/100MSDCF\/DSC00002.JPG"}
+{"from":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00003.JPG","source_identity":{"volume":{device},"file":{inode:Photos/2026/2026-10-04/DSC00003.JPG}},"file_id":3,"to":"{root:json}\/DCIM\/100MSDCF\/DSC00003.JPG"}
+{"from":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00004.JPG","source_identity":{"volume":{device},"file":{inode:Photos/2026/2026-10-04/DSC00004.JPG}},"file_id":4,"to":"{root:json}\/DCIM\/100MSDCF\/DSC00004.JPG"}
+{"from":"{root:json}\/Photos\/2026\/2026-10-04\/DSC00005.JPG","source_identity":{"volume":{device},"file":{inode:Photos/2026/2026-10-04/DSC00005.JPG}},"file_id":5,"to":"{root:json}\/DCIM\/100MSDCF\/DSC00005.JPG"}
+{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D1.ARW","source_identity":{"volume":{device},"file":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}},"file_id":13,"to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D1.ARW"}
+{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D2.ARW","source_identity":{"volume":{device},"file":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW}},"file_id":14,"to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D2.ARW"}
+{"from":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D3.ARW","source_identity":{"volume":{device},"file":{inode:Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW}},"file_id":15,"to":"{root:json}\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D3.ARW"}
