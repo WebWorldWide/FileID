@@ -62,6 +62,15 @@ struct EngineNoticeKindsTests {
         #expect(Sidebar.errorText(kind: "vlm_model_missing", message: "") == "Install it from Describe Files, then try again.")
     }
 
+    @Test("the Swift engine's switch to faster text reading shows a card with its own words")
+    func carefulTextReadingPaused() {
+        #expect(!EngineClient.isQuietNotice("ocr_accurate_disabled"))
+        #expect(Sidebar.showsErrorCard("ocr_accurate_disabled"))
+        #expect(Sidebar.errorTitle("ocr_accurate_disabled") == "Careful text reading paused")
+        #expect(Sidebar.errorText(kind: "ocr_accurate_disabled", message: "raw::engine {x}")
+                == "FileID had trouble reading text in some photos and switched to faster reading for the rest of this scan. Scan again later to read them carefully.")
+    }
+
     @Test("a stopped folder plan and a fall back explain themselves elsewhere, so the sidebar shows no card")
     func cardlessKinds() {
         #expect(!Sidebar.showsErrorCard("engine_fallback"))

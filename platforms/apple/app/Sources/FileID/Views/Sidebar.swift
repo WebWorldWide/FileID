@@ -245,6 +245,7 @@ struct Sidebar: View {
         case "find_merge_suggestions_failed": return "Looking for matching people didn't finish"
         case "face_cluster_no_model", "face_cluster_embedder_load_failed": return "Faces can't be grouped yet"
         case "engine_output_error": return "FileID's helper stopped"
+        case "ocr_accurate_disabled": return "Careful text reading paused"
         default: return "Something went wrong"
         }
     }
@@ -287,6 +288,8 @@ struct Sidebar: View {
         case "find_merge_suggestions_failed": return "Open People and try Suggested merges again in a moment."
         case "engine_output_error": return "FileID restarts it by itself. If it stays off, quit and reopen FileID."
         case "ipc_frame_too_large": return "That folder plan is too large to show. Try a smaller folder."
+        case "ocr_accurate_disabled":
+            return "FileID had trouble reading text in some photos and switched to faster reading for the rest of this scan. Scan again later to read them carefully."
         default: return looksTechnical(message) ? "Try again. If it keeps happening, quit and reopen FileID." : message
         }
     }
