@@ -3,7 +3,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-use super::{bulk::handle_trash_files, trash_log};
+use super::bulk::handle_trash_files;
+#[cfg(target_os = "macos")]
+use super::trash_log;
 use crate::ipc::{self, sink::Sink, BulkActionResult, EventPayload};
 
 fn catalog_with(files: &[(i64, &std::path::Path)]) -> Arc<Mutex<Connection>> {
@@ -31,6 +33,7 @@ async fn trash(db: &Arc<Mutex<Connection>>, file_ids: Vec<i64>) -> BulkActionRes
     panic!("trashFiles sent no result");
 }
 
+#[cfg(target_os = "macos")]
 fn journaled(batch_id: &str) -> Option<trash_log::TrashLogEntry> {
     trash_log::read_batch(batch_id).ok().flatten()
 }
