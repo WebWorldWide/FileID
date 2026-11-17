@@ -322,3 +322,262 @@ fn people_already_kept_use_up_the_person_cap_and_an_overfull_protected_set_refus
     let (kept, truncated) = cap(clusters, &HashSet::new(), MAX_PERSONS - 10).unwrap();
     assert_eq!((kept.len(), truncated), (10, 0), "a run that fits loses nothing");
 }
+
+fn person_ids(catalog: &Catalog) -> Vec<i64> {
+    let mut statement = catalog.conn.prepare("SELECT id FROM persons ORDER BY id").unwrap();
+    statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+#[test]
+fn mixed_legacy_stale_and_malformed_face_caches_are_deferred_and_keep_every_identity() {
+    for fault in ["model", "processing", "legacy", "revision", "nan"] {
+        let catalog = Catalog::new();
+        catalog.person(10, Some("Confirmed"), false);
+        catalog.person(20, None, false);
+        catalog.face(1, 0, 0.6, Some(10));
+        catalog.face(2, 0, 0.6, Some(20));
+        let fault_sql = match fault {
+            "model" => "UPDATE face_prints SET embedding_model='other-weights' WHERE id=2",
+            "processing" => "UPDATE face_prints SET processing_version='macos-other-crops' WHERE id=2",
+            "legacy" => "UPDATE face_prints SET embedding_model=NULL WHERE id=2",
+            "revision" => "UPDATE face_prints SET source_revision='stale' WHERE id=2",
+            _ => "UPDATE face_prints SET arcface_embedding=?1 WHERE id=2",
+        };
+        if fault == "nan" {
+            catalog.conn.execute(fault_sql, [encode(&[f32::NAN; DIM])]).unwrap();
+        } else {
+            catalog.conn.execute(fault_sql, []).unwrap();
+        }
+        let partition = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+        assert_eq!((partition.rows.len(), partition.deferred), (1, 1), "{fault}");
+        let mut conn = catalog.conn;
+        assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0, "{fault}");
+        let catalog = Catalog { conn, dir: catalog.dir };
+        assert_eq!(catalog.assignments(), vec![(1, Some(10)), (2, Some(20))], "{fault}");
+        let (catalog, outcome) = catalog.run();
+        assert!(outcome.error.is_none(), "{fault}");
+        assert_eq!(outcome.result.deferred_faces, Some(1), "{fault}");
+        assert_eq!(catalog.assignments(), vec![(1, Some(10)), (2, Some(20))], "{fault}");
+        assert_eq!(person_ids(&catalog), vec![10, 20], "{fault}");
+        let name: String = catalog.conn.query_row("SELECT name FROM persons WHERE id=10", [], |row| row.get(0)).unwrap();
+        assert_eq!(name, "Confirmed", "{fault}");
+    }
+}
+
+#[test]
+fn a_bridge_face_cannot_chain_two_named_people_together() {
+    let catalog = Catalog::new();
+    catalog.person(5, None, false);
+    catalog.person(10, Some("Adam"), false);
+    catalog.person(20, Some("Bob"), false);
+    catalog.face(1, 0, 0.6, Some(10));
+    catalog.face(2, 0, 0.6, Some(20));
+    catalog.face(3, 0, 0.6, Some(5));
+    let mut conn = catalog.conn;
+    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(absorbed, 1, "only the unnamed bridge is absorbed");
+    let assignments = catalog.assignments();
+    assert_eq!(&assignments[..2], &[(1, Some(10)), (2, Some(20))], "neither named person loses a face");
+    assert!(matches!(assignments[2].1, Some(10) | Some(20)));
+    let names: Vec<String> = catalog.conn.prepare("SELECT name FROM persons WHERE name IS NOT NULL ORDER BY id").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(names, vec!["Adam", "Bob"]);
+}
+
+#[test]
+fn people_named_only_by_a_title_middle_name_or_suffix_are_never_auto_merged() {
+    let catalog = Catalog::new();
+    catalog.conn.execute("INSERT INTO persons(id,title,is_unknown,created_at,file_count) VALUES(10,'Dr.',0,0,0)", []).unwrap();
+    catalog.conn.execute("INSERT INTO persons(id,middle_name,suffix,is_unknown,created_at,file_count) VALUES(20,'Quincy','Jr.',0,0,0)", []).unwrap();
+    for face in 1..=3 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 4..=6 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    let mut conn = catalog.conn;
+    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(20), Some(20), Some(20)]);
+}
+
+/// `count` unnamed people, one face each, all the same identity: every pair of them qualifies.
+fn crowd(count: i64) -> Catalog {
+    let catalog = Catalog::new();
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 1..=count {
+        catalog.person(id, None, false);
+        catalog.face(id, 0, 0.6, Some(id));
+    }
+    tx.commit().unwrap();
+    catalog
+}
+
+#[test]
+fn a_merge_search_over_its_edge_budget_merges_no_one() {
+    // 1,415 people give 1,000,405 qualifying pairs, one more than the 1,000,000-edge budget allows.
+    let catalog = crowd(1415);
+    let before = catalog.assignments();
+    let mut conn = catalog.conn;
+    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(catalog.assignments(), before, "a search that ran out of budget changes nothing");
+    let file_counts: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons WHERE file_count=0", [], |row| row.get(0)).unwrap();
+    assert_eq!(file_counts, 1415, "no person row was touched");
+
+    let catalog = crowd(1414);
+    let mut conn = catalog.conn;
+    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 1413, "inside the budget the same crowd is one person");
+}
+
+#[test]
+fn an_exhausted_join_budget_returns_no_partial_graph() {
+    let same: Vec<Vec<f32>> = vec![decode(&vector(0, 1, 0.0)); 3];
+    let small = vec![false; 3];
+    let join = |vectors: &[Vec<f32>], small: &[bool], evaluations: usize, found: Vec<(f32, usize, usize)>| {
+        Join { vectors, small, tight: 0.65, loose: 0.55, evaluations, exceeded: false, found }.edges()
+    };
+    assert_eq!(join(&same, &small, 0, Vec::new()).map(|edges| edges.len()), Some(3));
+    assert_eq!(join(&same, &small, JOIN_EVALUATIONS - 2, Vec::new()), None, "direct sweep out of work");
+    assert_eq!(join(&same, &small, 0, vec![(1.0, 0, 0); JOIN_EDGES - 1]), None, "direct sweep out of edges");
+
+    let dense: Vec<Vec<f32>> = vec![decode(&vector(0, 1, 0.0)); 720];
+    let small = vec![false; dense.len()];
+    assert!(dense.len() * (dense.len() - 1) / 2 > JOIN_DIRECT_PAIRS, "the vantage-point path");
+    assert_eq!(join(&dense, &small, 0, Vec::new()).map(|edges| edges.len()), Some(720 * 719 / 2));
+    assert_eq!(join(&dense, &small, JOIN_EVALUATIONS - 100, Vec::new()), None, "tree search out of work");
+    assert_eq!(join(&dense, &small, 0, vec![(1.0, 0, 0); JOIN_EDGES - 100]), None, "tree search out of edges");
+}
+
+#[test]
+fn pairs_at_the_exact_thresholds_are_joined_the_same_by_the_tree_and_the_direct_predicate() {
+    const WIDE: usize = 512;
+    let (tight, loose) = (0.65f32, 0.55f32);
+    let along = |cosine: f32| {
+        let mut values = vec![0.0f32; WIDE];
+        values[0] = cosine;
+        values[1] = (1.0 - cosine * cosine).max(0.0).sqrt();
+        values
+    };
+    let mut vectors = vec![along(1.0)];
+    for cosine in [tight.next_up(), tight, tight.next_down(), loose.next_up(), loose, loose.next_down()] {
+        vectors.push(along(cosine));
+    }
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    while vectors.len() < 720 {
+        let mut values: Vec<f32> = (0..WIDE)
+            .map(|axis| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                if axis < 2 { 0.0 } else { (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5 }
+            })
+            .collect();
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        values.iter_mut().for_each(|v| *v /= norm);
+        vectors.push(values);
+    }
+    let mut small = vec![false; vectors.len()];
+    small[4..=6].fill(true);
+    assert!(vectors.len() * (vectors.len() - 1) / 2 > JOIN_DIRECT_PAIRS, "the vantage-point path");
+    let tree = Join { vectors: &vectors, small: &small, tight, loose, evaluations: 0, exceeded: false, found: Vec::new() }.edges().unwrap();
+    let mut direct = Vec::new();
+    for i in 0..vectors.len() {
+        for j in i + 1..vectors.len() {
+            let cosine = dot(&vectors[i], &vectors[j]);
+            if cosine >= tight || (cosine >= loose && (small[i] || small[j])) {
+                direct.push((cosine, i, j));
+            }
+        }
+    }
+    direct.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let with_base: Vec<usize> = tree.iter().filter(|(_, i, _)| *i == 0).map(|(_, _, j)| *j).collect();
+    assert_eq!(with_base, vec![1, 2, 4, 5], "at or above tight, or at or above loose for a small person, and nothing below");
+    assert_eq!(tree, direct);
+}
+
+#[test]
+fn a_photo_changed_after_the_partition_was_read_refuses_the_commit() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Maya"), false);
+    catalog.face(1, 0, 0.6, Some(10));
+    let selected = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+    assert_eq!(selected.rows.len(), 1);
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0).is_ok());
+    std::fs::write(catalog.dir.0.join("1.jpg"), [1u8, 2]).unwrap();
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0).is_err());
+    let current = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+    assert_eq!((current.rows.len(), current.deferred), (0, 1));
+    assert_eq!(person_ids(&catalog), vec![10]);
+}
+
+#[test]
+fn faces_of_people_marked_unknown_do_not_use_up_the_face_window() {
+    let catalog = Catalog::new();
+    catalog.person(10, None, true);
+    catalog.person(20, None, false);
+    catalog.face(1, 0, 0.6, Some(10));
+    catalog.face(2, 1, 0.6, Some(20));
+    catalog.conn.execute("UPDATE persons SET is_unknown=0", []).unwrap();
+    let loaded = load_partition(&catalog.conn, &space(), &HashSet::from([1]), 0.0, 1).unwrap();
+    assert_eq!(loaded.rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![2]);
+    assert!(!loaded.overflowed);
+}
+
+#[test]
+fn a_pass_with_nothing_to_cluster_still_reports_the_people_it_kept() {
+    let catalog = Catalog::new();
+    catalog.person(10, None, true);
+    catalog.face(1, 0, 0.6, Some(10));
+    let (catalog, outcome) = catalog.run();
+    assert!(outcome.error.is_none());
+    assert_eq!((outcome.result.person_count, outcome.result.face_count), (1, 0));
+    assert_eq!(catalog.assignments(), vec![(1, Some(10))]);
+}
+
+#[test]
+fn oversized_evidence_is_deferred_while_other_people_still_merge() {
+    let catalog = Catalog::new();
+    for (person, face) in [(10, 1), (20, 2), (30, 3)] {
+        catalog.person(person, None, false);
+        catalog.face(face, 0, 0.6, Some(person));
+    }
+    let oversized = encode(&[1.0f32; 4097]);
+    catalog.conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=3", [&oversized]).unwrap();
+    let mut conn = catalog.conn;
+    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 1);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    let assignments = catalog.assignments();
+    assert_eq!(assignments[0].1, assignments[1].1);
+    assert_eq!(assignments[2], (3, Some(30)), "the deferred face keeps its person");
+    let bytes: i64 = catalog.conn.query_row("SELECT LENGTH(arcface_embedding) FROM face_prints WHERE id=3", [], |row| row.get(0)).unwrap();
+    assert_eq!(bytes, 4097 * 4, "and its evidence");
+    assert_eq!(person_ids(&catalog), vec![10, 20, 30], "auto-merge keeps every person row");
+}
+
+#[test]
+fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
+    let catalog = Catalog::new();
+    catalog.face(1, 0, 0.6, None);
+    catalog.face(2, 1, 0.6, None);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 100..100 + MAX_PERSONS as i64 - 1 {
+        tx.execute("INSERT INTO persons(id,is_unknown,created_at,file_count) VALUES(?1,0,0,0)", [id]).unwrap();
+    }
+    tx.commit().unwrap();
+    let plan = |faces: &[i64]| -> Vec<Planned> {
+        faces
+            .iter()
+            .map(|face| Planned { person: None, faces: vec![*face], representative: *face, centroid: decode(&vector(0, 1, 0.0)), radius: 0.1 })
+            .collect()
+    };
+    let pool = HashSet::from([1, 2]);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    let refused = apply(&tx, &plan(&[1, 2]), &pool, &HashSet::new(), 1.0);
+    assert!(refused.is_err(), "8,001 people");
+    drop(tx);
+    assert_eq!(person_ids(&catalog).len(), MAX_PERSONS - 1);
+    assert_eq!(catalog.assignments(), vec![(1, None), (2, None)]);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    assert_eq!(apply(&tx, &plan(&[1]), &pool, &HashSet::new(), 1.0).unwrap(), MAX_PERSONS as i64, "exactly the limit fits");
+}
