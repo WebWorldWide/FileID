@@ -1041,14 +1041,13 @@ struct RestructureView: View {
 
         // Up to 100k moves: mapping, grouping and the two catalog reads run off
         // the main actor; only the assignments below happen on it.
-        let libraryFiles = store.totalFiles
         let deselected = priorDeselectedIDs
         let skipped = skippedOutcomes
         let store = store
         planBuild?.cancel()
         planBuild = Task {
             let model = await Task.detached(priority: .userInitiated) {
-                Self.buildModel(from: plan, libraryFiles: libraryFiles,
+                Self.buildModel(from: plan, libraryFiles: store.countFiles(under: plan.libraryRoot),
                                 deselected: deselected, skipped: skipped, store: store)
             }.value
             guard !Task.isCancelled, let current = libraryRoot,

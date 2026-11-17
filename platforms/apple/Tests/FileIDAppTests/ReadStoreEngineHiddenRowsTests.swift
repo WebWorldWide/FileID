@@ -55,6 +55,29 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(store.files(search: "empty").isEmpty)
     }
 
+    @Test("an Organize Folders plan counts only the files under its own folder")
+    func filesUnderAPlanRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-under-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try DatabaseQueue(path: url.path).write { db in
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,kind) VALUES
+                    (10,'/lib/2021/a.pdf','pdf'), (11,'/lib/2021/x/b.pdf','pdf'), (12,'/lib/2021-old/c.pdf','pdf'),
+                    (13,'/lib/20210/d.pdf','pdf'), (14,'/other/e.jpg','image')
+                """)
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        #expect(store.countFiles(under: "/lib/2021") == 2)
+        #expect(store.countFiles(under: "/lib/2021/") == 2)
+        #expect(store.countFiles(under: "/lib") == 7)
+        #expect(store.countFiles(under: "/nowhere") == 0)
+    }
+
     @Test("the hidden messages match what the engine writes")
     nonisolated func messages() {
         #expect(ReadStore.engineHiddenMessages.count == 2)
