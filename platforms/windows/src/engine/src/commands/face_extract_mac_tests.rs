@@ -206,8 +206,8 @@ fn a_refreshed_vector_keeps_the_face_s_person_and_each_model_keeps_its_own_evide
     let name: String = conn.query_row("SELECT name FROM persons WHERE id=7", [], |r| r.get(0)).unwrap();
     assert_eq!(name, "Confirmed Person");
     assert_eq!(number(&conn, "SELECT person_id FROM catalog_observations WHERE id='faceprint:4'"), Some(7));
-    let confidence: f64 = conn.query_row("SELECT confidence FROM catalog_observations WHERE id='faceprint:4'", [], |r| r.get(0)).unwrap();
-    assert_eq!(confidence, 0.0, "a machine observation is not a confirmation");
+    let unconfirmed: bool = conn.query_row("SELECT confidence=0 FROM catalog_observations WHERE id='faceprint:4'", [], |r| r.get(0)).unwrap();
+    assert!(unconfirmed, "a machine observation is not a confirmation");
 
     let other = pending(&conn, OTHER_MODEL, PROCESSING, 10, 0, 0.0).unwrap().remove(0);
     assert!(persist(&conn, &other, &unit(1), OTHER_MODEL, PROCESSING, 2.0).unwrap());

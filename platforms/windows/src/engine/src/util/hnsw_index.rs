@@ -214,7 +214,7 @@ pub(crate) mod tests {
     /// still reach a query's exact ten nearest, or near matches silently drop out of search.
     #[test]
     fn dense_clusters_keep_routes_to_the_exact_nearest_neighbours() {
-        let mut state = 0xF11E_1D12_345u64;
+        let mut state = 0xF11_E1D1_2345_u64;
         let mut sample = move || {
             state ^= state << 13;
             state ^= state >> 7;

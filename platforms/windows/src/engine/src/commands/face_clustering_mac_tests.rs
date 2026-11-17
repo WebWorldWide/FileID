@@ -379,7 +379,7 @@ fn a_bridge_face_cannot_chain_two_named_people_together() {
     assert_eq!(absorbed, 1, "only the unnamed bridge is absorbed");
     let assignments = catalog.assignments();
     assert_eq!(&assignments[..2], &[(1, Some(10)), (2, Some(20))], "neither named person loses a face");
-    assert!(matches!(assignments[2].1, Some(10) | Some(20)));
+    assert!(matches!(assignments[2].1, Some(10 | 20)));
     let names: Vec<String> = catalog.conn.prepare("SELECT name FROM persons WHERE name IS NOT NULL ORDER BY id").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(names, vec!["Adam", "Bob"]);
 }
@@ -474,7 +474,9 @@ fn pairs_at_the_exact_thresholds_are_joined_the_same_by_the_tree_and_the_direct_
             })
             .collect();
         let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
-        values.iter_mut().for_each(|v| *v /= norm);
+        for value in &mut values {
+            *value /= norm;
+        }
         vectors.push(values);
     }
     let mut small = vec![false; vectors.len()];
