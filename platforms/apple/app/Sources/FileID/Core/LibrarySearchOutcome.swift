@@ -43,6 +43,16 @@ enum LibrarySearchOutcome {
 
     static let plainLabel = "Matches by name, text and what's in the picture"
 
+    /// The engine's summary recounted for the rows a kind filter keeps, in the engine's own wording.
+    /// `hitIDs` is the engine's list in its order (good matches first). Nil when `message` is not a summary.
+    static func narrowed(message: String?, hitIDs: [Int64], keptIDs: Set<Int64>) -> String? {
+        guard let strength = Strength(message: message) else { return nil }
+        let good = hitIDs.prefix(strength.good).filter(keptIDs.contains).count
+        let weaker = hitIDs.dropFirst(strength.good).filter(keptIDs.contains).count
+        if good == 0 { return weaker == 0 ? "No matches." : "No good matches, \(weaker) weaker." }
+        return "\(good) good \(good == 1 ? "match" : "matches")" + (weaker > 0 ? ", \(weaker) weaker." : ".")
+    }
+
     /// `message` is the engine's reply message, nil when it sent none (older engine, no search model).
     static func decide(message: String?, keywordCount: Int, showWeaker: Bool) -> Decision {
         guard let strength = Strength(message: message) else {

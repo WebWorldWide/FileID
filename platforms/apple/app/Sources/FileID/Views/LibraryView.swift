@@ -189,6 +189,7 @@ struct LibraryView: View {
             .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
                 if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotClosePreview)) { _ in previewSelectedID = nil }
             #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
@@ -1027,8 +1028,11 @@ struct LibraryView: View {
                             if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: search reply status=\(response.status) hits=\(response.hits.count) message=\(response.message ?? "nil")\n".utf8)) }
                             #endif
                             let keywordRows = newRows
-                            let decision = LibrarySearchOutcome.decide(message: response.message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             let engineRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            let message = kind == nil ? response.message
+                                : LibrarySearchOutcome.narrowed(message: response.message, hitIDs: response.hits.map(\.fileID),
+                                                                keptIDs: Set(engineRows.map(\.id))) ?? response.message
+                            let decision = LibrarySearchOutcome.decide(message: message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             switch decision.source {
                             case .engine:
                                 let known = Set(engineRows.map(\.id))
