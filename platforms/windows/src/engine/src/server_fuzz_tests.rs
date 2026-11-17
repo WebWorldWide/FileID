@@ -554,6 +554,10 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
 }
 
 
+async fn next_within(events: &mut tokio::sync::mpsc::Receiver<IpcEvent>) -> IpcEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await.expect("an event arrives").expect("sink open")
+}
+
 fn gap_dispatcher(db: Option<Writer>, sink: Sink) -> Dispatcher {
     Dispatcher {
         sink,
@@ -588,12 +592,12 @@ async fn start_scan_with_no_database_answers_db_unavailable_then_a_terminal_phas
     })
     .to_string();
     handle_line(&d, &line).await;
-    let first = events.recv().await.expect("an error event").payload;
+    let first = next_within(&mut events).await.payload;
     assert!(
         matches!(&first, EventPayload::Error(e) if e.inner.kind == "db_unavailable"),
         "first event: {first:?}"
     );
-    let second = events.recv().await.expect("a terminal event").payload;
+    let second = next_within(&mut events).await.payload;
     assert!(matches!(second, EventPayload::PhaseChanged(ref p) if p.inner == ScanPhase::Failed), "second event: {second:?}");
     assert!(!d.scan_active.load(Ordering::Acquire), "no scan slot is left reserved");
 }
@@ -632,7 +636,7 @@ async fn a_second_organize_folders_move_is_refused_while_the_first_runs_and_the_
     .await;
     let mut kinds = Vec::new();
     for _ in 0..2 {
-        match events.recv().await.expect("a refusal").payload {
+        match next_within(&mut events).await.payload {
             EventPayload::Error(e) => kinds.push(e.inner.kind.clone()),
             other => panic!("unexpected event {other:?}"),
         }
