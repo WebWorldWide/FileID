@@ -62,6 +62,14 @@ fn summary_reports_rates_and_omits_unmeasured_fields() {
     assert!(empty.probe_accuracy.is_none() && empty.json_valid_rate.is_none() && empty.generated_tokens_per_second.is_none());
 }
 
+#[test]
+fn peak_memory_is_reported_in_decimal_gigabytes() {
+    let measurement = Measurement { peak_resident_bytes: 2_700_000_000, ..Measurement::default() };
+    assert_eq!(summarize(&measurement, "h", None).peak_resident_gb, Some(2.7));
+    let binary = Measurement { peak_resident_bytes: 1 << 30, ..Measurement::default() };
+    assert_eq!(summarize(&binary, "h", None).peak_resident_gb, Some(1.07));
+}
+
 #[tokio::test]
 async fn tuning_keeps_fastest_identical_output_only() {
     let baseline = ("a caption".to_owned(), 20.0);
