@@ -432,6 +432,13 @@ package final class AccurateOCRBreaker: @unchecked Sendable {
     private let lock = NSLock()
     private var consecutiveFailures = 0
     private var trippedAt: CFAbsoluteTime = 0
+    private var tripHandler: (@Sendable () -> Void)?
+
+    /// Called each time the breaker trips, so the host can tell the user the accurate tier is off.
+    package func onTrip(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        tripHandler = handler
+    }
 
     package var allowed: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -446,8 +453,10 @@ package final class AccurateOCRBreaker: @unchecked Sendable {
         consecutiveFailures = success ? 0 : consecutiveFailures + 1
         let tripped = consecutiveFailures == Self.failureLimit
         if tripped { trippedAt = CFAbsoluteTimeGetCurrent() }
+        let handler = tripped ? tripHandler : nil
         lock.unlock()
         if tripped {
+            handler?()
             ImagingLog.warn("ocr_accurate_disabled",
                             error: "accurate text recognition failed \(Self.failureLimit) times in a row")
         }

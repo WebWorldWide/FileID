@@ -76,6 +76,28 @@ struct TextReadingTests {
         #expect(!breaker.allowed)
     }
 
+    private final class Emitted: @unchecked Sendable {
+        private let lock = NSLock()
+        private var kinds: [String] = []
+        func add(_ error: EngineError) { lock.lock(); kinds.append(error.kind); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return kinds }
+    }
+
+    @Test func tripTellsTheAppOncePerEngineRun() {
+        let breaker = AccurateOCRBreaker()
+        let emitted = Emitted()
+        AccurateTextNotice().install(on: breaker) { emitted.add($0) }
+        breaker.record(success: false)
+        breaker.record(success: false)
+        #expect(emitted.all.isEmpty)
+        breaker.record(success: false)
+        #expect(emitted.all == ["ocr_accurate_disabled"])
+        breaker.record(success: false)
+        breaker.record(success: true)
+        for _ in 0..<AccurateOCRBreaker.failureLimit { breaker.record(success: false) }
+        #expect(emitted.all == ["ocr_accurate_disabled"])
+    }
+
     /// Opt-in like the GPU tests: the first accurate read compiles Vision's model
     /// (minutes on a fresh machine) and hosted runners may lack a Neural Engine.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_OCR_TESTS"] == "1"))

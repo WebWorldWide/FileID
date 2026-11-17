@@ -83,6 +83,9 @@ struct FileIDEngineMain {
         let coordinator = ScanCoordinator()
         let sink = IPCSink.shared
         await JobQueue.shared.attachSink(sink)
+        AccurateTextNotice().install(on: AccurateOCRBreaker.shared) { notice in
+            Task { await sink.emit(.error(notice)) }
+        }
 
         // Open the database ONCE for the engine's lifetime. GRDB explicitly
         // forbids more than one DatabasePool to the same file — opening a
