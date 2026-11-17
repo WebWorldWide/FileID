@@ -1213,6 +1213,6 @@ mod tests {
             assert_eq!(question.measure, "count", "{text}");
             assert!(!question.reduced.split_whitespace().any(|word| ["this", "our", "collection"].contains(&word)), "{text} → {}", question.reduced);
         }
-        assert_eq!(parse_question("the last photos this trip").reduced, "the last photos this trip");
+        assert_eq!(parse_question("how many photos from this trip").reduced, "photos from this trip");
     }
 }
