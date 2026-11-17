@@ -1988,6 +1988,108 @@ mod tests {
         assert_eq!(decoded[0].source_revision, "fixture");
     }
 
+    #[test]
+    fn a_chapter_export_refuses_markers_edited_added_or_deleted_after_its_preview() {
+        let mut fixture = Fixture::new();
+        fixture
+            .conn
+            .execute("INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('gift',1,1,2,'Gift','','r','user',1,1,0)", [])
+            .unwrap();
+        let mut request = fixture.request("vtt");
+        request.recipe.as_mut().unwrap().kind = "chapters".into();
+        let edits = [
+            "UPDATE catalog_chapters SET title='Cake' WHERE id='gift'",
+            "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('song',1,3,4,'Song','','r','user',1,1,0)",
+            "DELETE FROM catalog_chapters WHERE id='song'",
+        ];
+        for edit in edits {
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            let output = std::path::PathBuf::from(&preview.outputs[0].output_path);
+            fixture.conn.execute(edit, []).unwrap();
+            let message = match execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")) {
+                Ok(result) => {
+                    assert_eq!(result.status, "error", "{edit}");
+                    result.message
+                }
+                Err(error) => error.to_string(),
+            };
+            assert!(message.contains("Chapter markers changed"), "{edit}: {message}");
+            assert!(!output.exists(), "{edit}: nothing is written");
+        }
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let text = fs::read_to_string(&exported.outputs[0].output_path).unwrap();
+        assert!(text.contains("Cake") && !text.contains("Song"), "{text}");
+    }
+
+    /// A JPEG whose EXIF says "rotate 90 degrees clockwise to display" and carries a GPS latitude.
+    fn rotated_jpeg_with_location(path: &Path) {
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_fn(32, 16, |x, _| if x < 8 { image::Rgb([255, 255, 255]) } else { image::Rgb([0, 0, 0]) })
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+            .unwrap();
+        let mut tiff: Vec<u8> = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(2u16.to_le_bytes());
+        tiff.extend([0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0]);
+        tiff.extend([0x25, 0x88, 4, 0, 1, 0, 0, 0]);
+        tiff.extend(38u32.to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend([1, 0, 2, 0, 2, 0, 0, 0, b'N', 0, 0, 0]);
+        tiff.extend(0u32.to_le_bytes());
+        let mut segment = vec![0xFF, 0xE1];
+        segment.extend(((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        segment.extend(b"Exif\0\0");
+        segment.extend(tiff);
+        let mut bytes = jpeg[..2].to_vec();
+        bytes.extend(segment);
+        bytes.extend(&jpeg[2..]);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_photo_export_applies_the_exif_orientation_and_keeps_no_location() {
+        let mut fixture = Fixture::new();
+        let source = fixture.root.join("Rotated.jpg");
+        rotated_jpeg_with_location(&source);
+        let mut decoder = ImageReader::open(&source).unwrap().with_guessed_format().unwrap().into_decoder().unwrap();
+        assert_eq!(decoder.orientation().unwrap(), image::metadata::Orientation::Rotate90, "the fixture carries its EXIF");
+        fixture.conn.execute("UPDATE files SET path_text=?1 WHERE id=1", [source.to_str().unwrap()]).unwrap();
+        let original = fs::read(&source).unwrap();
+        for format in ["jpeg", "png"] {
+            let request = fixture.request(format);
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+            assert_eq!(exported.status, "ok", "{}", exported.message);
+            let output = fs::read(&exported.outputs[0].output_path).unwrap();
+            let image = image::load_from_memory(&output).unwrap();
+            assert_eq!((image.width(), image.height()), (8, 16), "{format}: turned upright, then fitted in 16 pixels");
+            let pixels = image.to_rgb8();
+            assert!(pixels.get_pixel(4, 1)[0] > 200 && pixels.get_pixel(4, 14)[0] < 60, "{format}: the white band is turned to the top");
+            assert!(!output.windows(4).any(|window| window == b"Exif"), "{format}: no EXIF block, so no location");
+        }
+        assert_eq!(fs::read(&source).unwrap(), original, "the source keeps its bytes");
+    }
+
+    #[test]
+    fn an_export_stores_the_recipe_it_ran_beside_its_lineage() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let (original, role, recipe): (i64, String, String) = fixture
+            .conn
+            .query_row("SELECT original_id,role,recipe_json FROM catalog_assets", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((original, role.as_str()), (1, "export"));
+        let stored: serde_json::Value = serde_json::from_str(&recipe).unwrap();
+        assert_eq!(stored, serde_json::to_value(request.recipe.as_ref().unwrap()).unwrap());
+        assert_eq!(serde_json::from_value::<ToolRecipe>(stored).unwrap().max_dimension, 16);
+    }
+
     use media_recipes::{MediaProbe, MediaRuntime};
 
     struct FakeMedia {

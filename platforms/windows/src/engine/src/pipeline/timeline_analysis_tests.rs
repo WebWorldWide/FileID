@@ -77,6 +77,15 @@ fn parse_moments_accepts_wrapped_json_and_rejects_bad_ranges() {
     assert!(parse_moments(reversed, &four).is_err());
 }
 
+#[test]
+fn a_moment_reply_over_sixteen_kilobytes_is_refused() {
+    let four = [0.0, 0.5, 1.0, 1.5];
+    let reply = "{\"moments\":[{\"title\":\"Kid swings bat\",\"summary\":\"\",\"firstFrame\":1,\"lastFrame\":3}]}";
+    let at_limit = format!("{reply}{}", " ".repeat(16_384 - reply.len()));
+    assert_eq!(parse_moments(&at_limit, &four).unwrap().len(), 1);
+    assert!(parse_moments(&format!("{at_limit} "), &four).is_err());
+}
+
 fn spans(moments: &[Moment]) -> Vec<(usize, usize)> {
     moments.iter().map(|m| (m.first_frame, m.last_frame)).collect()
 }

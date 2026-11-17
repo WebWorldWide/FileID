@@ -1767,7 +1767,7 @@ mod tests {
     #[test]
     fn invalid_requests_cannot_write_history_or_change_files() {
         let mut conn = crate::db::test_support::memory_db();
-        for text in [String::new(), "x".repeat(2001)] {
+        for text in [String::new(), " ".into(), "\n\t ".into(), "x".repeat(2001)] {
             let request = ChatRequest {
                 request_id: "r".into(),
                 conversation_id: "c".into(),
