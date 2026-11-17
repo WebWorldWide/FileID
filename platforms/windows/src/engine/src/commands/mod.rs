@@ -24,6 +24,8 @@ pub(crate) mod restructure;
 #[cfg(test)]
 mod restructure_plan_counts_tests;
 pub(crate) mod scan;
+#[cfg(test)]
+mod scan_cancel_tests;
 pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
