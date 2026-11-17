@@ -124,6 +124,9 @@
     "description": "Trash snapshot keeps the file's face_prints rows, so put back restores the faces with their people assignment and recounts persons.file_count; Swift joins once its snapshot carries face_prints.",
     "engines": ["rust"],
     "requiresTestTrashRoot": ["darwin"],
+    "knownDivergences": [
+      {"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}
+    ],
     "tree": [
       {"path": "people/a.jpg", "content": "face a\n", "row": {"id": 1, "kind": "image"}},
       {"path": "people/b.jpg", "content": "face b\n", "row": {"id": 2, "kind": "image"}}
