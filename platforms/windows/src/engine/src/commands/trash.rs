@@ -508,6 +508,32 @@ fn persist_windows_restore_receipts(
     Ok(())
 }
 
+/// The canonical library roots the catalog has scanned.
+pub(crate) fn library_roots(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<std::path::PathBuf>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|root| root.ok()).filter_map(|root| std::fs::canonicalize(root).ok()).collect())
+}
+
+/// The innermost root containing `path`.
+pub(crate) fn containing_root(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = crate::util::path_safety::canonicalize_for_containment(path);
+    roots.iter().filter(|root| candidate.starts_with(root)).max_by_key(|root| root.components().count()).cloned()
+}
+
+/// What a put back may anchor in: the catalog's roots, plus the root the signed Trash journal
+/// recorded for this item. The recorded root only authorizes paths inside it, so a wiped catalog
+/// still lets FileID put back what it trashed but nothing outside the folder it was trashed from.
+fn restore_roots(library_roots: &[std::path::PathBuf], item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
+    let mut roots = library_roots.to_vec();
+    if let Some(recorded) = item.library_root.as_deref().and_then(|root| std::fs::canonicalize(root).ok()) {
+        if !roots.contains(&recorded) {
+            roots.push(recorded);
+        }
+    }
+    roots
+}
+
 pub(crate) async fn handle_restore_from_trash(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -516,16 +542,7 @@ pub(crate) async fn handle_restore_from_trash(
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
         let mut entry = trash_log::read_batch(&payload.batch_id)?
             .ok_or_else(|| anyhow::anyhow!("trash log batch {} not found", payload.batch_id))?;
-        let allowed_canonical: Vec<std::path::PathBuf> = {
-            let conn = db.lock();
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.filter_map(|root| root.ok())
-                .filter_map(|root| std::fs::canonicalize(root).ok())
-                .collect()
-        };
+        let library_roots = library_roots(&db.lock())?;
 
         let mut outcomes: Vec<Option<RestoreOutcome>> =
             std::iter::repeat_with(|| None).take(entry.items.len()).collect();
@@ -533,6 +550,7 @@ pub(crate) async fn handle_restore_from_trash(
         for (index, item) in entry.items.iter().enumerate() {
             let original = std::path::Path::new(&item.original_path);
             let candidate = crate::util::path_safety::canonicalize_for_containment(original);
+            let allowed_canonical = restore_roots(&library_roots, item);
             let allowed = allowed_canonical
                 .iter()
                 .any(|root| candidate.starts_with(root));
@@ -1633,6 +1651,59 @@ mod tests {
             restore_disposition(false, true),
             RestoreDisposition::Refused
         );
+    }
+
+    fn journal_item(original: &std::path::Path, library_root: Option<&std::path::Path>) -> trash_log::TrashLogItem {
+        trash_log::TrashLogItem {
+            file_id: 1,
+            original_path: original.to_string_lossy().into_owned(),
+            library_root: library_root.map(|root| root.to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+    }
+
+    fn contains(roots: &[std::path::PathBuf], path: &std::path::Path) -> bool {
+        let candidate = crate::util::path_safety::canonicalize_for_containment(path);
+        roots.iter().any(|root| candidate.starts_with(root))
+    }
+
+    #[test]
+    fn a_wiped_catalog_still_authorizes_the_root_the_journal_recorded() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("fileid-wipe-restore-{}", uuid::Uuid::new_v4()));
+        let library = base.join("library");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(library.join("sub")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        assert!(library_roots(&conn).unwrap().is_empty(), "the wipe left no scan sessions");
+
+        let recorded = journal_item(&library.join("sub/a.jpg"), Some(&library));
+        let roots = restore_roots(&[], &recorded);
+        assert!(contains(&roots, &library.join("sub/a.jpg")), "the put back anchors in the recorded root");
+        assert!(!contains(&roots, &elsewhere.join("a.jpg")), "and nowhere else");
+
+        let legacy = journal_item(&library.join("sub/a.jpg"), None);
+        assert!(!contains(&restore_roots(&[], &legacy), &library.join("sub/a.jpg")), "an entry with no recorded root is still refused");
+
+        let gone = journal_item(&library.join("a.jpg"), Some(&base.join("missing-root")));
+        assert!(restore_roots(&[], &gone).is_empty(), "a recorded root that no longer exists authorizes nothing");
+
+        let forged = journal_item(&elsewhere.join("a.jpg"), Some(&library));
+        assert!(!contains(&restore_roots(&[], &forged), &elsewhere.join("a.jpg")), "a path outside the recorded root is refused");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn trashing_records_the_innermost_root_that_contains_the_file() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("fileid-root-of-{}", uuid::Uuid::new_v4()));
+        let outer = base.join("photos");
+        let inner = outer.join("trips");
+        std::fs::create_dir_all(&inner).unwrap();
+        let roots = vec![outer.clone(), inner.clone()];
+        assert_eq!(containing_root(&roots, &inner.join("a.jpg")), Some(inner));
+        assert_eq!(containing_root(&roots, &outer.join("b.jpg")), Some(outer));
+        assert_eq!(containing_root(&roots, &base.join("c.jpg")), None);
+        std::fs::remove_dir_all(base).ok();
     }
 
     // Deterministic multi-entry: when two log items share one original

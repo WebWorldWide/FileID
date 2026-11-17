@@ -93,6 +93,7 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
     let mut converted = TrashLogItem {
         file_id: item.file_id,
         original_path: item.original_path,
+        library_root: None,
         recycle_bin_id: None,
         recycle_physical_path: None,
         source_identity: None,
