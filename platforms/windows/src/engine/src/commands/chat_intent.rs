@@ -635,7 +635,9 @@ pub fn parse_question(text: &str) -> Question {
             "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all",
         ];
         for (index, word) in words.iter().enumerate() {
-            if filler.contains(&word.as_str()) {
+            let names_the_library = matches!(word.as_str(), "this" | "the" | "our")
+                && words.get(index + 1).is_some_and(|next| next == "library" || next == "collection");
+            if filler.contains(&word.as_str()) || names_the_library {
                 used.insert(index);
             }
         }
@@ -1202,5 +1204,15 @@ mod tests {
         assert_eq!(noun(&["doc".into(), "pdf".into()], 2), "documents");
         assert_eq!(noun(&["image".into(), "video".into()], 2), "photos and videos");
         assert_eq!(noun(&[], 1), "file");
+    }
+
+    #[test]
+    fn this_library_is_not_a_search_subject() {
+        for text in ["How many videos are in this library?", "how many photos are in the collection", "count the videos in our library"] {
+            let question = parse_question(text);
+            assert_eq!(question.measure, "count", "{text}");
+            assert!(!question.reduced.split_whitespace().any(|word| ["this", "our", "collection"].contains(&word)), "{text} → {}", question.reduced);
+        }
+        assert_eq!(parse_question("the last photos this trip").reduced, "the last photos this trip");
     }
 }
