@@ -34,4 +34,32 @@ struct EngineNoticeKindsTests {
         #expect(Sidebar.errorTitle("face_cluster_embedder_load_failed") == "Faces can't be grouped yet")
         #expect(Sidebar.errorTitle("never_heard_of_it") == "Something went wrong")
     }
+
+    @Test("Describe, model install, plan and save failures from either engine have their own title and sentence")
+    func describeAndInstallTitles() {
+        let kinds = ["deep_load_failed", "deep_model_too_big", "deep_source_changed", "deep_targets_failed",
+                     "deep_analyze_selection_too_large", "command_limit_exceeded", "model_integrity_failed",
+                     "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed",
+                     "sentinel_write_failed", "zip_extract_failed", "plan_restructure_db", "plan_restructure_store",
+                     "plan_restructure_invalid", "restructure_undo_journal", "library_busy", "db_write_failed",
+                     "face_cluster_persist_failed", "face_print_persist_failed", "command_handler_panic",
+                     "oversized_ipc_frame", "invalid_face_review_request", "invalid_health_request",
+                     "invalid_list_models_request", "invalid_list_roots_request", "not_applicable_on_platform"]
+        for kind in kinds {
+            #expect(Sidebar.errorTitle(kind) != "Something went wrong", "\(kind)")
+            let text = Sidebar.errorText(kind: kind, message: "Could not load qwen3_vl_2b: mlx::core error {x}")
+            #expect(!text.contains("mlx::"), "\(kind)")
+        }
+        #expect(Sidebar.errorTitle("deep_load_failed") == "An AI model didn't load")
+        #expect(Sidebar.errorTitle("vlm_model_missing") == "This AI model isn't installed")
+        #expect(Sidebar.errorText(kind: "vlm_model_missing", message: "") == "Install it from Describe Files, then try again.")
+    }
+
+    @Test("a stopped folder plan and a fall back explain themselves elsewhere, so the sidebar shows no card")
+    func cardlessKinds() {
+        #expect(!Sidebar.showsErrorCard("engine_fallback"))
+        #expect(!Sidebar.showsErrorCard("plan_restructure_cancelled"))
+        #expect(!EngineClient.isQuietNotice("plan_restructure_cancelled"))
+        #expect(Sidebar.showsErrorCard("deep_load_failed"))
+    }
 }
