@@ -169,13 +169,11 @@ struct DiscoveryTests {
         #expect(!resultPaths.contains(nestedFile.resolvingSymlinksInPath().path))
     }
 
-    // A file the incremental skip set DROPS is still present on
-    // disk, so discovery must refresh its `scanned_at`; otherwise the post-scan
-    // orphan sweep (which prunes rows with `scanned_at < scanStart`) would treat
-    // every skipped-but-present file as a deletion candidate and stop pruning the
-    // genuinely-deleted ones once its cap is saturated.
-    @Test("A skipped unchanged file still gets its scanned_at bumped (R-08)")
-    func skippedFileScannedAtIsBumped() async throws {
+    // A file the incremental skip set drops is still on disk, but its row is left alone: a
+    // rescan with nothing new must not rewrite every row. The walk reports such files as
+    // present, so the orphan sweep does not take their old `scanned_at` for a deletion.
+    @Test("A skipped unchanged file keeps its row untouched and is reported as present")
+    func skippedFileRowIsUntouched() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileIDSkipTouch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -183,12 +181,8 @@ struct DiscoveryTests {
 
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
 
-        // Resolve to the REAL path so the inserted path_text, the skip-set prefix
-        // range, AND the enumerator's output all agree. `realpath` (not
-        // Foundation's resolvingSymlinksInPath, which STRIPS /private) yields the
-        // /private-prefixed form the FileManager enumerator actually emits for a
-        // /var temp dir; otherwise the skip range excludes the row and nothing
-        // skips. (Real scan roots are /Users/.. or /Volumes/.. — no /private.)
+        // realpath (not resolvingSymlinksInPath, which strips /private): the enumerator reports
+        // /private-prefixed paths for a /var temp dir, and the skip range must agree.
         let root = realResolved(tmp)
 
         // A fully-processed doc: it already HAS its BGE text_embedding (seeded below),
@@ -229,18 +223,66 @@ struct DiscoveryTests {
         let discovery = Discovery()
         let result = await discovery.walk(root: root, database: db, forceReprocess: false)
 
-        // Unchanged → SKIPPED (never re-emitted to the pipeline)…
         #expect(!result.contains { $0.url.lastPathComponent == "report.pdf" })
 
-        // …but its scanned_at must be refreshed to ~now so the orphan sweep
-        // (scanned_at < scanStart) won't treat the present file as deleted.
         let after: Double = try await db.pool.read { conn in
             try Double.fetchOne(conn, sql:
                 "SELECT scanned_at FROM files WHERE path_text = ?",
                 arguments: [doc.path]) ?? -1
         }
-        #expect(after > oldScannedAt)
-        #expect(after > fixedMtime.timeIntervalSince1970)
+        #expect(after == oldScannedAt)
+        #expect(await discovery.presentUnchanged == [Discovery.PathFingerprint(doc.path)])
+        let presentUnchanged = await discovery.presentUnchanged
+        let candidates = try await db.pool.read { conn in
+            try FileIDEngineMain.orphanCandidates(
+                conn, scanRootPath: root.path, scanStart: Date(),
+                presentUnchanged: presentUnchanged, cap: 10)
+        }
+        #expect(candidates.isEmpty)
+    }
+
+    @Test("The orphan sweep still finds the row of a file that is gone, past a crowd of present unchanged ones")
+    func orphanCandidatesSkipPresentRows() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDOrphanCandidates-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let root = "/lib"
+        let present = Set((0..<20).map { Discovery.PathFingerprint("/lib/present\($0).jpg") })
+        try await db.pool.write { conn in
+            func insert(_ path: String, scannedAt: Double) throws {
+                try conn.execute(sql: """
+                    INSERT INTO files (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension)
+                    VALUES (?, 0, ?, 1, ?, 'image', 'jpg')
+                    """, arguments: [path, path, scannedAt])
+            }
+            for i in 0..<20 { try insert("/lib/present\(i).jpg", scannedAt: 1_000) }
+            try insert("/lib/gone.jpg", scannedAt: 1_000)
+            try insert("/lib/written-this-scan.jpg", scannedAt: 5_000)
+            try insert("/elsewhere/other.jpg", scannedAt: 1_000)
+        }
+
+        let candidates = try await db.pool.read { conn in
+            try FileIDEngineMain.orphanCandidates(
+                conn, scanRootPath: root, scanStart: Date(timeIntervalSince1970: 2_000),
+                presentUnchanged: present, cap: 5)
+        }
+
+        #expect(candidates.map(\.path) == ["/lib/gone.jpg"])
+    }
+
+    @Test("A walk that kept nothing but found current files says nothing changed; other walks do not")
+    func rescanNoChangesNotice() {
+        let clean = Discovery.Shortfall()
+        let notice = Discovery.rescanNoChangesNotice(kept: 0, shortfall: clean, unchangedFiles: 185, root: "/lib")
+        #expect(notice?.kind == "rescan_no_changes")
+        #expect(notice?.path == "/lib")
+        #expect(Discovery.rescanNoChangesNotice(kept: 1, shortfall: clean, unchangedFiles: 185, root: "/lib") == nil)
+        #expect(Discovery.rescanNoChangesNotice(kept: 0, shortfall: clean, unchangedFiles: 0, root: "/lib") == nil)
+        var partial = Discovery.Shortfall()
+        partial.unreadablePaths = 1
+        #expect(Discovery.rescanNoChangesNotice(kept: 0, shortfall: partial, unchangedFiles: 185, root: "/lib") == nil)
     }
 }
 
@@ -342,7 +384,8 @@ struct FileTypeTableTests {
 
 @Suite("Discovery shortfall notice")
 struct DiscoveryShortfallTests {
-    @Test("unreadable folders and oversized files produce one plain notice; a clean walk none")
+    @Test("unreadable folders and oversized files produce one plain notice; a clean walk none",
+          .enabled(if: getuid() != 0, "root can read a mode 000 directory"))
     func shortfall() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDShortfall-\(UUID().uuidString)")
         let locked = tmp.appendingPathComponent("locked")
@@ -365,5 +408,133 @@ struct DiscoveryShortfallTests {
         #expect(notice.kind == "discovery_partial")
         #expect(notice.message.contains("over 1 MB") && notice.message.contains("couldn't be opened"))
         #expect(Discovery.shortfallNotice(Discovery.Shortfall()) == nil)
+    }
+}
+
+@Suite("Discovery enumerator fallback")
+struct DiscoveryEnumeratorFallbackTests {
+
+    private func makeTree() throws -> (root: URL, expected: [String]) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDFallback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var resolved: String
+        if let real = realpath(base.path, nil) { resolved = String(cString: real); free(real) } else { resolved = base.path }
+        let root = URL(fileURLWithPath: resolved)
+        let payload = Data("x".utf8)
+        let relative = [
+            "top.jpg", "Photos/a.jpg", "Photos/b.jpg", "Photos/c.pdf", "Photos/.hidden.jpg",
+            "Photos/Party/d.jpg", "Photos/Party/e.png", "Photos/Party/Deep/f.jpg",
+            "Photos/Aaa/g.jpg", "Other/h.jpg",
+        ]
+        var expected: [String] = []
+        for path in relative {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try payload.write(to: url)
+            if !url.lastPathComponent.hasPrefix(".") { expected.append(url.path) }
+        }
+        return (root, expected.sorted())
+    }
+
+    @Test("A directory the enumerator gives up on is listed again, once, with its subtree")
+    func fallbackKeepsSubtreeWithoutDuplicates() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        let failing: Set<String> = [
+            root.appendingPathComponent("Photos").path,
+            root.appendingPathComponent("Photos/Party").path,
+        ]
+        await discovery.simulateEnumeratorFailures(in: failing)
+
+        let found = await discovery.walk(root: root).map(\.url.path)
+
+        #expect(found.sorted() == expected)
+        #expect(Set(found).count == found.count)
+        #expect(await discovery.lastShortfall.unreadablePaths == 0)
+    }
+
+    @Test("Streaming walk with a failed directory reports the same count as a clean walk")
+    func streamingFallbackCount() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(in: [root.appendingPathComponent("Photos").path])
+        let kept = await discovery.walkStreaming(root: root) { _ in }
+        #expect(kept == expected.count)
+    }
+
+    @Test("The fallback still honors folder exclusions")
+    func fallbackHonorsExclusions() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(in: [root.appendingPathComponent("Photos").path])
+        let excluded = root.appendingPathComponent("Photos/Party").path
+
+        let found = await discovery.walk(root: root, excludedPaths: [excluded]).map(\.url.path)
+
+        #expect(found.sorted() == expected.filter { !$0.hasPrefix(excluded + "/") })
+    }
+
+    @Test("Siblings the enumerator still yields after reporting a failure are not listed twice")
+    func laterSiblingsAreYieldedOnce() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(
+            in: [root.appendingPathComponent("Photos").path, root.appendingPathComponent("Photos/Party").path],
+            keepYielding: true)
+
+        let found = await discovery.walk(root: root).map(\.url.path)
+
+        #expect(found.sorted() == expected)
+        #expect(Set(found).count == found.count)
+    }
+
+    @Test("A failure reported for the same directory twice lists it once")
+    func repeatedFailureListsOnce() {
+        let record = Discovery.EnumerationRecord()
+        let photos = URL(fileURLWithPath: "/lib/Photos")
+        record.noteYield(of: photos.appendingPathComponent("a.jpg"), parent: photos.path)
+        record.noteFailure(of: photos)
+        record.noteFailure(of: photos)
+        record.noteYield(of: photos.appendingPathComponent("b.jpg"), parent: photos.path)
+
+        #expect(record.failures().map(\.path) == ["/lib/Photos"])
+        #expect(record.covered(photos) == ["a.jpg", "b.jpg"])
+    }
+
+    @Test("The error handler and the enumerator may spell a symlinked prefix differently")
+    func symlinkedPrefixIsOneDirectory() {
+        let record = Discovery.EnumerationRecord()
+        let viaPrivate = URL(fileURLWithPath: "/private/tmp/lib/Photos")
+        let viaLink = URL(fileURLWithPath: "/tmp/lib/Photos")
+        record.noteYield(of: viaPrivate.appendingPathComponent("a.jpg"), parent: viaPrivate.path)
+        record.noteFailure(of: viaLink)
+        record.noteYield(of: viaPrivate.appendingPathComponent("b.jpg"), parent: viaPrivate.path)
+        record.noteFailure(of: viaPrivate)
+
+        #expect(record.failures().count == 1)
+        #expect(record.covered(viaLink) == ["a.jpg", "b.jpg"])
+        #expect(record.covered(viaPrivate) == ["a.jpg", "b.jpg"])
+    }
+
+    @Test("A directory the fallback cannot list either is counted as unreadable",
+          .enabled(if: getuid() != 0, "root can read a mode 000 directory"))
+    func fallbackFailureIsCounted() async throws {
+        let (root, expected) = try makeTree()
+        let locked = root.appendingPathComponent("Other")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let discovery = Discovery()
+        let found = await discovery.walk(root: root).map(\.url.path)
+        #expect(found.sorted() == expected.filter { !$0.contains("/Other/") })
+        #expect(await discovery.lastShortfall.unreadablePaths == 1)
     }
 }

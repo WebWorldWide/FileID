@@ -73,6 +73,32 @@ public actor Discovery {
     }
     public private(set) var lastShortfall = Shortfall()
 
+    /// Files of the last walk that are on disk and need no work: current in the catalog, or
+    /// iCloud-only and left out. Their rows are not rewritten; the orphan sweep reads this set
+    /// to tell them from rows of files that are gone.
+    private(set) var presentUnchanged: Set<PathFingerprint> = []
+
+    /// Plain-language notice (kind `rescan_no_changes`, as the shared engine's) when a walk found
+    /// files the catalog already holds and nothing else to do; nil when anything was kept or the
+    /// walk fell short (that notice says more).
+    public static func rescanNoChangesNotice(kept: Int, shortfall: Shortfall, unchangedFiles: Int, root: String) -> EngineError? {
+        guard kept == 0, unchangedFiles > 0, shortfallNotice(shortfall) == nil else { return nil }
+        return EngineError(
+            kind: "rescan_no_changes",
+            message: "Nothing changed in these files since the last scan. FileID is finishing a quick check of the folder.",
+            path: root)
+    }
+
+    /// Test seam: directories (by enumerator path) whose enumeration is cut short after their first
+    /// entry, as the URL enumerator does on exFAT (or, with `keepYielding`, reported as failed while it
+    /// still yields the rest of the directory).
+    var simulatedFailures: Set<String> = []
+    var simulatedFailuresKeepYielding = false
+    func simulateEnumeratorFailures(in directories: Set<String>, keepYielding: Bool = false) {
+        simulatedFailures = directories
+        simulatedFailuresKeepYielding = keepYielding
+    }
+
     public struct Progress: Sendable {
         public let discovered: Int
         public let isComplete: Bool
@@ -158,6 +184,61 @@ public actor Discovery {
         let prefix: String
     }
 
+    /// What the URL enumerator has handed out, so a directory it fails on can be listed again
+    /// without repeating entries it already returned, whether the enumerator then stops
+    /// yielding that directory or carries on with it. Keys are `directoryKey` paths, because the
+    /// error handler and the yielded URLs need not spell a symlinked prefix the same way.
+    final class EnumerationRecord: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recent: [String: Set<String>] = [:]
+        private var lastParent = ""
+        private var failedChildren: [String: Set<String>] = [:]
+        private var failedOrder: [(key: String, url: URL)] = []
+
+        static func directoryKey(_ path: String) -> String {
+            var key = (path as NSString).standardizingPath
+            for prefix in ["/private/var/", "/private/tmp/", "/private/etc/"] where key.hasPrefix(prefix) {
+                key.removeFirst("/private".count)
+                break
+            }
+            return key
+        }
+
+        func noteYield(of url: URL, parent: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            let key = Self.directoryKey(parent)
+            if key != lastParent {
+                recent = recent.filter { key == $0.key || key.hasPrefix($0.key + "/") }
+                lastParent = key
+            }
+            let name = url.lastPathComponent
+            recent[key, default: []].insert(name)
+            if failedChildren[key] != nil { failedChildren[key]?.insert(name) }
+        }
+
+        func noteFailure(of directory: URL) {
+            lock.lock()
+            defer { lock.unlock() }
+            let key = Self.directoryKey(directory.path)
+            guard failedChildren[key] == nil else { return }
+            failedChildren[key] = recent[key] ?? []
+            failedOrder.append((key, directory))
+        }
+
+        func failures() -> [URL] {
+            lock.lock()
+            defer { lock.unlock() }
+            return failedOrder.map(\.url)
+        }
+
+        func covered(_ directory: URL) -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            return failedChildren[Self.directoryKey(directory.path)] ?? []
+        }
+    }
+
     private struct SkipEntry: Sendable {
         let modifiedAt: Double?
         let size: Int64
@@ -168,7 +249,7 @@ public actor Discovery {
     /// at a million files that can consume hundreds of MiB before tagging even
     /// begins. SHA-256 truncated to 128 bits makes the retained size independent
     /// of path length while keeping collision risk negligible.
-    private struct PathFingerprint: Hashable, Sendable {
+    struct PathFingerprint: Hashable, Sendable {
         let high: UInt64
         let low: UInt64
 
@@ -252,27 +333,32 @@ public actor Discovery {
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
     ) async -> Int {
-        let resourceKeys: [URLResourceKey] = [
-            .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
-            .fileSizeKey, .creationDateKey
-        ]
+        // `.fileSizeKey` is deliberately not prefetched: on exFAT volumes the batched
+        // fetch fails with EINVAL for some directories and the enumerator then drops
+        // the rest of that directory. The size comes from the per-file stat instead.
+        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey, .creationDateKey]
         // Without an errorHandler the enumerator SILENTLY drops any entry it
         // can't read (permission denied, a NAS share that drops mid-scan, a file
         // removed underfoot) — the user gets an incomplete library with no warning.
-        // Count the failures and return true to keep walking, so one unreadable
-        // subtree can't truncate the scan; the running total is surfaced as a
+        // A directory the enumerator fails on is listed again with contentsOfDirectory
+        // once the walk ends, so a quirk of one volume never drops its subtree. Only
+        // what that second listing cannot read is counted, and surfaced as a
         // non-fatal `discovery_partial` summary below, mirroring the Windows engine
         // (scan_session.rs error_count → "discovery_partial").
         var discoveryErrorCount = 0
         var oversizedCount = 0
+        let record = EnumerationRecord()
+        let simulatedFailures = self.simulatedFailures
+        let simulatedFailuresKeepYielding = self.simulatedFailuresKeepYielding
+        var failedSimulatedParents = Set<String>()
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: resourceKeys,
             options: skipHidden ? [.skipsHiddenFiles] : [],
             errorHandler: { url, error in
-                discoveryErrorCount += 1
-                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
+                JSONLog.shared.warn(ev: "discovery_enumerator_fallback",
                                     path: redactPathForLog(url.path), error: "\(error)")
+                record.noteFailure(of: url)
                 return true
             }
         ) else {
@@ -283,35 +369,30 @@ public actor Discovery {
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
         var kept = 0
         var sinceLastProgress = 0
-        // Paths skipped this scan whose `scanned_at` must still be
-        // bumped to "now" so the post-scan orphan sweep doesn't mistake a present-
-        // but-skipped file for a deletion. Captured once at the walk's start
-        // (always > the upstream scanStart), flushed in bounded batches.
-        var skippedTouch: [String] = []
-        let touchTime = Date().timeIntervalSince1970
+        // Files skipped or left out this walk are present, so the post-scan orphan sweep
+        // must not take their untouched rows for deletions; it reads them from here.
+        var present = Set<PathFingerprint>()
         var cloudOnlyCount = 0
         var movedCount = 0
         let libraryHasRows = skip?.isEmpty == false
 
-        // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
-        // async contexts (Sendable issues). nextObject() is the sync escape.
-        while let next = enumerator.nextObject() {
-            guard let url = next as? URL else { continue }
-            if cancelCheck() { break }
+        enum Step { case file, directory, excludedDirectory, other }
+
+        func handle(_ url: URL, isolation: isolated (any Actor)? = #isolation) async -> Step {
             let values = try? url.resourceValues(forKeys: Set(resourceKeys))
             // Skip directories (enumerator yields both; we want files).
             if values?.isDirectory == true {
-                if Self.isExcluded(url.path, by: exclusions) {
-                    enumerator.skipDescendants()
-                }
-                continue
+                return Self.isExcluded(url.path, by: exclusions) ? .excludedDirectory : .directory
             }
-            if Self.isExcluded(url.path, by: exclusions) { continue }
-            if values?.isRegularFile != true { continue }
-            if url.path.hasPrefix(Self.engineStatePrefix) { continue }
+            if Self.isExcluded(url.path, by: exclusions) { return .other }
+            if values?.isRegularFile != true { return .other }
+            if url.path.hasPrefix(Self.engineStatePrefix) { return .other }
             let ext = url.pathExtension
-            guard FileTypes.isCataloged(name: url.lastPathComponent) else { continue }
-            let size = Int64(values?.fileSize ?? 0)
+            guard FileTypes.isCataloged(name: url.lastPathComponent) else { return .other }
+            // One stat gives the size, the inode, the cloud flag and the modification time as the
+            // catalog stores it (seconds plus nanoseconds, not a Date's rounding).
+            let identity = Self.identity(of: url)
+            let size = identity.size ?? 0
             let fileKind = FileTypes.kind(forExtension: ext)
             // Video, audio and other files are never decoded whole, so the size cap does not apply.
             let streamed = fileKind == .video || fileKind == .audio || fileKind == .other
@@ -319,7 +400,7 @@ public actor Discovery {
                 oversizedCount += 1
                 JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
-                continue
+                return .other
             }
             // Incremental skip: a DB row that succeeded before and still
             // has the same size AND the same mtime as on disk (the DBWriter
@@ -328,30 +409,21 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row; a lookup miss
             // fails safe (the file is processed).
-            // One stat gives the inode, the cloud flag and the modification time as the
-            // catalog stores it (seconds plus nanoseconds, not a Date's rounding).
-            let identity = Self.identity(of: url)
-            if let skip, let entry = skip[PathFingerprint(url.path)],
+            let fingerprint = PathFingerprint(url.path)
+            if let skip, let entry = skip[fingerprint],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: identity.modified,
                    currentSize: size) {
-                // The file is PRESENT (just unchanged) — record it
-                // so its row's `scanned_at` is refreshed; otherwise the orphan
-                // sweep (scanned_at < scanStart) would treat it as deleted.
-                skippedTouch.append(url.path)
-                if skippedTouch.count >= 2_000 {
-                    await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
-                    skippedTouch.removeAll(keepingCapacity: true)
-                }
-                continue
+                present.insert(fingerprint)
+                return .other
             }
             // Reading a cloud-only file makes macOS download it. Leave it out
             // (keeping any row it already has) until it is on this Mac.
             if identity.cloudOnly {
                 cloudOnlyCount += 1
-                skippedTouch.append(url.path)
-                continue
+                present.insert(fingerprint)
+                return .other
             }
             var discovered = DiscoveredFile(
                 url: url,
@@ -376,10 +448,50 @@ public actor Discovery {
                 progress(kept)
                 sinceLastProgress = 0
             }
+            return .file
         }
-        if !skippedTouch.isEmpty {
-            await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
+
+        // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
+        // async contexts (Sendable issues). nextObject() is the sync escape.
+        while let next = enumerator.nextObject() {
+            guard let url = next as? URL else { continue }
+            if cancelCheck() { break }
+            let parent = url.deletingLastPathComponent().path
+            if !simulatedFailuresKeepYielding, failedSimulatedParents.contains(parent) {
+                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            record.noteYield(of: url, parent: parent)
+            if await handle(url) == .excludedDirectory { enumerator.skipDescendants() }
+            if simulatedFailures.contains(parent), failedSimulatedParents.insert(parent).inserted {
+                record.noteFailure(of: url.deletingLastPathComponent())
+            }
         }
+        var fallbackDirectories = record.failures()
+        var listed = Set<String>()
+        while !fallbackDirectories.isEmpty, !cancelCheck() {
+            let directory = fallbackDirectories.removeLast()
+            guard listed.insert(EnumerationRecord.directoryKey(directory.path)).inserted else { continue }
+            let covered = record.covered(directory)
+            let children: [URL]
+            do {
+                children = try FileManager.default.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: resourceKeys,
+                    options: skipHidden ? [.skipsHiddenFiles] : [])
+            } catch {
+                discoveryErrorCount += 1
+                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
+                                    path: redactPathForLog(directory.path), error: "\(error)")
+                continue
+            }
+            for child in children.sorted(by: { $0.path > $1.path }) where !covered.contains(child.lastPathComponent) {
+                if cancelCheck() { break }
+                if await handle(child) == .directory { fallbackDirectories.append(child) }
+            }
+        }
+        presentUnchanged = present
         // Non-fatal partial-discovery summary: some entries under `root` couldn't be
         // read this walk (counted by the enumerator's errorHandler above). Logged so
         // the app (Settings → Logs) can tell the user the library may be incomplete
@@ -400,45 +512,13 @@ public actor Discovery {
         return kept
     }
 
-    /// Bump `scanned_at` for files SKIPPED this scan. A skip never
-    /// reaches the DBWriter UPSERT that normally refreshes `scanned_at`, so without
-    /// this the post-scan orphan sweep — which prunes rows whose `scanned_at`
-    /// predates the scan — would saturate its candidate cap with present-but-skipped
-    /// files and fail to delete genuinely-gone ones. A cheap UPDATE-only touch keeps
-    /// the skip set and the orphan sweep agreeing on "seen this scan". Bound the
-    /// IN-list to stay under SQLite's bound-variable limit. Fail-safe: a touch error
-    /// only risks an over-eager sweep candidate next run, never data loss, so it is
-    /// logged and swallowed.
-    private static func touchScannedAt(
-        _ paths: [String], to scannedAt: Double, database: Database?
-    ) async {
-        guard let database, !paths.isEmpty else { return }
-        do {
-            try await database.pool.write { db in
-                for chunk in stride(from: 0, to: paths.count, by: 500).map({
-                    Array(paths[$0..<min($0 + 500, paths.count)])
-                }) {
-                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
-                    var args: [DatabaseValueConvertible] = [scannedAt]
-                    args.append(contentsOf: chunk)
-                    try db.execute(
-                        sql: "UPDATE files SET scanned_at = ? WHERE path_text IN (\(placeholders))",
-                        arguments: StatementArguments(args))
-                }
-            }
-        } catch {
-            JSONLog.shared.warn(ev: "discovery_skip_touch_failed",
-                                path: redactPathForLog(paths.first ?? ""), error: "\(error)")
-        }
-    }
-
     /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
     /// the Windows NTFS MFT file_ref (platform.rs `file_ref`). Stored as INTEGER
     /// for cross-platform DB byte-parity. `stat` (follows symlinks) so a
     /// symlinked regular file resolves to its target's identity, matching the
     /// Windows CreateFileW path; nil on any error (heal simply won't fire).
-    /// Computed only for KEPT files (post incremental-skip), so the extra syscall
-    /// is paid once per file already bound for the ANE/Vision/CLIP/OCR pass.
+    /// Computed once per cataloged file, before the size cap and the incremental
+    /// skip, so the walk pays a single stat per file.
     ///
     /// CAUTION: unlike the Windows NTFS file_ref, st_ino carries NO
     /// sequence/generation number — APFS/HFS reuse an inode freely after a file is
@@ -451,18 +531,18 @@ public actor Discovery {
         identity(of: url).inode
     }
 
-    /// One `stat` for both the inode and SF_DATALESS, the flag macOS sets on a
+    /// One `stat` for the inode, the size and SF_DATALESS, the flag macOS sets on a
     /// file whose contents live only in iCloud (or another file provider).
     /// `modified` is the Rust engine's value, including 0 for a time before 1970 (its discovery
     /// stores 0 there); it is nil only when the stat fails.
-    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool, modified: Double?) {
+    static func identity(of url: URL) -> (inode: UInt64?, cloudOnly: Bool, modified: Double?, size: Int64?) {
         var st = stat()
         let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
             guard let rep else { return false }
             return stat(rep, &st) == 0
         }
-        guard ok else { return (nil, false, nil) }
-        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0, FileModificationTime.unixSeconds(st) ?? 0)
+        guard ok else { return (nil, false, nil, nil) }
+        return (UInt64(st.st_ino), st.st_flags & UInt32(SF_DATALESS) != 0, FileModificationTime.unixSeconds(st) ?? 0, Int64(st.st_size))
     }
 
     /// True when no row sits at `path` yet and a successfully scanned row with the

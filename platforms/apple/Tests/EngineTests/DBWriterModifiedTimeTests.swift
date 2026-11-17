@@ -66,6 +66,8 @@ struct DBWriterModifiedTimeTests {
         // Foundation's own reading of the same file differs in the last bit.
         let foundation = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970
         #expect(foundation != identity.modified)
+        #expect(identity.size == 1)
         #expect(Discovery.identity(of: url.appendingPathExtension("missing")).modified == nil)
+        #expect(Discovery.identity(of: url.appendingPathExtension("missing")).size == nil)
     }
 }
