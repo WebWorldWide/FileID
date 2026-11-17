@@ -74,9 +74,14 @@ public actor Discovery {
     public private(set) var lastShortfall = Shortfall()
 
     /// Test seam: directories (by enumerator path) whose enumeration is cut short after their first
-    /// entry, as the URL enumerator does on exFAT.
+    /// entry, as the URL enumerator does on exFAT (or, with `keepYielding`, reported as failed while it
+    /// still yields the rest of the directory).
     var simulatedFailures: Set<String> = []
-    func simulateEnumeratorFailures(in directories: Set<String>) { simulatedFailures = directories }
+    var simulatedFailuresKeepYielding = false
+    func simulateEnumeratorFailures(in directories: Set<String>, keepYielding: Bool = false) {
+        simulatedFailures = directories
+        simulatedFailuresKeepYielding = keepYielding
+    }
 
     public struct Progress: Sendable {
         public let discovered: Int
@@ -164,33 +169,57 @@ public actor Discovery {
     }
 
     /// What the URL enumerator has handed out, so a directory it fails on can be listed again
-    /// without repeating entries it already returned.
-    private final class EnumerationRecord: @unchecked Sendable {
+    /// without repeating entries it already returned, whether the enumerator then stops
+    /// yielding that directory or carries on with it. Keys are `directoryKey` paths, because the
+    /// error handler and the yielded URLs need not spell a symlinked prefix the same way.
+    final class EnumerationRecord: @unchecked Sendable {
         private let lock = NSLock()
-        private var yieldedChildren: [String: Set<String>] = [:]
+        private var recent: [String: Set<String>] = [:]
         private var lastParent = ""
-        private var failed: [(url: URL, covered: Set<String>)] = []
+        private var failedChildren: [String: Set<String>] = [:]
+        private var failedOrder: [(key: String, url: URL)] = []
+
+        static func directoryKey(_ path: String) -> String {
+            var key = (path as NSString).standardizingPath
+            for prefix in ["/private/var/", "/private/tmp/", "/private/etc/"] where key.hasPrefix(prefix) {
+                key.removeFirst("/private".count)
+                break
+            }
+            return key
+        }
 
         func noteYield(of url: URL, parent: String) {
             lock.lock()
             defer { lock.unlock() }
-            if parent != lastParent {
-                yieldedChildren = yieldedChildren.filter { parent == $0.key || parent.hasPrefix($0.key + "/") }
-                lastParent = parent
+            let key = Self.directoryKey(parent)
+            if key != lastParent {
+                recent = recent.filter { key == $0.key || key.hasPrefix($0.key + "/") }
+                lastParent = key
             }
-            yieldedChildren[parent, default: []].insert(url.lastPathComponent)
+            let name = url.lastPathComponent
+            recent[key, default: []].insert(name)
+            if failedChildren[key] != nil { failedChildren[key]?.insert(name) }
         }
 
         func noteFailure(of directory: URL) {
             lock.lock()
             defer { lock.unlock() }
-            failed.append((directory, yieldedChildren[directory.path] ?? []))
+            let key = Self.directoryKey(directory.path)
+            guard failedChildren[key] == nil else { return }
+            failedChildren[key] = recent[key] ?? []
+            failedOrder.append((key, directory))
         }
 
-        func failures() -> [(url: URL, covered: Set<String>)] {
+        func failures() -> [URL] {
             lock.lock()
             defer { lock.unlock() }
-            return failed
+            return failedOrder.map(\.url)
+        }
+
+        func covered(_ directory: URL) -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            return failedChildren[Self.directoryKey(directory.path)] ?? []
         }
     }
 
@@ -304,6 +333,7 @@ public actor Discovery {
         var oversizedCount = 0
         let record = EnumerationRecord()
         let simulatedFailures = self.simulatedFailures
+        let simulatedFailuresKeepYielding = self.simulatedFailuresKeepYielding
         var failedSimulatedParents = Set<String>()
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -420,7 +450,7 @@ public actor Discovery {
             guard let url = next as? URL else { continue }
             if cancelCheck() { break }
             let parent = url.deletingLastPathComponent().path
-            if failedSimulatedParents.contains(parent) {
+            if !simulatedFailuresKeepYielding, failedSimulatedParents.contains(parent) {
                 if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
                     enumerator.skipDescendants()
                 }
@@ -428,14 +458,16 @@ public actor Discovery {
             }
             record.noteYield(of: url, parent: parent)
             if await handle(url) == .excludedDirectory { enumerator.skipDescendants() }
-            if simulatedFailures.contains(parent) {
-                failedSimulatedParents.insert(parent)
+            if simulatedFailures.contains(parent), failedSimulatedParents.insert(parent).inserted {
                 record.noteFailure(of: url.deletingLastPathComponent())
             }
         }
         var fallbackDirectories = record.failures()
+        var listed = Set<String>()
         while !fallbackDirectories.isEmpty, !cancelCheck() {
-            let (directory, covered) = fallbackDirectories.removeLast()
+            let directory = fallbackDirectories.removeLast()
+            guard listed.insert(EnumerationRecord.directoryKey(directory.path)).inserted else { continue }
+            let covered = record.covered(directory)
             let children: [URL]
             do {
                 children = try FileManager.default.contentsOfDirectory(
@@ -449,7 +481,7 @@ public actor Discovery {
             }
             for child in children.sorted(by: { $0.path > $1.path }) where !covered.contains(child.lastPathComponent) {
                 if cancelCheck() { break }
-                if await handle(child) == .directory { fallbackDirectories.append((child, [])) }
+                if await handle(child) == .directory { fallbackDirectories.append(child) }
             }
         }
         if !skippedTouch.isEmpty {

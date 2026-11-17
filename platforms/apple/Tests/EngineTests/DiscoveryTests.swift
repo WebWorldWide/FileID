@@ -436,7 +436,51 @@ struct DiscoveryEnumeratorFallbackTests {
         #expect(found.sorted() == expected.filter { !$0.hasPrefix(excluded + "/") })
     }
 
-    @Test("A directory the fallback cannot list either is counted as unreadable")
+    @Test("Siblings the enumerator still yields after reporting a failure are not listed twice")
+    func laterSiblingsAreYieldedOnce() async throws {
+        let (root, expected) = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = Discovery()
+        await discovery.simulateEnumeratorFailures(
+            in: [root.appendingPathComponent("Photos").path, root.appendingPathComponent("Photos/Party").path],
+            keepYielding: true)
+
+        let found = await discovery.walk(root: root).map(\.url.path)
+
+        #expect(found.sorted() == expected)
+        #expect(Set(found).count == found.count)
+    }
+
+    @Test("A failure reported for the same directory twice lists it once")
+    func repeatedFailureListsOnce() {
+        let record = Discovery.EnumerationRecord()
+        let photos = URL(fileURLWithPath: "/lib/Photos")
+        record.noteYield(of: photos.appendingPathComponent("a.jpg"), parent: photos.path)
+        record.noteFailure(of: photos)
+        record.noteFailure(of: photos)
+        record.noteYield(of: photos.appendingPathComponent("b.jpg"), parent: photos.path)
+
+        #expect(record.failures().map(\.path) == ["/lib/Photos"])
+        #expect(record.covered(photos) == ["a.jpg", "b.jpg"])
+    }
+
+    @Test("The error handler and the enumerator may spell a symlinked prefix differently")
+    func symlinkedPrefixIsOneDirectory() {
+        let record = Discovery.EnumerationRecord()
+        let viaPrivate = URL(fileURLWithPath: "/private/tmp/lib/Photos")
+        let viaLink = URL(fileURLWithPath: "/tmp/lib/Photos")
+        record.noteYield(of: viaPrivate.appendingPathComponent("a.jpg"), parent: viaPrivate.path)
+        record.noteFailure(of: viaLink)
+        record.noteYield(of: viaPrivate.appendingPathComponent("b.jpg"), parent: viaPrivate.path)
+        record.noteFailure(of: viaPrivate)
+
+        #expect(record.failures().count == 1)
+        #expect(record.covered(viaLink) == ["a.jpg", "b.jpg"])
+        #expect(record.covered(viaPrivate) == ["a.jpg", "b.jpg"])
+    }
+
+    @Test("A directory the fallback cannot list either is counted as unreadable",
+          .enabled(if: getuid() != 0, "root can read a mode 000 directory"))
     func fallbackFailureIsCounted() async throws {
         let (root, expected) = try makeTree()
         let locked = root.appendingPathComponent("Other")
