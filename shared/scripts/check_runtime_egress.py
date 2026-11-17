@@ -157,7 +157,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "9b264a34ac14bb157b623a1ad370506562fd8596a8973386e181d04dc505c34f",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "06d8ce706dfe6031ebc2165d25d91cd0ab2328a3ad69639a0edb4a3c3f41fd39",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "bbd632e6861c4061de32bcbf22b28d51bd2d84d7a5783979aabc86d70172c5a7",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "9fea05f5a1148d7c96ea96ff99f8efd4972fb2533bb55d2f78ce9866d26a3af7",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "c5d0373ae2ab87e8b618fbf2ced08eaf94a965a54c14f8fe47b377663b52f3f6",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "b5114808c63e89633335e8e1e9eb3d913ccc72e6cc63778c02917589f4624cbe",
   "platforms/windows/src/engine/src/commands/restructure.rs": "04a4cb4553be1b8216cefb0d031fbd7cbb0cac1c5a7c5986b66519cb3e45c523",
   "platforms/windows/src/engine/src/commands/trash.rs": "b77e0167e8b0852e1130a19889dd43fd74f7b663bc0b0d992e87ae5e7f571f2f",
