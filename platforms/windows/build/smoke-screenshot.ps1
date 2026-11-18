@@ -4,7 +4,7 @@
 # the primary monitor at intervals, then exits the app cleanly. Output:
 #   build/smoke-out/launch.png      -- ~1s after window appears
 #   build/smoke-out/welcome.png     -- ~3s after launch (welcome sheet should be up)
-#   build/smoke-out/post-click.png  -- ~6s after launch (was 3s after Tab+Enter)
+#   build/smoke-out/post-click.png  -- ~6s after launch
 #   build/smoke-out/app.log         -- snapshot of %LOCALAPPDATA%\FileID\logs\app.log
 #
 # Use this from another shell to verify the install flow remotely:
@@ -51,13 +51,11 @@ function Capture-Screen([string]$path) {
     Write-Host "  -> $path"
 }
 
-# Launch + wait for window.
 $proc = Start-Process -FilePath $AppExe -PassThru
 Write-Host "  PID = $($proc.Id)"
 Start-Sleep -Seconds $LaunchWaitSeconds
 Capture-Screen (Join-Path $OutDir "launch.png")
 
-# Wait for welcome sheet animation.
 Start-Sleep -Seconds $WelcomeWaitSeconds
 Capture-Screen (Join-Path $OutDir "welcome.png")
 
@@ -67,7 +65,6 @@ Capture-Screen (Join-Path $OutDir "welcome.png")
 Start-Sleep -Seconds $PostClickWaitSeconds
 Capture-Screen (Join-Path $OutDir "post-click.png")
 
-# Snapshot app.log.
 $appLog = Join-Path $env:LOCALAPPDATA "FileID\logs\app.log"
 if (Test-Path $appLog) {
     Copy-Item -Force $appLog (Join-Path $OutDir "app.log")
@@ -76,7 +73,6 @@ if (Test-Path $appLog) {
     Write-Host "  (no app.log found at $appLog)" -ForegroundColor Yellow
 }
 
-# Clean shutdown.
 try {
     if (-not $proc.HasExited) {
         Write-Host "Closing FileID..."

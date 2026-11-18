@@ -35,7 +35,6 @@ if (-not (Test-Path $EnginePath)) { Bad "engine not built: $EnginePath"; exit 2 
 if (-not (Test-Path $Corpus))     { Bad "corpus not found: $Corpus"; exit 2 }
 if (-not (Test-Path $RealModels)) { Bad "real Models dir missing: $RealModels"; exit 2 }
 
-# --- isolated state dir (preserves the user's real library) -----------
 # The engine's root() = %LOCALAPPDATA%\FileID, so with LOCALAPPDATA=$Temp the
 # real state dir is $Temp\FileID. The junction + DB must live THERE, not in $Temp.
 $Temp  = Join-Path $env:TEMP "fileid_audit_state"
@@ -52,7 +51,6 @@ $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 OK "isolated state dir: $State  (Models junctioned; real library untouched)"
 
-# --- colocate the runtime DLLs beside the engine ---------------------
 $fetch = Join-Path $BuildDir "fetch-runtime-deps.ps1"
 $outDir = Split-Path -Parent $EnginePath
 if (Test-Path $fetch) {
@@ -70,7 +68,6 @@ Info "corpus: $Corpus  ($corpusCount files)"
 $eventLog = Join-Path $Temp "events.jsonl"
 "" | Set-Content $eventLog
 
-# --- spawn engine -----------------------------------------------------
 Step "Launching engine (isolated LOCALAPPDATA)"
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $EnginePath
@@ -122,7 +119,6 @@ try {
         if ($readyLine -match "`"$k`"\s*:\s*`"?([^,`"}]+)") { Info "$k = $($Matches[1])" }
     }
 
-    # --- scan ---------------------------------------------------------
     Step "Scanning ($corpusCount files; timeout ${ScanTimeoutMin}m)"
     $scanStart = Get-Date
     Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null; rescan = $true } } }
@@ -142,17 +138,14 @@ try {
     $tput = if ($scanSec -gt 0) { [math]::Round($processed / $scanSec, 1) } else { 0 }
     Info "throughput = $tput files/s"
 
-    # --- face clustering ---------------------------------------------
     Step "Face clustering"
     Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
     if (Wait-For '"faceClusteringComplete"' 300) { OK "clustering complete" } else { Warn "clustering did not report complete in 5m" }
 
-    # --- restructure PLAN (non-destructive) --------------------------
     Step "Restructure plan (plan only — NOT applied)"
     Send-Cmd @{ id = "plan-1"; payload = @{ planRestructure = @{ libraryRoot = $Corpus } } }
     if (Wait-For '"restructurePlan"' 300) { OK "restructure plan produced" } else { Warn "no restructure plan in 5m" }
 
-    # --- merge suggestions -------------------------------------------
     Step "Merge suggestions"
     Send-Cmd @{ id = "merge-1"; payload = @{ findMergeSuggestions = @{} } }
     Wait-For '"mergeSuggestions"' 120 | Out-Null
@@ -168,7 +161,6 @@ finally {
     if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
 }
 
-# --- analysis ---------------------------------------------------------
 Step "Telemetry"
 $dbPath = Join-Path $State "fileid.sqlite"
 Info "DB: $dbPath  ($([math]::Round((Get-Item $dbPath -ErrorAction SilentlyContinue).Length/1MB,2)) MB)"
@@ -185,7 +177,6 @@ $py = $null; foreach ($c in @('python','py')) { if (Get-Command $c -ErrorAction 
 if ($py) { $env:ASSERT_MIN_FILES = "1"; & $py (Join-Path $BuildDir "scan_assertions.py") $dbPath }
 else { Warn "python not found; skipping DB assertions" }
 
-# --- cleanup ----------------------------------------------------------
 Step "Cleanup (removing junction + temp; user library untouched)"
 $j = Join-Path $State "Models"
 if (Test-Path $j) { cmd /c rmdir "$j" 2>$null }

@@ -104,7 +104,6 @@ try {
     if (-not $readyJson) {
         $failures += 'engine did not emit a ready event within timeout'
     } else {
-        # Validate the ready event shape.
         try {
             $parsed = $readyJson | ConvertFrom-Json
             $payload = $parsed.payload
@@ -127,13 +126,11 @@ try {
         }
     }
 
-    # Send shutdown.
     Write-Host '[engine-smoke] Sending shutdown...' -ForegroundColor Cyan
     $stdin.WriteLine('{"id":"smoke-shutdown","payload":{"shutdown":{}}}')
     $stdin.Flush()
     $stdin.Close()
 
-    # Wait for clean exit.
     if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
         $failures += 'engine did not exit within timeout after shutdown'
         try { $proc.Kill() } catch { }

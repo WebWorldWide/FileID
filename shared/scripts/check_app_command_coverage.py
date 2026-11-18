@@ -42,7 +42,7 @@ HANDLERS = {
 # Reachable commands that no conformance case can run on CI's runner, with the
 # reason and where the Rust engine was checked against the Swift engine instead.
 # Empty: every app-reachable command has a case. An entry looks like
-# ("command", "benchmarkModel"): "needs an installed model; STATE 2026-11-11 Stage 7".
+# ("command", "benchmarkModel"): "needs an installed model; <reason>".
 OUTSIDE_CONFORMANCE: dict[tuple[str, str], str] = {}
 
 # App-reachable commands that both engines answer as unsupported. Empty: the

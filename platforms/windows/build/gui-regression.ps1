@@ -1,14 +1,12 @@
 # FileID Windows — GUI regression harness.
 #
-# Drives the actual WinUI 3 app against a real corpus, watching for native
-# fast-fails the existing iterate.ps1 (engine-headless) can never catch.
-# This is the harness that would have caught V15.2 ThumbnailService /
-# V15.4 SidebarQueueList before the user did — both Pattern B bugs that
-# only surface when the 17 PropertyChanged subscribers run.
+# Drives the actual WinUI 3 app against a real corpus, watching for native fast-fails that
+# iterate.ps1 (engine-headless) cannot catch: they only surface when the 17 PropertyChanged
+# subscribers run.
 #
 # Requires:
-#   1. The app built with --auto-scan-folder support (V15.5+; Program.cs
-#      parses the flag, App.xaml.cs dispatches the scan once Ready).
+#   1. The app built with --auto-scan-folder support (Program.cs parses the flag,
+#      App.xaml.cs dispatches the scan once Ready).
 #   2. A corpus folder (use build/gen-corpus.ps1 to make a 50K synthetic one).
 #
 # Pass criteria:
@@ -60,7 +58,6 @@ function Assert($name, [bool]$cond, $detail = "") {
     else { Fail "$name $detail"; $script:failures++ }
 }
 
-# --- 1. Pre-flight ----------------------------------------------------
 Step "Pre-flight"
 if (-not (Test-Path $Corpus)) {
     Fail "corpus path does not exist: $Corpus"
@@ -69,7 +66,6 @@ if (-not (Test-Path $Corpus)) {
 $corpusFileCount = (Get-ChildItem -Path $Corpus -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
 OK "corpus: $Corpus ($corpusFileCount files)"
 
-# --- 2. Build ---------------------------------------------------------
 $AppExe = Join-Path $AppDir "bin\$Configuration\$AppTfm\FileID.exe"
 if (-not [string]::IsNullOrWhiteSpace($AppExecutable)) {
     if (-not $SkipBuild) { throw "-AppExecutable requires -SkipBuild." }
@@ -90,7 +86,6 @@ if (-not (Test-Path $AppExe)) {
 }
 OK "app exe: $AppExe"
 
-# --- 3. Wipe state ----------------------------------------------------
 if (-not $SkipWipe) {
     Step "Wiping prior state"
     if (Test-Path $StateDb)   { Remove-Item -LiteralPath $StateDb -Force -ErrorAction SilentlyContinue }
@@ -103,20 +98,17 @@ if (-not $SkipWipe) {
     OK "state wiped"
 }
 
-# --- 4. Snapshot WER dumps -------------------------------------------
 $dumpsBefore = @()
 if (Test-Path $WerDir) {
     $dumpsBefore = Get-ChildItem -Path $WerDir -Filter "FileID*.dmp" -ErrorAction SilentlyContinue | ForEach-Object Name
 }
 
-# --- 5. Spawn app -----------------------------------------------------
 Step "Launching app with --auto-scan-folder"
 $proc = Start-Process -FilePath $AppExe `
     -ArgumentList @("--auto-scan-folder", $Corpus, "--auto-exit-after-scan") `
     -PassThru
 OK "spawned pid=$($proc.Id)"
 
-# --- 6. Poll loop -----------------------------------------------------
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $scanStarted = $false
 $scanEnded = $false
@@ -149,7 +141,6 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 5
 }
 
-# --- 7. Wait briefly for graceful close ------------------------------
 if (-not $proc.HasExited) {
     Step "Waiting up to 30s for app to close"
     $proc.WaitForExit(30000) | Out-Null
@@ -159,7 +150,6 @@ if (-not $proc.HasExited) {
     try { Stop-Process -Id $proc.Id -Force } catch { }
 }
 
-# --- 8. Assertions ---------------------------------------------------
 Step "Assertions"
 Assert "scan started"   $scanStarted
 Assert "scan ended"     $scanEnded
@@ -205,7 +195,6 @@ if ($unmatchedApply -and (Test-Path $AppLog)) {
         | ForEach-Object { Write-Host "  $_" -ForegroundColor Magenta }
 }
 
-# --- 9. Result -------------------------------------------------------
 Write-Host ""
 if ($failures -eq 0) {
     Write-Host "[PASS] GUI regression: scan completed cleanly." -ForegroundColor Green
