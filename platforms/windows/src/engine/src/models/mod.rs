@@ -1,22 +1,22 @@
-// ML inference models for the Windows engine.
+// ML inference models for the shared engine.
 //
-// One submodule per model + the runtime probe + the registry of
-// downloadable artifacts. Mirrors the macOS layer's surface; the
-// implementations differ because Windows uses ONNX Runtime (CUDA /
-// OpenVINO / DirectML / QNN / CPU) instead of CoreML+Vision and a
-// llama.cpp subprocess instead of MLX for the VLMs.
+// One submodule per model + the inference seam (`inference.rs`) + the runtime
+// probe + the registry of downloadable artifacts. Every ONNX model runs on tract
+// (CPU); a Windows `ort-accel` build binds ONNX Runtime's CUDA / OpenVINO /
+// DirectML / QNN providers instead when one is usable. The VLMs run in a
+// llama.cpp subprocess (Windows/Linux) or MLX (macOS).
 //
 // Loading is fail-soft: every model's `load(path)` returns Err if the
-// weights aren't on disk or the ORT session refuses to bind. The
+// weights aren't on disk or the session refuses to build. The
 // pipeline (`pipeline/tagging.rs::ModelStack::load_default`) wraps each
 // load in `load_optional` so a missing model degrades that single stage
 // to a no-op without failing the whole scan. Inference paths similarly
 // return `anyhow::Error` on any failure; callers `tracing::warn!` and
 // move on.
 //
-// The actual ORT session bind + tensor wrangling lives inside each
-// submodule. Cross-cutting concerns (EP priority, DLL-search hardening,
-// pack detection) live in `runtime.rs`.
+// Each submodule owns its preprocessing and decoding and states its input
+// contract to the seam. Cross-cutting concerns (EP priority, DLL-search
+// hardening, pack detection) live in `runtime.rs`.
 
 pub mod bge_text;
 pub mod catalog;

@@ -35,8 +35,6 @@ const APP_ID: &str = "io.github.fileid.FileID";
 
 fn main() -> glib::ExitCode {
     window::note_launch();
-    // Chat retrieval runs the CLIP/BGE text encoders in this process.
-    fileid_engine::ort_runtime::disable_telemetry_before_load();
 
     // Local-only structured logging. Same envelope shape as the engine so the
     // two log streams interleave cleanly. NEVER transmits.

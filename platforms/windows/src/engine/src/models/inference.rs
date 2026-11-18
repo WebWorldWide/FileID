@@ -110,7 +110,10 @@ pub struct InferenceSession {
 
 type CacheKey = (PathBuf, u64, Option<std::time::SystemTime>, String);
 
-static COMPILED: parking_lot::Mutex<Option<HashMap<CacheKey, Weak<CompiledModel>>>> = parking_lot::Mutex::new(None);
+/// One slot per model file and contract, so loading one model never waits for
+/// another's compile.
+static COMPILED: parking_lot::Mutex<Option<HashMap<CacheKey, Arc<parking_lot::Mutex<Weak<CompiledModel>>>>>> =
+    parking_lot::Mutex::new(None);
 
 impl InferenceSession {
     /// Load `path` on tract. Sessions of the same file and `specs` share one
@@ -118,19 +121,24 @@ impl InferenceSession {
     pub fn load_cpu(label: &str, path: &Path, specs: &[InputSpec]) -> Result<Self> {
         let metadata = std::fs::metadata(path).with_context(|| format!("{label} weights {}", path.display()))?;
         let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok(), format!("{specs:?}"));
-        let mut cache = COMPILED.lock();
-        let cache = cache.get_or_insert_with(HashMap::new);
-        cache.retain(|_, model| model.strong_count() > 0);
-        let model = match cache.get(&key).and_then(Weak::upgrade) {
+        let slot = {
+            let mut cache = COMPILED.lock();
+            let cache = cache.get_or_insert_with(HashMap::new);
+            cache.retain(|_, slot| Arc::strong_count(slot) > 1 || slot.lock().strong_count() > 0);
+            cache.entry(key).or_default().clone()
+        };
+        let mut held = slot.lock();
+        let model = match held.upgrade() {
             Some(model) => model,
             None => {
                 let started = std::time::Instant::now();
                 let model = Arc::new(compile(path, specs).with_context(|| format!("tract model load ({label})"))?);
                 tracing::info!(model = label, backend = TRACT_CPU, load_ms = started.elapsed().as_millis() as u64, "model compiled");
-                cache.insert(key, Arc::downgrade(&model));
+                *held = Arc::downgrade(&model);
                 model
             }
         };
+        drop(held);
         let state = Box::new(model.plan.spawn().with_context(|| format!("tract run state ({label})"))?);
         Ok(Self { backend: Backend::Tract { model, state } })
     }
@@ -247,7 +255,7 @@ fn widen_half_precision(typed: TypedModel) -> Result<TypedModel> {
         return Ok(typed);
     }
     let widen = tract_onnx::tract_core::transform::get_transform("f16_to_f32")?.context("tract has no f16_to_f32 transform")?;
-    Ok(widen.transform_into(typed)?)
+    widen.transform_into(typed)
 }
 
 fn run_tract(model: &CompiledModel, state: &mut TypedSimpleState, mut inputs: Vec<(&str, Input)>) -> Result<Vec<Output>> {

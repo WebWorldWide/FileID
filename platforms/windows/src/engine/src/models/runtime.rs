@@ -982,6 +982,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&pack);
     }
 
+    #[cfg(not(feature = "ort-accel"))]
+    #[test]
+    fn without_ort_accel_every_model_runs_on_tract_cpu() {
+        assert_eq!(inference_backend(), "tract-cpu");
+        assert_eq!(bind_chain(RuntimeProbe::shared()), vec![ExecutionProvider::Cpu]);
+        assert_eq!(active_provider(), ExecutionProvider::Cpu);
+        assert_eq!(armed_provider(), ExecutionProvider::Cpu);
+    }
+
     /// Regression guard: every vendor's requested EP chain must end at CPU
     /// (the always-present floor). Availability filtering below removes
     /// providers whose matched native runtime cannot load them.
