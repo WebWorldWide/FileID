@@ -1,984 +1,196 @@
 [
   {
-    "name": "cross-catalog-chapter-edit-and-undo",
-    "description": "One catalog passes Swift → Rust → Swift: a chapter saved by Swift is found by Rust evidence search, edited by Rust and restored by Swift Undo, while face provenance, refresh failures and corrections survive both engines.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
-    "sql": [
-      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/Family Birthday.mov',1,100,10,0,'video','mov')",
-      "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(2,'/internal/Portrait.jpg',2,100,10,0,'image','jpg')",
-      "INSERT INTO persons(id,name,created_at) VALUES(7,'Confirmed Person',0)",
-      "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(2,'fixture-revision','fixture',0)",
-      "INSERT INTO face_prints(id,file_id,print_data,bbox,person_id,arcface_embedding,embedding_model,processing_version,source_revision) VALUES(4,2,X'00','0.1,0.1,0.2,0.2',7,X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-weight-hash','fixture-alignment','fixture-revision')",
-      "UPDATE catalog_observations SET user_edited=1,region_json='manual face marker' WHERE id='faceprint:4'",
-      "INSERT INTO face_refresh_failures(face_id,embedding_model,processing_version,source_revision,source_path,source_size,source_modified,bbox,attempts,retry_after,reason,updated_at) VALUES(4,'next-weight','next-processing','100:fixture','/internal/Portrait.jpg',100,10,'0.1,0.1,0.2,0.2',2,280,'no_embedding',160)"
-    ],
+    "name": "swift-written-catalog-chapter",
+    "description": "A catalog the Swift engine wrote is read by this engine: its chapter is found by evidence search, edited and restored by Undo, while face provenance, refresh failures and corrections survive.",
+    "fixture": "swift-written-catalog-chapter",
+    "os": ["darwin"],
     "steps": [
-      {"label": "swift saves chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "gift", "fileID": 1, "startSeconds": 8.0, "endSeconds": 12.0, "title": "Gift Opening", "summary": "Grandma opens presents", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"userEdited": true}]}},
-      {"restart": "rust"},
-      {"label": "rust first hit is the chapter", "catalog": {"action": "search", "query": "Grandma presents"}, "expect": {"hits": [{"fileID": 1, "startSeconds": 8.0}]}},
-      {"label": "rust edits chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "gift", "fileID": 1, "startSeconds": 10.0, "endSeconds": 12.0, "title": "Gift Unwrapped", "summary": "Grandma opens presents", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"startSeconds": 10.0, "title": "Gift Unwrapped"}]}},
-      {"restart": "swift"},
-      {"label": "swift undo restores", "catalog": {"action": "undoChapterEdit", "fileID": 1}, "expect": {"status": "ok", "chapters": [{"startSeconds": 8.0, "title": "Gift Opening", "stale": false, "modelVersion": "user"}]}},
-      {"label": "person name", "db": "SELECT name FROM persons WHERE id=7", "expect": [["Confirmed Person"]]},
-      {"label": "refresh failure", "db": "SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4", "expect": [["next-weight", "next-processing", 2, 280.0, "no_embedding"]]},
-      {"label": "face provenance", "db": "SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4", "expect": [[7, "fixture-weight-hash", "fixture-alignment", "fixture-revision", 512]]},
-      {"label": "user correction", "db": "SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'", "expect": [["manual face marker", 1, 0]]},
-      {"label": "face embedding projection", "db": "SELECT model,dimension,hex(vector)=hex((SELECT arcface_embedding FROM face_prints WHERE id=4)) FROM catalog_embeddings WHERE entity_id='faceprint:4'", "expect": [["fixture-weight-hash|fixture-alignment", 128, 1]]}
+        {"label": "rust first hit is the chapter", "catalog": {"action": "search", "query": "Grandma presents"}, "expect": {"hits": [{"fileID": 1, "startSeconds": 8.0}]}},
+        {"label": "rust edits chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "gift", "fileID": 1, "startSeconds": 10.0, "endSeconds": 12.0, "title": "Gift Unwrapped", "summary": "Grandma opens presents", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"startSeconds": 10.0, "title": "Gift Unwrapped"}]}},
+        {"restart": true},
+        {"label": "rust undo restores", "catalog": {"action": "undoChapterEdit", "fileID": 1}, "expect": {"status": "ok", "chapters": [{"startSeconds": 8.0, "title": "Gift Opening", "stale": false, "modelVersion": "user"}]}},
+        {"label": "person name", "db": "SELECT name FROM persons WHERE id=7", "expect": [["Confirmed Person"]]},
+        {"label": "refresh failure", "db": "SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4", "expect": [["next-weight", "next-processing", 2, 280.0, "no_embedding"]]},
+        {"label": "face provenance", "db": "SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4", "expect": [[7, "fixture-weight-hash", "fixture-alignment", "fixture-revision", 512]]},
+        {"label": "user correction", "db": "SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'", "expect": [["manual face marker", 1, 0]]},
+        {"label": "face embedding projection", "db": "SELECT model,dimension,hex(vector)=hex((SELECT arcface_embedding FROM face_prints WHERE id=4)) FROM catalog_embeddings WHERE entity_id='faceprint:4'", "expect": [["fixture-weight-hash|fixture-alignment", 128, 1]]}
     ]
   },
   {
-    "name": "cross-chat-history-and-filters",
-    "description": "One conversation passes Swift → Rust → Swift: history persists, contextual media follow-ups resolve against the earlier subject on both engines, clear deletes it, and source files are never touched.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "swift-written-chat-history",
+    "description": "A conversation the Swift engine wrote is continued by this engine: history persists, contextual media follow-ups resolve against the earlier subject, clear deletes it, and source files are never touched.",
+    "fixture": "swift-written-chat-history",
+    "os": ["darwin"],
     "tree": [
-      {"path": "birthday.txt", "content": "Birthday gift opening"}
-    ],
-    "sql": [
-      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'{path:birthday.txt}',1,21,0,'doc','txt','Birthday gift opening')",
-      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(2,'/offline/birthday.mov',2,21,0,'video','mov','Birthday gift opening'),(3,'/offline/birthday.jpg',3,21,0,'image','jpg','Birthday gift opening')"
+        {"path": "birthday.txt", "content": "Birthday gift opening"}
     ],
     "steps": [
-      {"label": "swift asks", "chat": {"action": "send", "text": "Please find my birthday files", "useModel": false}, "expect": {"status": "completed", "hits": {"$tol": "set", "value": [{"fileID": 1}, {"fileID": 2}, {"fileID": 3}]}, "messages": {"$tol": "count", "value": 2}}},
-      {"restart": "rust"},
-      {"label": "rust sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 2}}},
-      {"label": "rust follow-up", "chat": {"action": "send", "text": "only videos", "useModel": false}, "expect": {"hits": [{"fileID": 2}], "message": "Found 1 match for “birthday” (videos).", "messages": {"$tol": "count", "value": 4}}},
-      {"restart": "swift"},
-      {"label": "swift sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 4}}},
-      {"label": "swift follow-up", "chat": {"action": "send", "text": "now photos", "useModel": false}, "expect": {"hits": [{"fileID": 3}], "message": "Found 1 match for “birthday” (photos).", "messages": {"$tol": "count", "value": 6}}},
-      {"label": "clear", "chat": {"action": "clear"}, "expect": {"messages": []}},
-      {"label": "source untouched", "fs": {"contents": {"birthday.txt": "Birthday gift opening"}}},
-      {"label": "chat deleted", "db": "SELECT (SELECT COUNT(*) FROM catalog_chat),(SELECT COUNT(*) FROM files)", "expect": [[0, 3]]}
+        {"label": "rust sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 2}}},
+        {"label": "rust follow-up", "chat": {"action": "send", "text": "only videos", "useModel": false}, "expect": {"hits": [{"fileID": 2}], "message": "Found 1 match for “birthday” (videos).", "messages": {"$tol": "count", "value": 4}}},
+        {"restart": true},
+        {"label": "rust sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 4}}},
+        {"label": "rust follow-up", "chat": {"action": "send", "text": "now photos", "useModel": false}, "expect": {"hits": [{"fileID": 3}], "message": "Found 1 match for “birthday” (photos).", "messages": {"$tol": "count", "value": 6}}},
+        {"label": "clear", "chat": {"action": "clear"}, "expect": {"messages": []}},
+        {"label": "source untouched", "fs": {"contents": {"birthday.txt": "Birthday gift opening"}}},
+        {"label": "chat deleted", "db": "SELECT (SELECT COUNT(*) FROM catalog_chat),(SELECT COUNT(*) FROM files)", "expect": [[0, 3]]}
     ]
   },
   {
-    "name": "cross-tools-swift-preview-rust-execute-jpeg",
-    "description": "A JPEG photo export previewed by swift is executed by rust and undone by swift; the source is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "tools-photo-tiff-preview-execute-undo-across-restarts",
+    "description": "A TIFF photo export previewed, executed and undone across engine restarts; the source is never modified.",
     "tree": [
-      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
+        {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {"label": "swift capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
-      {"label": "swift preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "jpeg", "maxDimension": 16}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
-      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
-      {"restart": "rust"},
-      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
-      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"restart": "swift"},
-      {"label": "swift history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
-      {"label": "swift undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
-      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
+        {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+        {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "tiff", "maxDimension": 16}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+        {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+        {"restart": true},
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+        {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+        {"restart": true},
+        {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+        {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+        {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+        {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
-    "name": "cross-tools-rust-preview-swift-execute-tiff",
-    "description": "A TIFF photo export previewed by rust is executed by swift and undone by rust; the source is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "rust",
+    "name": "swift-written-tools-png-enlarge-preview",
+    "description": "A PNG photo export with upscaling previewed by the Swift engine is executed and undone by this engine; the source is never modified.",
+    "fixture": "swift-written-tools-png-enlarge-preview",
+    "os": ["darwin"],
     "tree": [
-      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
+        {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
-      {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "tiff", "maxDimension": 16}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
-      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
-      {"restart": "swift"},
-      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
-      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"restart": "rust"},
-      {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
-      {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
-      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+        {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
+        {"restart": true},
+        {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+        {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+        {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+        {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
-    "name": "cross-tools-swift-preview-rust-execute-png-enlarge",
-    "description": "A PNG photo export with upscaling previewed by swift is executed by rust and undone by swift; the source is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "tools-photo-png-enlarge-preview-execute-undo-across-restarts",
+    "description": "A PNG photo export with upscaling previewed, executed and undone across engine restarts; the source is never modified.",
     "tree": [
-      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
+        {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {"label": "swift capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
-      {"label": "swift preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "allowUpscale": true}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
-      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
-      {"restart": "rust"},
-      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
-      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
-      {"restart": "swift"},
-      {"label": "swift history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
-      {"label": "swift undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
-      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
+        {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+        {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "allowUpscale": true}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+        {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+        {"restart": true},
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+        {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
+        {"restart": true},
+        {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+        {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+        {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+        {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
-    "name": "cross-tools-rust-preview-swift-execute-png-enlarge",
-    "description": "A PNG photo export with upscaling previewed by rust is executed by swift and undone by rust; the source is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "rust",
+    "name": "swift-written-takes-grouping",
+    "description": "Related-take proposals the Swift job wrote are current for this engine's job: session keys and file fingerprints match byte for byte, so an unchanged rerun redoes nothing and both read the same groups.",
+    "fixture": "swift-written-takes-grouping",
+    "os": ["darwin"],
     "tree": [
-      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
+        {"path": "shoot/a1.jpg", "content": "take 1", "row": {"id": 1, "kind": "image", "created_at": 1000, "camera_model": "Phone A"}},
+        {"path": "shoot/a2.jpg", "content": "take 2", "row": {"id": 2, "kind": "image", "created_at": 1030, "camera_model": "Phone A"}},
+        {"path": "shoot/a3.jpg", "content": "take 3", "row": {"id": 3, "kind": "image", "created_at": 1060, "camera_model": "Phone A"}},
+        {"path": "party/b1.jpg", "content": "take 4", "row": {"id": 4, "kind": "image", "created_at": 9000, "camera_model": "Phone A"}},
+        {"path": "party/b2.jpg", "content": "take 5", "row": {"id": 5, "kind": "image", "created_at": 9001, "camera_model": "Camera B"}},
+        {"path": "walk/c1.jpg", "content": "take 6", "row": {"id": 6, "kind": "image", "created_at": 20000}},
+        {"path": "walk/c2.jpg", "content": "take 7", "row": {"id": 7, "kind": "image", "created_at": 20040, "camera_model": "Phone A"}}
     ],
     "steps": [
-      {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
-      {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "allowUpscale": true}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
-      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
-      {"restart": "swift"},
-      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
-      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
-      {"restart": "rust"},
-      {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
-      {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
-      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
-      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
+        {"label": "rust reads the same groups", "catalog": {"action": "takeGroupProposals"}, "expect": {"status": "ok", "takeGroups": {"$var": "swiftGroups.takeGroups"}}},
+        {"label": "rust reruns", "catalog": {"action": "enqueueTakeGrouping"}, "expect": {"status": "ok"}},
+        {"label": "rust job finishes", "catalog": {"action": "takeGroupProposals"}, "until": 20, "expect": {"status": "ok", "jobs": [{"id": "take-grouping", "kind": "takeGrouping", "state": "completed", "progress": 1}], "takeGroups": {"$tol": "count", "value": 3}}},
+        {"label": "rust redid nothing", "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key", "expect": {"$var": "stamps"}},
+        {"label": "rust keeps the fingerprints", "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id", "expect": {"$var": "files"}},
+        {"restart": true},
+        {"label": "rust reruns", "catalog": {"action": "enqueueTakeGrouping"}, "expect": {"status": "ok"}},
+        {"label": "rust job finishes again", "catalog": {"action": "takeGroupProposals"}, "until": 20, "expect": {"status": "ok", "jobs": [{"id": "take-grouping", "kind": "takeGrouping", "state": "completed", "progress": 1}], "takeGroups": {"$tol": "count", "value": 3}}},
+        {"label": "rust redid nothing", "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key", "expect": {"$var": "stamps"}}
     ]
   },
   {
-    "name": "cross-takes-grouping-swift-then-rust",
-    "description": "Related-take proposals written by the Swift job are current for the Rust job and back: session keys and file fingerprints match byte for byte, so an unchanged rerun on the other engine redoes nothing and both read the same groups.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
-    "start": "swift",
-    "extends": "takes-grouping-proposes-related-tries",
-    "steps": [
-      {
-        "label": "swift runs the job",
-        "catalog": {
-          "action": "enqueueTakeGrouping"
-        },
-        "expect": {
-          "status": "ok"
-        }
-      },
-      {
-        "label": "swift job finishes",
-        "catalog": {
-          "action": "takeGroupProposals"
-        },
-        "until": 20,
-        "expect": {
-          "status": "ok",
-          "jobs": [
-            {
-              "id": "take-grouping",
-              "kind": "takeGrouping",
-              "state": "completed",
-              "progress": 1
-            }
-          ],
-          "takeGroups": {
-            "$tol": "count",
-            "value": 3
-          }
-        },
-        "save": "swiftGroups"
-      },
-      {
-        "label": "swift stamps",
-        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
-        "save": "stamps"
-      },
-      {
-        "label": "swift fingerprints",
-        "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id",
-        "save": "files"
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust reads the same groups",
-        "catalog": {
-          "action": "takeGroupProposals"
-        },
-        "expect": {
-          "status": "ok",
-          "takeGroups": {
-            "$var": "swiftGroups.takeGroups"
-          }
-        }
-      },
-      {
-        "label": "rust reruns",
-        "catalog": {
-          "action": "enqueueTakeGrouping"
-        },
-        "expect": {
-          "status": "ok"
-        }
-      },
-      {
-        "label": "rust job finishes",
-        "catalog": {
-          "action": "takeGroupProposals"
-        },
-        "until": 20,
-        "expect": {
-          "status": "ok",
-          "jobs": [
-            {
-              "id": "take-grouping",
-              "kind": "takeGrouping",
-              "state": "completed",
-              "progress": 1
-            }
-          ],
-          "takeGroups": {
-            "$tol": "count",
-            "value": 3
-          }
-        }
-      },
-      {
-        "label": "rust redid nothing",
-        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
-        "expect": {
-          "$var": "stamps"
-        }
-      },
-      {
-        "label": "rust keeps the fingerprints",
-        "db": "SELECT file_id,session,fingerprint FROM take_proposal_files ORDER BY file_id",
-        "expect": {
-          "$var": "files"
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift reruns",
-        "catalog": {
-          "action": "enqueueTakeGrouping"
-        },
-        "expect": {
-          "status": "ok"
-        }
-      },
-      {
-        "label": "swift job finishes again",
-        "catalog": {
-          "action": "takeGroupProposals"
-        },
-        "until": 20,
-        "expect": {
-          "status": "ok",
-          "jobs": [
-            {
-              "id": "take-grouping",
-              "kind": "takeGrouping",
-              "state": "completed",
-              "progress": 1
-            }
-          ],
-          "takeGroups": {
-            "$tol": "count",
-            "value": 3
-          }
-        }
-      },
-      {
-        "label": "swift redid nothing",
-        "db": "SELECT group_key,session,relation,file_ids_json,evidence_json,proposed_at FROM take_proposals ORDER BY group_key",
-        "expect": {
-          "$var": "stamps"
-        }
-      }
-    ]
-  },
-  {
-    "name": "cross-names-learned-style",
-    "description": "Smart-name style samples recorded by Swift are read by Rust and the other way round: both derive the same preferences from one catalog, apply them to the same name, and a reset in Rust is seen by Swift.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
-    "start": "swift",
+    "name": "swift-written-names-learned-style",
+    "description": "Smart-name style samples the Swift engine recorded give this engine the same preferences, apply them to the same name, and a reset leaves no samples.",
+    "fixture": "swift-written-names-learned-style",
+    "os": ["darwin"],
     "tree": [
-      {
-        "path": "learn/IMG_0001.jpg",
-        "content": "learn/IMG_0001.jpg",
-        "mtime": 1000,
-        "row": {
-          "id": 51,
-          "kind": "image",
-          "vlm_proposed_name": "Beach Sunset"
-        }
-      },
-      {
-        "path": "learn/IMG_0002.jpg",
-        "content": "learn/IMG_0002.jpg",
-        "mtime": 1000,
-        "row": {
-          "id": 52,
-          "kind": "image",
-          "vlm_proposed_name": "Dog Park"
-        }
-      },
-      {
-        "path": "learn/IMG_0003.jpg",
-        "content": "learn/IMG_0003.jpg",
-        "mtime": 1000,
-        "row": {
-          "id": 53,
-          "kind": "image",
-          "vlm_proposed_name": "Snow Day"
-        }
-      },
-      {
-        "path": "learn/IMG_0004.jpg",
-        "content": "learn/IMG_0004.jpg",
-        "mtime": 1000,
-        "row": {
-          "id": 54,
-          "kind": "image",
-          "vlm_proposed_name": "Kids Playing Soccer"
-        }
-      }
+        {"path": "learn/IMG_0001.jpg", "content": "learn/IMG_0001.jpg", "mtime": 1000, "row": {"id": 51, "kind": "image", "vlm_proposed_name": "Beach Sunset"}},
+        {"path": "learn/IMG_0002.jpg", "content": "learn/IMG_0002.jpg", "mtime": 1000, "row": {"id": 52, "kind": "image", "vlm_proposed_name": "Dog Park"}},
+        {"path": "learn/IMG_0003.jpg", "content": "learn/IMG_0003.jpg", "mtime": 1000, "row": {"id": 53, "kind": "image", "vlm_proposed_name": "Snow Day"}},
+        {"path": "learn/IMG_0004.jpg", "content": "learn/IMG_0004.jpg", "mtime": 1000, "row": {"id": 54, "kind": "image", "vlm_proposed_name": "Kids Playing Soccer"}}
     ],
     "steps": [
-      {
-        "label": "swift records two samples",
-        "catalog": {
-          "action": "learnNames",
-          "naming": {
-            "style": "short",
-            "maxLength": 40
-          },
-          "nameEdits": [
-            {
-              "fileID": 51,
-              "proposed": "beach-sunset.jpg",
-              "applied": "Beach_Sunset.jpg"
-            },
-            {
-              "fileID": 52,
-              "proposed": "dog-park.jpg",
-              "applied": "Dog_Park.jpg"
-            }
-          ]
-        },
-        "expect": {
-          "status": "ok",
-          "hits": {
-            "$tol": "exact",
-            "value": [
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "nameSamples",
-                "text": "2"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust adds the third",
-        "catalog": {
-          "action": "learnNames",
-          "naming": {
-            "style": "short",
-            "maxLength": 40
-          },
-          "nameEdits": [
-            {
-              "fileID": 53,
-              "proposed": "snow-day.jpg",
-              "applied": "Snow_Day.jpg"
-            }
-          ]
-        },
-        "expect": {
-          "status": "ok",
-          "hits": {
-            "$tol": "exact",
-            "value": [
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "namePreference",
-                "text": "_",
-                "evidenceID": "separator"
-              },
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "namePreference",
-                "text": "title",
-                "evidenceID": "case"
-              },
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "nameSamples",
-                "text": "3"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "label": "rust applies them",
-        "catalog": {
-          "action": "proposeNames",
-          "fileIDs": [
-            54
-          ],
-          "naming": {
-            "style": "short",
-            "maxLength": 40,
-            "learn": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "hits": [
-            {
-              "fileID": 54,
-              "text": "Kids_Playing_Soccer.jpg",
-              "evidenceID": "proposedName|learned:separator,case"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift sees the same preferences",
-        "catalog": {
-          "action": "namePreferences"
-        },
-        "expect": {
-          "status": "ok",
-          "hits": {
-            "$tol": "exact",
-            "value": [
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "namePreference",
-                "text": "_",
-                "evidenceID": "separator"
-              },
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "namePreference",
-                "text": "title",
-                "evidenceID": "case"
-              },
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "nameSamples",
-                "text": "3"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "label": "swift applies them",
-        "catalog": {
-          "action": "proposeNames",
-          "fileIDs": [
-            54
-          ],
-          "naming": {
-            "style": "short",
-            "maxLength": 40,
-            "learn": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "hits": [
-            {
-              "fileID": 54,
-              "text": "Kids_Playing_Soccer.jpg",
-              "evidenceID": "proposedName|learned:separator,case"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust resets",
-        "catalog": {
-          "action": "resetNamePreferences"
-        },
-        "expect": {
-          "status": "ok",
-          "hits": {
-            "$tol": "exact",
-            "value": [
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "nameSamples",
-                "text": "0"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift sees no samples",
-        "catalog": {
-          "action": "namePreferences"
-        },
-        "expect": {
-          "status": "ok",
-          "hits": {
-            "$tol": "exact",
-            "value": [
-              {
-                "fileID": 0,
-                "path": "",
-                "kind": "nameSamples",
-                "text": "0"
-              }
-            ]
-          }
-        }
-      }
+        {"label": "rust adds the third", "catalog": {"action": "learnNames", "naming": {"style": "short", "maxLength": 40}, "nameEdits": [{"fileID": 53, "proposed": "snow-day.jpg", "applied": "Snow_Day.jpg"}]}, "expect": {"status": "ok", "hits": {"$tol": "exact", "value": [{"fileID": 0, "path": "", "kind": "namePreference", "text": "_", "evidenceID": "separator"}, {"fileID": 0, "path": "", "kind": "namePreference", "text": "title", "evidenceID": "case"}, {"fileID": 0, "path": "", "kind": "nameSamples", "text": "3"}]}}},
+        {"label": "rust applies them", "catalog": {"action": "proposeNames", "fileIDs": [54], "naming": {"style": "short", "maxLength": 40, "learn": true}}, "expect": {"status": "ok", "hits": [{"fileID": 54, "text": "Kids_Playing_Soccer.jpg", "evidenceID": "proposedName|learned:separator,case"}]}},
+        {"restart": true},
+        {"label": "rust sees the same preferences", "catalog": {"action": "namePreferences"}, "expect": {"status": "ok", "hits": {"$tol": "exact", "value": [{"fileID": 0, "path": "", "kind": "namePreference", "text": "_", "evidenceID": "separator"}, {"fileID": 0, "path": "", "kind": "namePreference", "text": "title", "evidenceID": "case"}, {"fileID": 0, "path": "", "kind": "nameSamples", "text": "3"}]}}},
+        {"label": "rust applies them", "catalog": {"action": "proposeNames", "fileIDs": [54], "naming": {"style": "short", "maxLength": 40, "learn": true}}, "expect": {"status": "ok", "hits": [{"fileID": 54, "text": "Kids_Playing_Soccer.jpg", "evidenceID": "proposedName|learned:separator,case"}]}},
+        {"restart": true},
+        {"label": "rust resets", "catalog": {"action": "resetNamePreferences"}, "expect": {"status": "ok", "hits": {"$tol": "exact", "value": [{"fileID": 0, "path": "", "kind": "nameSamples", "text": "0"}]}}},
+        {"restart": true},
+        {"label": "rust sees no samples", "catalog": {"action": "namePreferences"}, "expect": {"status": "ok", "hits": {"$tol": "exact", "value": [{"fileID": 0, "path": "", "kind": "nameSamples", "text": "0"}]}}}
     ]
   },
-  {"name": "cross-trash-rust-trashes-swift-puts-back", "description": "Rollback safety: a Trash batch the app-hosted Rust engine made (test Trash root) is put back by the Swift engine from Rust's signed trash_log.json, file and catalog rows (tags included) restored.", "requires": ["swift", "rust"], "engines": ["rust"], "start": "rust", "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "rust trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": "swift"}, {"label": "swift puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}]},
-  {"name": "cross-trash-swift-trashes-rust-puts-back", "description": "A Trash batch the Swift engine made (test Trash root, -DFILEID_TEST_TRASH_ROOT) is put back by the app-hosted Rust engine, which imports Swift's trash-journal.json: file and catalog rows (tags included) restored.", "requires": ["swift", "rust"], "engines": ["swift"], "start": "swift", "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "swift trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": "rust"}, {"label": "rust puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}], "appHosted": true},
+  {"name": "trash-put-back-after-restart", "description": "Rollback safety: a Trash batch the app-hosted engine made (test Trash root) is put back after a restart from its signed trash_log.json, file and catalog rows (tags included) restored.", "os": ["darwin"], "requiresTestTrashRoot": true, "tree": [{"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}, {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'keep me','user',NULL)"], "steps": [{"label": "rust trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}}, {"label": "row and tag dropped", "db": "SELECT COUNT(*) FROM tags WHERE file_id=1", "expect": [[0]]}, {"restart": true}, {"label": "rust puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}}, {"label": "row and tag back", "db": "SELECT f.id,f.path_text,t.tag FROM files f JOIN tags t ON t.file_id=f.id WHERE f.id=1", "expect": [[1, "{path:docs/trash me.txt}", "keep me"]]}]},
   {
-    "name": "cross-scan-swift-then-rust-keeps-modified-times-and-reviewed-rows",
-    "description": "One catalog scanned by the swift engine and rescanned by the rust engine: the stored modified time of every file stays the same number (the engines once differed in the last bit for about a quarter of timestamps), a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
-    "start": "swift",
+    "name": "swift-written-scan-modified-times-and-reviewed-rows",
+    "description": "One catalog scanned by the Swift engine and rescanned by this engine: the stored modified time of every file stays the same number (the engines once differed in the last bit for about a quarter of timestamps), a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
+    "os": ["darwin"],
+    "fixture": "swift-written-scan-modified-times-and-reviewed-rows",
+    "os": ["darwin"],
     "tree": [
-      {
-        "path": "docs/a.txt",
-        "mtimeNs": [
-          1724989629,
-          833179165
-        ],
-        "content": "mtime parity docs/a.txt\n"
-      },
-      {
-        "path": "docs/b.txt",
-        "mtimeNs": [
-          1603520313,
-          785102536
-        ],
-        "content": "mtime parity docs/b.txt\n"
-      },
-      {
-        "path": "docs/c.txt",
-        "mtimeNs": [
-          1704538783,
-          171373719
-        ],
-        "content": "mtime parity docs/c.txt\n"
-      },
-      {
-        "path": "docs/d.txt",
-        "mtimeNs": [
-          1700000000,
-          0
-        ],
-        "content": "mtime parity docs/d.txt\n"
-      },
-      {
-        "path": "images/e.png",
-        "mtimeNs": [
-          1719409671,
-          136042265
-        ],
-        "generate": "png",
-        "dimensions": [
-          16,
-          16
-        ]
-      },
-      {
-        "path": "images/f.png",
-        "mtimeNs": [
-          1635498135,
-          1905740
-        ],
-        "generate": "png",
-        "dimensions": [
-          16,
-          16
-        ]
-      }
+        {"path": "docs/a.txt", "mtimeNs": [1724989629, 833179165], "content": "mtime parity docs/a.txt\n"},
+        {"path": "docs/b.txt", "mtimeNs": [1603520313, 785102536], "content": "mtime parity docs/b.txt\n"},
+        {"path": "docs/c.txt", "mtimeNs": [1704538783, 171373719], "content": "mtime parity docs/c.txt\n"},
+        {"path": "docs/d.txt", "mtimeNs": [1700000000, 0], "content": "mtime parity docs/d.txt\n"},
+        {"path": "images/e.png", "mtimeNs": [1719409671, 136042265], "generate": "png", "dimensions": [16, 16]},
+        {"path": "images/f.png", "mtimeNs": [1635498135, 1905740], "generate": "png", "dimensions": [16, 16]}
     ],
     "steps": [
-      {
-        "label": "swift scans",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}"
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "totalFiles": 6,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "file id",
-        "db": "SELECT id FROM files WHERE path_text='{path:docs/a.txt}'",
-        "save": [
-          {
-            "name": "fid",
-            "path": "0.0"
-          }
-        ]
-      },
-      {
-        "label": "times after the first scan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "save": "first",
-        "expect": {
-          "$tol": "count",
-          "value": 6
-        }
-      },
-      {
-        "label": "swift saves a chapter",
-        "catalog": {
-          "action": "saveChapter",
-          "chapter": {
-            "id": "kept",
-            "fileID": {
-              "$var": "fid"
-            },
-            "startSeconds": 0.0,
-            "endSeconds": 1.0,
-            "title": "Kept chapter",
-            "summary": "",
-            "sourceRevision": "untrusted",
-            "modelVersion": "untrusted",
-            "confidence": 0.0,
-            "userEdited": false,
-            "stale": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "chapters": [
-            {
-              "id": "kept",
-              "stale": false
-            }
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust plain rescan analyses nothing",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}"
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "benignErrors": [
-          "rescan_no_changes",
-          "deep_analyze_unavailable"
-        ],
-        "expect": {
-          "processedFiles": 0,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "times unchanged by the plain rescan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "expect": {
-          "$var": "first"
-        }
-      },
-      {
-        "label": "rust forced rescan",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}",
-            "rescan": true
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "totalFiles": 6,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "times unchanged by the forced rescan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "expect": {
-          "$var": "first"
-        }
-      },
-      {
-        "label": "the reviewed chapter is current",
-        "db": "SELECT id,stale,user_edited FROM catalog_chapters",
-        "expect": [
-          [
-            "kept",
-            0,
-            1
-          ]
-        ]
-      }
+        {"label": "rust plain rescan analyses nothing", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "benignErrors": ["rescan_no_changes", "deep_analyze_unavailable"], "expect": {"processedFiles": 0, "failedFiles": 0}},
+        {"label": "times unchanged by the plain rescan", "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text", "expect": {"$var": "first"}},
+        {"label": "rust forced rescan", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "expect": {"totalFiles": 6, "failedFiles": 0}},
+        {"label": "times unchanged by the forced rescan", "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text", "expect": {"$var": "first"}},
+        {"label": "the reviewed chapter is current", "db": "SELECT id,stale,user_edited FROM catalog_chapters", "expect": [["kept", 0, 1]]}
     ]
   },
   {
-    "name": "cross-scan-rust-then-swift-keeps-modified-times-and-reviewed-rows",
-    "description": "One catalog scanned by the rust engine and rescanned by the swift engine: the stored modified time of every file stays the same number (the engines once differed in the last bit for about a quarter of timestamps), a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "rust"
-    ],
-    "start": "rust",
+    "name": "scan-keeps-modified-times-and-reviewed-rows-after-restart",
+    "description": "One catalog scanned and rescanned across an engine restart: the stored modified time of every file stays the same number, a plain rescan re-analyses nothing, and a chapter saved after the first scan is neither marked stale nor loses its revision after a forced rescan. Needs no model.",
     "tree": [
-      {
-        "path": "docs/a.txt",
-        "mtimeNs": [
-          1724989629,
-          833179165
-        ],
-        "content": "mtime parity docs/a.txt\n"
-      },
-      {
-        "path": "docs/b.txt",
-        "mtimeNs": [
-          1603520313,
-          785102536
-        ],
-        "content": "mtime parity docs/b.txt\n"
-      },
-      {
-        "path": "docs/c.txt",
-        "mtimeNs": [
-          1704538783,
-          171373719
-        ],
-        "content": "mtime parity docs/c.txt\n"
-      },
-      {
-        "path": "docs/d.txt",
-        "mtimeNs": [
-          1700000000,
-          0
-        ],
-        "content": "mtime parity docs/d.txt\n"
-      },
-      {
-        "path": "images/e.png",
-        "mtimeNs": [
-          1719409671,
-          136042265
-        ],
-        "generate": "png",
-        "dimensions": [
-          16,
-          16
-        ]
-      },
-      {
-        "path": "images/f.png",
-        "mtimeNs": [
-          1635498135,
-          1905740
-        ],
-        "generate": "png",
-        "dimensions": [
-          16,
-          16
-        ]
-      }
+        {"path": "docs/a.txt", "mtimeNs": [1724989629, 833179165], "content": "mtime parity docs/a.txt\n"},
+        {"path": "docs/b.txt", "mtimeNs": [1603520313, 785102536], "content": "mtime parity docs/b.txt\n"},
+        {"path": "docs/c.txt", "mtimeNs": [1704538783, 171373719], "content": "mtime parity docs/c.txt\n"},
+        {"path": "docs/d.txt", "mtimeNs": [1700000000, 0], "content": "mtime parity docs/d.txt\n"},
+        {"path": "images/e.png", "mtimeNs": [1719409671, 136042265], "generate": "png", "dimensions": [16, 16]},
+        {"path": "images/f.png", "mtimeNs": [1635498135, 1905740], "generate": "png", "dimensions": [16, 16]}
     ],
     "steps": [
-      {
-        "label": "rust scans",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}"
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "totalFiles": 6,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "file id",
-        "db": "SELECT id FROM files WHERE path_text='{path:docs/a.txt}'",
-        "save": [
-          {
-            "name": "fid",
-            "path": "0.0"
-          }
-        ]
-      },
-      {
-        "label": "times after the first scan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "save": "first",
-        "expect": {
-          "$tol": "count",
-          "value": 6
-        }
-      },
-      {
-        "label": "rust saves a chapter",
-        "catalog": {
-          "action": "saveChapter",
-          "chapter": {
-            "id": "kept",
-            "fileID": {
-              "$var": "fid"
-            },
-            "startSeconds": 0.0,
-            "endSeconds": 1.0,
-            "title": "Kept chapter",
-            "summary": "",
-            "sourceRevision": "untrusted",
-            "modelVersion": "untrusted",
-            "confidence": 0.0,
-            "userEdited": false,
-            "stale": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "chapters": [
-            {
-              "id": "kept",
-              "stale": false
-            }
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift plain rescan analyses nothing",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}"
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "benignErrors": [
-          "rescan_no_changes",
-          "deep_analyze_unavailable"
-        ],
-        "expect": {
-          "processedFiles": 0,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "times unchanged by the plain rescan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "expect": {
-          "$var": "first"
-        }
-      },
-      {
-        "label": "swift forced rescan",
-        "command": {
-          "startScan": {
-            "rootPath": "{root}",
-            "rescan": true
-          }
-        },
-        "await": "scanComplete",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "totalFiles": 6,
-          "failedFiles": 0
-        }
-      },
-      {
-        "label": "times unchanged by the forced rescan",
-        "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text",
-        "expect": {
-          "$var": "first"
-        }
-      },
-      {
-        "label": "the reviewed chapter is current",
-        "db": "SELECT id,stale,user_edited FROM catalog_chapters",
-        "expect": [
-          [
-            "kept",
-            0,
-            1
-          ]
-        ]
-      }
+        {"label": "rust scans", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "expect": {"totalFiles": 6, "failedFiles": 0}},
+        {"label": "file id", "db": "SELECT id FROM files WHERE path_text='{path:docs/a.txt}'", "save": [{"name": "fid", "path": "0.0"}]},
+        {"label": "times after the first scan", "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text", "save": "first", "expect": {"$tol": "count", "value": 6}},
+        {"label": "rust saves a chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "kept", "fileID": {"$var": "fid"}, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Kept chapter", "summary": "", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"id": "kept", "stale": false}]}},
+        {"restart": true},
+        {"label": "rust plain rescan analyses nothing", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "benignErrors": ["rescan_no_changes", "deep_analyze_unavailable"], "expect": {"processedFiles": 0, "failedFiles": 0}},
+        {"label": "times unchanged by the plain rescan", "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text", "expect": {"$var": "first"}},
+        {"label": "rust forced rescan", "command": {"startScan": {"rootPath": "{root}", "rescan": true}}, "await": "scanComplete", "timeout": 120, "abortOnError": true, "expect": {"totalFiles": 6, "failedFiles": 0}},
+        {"label": "times unchanged by the forced rescan", "db": "SELECT path_text,size_bytes,modified_at FROM files ORDER BY path_text", "expect": {"$var": "first"}},
+        {"label": "the reviewed chapter is current", "db": "SELECT id,stale,user_edited FROM catalog_chapters", "expect": [["kept", 0, 1]]}
     ]
   },
-  {"name":"cross-trash-rust-trashes-swift-puts-back-faces","description":"Rollback safety: a Trash batch the Rust engine made carries the file's faces in its signed trash_log.json; the Swift engine puts the file back with its faces, people assignment and recounted persons.","requires":["swift","rust"],"engines":["rust"],"start":"rust","requiresTestTrashRoot":true,"tree":[{"path":"people/a.jpg","content":"face a\n","row":{"id":1,"kind":"image"}},{"path":"people/b.jpg","content":"face b\n","row":{"id":2,"kind":"image"}}],"sql":["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')","UPDATE files SET has_faces = 1 WHERE id IN (1,2)","INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(1,'Alex',123,1,2),(2,'Sam',123,3,1)","INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.9),(2,2,1,X'00','[0,0,1,1]',X'0000803f',0.8),(3,1,2,X'00','[0,0,1,1]',X'0000803f',0.7)"],"steps":[{"label":"rust trashes","command":{"trashFiles":{"fileIDs":[1]}},"await":"bulkActionResult","save":{"name":"batch","path":"action","after":":"},"expect":{"succeeded":1,"failed":0}},{"label":"in the test Trash","fs":{"absent":["people/a.jpg"],"inTestTrash":["a.jpg"]}},{"label":"faces dropped, people recounted","db":"SELECT id,file_count,representative_face_id FROM persons ORDER BY id","expect":[[1,1,2],[2,0,null]]},{"restart":"swift"},{"label":"swift puts back","command":{"restoreFromTrash":{"batchID":{"$var":"batch"}}},"await":"bulkActionResult","expect":{"action":"restoreFromTrash","succeeded":1,"failed":0}},{"label":"file back","fs":{"contents":{"people/a.jpg":"face a\n","people/b.jpg":"face b\n"}}},{"label":"faces back","db":"SELECT id,file_id,person_id FROM face_prints ORDER BY id","expect":[[1,1,1],[2,2,1],[3,1,2]]},{"label":"has_faces back","db":"SELECT id,has_faces FROM files ORDER BY id","expect":[[1,1],[2,1]]},{"label":"people recounted","db":"SELECT id,file_count,representative_face_id FROM persons ORDER BY id","expect":[[1,2,2],[2,1,3]]}]},
-  {"name":"cross-trash-swift-trashes-rust-puts-back-faces","description":"A Trash batch the Swift engine made (test Trash root) carries the file's faces; the Rust engine imports trash-journal.json and puts the file back with its faces, people assignment and recounted persons.","requires":["swift","rust"],"engines":["swift"],"start":"swift","requiresTestTrashRoot":true,"tree":[{"path":"people/a.jpg","content":"face a\n","row":{"id":1,"kind":"image"}},{"path":"people/b.jpg","content":"face b\n","row":{"id":2,"kind":"image"}}],"sql":["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')","UPDATE files SET has_faces = 1 WHERE id IN (1,2)","INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(1,'Alex',123,1,2),(2,'Sam',123,3,1)","INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.9),(2,2,1,X'00','[0,0,1,1]',X'0000803f',0.8),(3,1,2,X'00','[0,0,1,1]',X'0000803f',0.7)"],"steps":[{"label":"swift trashes","command":{"trashFiles":{"fileIDs":[1]}},"await":"bulkActionResult","save":{"name":"batch","path":"action","after":":"},"expect":{"succeeded":1,"failed":0}},{"label":"in the test Trash","fs":{"absent":["people/a.jpg"],"inTestTrash":["a.jpg"]}},{"label":"faces dropped, people recounted","db":"SELECT id,file_count,representative_face_id FROM persons ORDER BY id","expect":[[1,1,2],[2,0,null]]},{"restart":"rust"},{"label":"rust puts back","command":{"restoreFromTrash":{"batchID":{"$var":"batch"}}},"await":"bulkActionResult","expect":{"action":"restoreFromTrash","succeeded":1,"failed":0}},{"label":"file back","fs":{"contents":{"people/a.jpg":"face a\n","people/b.jpg":"face b\n"}}},{"label":"faces back","db":"SELECT id,file_id,person_id FROM face_prints ORDER BY id","expect":[[1,1,1],[2,2,1],[3,1,2]]},{"label":"has_faces back","db":"SELECT id,has_faces FROM files ORDER BY id","expect":[[1,1],[2,1]]},{"label":"people recounted","db":"SELECT id,file_count,representative_face_id FROM persons ORDER BY id","expect":[[1,2,2],[2,1,3]]}],"appHosted":true}
+  {"name": "trash-put-back-after-restart-faces", "description": "Rollback safety: a Trash batch the engine made carries the file's faces in its signed trash_log.json; after a restart the file is put back with its faces, people assignment and recounted persons.", "os": ["darwin"], "requiresTestTrashRoot": true, "tree": [{"path": "people/a.jpg", "content": "face a\n", "row": {"id": 1, "kind": "image"}}, {"path": "people/b.jpg", "content": "face b\n", "row": {"id": 2, "kind": "image"}}], "sql": ["INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')", "UPDATE files SET has_faces = 1 WHERE id IN (1,2)", "INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(1,'Alex',123,1,2),(2,'Sam',123,3,1)", "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.9),(2,2,1,X'00','[0,0,1,1]',X'0000803f',0.8),(3,1,2,X'00','[0,0,1,1]',X'0000803f',0.7)"], "steps": [{"label": "rust trashes", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}}, {"label": "in the test Trash", "fs": {"absent": ["people/a.jpg"], "inTestTrash": ["a.jpg"]}}, {"label": "faces dropped, people recounted", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 1, 2], [2, 0, null]]}, {"restart": true}, {"label": "rust puts back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}}, {"label": "file back", "fs": {"contents": {"people/a.jpg": "face a\n", "people/b.jpg": "face b\n"}}}, {"label": "faces back", "db": "SELECT id,file_id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1, 1], [2, 2, 1], [3, 1, 2]]}, {"label": "has_faces back", "db": "SELECT id,has_faces FROM files ORDER BY id", "expect": [[1, 1], [2, 1]]}, {"label": "people recounted", "db": "SELECT id,file_count,representative_face_id FROM persons ORDER BY id", "expect": [[1, 2, 2], [2, 1, 3]]}]}
 ]
