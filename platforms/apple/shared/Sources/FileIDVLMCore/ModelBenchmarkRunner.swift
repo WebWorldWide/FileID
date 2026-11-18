@@ -94,7 +94,6 @@ package enum ModelBenchmarkRunner {
         return circle.composited(over: bar.composited(over: background))
     }
 
-    // MARK: - Run
 
     enum Failure: LocalizedError {
         case notInstalled(String)
