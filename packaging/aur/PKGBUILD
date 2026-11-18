@@ -76,4 +76,10 @@ package() {
     "${pkgdir}/usr/share/metainfo/io.github.fileid.FileID.metainfo.xml"
   install -Dm644 "${data}/io.github.fileid.FileID.svg" \
     "${pkgdir}/usr/share/icons/hicolor/scalable/apps/io.github.fileid.FileID.svg"
+
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  # The v0.1.0 tag predates the generated notices; later tags carry them.
+  if [ -f THIRD_PARTY_NOTICES.txt ]; then
+    install -Dm644 THIRD_PARTY_NOTICES.txt "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES.txt"
+  fi
 }

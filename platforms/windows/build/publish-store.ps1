@@ -84,6 +84,7 @@ foreach ($required in @(
 }
 Copy-Item -Path (Join-Path $platformRoot 'store/Assets/*.png') -Destination (Join-Path $stage 'Assets')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES.txt')
 $docsStage = Join-Path $stage 'Docs'
 New-Item -ItemType Directory -Force -Path $docsStage | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot 'shared/docs/PRIVACY.md') -Destination (Join-Path $docsStage 'PRIVACY.md')
