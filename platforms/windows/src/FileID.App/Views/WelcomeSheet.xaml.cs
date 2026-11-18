@@ -10,8 +10,6 @@
 //   3. A small subscription to AllInstalled that auto-dismisses 800 ms
 //      after every model finishes (matches macOS).
 //
-// The "LIVE INSTALL STATE" diagnostic panel from earlier iterations is
-// gone — x:Bind makes it redundant (UI reflects model state in real time).
 
 using FileID.IpcSchema;
 using FileID.Services;
@@ -111,7 +109,6 @@ public sealed partial class WelcomeSheet : UserControl
         }, ct);
     }
 
-    // ─── x:Bind helper functions ────────────────────────────────────────
     //
     // WinUI 3 supports x:Bind functions: the XAML can reference any
     // public/internal method on the page and re-evaluate it whenever any
@@ -307,8 +304,6 @@ public sealed partial class WelcomeSheet : UserControl
         return $"{hours:0}h {(seconds % 3600) / 60:00}m";
     }
 
-    // ─── Per-row action handlers ────────────────────────────────────────
-
     private void OnClipActionClicked(object sender, RoutedEventArgs e)
     {
         DebugLog.Info("[INSTALL] CLIP per-row button clicked.");
@@ -343,7 +338,6 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Accelerator);
     }
 
-    // XAML binding helpers for the Accelerator row.
     internal Visibility ShowAcceleratorButton(ModelInstallStatus status, bool isRealInstall)
     {
         // Show the button only when there's something the user can do:
