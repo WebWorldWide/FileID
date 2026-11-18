@@ -26,6 +26,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDir = '',
+    [string]$OrtRepository = '',
     # Kept short: ORT's build tree is deep enough to hit MAX_PATH.
     [string]$WorkDir = ''
 )
@@ -35,7 +36,16 @@ $ProgressPreference = 'SilentlyContinue'
 
 $OrtVersion = '1.22.0'
 $OrtCommit = 'f217402897f40ebba457e2421bc0a4702771968e'
-$OrtRepository = 'https://github.com/microsoft/onnxruntime.git'
+# microsoft/onnxruntime stopped resolving on 2026-11-17. The pinned commit below
+# is fetched by hash and the checkout is verified against it, so any server that
+# serves it yields the same tree; Intel's fork carries it (tree 29be5f8a...).
+# Override with -OrtRepository or FILEID_ORT_REPOSITORY (an owned mirror).
+$DefaultOrtRepository = 'https://github.com/intel/onnxruntime.git'
+if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $env:FILEID_ORT_REPOSITORY }
+if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $DefaultOrtRepository }
+if ($OrtRepository -notmatch '^https://' -and -not (Test-Path -LiteralPath $OrtRepository)) {
+    throw "OrtRepository must be an https:// URL or an existing local path: $OrtRepository"
+}
 $CudaVersion = '12.8.1'
 $CudnnVersion = '9.8.0'
 # SASS for Pascal, Turing, Ampere, Ada; Blackwell (RTX 50) as SASS plus PTX so
