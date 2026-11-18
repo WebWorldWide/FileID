@@ -136,12 +136,13 @@ symphonia = { version = "0.5", default-features = false, features = ["all-codecs
 # EXACT versions (no caret) because the 2.0 RC line had ABI churn between
 # rc.10 / rc.11 / rc.12. Exact pins prevent silent breakage on `cargo update`.
 #
-# `download-binaries` MUST be on so the ORT runtime DLLs (onnxruntime.dll
-# + DirectML.dll + onnxruntime_providers_shared.dll) ship in the build
-# output — without it, `Session::builder()` fails immediately for every
-# EP including DirectML/CPU. CUDA/OpenVINO/QNN feature gates stay enabled
-# so the session-creation API compiles; their EP DLLs are delivered
-# separately via Performance Packs.
+# Windows and macOS use `load-dynamic` and never enable `download-binaries`:
+# the runtime DLL/dylib is the pinned FileID build (`fetch-runtime-deps.ps1`,
+# the macOS bundle), found through `ORT_DYLIB_PATH`, and `copy-dylibs` is off,
+# so a pyke download (cdn.pyke.io) would only fill a cache nothing reads.
+# Linux statically links pyke's `.a`, so it keeps `download-binaries`.
+# CUDA/OpenVINO/QNN feature gates stay enabled so the session-creation API
+# compiles; their EP DLLs are delivered separately via Performance Packs.
 # `ort` moved to per-target deps so non-Windows builds don't pull `directml`.
 ort-sys = "=2.0.0-rc.10"
 ndarray = "0.16"
@@ -149,7 +150,6 @@ ndarray = "0.16"
 [target.'cfg(windows)'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
-    "download-binaries",
     "ndarray",
     "directml",
     "cuda",
@@ -240,7 +240,6 @@ libc = "0.2"
 [target.'cfg(all(not(windows), not(target_os = "linux")))'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
-    "download-binaries",
     "ndarray",
     "cuda",
     "openvino",
