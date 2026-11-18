@@ -31,7 +31,7 @@ Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via
 ## AI models (commercial-clean target)
 
 Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface` (an existing `~/Documents/huggingface/models` from older Developer ID installs stays in use). The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
-- **Faces** — SFace embedder (Apache, 128-d ONNX via the CoreML EP) + 5-point alignment; detection stays Apple Vision.
+- **Faces** — SFace embedder (Apache, 128-d ONNX run by the shared Rust engine on tract, CPU) + 5-point alignment; detection stays Apple Vision.
 - **CLIP** — OpenAI/OpenCLIP ViT-B/32 (MIT) image + text, 512-d.
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.
 - **Deep Analyze** — Qwen3-VL 4B is the measured recommendation for 8 GB Macs and Qwen3-VL 8B for 16 GB Macs; Qwen2.5-VL 7B, Gemma 3, and Mistral-Small-3.2 remain curated alternatives.

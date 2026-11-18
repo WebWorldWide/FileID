@@ -21,17 +21,23 @@ use tract_onnx::tract_hir::infer::Factoid;
 /// The backend label tract sessions report.
 pub const TRACT_CPU: &str = "tract-cpu";
 
+const MAX_DEFAULT_MATMUL_THREADS: usize = 16;
+
 /// Threads one matmul may use: `FILEID_TRACT_THREADS` when set (`1` keeps tract
-/// single-threaded), else the machine's performance cores. Applied once, before
-/// the first model compiles, so every platform and every entry point (engine,
-/// CLI, GTK app, tests) runs the same configuration.
+/// single-threaded), else the machine's performance cores, never more than
+/// the CPUs this process may run on (cgroup quotas included) or 16. Applied
+/// once, before the first model compiles, so every platform and every entry
+/// point (engine, CLI, GTK app, tests) runs the same configuration.
 pub fn matmul_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THREADS.get_or_init(|| {
         let threads = std::env::var("FILEID_TRACT_THREADS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or_else(|| crate::platform::performance_core_count())
+            .unwrap_or_else(|| {
+                let allowed = std::thread::available_parallelism().map_or(usize::MAX, usize::from);
+                crate::platform::performance_core_count().min(allowed).min(MAX_DEFAULT_MATMUL_THREADS)
+            })
             .max(1);
         if threads > 1 {
             tract_linalg::multithread::set_default_executor(tract_linalg::multithread::Executor::multithread_with_name(threads, "fileid-tract"));

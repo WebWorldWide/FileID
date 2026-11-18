@@ -434,7 +434,37 @@ pub fn performance_core_count() -> usize {
             return value as usize;
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some(count) = linux_top_capacity_cpus() {
+        return count.min(cpu_topology().p_cores as usize).max(1);
+    }
     cpu_topology().p_cores as usize
+}
+
+/// CPUs sharing the highest `cpu_capacity`: the big cores of a hybrid part.
+/// `None` when the kernel exposes no capacities or every CPU is equal.
+#[cfg(target_os = "linux")]
+fn linux_top_capacity_cpus() -> Option<usize> {
+    let capacities: Vec<u32> = std::fs::read_dir("/sys/devices/system/cpu")
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.strip_prefix("cpu").is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty()) {
+                return None;
+            }
+            std::fs::read_to_string(entry.path().join("cpu_capacity")).ok()?.trim().parse().ok()
+        })
+        .collect();
+    top_capacity_count(&capacities)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn top_capacity_count(capacities: &[u32]) -> Option<usize> {
+    let max = *capacities.iter().max()?;
+    let min = *capacities.iter().min()?;
+    (max != min).then(|| capacities.iter().filter(|&&c| c == max).count())
 }
 
 /// Number of tagging workers to spin up by default. macOS-parity formula
@@ -1573,6 +1603,14 @@ mod adaptive_tests {
             };
             assert_eq!(got, expected_for_low_logical, "{:?} mismatch", st);
         }
+    }
+
+    #[test]
+    fn top_capacity_count_counts_big_cores_of_a_hybrid_part() {
+        assert_eq!(top_capacity_count(&[]), None);
+        assert_eq!(top_capacity_count(&[1024; 8]), None);
+        assert_eq!(top_capacity_count(&[1024, 1024, 1024, 1024, 512, 512, 512, 512]), Some(4));
+        assert_eq!(top_capacity_count(&[1024, 871, 871, 512]), Some(1));
     }
 
     #[test]

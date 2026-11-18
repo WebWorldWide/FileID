@@ -145,8 +145,8 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             // Engine not Ready yet: wait (up to 30 s) with inline feedback
             // instead of silently no-op'ing ("Start Scan does nothing"). 30 s
-            // covers a cold DirectML probe + slow HDD, where the first Ready
-            // can land at 20-25 s, while still failing fast on a dead engine.
+            // covers a slow HDD, where the first Ready can land at 20-25 s,
+            // while still failing fast on a dead engine.
             if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
             {
                 IdleStatusText.Text = "Getting ready…";

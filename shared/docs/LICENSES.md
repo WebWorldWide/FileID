@@ -127,7 +127,7 @@ The weights are never bundled; they are downloaded at a pinned revision after th
    `shared/licenses/components.json` (WindowsAppSDK especially). WiX's MS-RL bootstrapper stub in the
    setup executable deserves a one-line legal confirmation (the WiX FAQ says output is not
    subject to MS-RL).
-4. **ONNX Runtime third-party notices.** No longer applies: no FileID binary carries ONNX Runtime. (The Mac app still links ONNX Runtime 1.24.2 through the vendored Swift package until its own lane removes it.) PDFium's `licenses/` folder still needs staging.
+4. **ONNX Runtime third-party notices.** No longer applies: no FileID binary carries ONNX Runtime. PDFium's `licenses/` folder still needs staging.
 5. **FFmpeg/OpenH264.** If a media runtime is ever shipped: ship the LGPL source + licence it
    already records, and get codec patent clearance (a source-built OpenH264 has no Cisco grant).
 6. **SFace training data.** The weights are Apache-2.0 but the repo does not state the training

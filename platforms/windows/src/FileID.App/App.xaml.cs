@@ -217,9 +217,7 @@ public partial class App : Application
             // CudnnAutoInstaller silent fetch removed. The ~430 MB
             // background download surprised users and added startup-time
             // GPU pressure during what was already a hang-prone period.
-            // DirectML at 38 fps is sufficient on the RTX 2060 / 6 GB
-            // target. Power users can opt in via Settings → Performance
-            // → "NVIDIA acceleration (cuDNN)". See DECISIONS.md 2026-05-15.
+            // See DECISIONS.md 2026-05-15.
 
             Trace("WorkflowAutoTabRouter.Hook");
             try { WorkflowAutoTabRouter.Hook(); }

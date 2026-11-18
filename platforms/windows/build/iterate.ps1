@@ -123,11 +123,8 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
-# V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
-# wedged the DirectML driver and locked the entire system requiring a
-# hard reboot. Pool sizing is now VRAM-budgeted inside the engine and
-# defaults to 1. Push GPU saturation via batched inference, not
-# multiplied Sessions.
+# Do not set FILEID_MODEL_POOL_SIZE here: the engine sizes the model pool
+# from installed and available memory (2 sessions, 1 on a low-memory box).
 # V14.9-X: propagate FILEID_TEST_FILE_CAP from parent shell so a bounded
 # validation run (e.g. N=100) can stop Discovery early without editing
 # this script. Unset/0 = full scan.

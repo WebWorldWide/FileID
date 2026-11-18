@@ -194,7 +194,7 @@ Files live under each platform's models directory. Downloads triggered by the we
 
 | Aspect | Value |
 |---|---|
-| Source (macOS) | Pinned ViT-B/32 ONNX through ONNX Runtime; CoreML execution provider is attempted with CPU fallback (see `MobileCLIPService.swift`) |
+| Source (macOS) | Pinned ViT-B/32 ONNX, run by the shared Rust engine on tract (CPU) |
 | Source (Windows) | [`Xenova/clip-vit-base-patch32`](https://huggingface.co/Xenova/clip-vit-base-patch32) — `onnx/vision_model.onnx` (community ONNX export of OpenAI's MIT CLIP) |
 | License | **MIT** (OpenAI CLIP) |
 | macOS layout | `~/Library/Application Support/FileID/Models/mobileclip_image/clip_vitb32_image.onnx` |

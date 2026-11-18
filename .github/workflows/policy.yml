@@ -38,6 +38,10 @@ jobs:
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
+      - name: Test model golden provenance check
+        run: python shared/scripts/test_check_model_golden_provenance.py
+      - name: Enforce model goldens come from the reference runtime
+        run: python shared/scripts/check_model_golden_provenance.py
       - name: Enforce catalog migration parity
         run: python shared/scripts/check_catalog_schema.py
       - name: Test Mac app command coverage check

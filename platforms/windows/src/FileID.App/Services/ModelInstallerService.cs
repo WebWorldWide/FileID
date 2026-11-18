@@ -45,14 +45,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     private static readonly string[] FaceMeshSentinelIds = { "face_mesh" };
-    // one-button GPU acceleration pack on the welcome sheet.
-    // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
-    // provider DLL — the thing that actually flips inference off DirectML) plus
-    // cudnn_runtime_x64. The PROVIDER is the completion gate: cuDNN alone never
-    // enabled CUDA, so a legacy cuDNN-only install must still read as
-    // NotInstalled and prompt for the provider. Other vendors stay no-op
-    // (DirectML is bundled with ORT and is the production path on AMD/Intel/
-    // Qualcomm).
+    // Legacy GPU-pack sentinels from earlier releases. The engine registry no
+    // longer offers these packs; the ids only keep old installs reading as
+    // installed in the model lists.
     private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64", "ort_openvino_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install

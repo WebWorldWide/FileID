@@ -211,7 +211,7 @@ RAW_NETWORK_PATTERNS = {
     ),
 }
 SAFE_NETWORK_SINK_PATTERNS = {
-    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel|fetch_repo_listing)\s*\("),
+    ".rs": re.compile(r"\b(?:download_simple|download_parallel|fetch_repo_listing)\s*\("),
     ".swift": re.compile(r"\b(?:streamingDownload|parallelStreamingDownload)\s*\("),
     ".cs": re.compile(r"$^"),
 }
