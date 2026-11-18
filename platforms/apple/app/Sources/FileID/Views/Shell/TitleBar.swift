@@ -411,6 +411,7 @@ struct TitleBar: View {
     }
 
     private var currentActivity: (label: String, color: Color, progress: Double?, tone: ProgressTone, idle: Bool) {
+        if case .crashed = engine.state { return ("Helper stopped", Theme.danger, nil, .paused, true) }
         if scanRunning, let p = engine.lastProgress {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
             return ("Scanning", Theme.gold, p.phase == .tagging ? frac : nil, .gold, false)
