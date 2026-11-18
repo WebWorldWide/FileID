@@ -60,3 +60,7 @@ jobs:
         run: python shared/scripts/gen_model_manifest.py --check
       - name: Enforce the compiled-in Mac model catalog matches model-catalog.json
         run: python shared/scripts/gen_model_catalog_swift.py --check
+      - name: Test third-party notices generator
+        run: python shared/scripts/test_gen_third_party_notices.py
+      - name: Enforce dependency licence allowlist and current third-party notices
+        run: python shared/scripts/gen_third_party_notices.py --check
