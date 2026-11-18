@@ -1,9 +1,5 @@
-// Stage 5: the scan's working images. A decoded CGImage stays here behind a
-// handle so Vision, CLIP and RAM++ read the same pixels the Swift engine's
-// Tagging.processImage reads, with no copy through Rust. Decode, EXIF, dHash
-// and the video keyframe follow Tagging.swift and DeepAnalyze.swift line for
-// line; the shared scan conformance case pins the results against the Swift
-// engine.
+// Stage 5: the scan's working images. A decoded CGImage stays here behind a handle so Vision, CLIP and RAM++ read the same pixels as the Swift engine's
+// Tagging.processImage. Decode, EXIF, dHash and the video keyframe must match the Swift engine; the shared scan conformance case pins the results.
 import AVFoundation
 import CoreGraphics
 import Foundation
@@ -290,9 +286,8 @@ public func fileid_apple_video_keyframe(
     }
 }
 
-/// The image's dHash. Call it after Vision and CLIP have read the image, as
-/// Tagging.processImage does: a JPEG-backed image keeps the decode its first
-/// draw needed, so a 9x8 draw first would leave CLIP a coarse decode.
+/// The image's dHash. Call it after Vision and CLIP have read the image: a JPEG-backed image keeps the decode its first draw needed,
+/// so a 9x8 draw first would leave CLIP a coarse decode.
 @_cdecl("fileid_apple_image_dhash")
 public func fileid_apple_image_dhash(_ image: UInt64) -> UInt64 {
     guard let cgImage = ScanImages.shared.image(image) else { return 0 }

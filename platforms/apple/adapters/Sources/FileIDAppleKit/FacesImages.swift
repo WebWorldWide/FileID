@@ -1,10 +1,6 @@
-// Stage 6: the photos the Rust engine reads faces from. Decode, Vision
-// landmarks, the rendered RGBA buffer, the padded fallback crop and the crop
-// JPEGs follow the Swift engine's FaceClustering.extractOneFile, FaceAlign and
-// ArcFaceService line for line, so the Rust alignment (face_align.rs) and SFace
-// see the same pixels and the faces stay in `macos-landmark-overlap-v3-orientation`.
-// The decoded image stays behind a handle; Rust frees it with
-// fileid_apple_faces_close.
+// Stage 6: the photos the Rust engine reads faces from. Decode, Vision landmarks, the RGBA buffer, the padded fallback crop and crop JPEGs
+// must match the Swift engine's FaceClustering, FaceAlign and ArcFaceService line for line, so the Rust alignment (face_align.rs) and SFace see the same pixels.
+// The decoded image stays behind a handle; Rust frees it with fileid_apple_faces_close.
 import CoreGraphics
 import FileIDImaging
 import Foundation

@@ -70,7 +70,6 @@ enum MediaFrames {
         return rgb
     }
 
-    // MARK: Frame pool (the Swift engine's `VideoFramePool`)
 
     struct PoolFrame: Sendable {
         let seconds: Double

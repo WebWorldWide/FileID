@@ -36,7 +36,6 @@ struct TagUndoJournalTests {
             try? FileManager.default.removeItem(at: b)
         }
 
-        // Batch 1: A genuinely changes → journal records this batch.
         let first = TagWriter.addTagsBulkDetailed(["Vacation"], to: [a], journal: defaults)
         #expect(first.outcomes.count == 1)
         #expect(defaults.data(forKey: TagWriter.undoJournalKey) != nil)

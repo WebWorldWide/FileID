@@ -1,7 +1,5 @@
-// When a file's text deserves a careful read: Vision's accurate tier during the
-// scan (macOS) and a VLM transcription during Deep Analyze (every engine).
-// Mirrored rule for rule by the Rust engine's `pipeline/text_reading.rs`; the
-// shared conformance case pins the search side.
+// Decides when a file's text deserves a careful read: Vision's accurate tier during scan, and a VLM transcription during Deep Analyze.
+// Mirrors the Rust engine's pipeline/text_reading.rs rule for rule; the shared conformance case pins the search side.
 import Foundation
 
 package enum TextReading {

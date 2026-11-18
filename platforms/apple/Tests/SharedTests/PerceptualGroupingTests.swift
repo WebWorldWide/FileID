@@ -10,7 +10,6 @@ struct PerceptualGroupingTests {
 
     private func i(_ u: UInt64) -> Int64 { Int64(bitPattern: u) }
 
-    // MARK: - Hamming distance
 
     @Test("Hamming distance is popcount of XOR over the raw 64 bits")
     func hamming() {
@@ -22,7 +21,6 @@ struct PerceptualGroupingTests {
         #expect(PerceptualGrouping.hammingDistance(i(UInt64.max), i(UInt64.max)) == 0)
     }
 
-    // MARK: - Grouping
 
     @Test("Exact match (Ham 0) groups; threshold 0 is honored")
     func exactMatch() {

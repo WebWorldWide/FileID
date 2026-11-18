@@ -1,8 +1,5 @@
-// Stage 6: Best Takes' face judgement for the Rust engine
-// (VisionTakeFaceAnalyzer and TakeMediaAnalysis.signals in the Swift engine).
-// The adapter decodes and draws the photo, and runs Vision's landmarks,
-// capture quality and human rectangles; the Rust engine keeps tiling, merging,
-// Face Mesh and scoring (take_scoring.rs, catalog_take_auto.rs).
+// Stage 6 (Best Takes) face judgement for the Rust engine: decode and draw the photo, run Vision landmarks, capture quality and human rectangles.
+// The Rust engine keeps tiling, merging, Face Mesh and scoring (take_scoring.rs, catalog_take_auto.rs).
 import CoreGraphics
 import FileIDImaging
 import Foundation
@@ -41,10 +38,8 @@ enum FacesTake {
         return (rgb, w, h, sourceLongSide(source))
     }
 
-    /// `TakeMediaAnalysis.signals`' tile source: the detail decode
-    /// (`decodeScanImage`) when its long side reaches the smaller of the
-    /// source's and `longSide`, else `decodeBoundedImage` at `longSide`. Vision
-    /// reads crops of this image as decoded, as in Swift.
+    /// Tile source for `TakeMediaAnalysis.signals`: the detail decode when its long side reaches min(source, longSide), else `decodeBoundedImage` at longSide.
+    /// Vision reads crops of this image as decoded.
     static func tileSource(path: String, longSide: Int) -> CGImage? {
         let url = URL(fileURLWithPath: path)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
@@ -89,9 +84,7 @@ enum FacesTake {
         return drawn ? buffer : nil
     }
 
-    /// The sRGB image Vision reads, over packed RGB8, with the bitmap layout of
-    /// `TakeMediaAnalysis.fit`'s context: Vision's boxes and landmarks move by
-    /// up to 0.006 of the frame when the same bytes are tagged 32-bit big-endian.
+    /// sRGB image Vision reads, over packed RGB8 with `TakeMediaAnalysis.fit`'s bitmap layout. Tagging the same bytes as 32-bit big-endian moves Vision's boxes by up to 0.006 of the frame.
     static func image(rgb: UnsafeBufferPointer<UInt8>, width: Int, height: Int) -> CGImage? {
         guard width > 0, height > 0, rgb.count == width * height * 3 else { return nil }
         var rgbx = [UInt8](repeating: 255, count: width * height * 4)
@@ -107,10 +100,7 @@ enum FacesTake {
         }
     }
 
-    /// A mesh input in top-left pixels of a `width` × `height` image: Vision's
-    /// box and the centres of its eye and nose regions (`meshDetection`).
-    /// Floats cross as bit patterns: x1, y1, x2, y2, eyeA, eyeB, nose; `boxOnly`
-    /// when the face has no landmarks.
+    /// Mesh input in top-left pixels: Vision's box and the eye and nose region centres. Floats cross as bit patterns (x1, y1, x2, y2, eyeA, eyeB, nose); `boxOnly` when the face has no landmarks.
     struct Mesh: Encodable {
         let bits: [UInt32]
         let boxOnly: Bool
