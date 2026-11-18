@@ -4,6 +4,7 @@ import GRDB
 import ImageIO
 import UniformTypeIdentifiers
 import FileIDShared
+import FileIDORTSupport
 import FileIDImaging
 
 /// Read-only query commands whose replies mirror the shared Rust engine:

@@ -544,8 +544,8 @@ extension ModelInstallCard {
             blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Runs on this Mac.",
             rows: [
                 Row(name: "Understands photos", detail: "Looks at each photo during a scan.", technical: "OpenCLIP ViT-B/32 image model (MIT)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
-                Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPTextEncoder.defaultModelURL),
-                Row(name: "Word list", detail: "The words the search model knows.", technical: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
+                Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPEmbeddingSpace.textModelURL),
+                Row(name: "Word list", detail: "The words the search model knows.", technical: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPEmbeddingSpace.textModelDirectory.appendingPathComponent("vocab.json")),
             ],
             approxBytes: CLIPModelInstaller.approxDownloadBytes,
             removeTitle: "Remove the Search by description model?",

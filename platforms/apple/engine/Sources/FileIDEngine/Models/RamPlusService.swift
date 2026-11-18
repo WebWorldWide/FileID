@@ -21,6 +21,7 @@
 import Foundation
 import CoreGraphics
 import FileIDShared
+import FileIDORTSupport
 import OnnxRuntimeBindings
 import FileIDImaging
 

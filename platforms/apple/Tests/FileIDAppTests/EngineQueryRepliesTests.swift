@@ -519,8 +519,49 @@ struct AppCLIPTextSessionTests {
         #expect(files.count > 20)
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
-            for forbidden in ["CLIPTextEncoder.shared", "CLIPTextEncoder(", "CLIPTokenizer.shared", "ORTSession("] {
+            for forbidden in ["CLIPTextEncoder", "CLIPTokenizer.shared", "ORTSession(", "ORTPrivacy", "OnnxRuntimeBindings", "FileIDORT"] {
                 #expect(!text.contains(forbidden), "\(file.lastPathComponent) uses \(forbidden)")
+            }
+        }
+    }
+}
+
+@Suite("The shipped app links no ONNX Runtime")
+struct ShippedAppWithoutONNXRuntimeTests {
+    private static let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
+    private static let shippedTargets = [
+        "FileIDModelInfo", "FileIDShared", "FileIDImaging", "FileIDVLMCore",
+        "FileID", "FileIDAppleVLM", "FileIDAppleKit",
+    ]
+
+    @Test func shippedTargetsDoNotDependOnONNXRuntime() throws {
+        let manifest = try String(contentsOf: Self.appleRoot.appendingPathComponent("Package.swift"), encoding: .utf8)
+        let starts = ["\n        .target(", "\n        .executableTarget(", "\n        .testTarget("]
+        let declarations = starts.flatMap { start in manifest.ranges(of: start).map(\.lowerBound) }.sorted()
+        #expect(declarations.count > 8)
+        for target in Self.shippedTargets {
+            let name = try #require(manifest.range(of: "(\n            name: \"\(target)\","), "Package.swift declares \(target)")
+            let start = try #require(declarations.last { $0 < name.lowerBound })
+            let end = declarations.first { $0 > name.lowerBound } ?? manifest.endIndex
+            let block = manifest[start..<end]
+            #expect(!block.contains("onnxruntime"), "\(target) depends on onnxruntime")
+            #expect(!block.contains("FileIDORT"), "\(target) depends on FileIDORTC or FileIDORTSupport")
+        }
+    }
+
+    @Test func shippedSourcesDoNotImportONNXRuntime() throws {
+        let manager = FileManager.default
+        for folder in ["app/Sources", "adapters/Sources", "shared/Sources/FileIDShared", "shared/Sources/FileIDImaging",
+                       "shared/Sources/FileIDModelInfo", "shared/Sources/FileIDVLMCore"] {
+            let files = try #require(manager.enumerator(at: Self.appleRoot.appendingPathComponent(folder), includingPropertiesForKeys: nil))
+                .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+            #expect(!files.isEmpty, "\(folder) has sources")
+            for file in files {
+                let text = try String(contentsOf: file, encoding: .utf8)
+                #expect(!text.contains("OnnxRuntimeBindings") && !text.contains("import FileIDORT"),
+                        "\(file.lastPathComponent) imports ONNX Runtime")
             }
         }
     }

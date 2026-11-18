@@ -13,6 +13,17 @@ public enum CLIPEmbeddingSpace {
         return "clip-vitb32-openai-v1:" + digest
     }()
 
+    /// Where the CLIP text model and BPE vocabulary are installed, beside the other AI models.
+    public static var textModelDirectory: URL {
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("FileID/Models/clip_text", isDirectory: true)
+    }
+
+    public static var textModelURL: URL {
+        textModelDirectory.appendingPathComponent("clip_text.onnx")
+    }
+
     public static func verifyArtifact(at url: URL, id: String) -> Bool {
         guard let artifact = ModelManifest.artifacts.first(where: { $0.id == id }) else { return false }
         return ModelArtifactVerification.verifyFile(at: url, sha256: artifact.sha256)

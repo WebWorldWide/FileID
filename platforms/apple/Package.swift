@@ -41,18 +41,14 @@ let package = Package(
         // SQLite (WAL-mode) — the engine's primary store. Explicit
         // transaction control; FTS5 + vectorlite extension support.
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
-        // ONNX Runtime for face embedder. Lets the engine pull Buffalo
-        // ONNX directly from upstream (Immich's HF mirror) at runtime —
-        // same posture Immich itself uses, no weight redistribution on
-        // our part. CoreML execution provider keeps ANE acceleration.
+        // ONNX Runtime for the retired Swift engine (conformance peer only).
+        // Only FileIDORTSupport and FileIDEngine link it; the shipped app and
+        // the shared Rust engine's adapters do not.
         .package(path: "vendor/onnxruntime-swift-package-manager")
     ],
     targets: [
-        // Shared types (Codable DTOs, IPC envelope) plus code the engine and
-        // the app must not fork: merge suggestions over the catalog (GRDB) and
-        // the CLIP text encoder (ONNX Runtime). Both executables already link
-        // these packages.
         // ONNX Runtime C API calls the Objective-C bindings don't expose.
+        // Linked only by FileIDORTSupport, so only the Swift engine.
         .target(
             name: "FileIDORTC",
             dependencies: [
@@ -73,11 +69,24 @@ let package = Package(
             name: "FileIDShared",
             dependencies: [
                 "FileIDModelInfo",
-                "FileIDORTC",
-                .product(name: "GRDB", package: "GRDB.swift"),
-                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+                .product(name: "GRDB", package: "GRDB.swift")
             ],
             path: "shared/Sources/FileIDShared",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+
+        // The ONNX Runtime code only the Swift engine runs: the telemetry-off
+        // environment and the CLIP text encoder. The shipped app and
+        // FileIDShared link none of it; text embeddings for the app come from
+        // the shared Rust engine over IPC.
+        .target(
+            name: "FileIDORTSupport",
+            dependencies: [
+                "FileIDShared",
+                "FileIDORTC",
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+            ],
+            path: "shared/Sources/FileIDORTSupport",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
@@ -123,6 +132,7 @@ let package = Package(
             name: "FileIDEngine",
             dependencies: [
                 "FileIDShared",
+                "FileIDORTSupport",
                 "FileIDImaging",
                 "FileIDVLMCore",
                 .product(name: "AsyncAlgorithms",      package: "swift-async-algorithms"),
@@ -146,12 +156,7 @@ let package = Package(
             name: "FileID",
             dependencies: [
                 "FileIDShared",
-                .product(name: "GRDB", package: "GRDB.swift"),
-                // CLIP text encoder (semantic search) now runs the OpenCLIP
-                // ViT-B/32 ONNX via ONNX Runtime — the same engine the faces +
-                // image-CLIP paths use — replacing the research-only MobileCLIP-S2
-                // CoreML text model. See CLIPTextEncoder.
-                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+                .product(name: "GRDB", package: "GRDB.swift")
             ],
             path: "app/Sources/FileID",
             resources: [.copy("Resources/Fonts")],
@@ -205,7 +210,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EngineTests",
-            dependencies: ["FileIDEngine", "FileIDVLMCore"],
+            dependencies: ["FileIDEngine", "FileIDORTSupport", "FileIDVLMCore"],
             path: "Tests/EngineTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

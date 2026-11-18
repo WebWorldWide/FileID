@@ -1,4 +1,5 @@
 import FileIDShared
+import FileIDORTSupport
 import Foundation
 import OnnxRuntimeBindings
 
