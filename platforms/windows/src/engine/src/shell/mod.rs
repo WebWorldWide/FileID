@@ -1,38 +1,18 @@
-// Windows shell + system integrations. Each Win32 submodule is a thin
-// RAII wrapper over a Win32 / WinRT API:
-//
-//   trash      → IFileOperation::DeleteItem (8-parallel from Cleanup tab)
-//   ocr        → Windows.Media.Ocr (WinRT)
-//   tags       → IPropertyStore System.Keywords
-//   video      → Media Foundation IMFSourceReader
-//   heic       → WIC HEIF decode
-//
-// Sleep-prevention (SetThreadExecutionState) lives in `crate::platform`
-// because it's cross-cutting, not shell-specific.
-//
-// On non-Windows targets each module is replaced by a same-surface fallback.
-// Linux (`cfg(target_os = "linux")`) carries real, dependency-free backends
-// built on std + libc + subprocess:
-//
-//   reveal  → org.freedesktop.FileManager1.ShowItems (dbus-send/gdbus),
-//             falling back to `xdg-open` on the parent dir
-//   trash   → freedesktop Trash spec (move to $XDG_DATA_HOME/Trash + .trashinfo)
-//   tags    → user.xdg.tags xattr via libc {set,get,list,remove}xattr
-//   ocr     → tesseract CLI (best-effort; empty when absent)
-//   video   → ffmpeg keyframe → P6 PPM we parse (best-effort)
-//   heic    → libheif tools (heif-dec/heif-convert) → temp PNG → `image`
-//             decode (best-effort; needs the HEVC decoder plugin
-//             `libheif-plugin-libde265`, else the file is cleanly skipped)
-//
-// macOS (`cfg(all(not(windows), not(target_os = "linux")))`, where the CLI
-// and TUI run this engine) uses system tools where they always exist:
-//
-//   reveal  → `open -R`
-//   heic    → `sips` (ImageIO) → temp PNG → `image` decode
-//   video   → FileID's vetted FFmpeg runtime, as on Linux
-//   ocr     → unavailable: empty text, one notice per process
-//   trash / tags → refuse with a message naming the macOS app, except in
-//             the engine the app hosts (`apple-adapters`): `macos.rs`
+// Windows shell + system integrations: each Win32 submodule is a thin RAII wrapper over a Win32 / WinRT API (trash, ocr, tags, video, heic). Sleep prevention lives in `crate::platform` because it is cross-cutting.
+// On other targets each module is replaced by a same-surface fallback.
+// Linux carries real, dependency-free backends built on std + libc + subprocess:
+// reveal → org.freedesktop.FileManager1.ShowItems (dbus-send/gdbus), falling back to `xdg-open` on the parent dir
+// trash  → freedesktop Trash spec ($XDG_DATA_HOME/Trash + .trashinfo)
+// tags   → user.xdg.tags xattr via libc
+// ocr    → tesseract CLI (best-effort; empty when absent)
+// video  → ffmpeg keyframe → P6 PPM we parse (best-effort)
+// heic   → libheif tools (heif-dec/heif-convert) → temp PNG → `image` decode (best-effort; needs the HEVC plugin `libheif-plugin-libde265`, else the file is cleanly skipped)
+// macOS (where the CLI and TUI run this engine) uses system tools where they always exist:
+// reveal → `open -R`
+// heic   → `sips` (ImageIO) → temp PNG → `image` decode
+// video  → FileID's vetted FFmpeg runtime, as on Linux
+// ocr    → unavailable: empty text, one notice per process
+// trash / tags → refuse with a message naming the macOS app, except in the engine the app hosts (`apple-adapters`): `macos.rs`
 
 #[cfg(windows)] pub mod tags;
 #[cfg(windows)] pub mod thumbnail;
@@ -43,16 +23,12 @@
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))] mod macos;
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))] pub use macos::{tags, trash};
 
-// ────────────────────────────────────────────────────────────────────
-// Linux shared helpers (path → URI, temp files, silent subprocess).
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 mod linux_util {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
 
-    /// Absolute form of `path` without resolving symlinks (canonicalize would).
     pub fn absolute(path: &Path) -> PathBuf {
         if path.is_absolute() {
             path.to_path_buf()
@@ -111,7 +87,6 @@ mod linux_util {
         PathBuf::from(OsString::from_vec(out))
     }
 
-    /// A unique temp path under the system temp dir (pid + nanos + counter).
     pub fn temp_file(ext: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -401,9 +376,6 @@ mod linux_util {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// reveal
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod reveal {
     use super::linux_util::{absolute, percent_encode_path, run_silent};
@@ -418,7 +390,6 @@ pub mod reveal {
         let abs = absolute(path);
         let uri = format!("file://{}", percent_encode_path(&abs));
 
-        // 1. ShowItems via dbus-send.
         if run_silent(
             Command::new("dbus-send")
                 .arg("--session")
@@ -451,7 +422,6 @@ pub mod reveal {
             return Ok(());
         }
 
-        // 3. Fallback: open the parent directory (no selection).
         let parent = abs.parent().unwrap_or_else(|| Path::new("/"));
         if run_silent(Command::new("xdg-open").arg(parent)) {
             return Ok(());
@@ -467,7 +437,6 @@ pub mod reveal {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    /// Select the file in Finder.
     pub fn reveal(path: &Path) -> Result<()> {
         anyhow::ensure!(path.is_absolute(), "reveal needs an absolute path");
         let status = Command::new("/usr/bin/open")
@@ -483,9 +452,6 @@ pub mod reveal {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// tags  (user.xdg.tags xattr)
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod tags {
     use anyhow::{Context, Result};
@@ -502,7 +468,6 @@ pub mod tags {
             .with_context(|| format!("path {} contains an interior NUL", path.display()))
     }
 
-    /// Replace the file's tag list. Empty `tags` removes the attribute.
     pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
         crate::util::read_only::require_source_mutation(path)?;
         let c = cpath(path)?;
@@ -565,7 +530,6 @@ pub mod tags {
     /// to mirror the Windows sidecar API.
     pub fn move_sidecar(_old: &Path, _new: &Path) {}
 
-    /// True iff `want` appears in the file's xattr name list (NUL-separated).
     fn xattr_present(path: &CStr, want: &CStr) -> bool {
         let len = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
         if len <= 0 {
@@ -615,7 +579,6 @@ pub mod tags {
             assert!(tags.contains(&"holiday".to_string()));
             assert!(tags.contains(&"2024".to_string()));
 
-            // Clearing removes the attribute.
             write_tags(&file, &[]).unwrap();
             assert!(read_tags(&file).unwrap().is_empty());
 
@@ -743,7 +706,6 @@ pub mod thumbnail {
             .context("decoded buffer does not match its dimensions")
     }
 
-    /// Scale a decoded RGB frame (a video keyframe) to fit `dim`.
     pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>, dim: i32) -> Result<Thumbnail> {
         let dim = u32::try_from(dim).ok().filter(|dim| *dim > 0)
             .context("thumbnail dimension must be positive")?;
@@ -776,7 +738,6 @@ pub mod thumbnail {
             out
         }
 
-        /// TIFF-style RAW: IFD0 with orientation 6 and a JPEG preview.
         fn fake_raw(preview: &[u8]) -> Vec<u8> {
             let mut b = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
             let data_at = 8 + 2 + 3 * 12 + 4;
@@ -843,9 +804,6 @@ pub mod thumbnail {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// trash  (freedesktop Trash spec)
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod trash {
     use super::linux_util::{absolute, percent_decode_path, percent_encode_path};
@@ -856,9 +814,7 @@ pub mod trash {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path, PathBuf};
 
-    /// Batch wrapper. Trashes each path; returns one bool per input, true =
-    /// success. Order is preserved. Filesystem moves are cheap, so this runs
-    /// sequentially (no worker pool, unlike the COM-apartment Windows path).
+    /// Batch wrapper: one bool per input (true = success), order preserved. Filesystem moves are cheap, so this runs sequentially.
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         let trash = match home_trash_dir() {
             Ok(t) => t,
@@ -867,8 +823,6 @@ pub mod trash {
         paths.iter().map(|p| trash_into(p, &trash).is_ok()).collect()
     }
 
-    /// Move a single file to the home trash. Idempotent: a missing source is
-    /// treated as success ("already not on disk").
     pub fn trash_path(path: &Path) -> Result<()> {
         let trash = home_trash_dir()?;
         trash_into(path, &trash)
@@ -1415,8 +1369,6 @@ pub mod trash {
             .collect()
     }
 
-    /// Pull the original location out of a `.trashinfo` body's `Path=` line
-    /// (percent-decoded). Returns None if there's no `Path=` key.
     fn parse_trashinfo_orig(contents: &str) -> Option<PathBuf> {
         contents
             .lines()
@@ -1492,7 +1444,6 @@ pub mod trash {
                 n += 1;
                 continue;
             }
-            // Atomically claim the name by exclusively creating its .trashinfo.
             match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1528,8 +1479,6 @@ pub mod trash {
         }
     }
 
-    /// `name`, `name.1`, `name.2`, … keeping any extension on the tail so the
-    /// trashed file stays recognizable.
     fn candidate_name(orig: &OsStr, n: u32) -> OsString {
         if n == 0 {
             return orig.to_os_string();
@@ -1591,8 +1540,6 @@ pub mod trash {
         }
     }
 
-    /// Local-time ISO-8601 (no offset), per the freedesktop trash spec. Uses
-    /// libc's `localtime_r` so we don't hand-roll calendar/timezone math.
     fn deletion_date_now() -> String {
         unsafe {
             let t = libc::time(std::ptr::null_mut());
@@ -2054,9 +2001,6 @@ pub mod trash {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// ocr  (tesseract CLI, best-effort)
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod ocr {
     use super::linux_util::{run_output_bounded, temp_file};
@@ -2125,9 +2069,6 @@ pub mod ocr {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// video  (ffmpeg keyframe, best-effort)
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod video {
     use super::linux_util::run_output_bounded;
@@ -2145,7 +2086,6 @@ pub mod video {
     pub struct VideoFrame {
         pub width: u32,
         pub height: u32,
-        /// Tightly packed RGB8.
         pub rgb: Vec<u8>,
     }
 
@@ -2214,8 +2154,6 @@ pub mod video {
             .filter(|d| d.is_finite() && *d > 0.0)
     }
 
-    /// Parse a binary (P6) PPM: `P6 <w> <h> <maxval>` then one whitespace and
-    /// raw RGB. Comments (`#…`) are skipped. Only 8-bit (maxval 255) is handled.
     fn parse_ppm(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         if bytes.len() < 2 || &bytes[0..2] != b"P6" {
             return None;
@@ -2297,7 +2235,6 @@ pub mod video {
     pub struct VideoFrame {
         pub width: u32,
         pub height: u32,
-        /// Tightly packed RGB8.
         pub rgb: Vec<u8>,
     }
     /// Keyframe at ~25% of duration. The Mac app's engine takes it from
@@ -2362,9 +2299,6 @@ pub mod video {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// heic  (Linux libheif CLI bridge; graceful stub on other non-Windows OSes)
-// ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod heic {
     use super::linux_util::{read_bounded, temp_file, terminate_process_group};
@@ -2564,8 +2498,6 @@ pub mod heic {
     const MAX_HEIC_PIXELS: u64 = 50_000_000;
     const MAX_CONVERTED_PNG_BYTES: u64 = 256 * 1024 * 1024;
 
-    /// HEIC/HEIF decode through the system `sips` tool (ImageIO). The PNG it
-    /// writes lives in a private temp directory removed on every path.
     pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         anyhow::ensure!(path.is_absolute(), "heic decode needs an absolute path");
         let outputs = TempOutputDir::create()?;

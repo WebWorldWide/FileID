@@ -1,8 +1,4 @@
-//! Windows platform helpers — parent-PID watchdog, worker count heuristic,
-//! physical memory probe, sleep guard.
-//!
-//! Non-Windows builds get stub implementations so the engine compiles on
-//! every host while Windows-specific surfaces stay gated by `#[cfg(windows)]`.
+//! Platform helpers: parent-PID watchdog, worker-count heuristic, physical memory probe, sleep guard. Non-Windows builds get stubs so the engine compiles everywhere while Windows-specific surfaces stay behind `#[cfg(windows)]`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -49,10 +45,7 @@ fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
         return None;
     }
     let stat = unsafe { stat.assume_init() };
-    // statvfs field widths differ by platform: f_bavail/f_frsize are u64 on
-    // Linux glibc but f_bavail is u32 on macOS. `u64::from` widens on macOS and
-    // is an identity on Linux — allow the (Linux-only) useless_conversion so the
-    // one expression stays correct on both without a cast clippy flags either way.
+    // statvfs field widths differ: f_bavail/f_frsize are u64 on Linux glibc but f_bavail is u32 on macOS. `u64::from` widens on macOS and is an identity on Linux, so allow the Linux-only useless_conversion to keep one expression correct on both.
     #[allow(clippy::useless_conversion)]
     let bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
     Some(bytes)
@@ -63,13 +56,9 @@ fn available_disk_bytes_existing(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Redact a path for persistent logs, retaining only its last two components.
 pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     use std::path::Component;
-    // Only Normal components are PII candidates — Prefix (drive letter,
-    // UNC server\share) and RootDir are protocol/topology, never PII.
-    // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
-    // → "…/user/file.jpg" rather than leaking the drive/server.
+    // Only Normal components are PII candidates: Prefix (drive letter, UNC server\share) and RootDir are topology, so C:\ → "…" and \\server\share\user\file.jpg → "…/user/file.jpg" without leaking the drive/server.
     let parts: Vec<&str> = path
         .as_ref()
         .components()
@@ -81,14 +70,7 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if parts.is_empty() {
         return "…".to_string();
     }
-    // Home-anchored masking: for a file directly under a home dir
-    // (`…/Users/<user>/file` or `…/home/<user>/file`), the last-two-components
-    // tail would be `<user>/file` and leak the username. Detect a home-root
-    // keyword + username and, when the username would otherwise fall inside the
-    // kept two-component tail, drop everything up to and including the username
-    // so only the post-username components survive. Deeper paths
-    // (…/Users/<user>/Pictures/IMG) already push the username off the end and
-    // hit the generic tail below unchanged.
+    // Home-anchored masking: for a file directly under a home dir (`…/Users/<user>/file`, `…/home/<user>/file`) the last-two-components tail would be `<user>/file` and leak the username. Detect a home-root keyword + username and, when the username would fall inside the kept tail, drop everything up to and including it. Deeper paths already push the username off the end.
     let home_anchor = parts.iter().position(|p| {
         let l = p.to_lowercase();
         l == "users" || l == "home"
@@ -96,21 +78,11 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if let Some(anchor) = home_anchor {
         let user_idx = anchor + 1;
         if user_idx < parts.len() {
-            // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
-            // `/home/<user>`) — the username is the terminal component. Only a
-            // GENUINE home root (the keyword is the first component, anchor == 0)
-            // qualifies; fully mask it (baseline behavior). A nested
-            // backup tree whose terminal IS a real file (anchor > 0, e.g.
-            // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
-            // so its filename survives.
+            // (a) The path ends AT the home dir (`C:\Users\<user>`, `/home/<user>`): the username is the terminal component. Only a GENUINE home root (keyword first, anchor == 0) is fully masked; a nested backup tree whose terminal is a real file (anchor > 0, e.g. `E:\Backups\Users\file.txt`) falls through so its filename survives.
             if user_idx == parts.len() - 1 && anchor == 0 {
                 return "…".to_string();
             }
-            // (b) The username sits inside the kept last-two-component tail with
-            // at least one component after it (a real user dir above a file).
-            // Drop up to+including the username so only post-username context
-            // survives. The "component follows" guard stops a dir literally named
-            // users/home directly above a file from masking the FILENAME.
+            // (b) The username sits inside the kept tail with at least one component after it (a real user dir above a file): drop up to and including it. The "component follows" guard stops a dir literally named users/home directly above a file from masking the FILENAME.
             if user_idx + 1 < parts.len() && parts.len() - user_idx <= 2 {
                 let after = &parts[user_idx + 1..];
                 let kept: Vec<&str> =
@@ -160,8 +132,6 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log(""), "…");
     }
 
-    /// UNC path must keep only the last 2 Normal components; the server
-    /// and share name are protocol topology and must not leak into logs.
     #[test]
     #[cfg(windows)]
     fn redacts_unc_path_keeping_last_two_components() {
@@ -171,9 +141,6 @@ mod redaction_tests {
         assert!(!r.contains("share"), "share name leaked: {r}");
     }
 
-    /// Drive root (Prefix + RootDir, no Normal components) collapses to
-    /// "…" so we don't leak even the drive letter in cases where the
-    /// caller hands us a bare root.
     #[test]
     #[cfg(windows)]
     fn redacts_drive_root_to_ellipsis() {
@@ -188,10 +155,7 @@ mod redaction_tests {
         }
     }
 
-    /// #26: a USER path that merely CONTAINS `AppData\Local\FileID` but lives
-    /// outside this engine's resolved root (e.g. a backup on another volume) is
-    /// NOT the app's state tree and MUST be redacted — the old unanchored
-    /// `contains` fallback leaked these verbatim.
+    /// #26: a USER path that merely CONTAINS `AppData\Local\FileID` but lives outside this engine's resolved root (e.g. a backup on another volume) is NOT the app's state tree and MUST be redacted; the old unanchored `contains` fallback leaked these.
     #[test]
     #[cfg(windows)]
     fn redacts_user_backup_path_containing_appdata_local_fileid() {
@@ -200,10 +164,7 @@ mod redaction_tests {
         assert!(!r.contains("Backups"), "backup path leaked: {r}");
     }
 
-    /// ENG-97: a USER path that merely contains a folder named "FileID" (a dev
-    /// checkout, a backup dir, …) is NOT the app's state tree and MUST be
-    /// redacted — the old broad `\fileid\` substring match leaked these verbatim
-    /// with the username.
+    /// ENG-97: a USER path that merely contains a folder named "FileID" (dev checkout, backup dir) is NOT the app's state tree and MUST be redacted; the old broad `\fileid\` substring match leaked these with the username.
     #[test]
     #[cfg(windows)]
     fn redacts_user_path_merely_containing_fileid() {
@@ -212,9 +173,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// A file directly under a home dir must NOT expose the username.
-    /// Keeping the last two components alone would emit `…/Adam/resume.pdf` and
-    /// leak the username — home-anchored masking drops the user component.
+    /// A file directly under a home dir must NOT expose the username: the last two components alone would emit `…/Adam/resume.pdf`.
     #[test]
     #[cfg(windows)]
     fn redacts_home_direct_file_masking_username() {
@@ -223,9 +182,7 @@ mod redaction_tests {
         assert!(r.ends_with("resume.pdf"), "filename lost: {r}");
     }
 
-    /// POSIX shape: `/home/<user>/file` and `/Users/<user>/file`
-    /// must likewise mask the username. Runs on every host (the components
-    /// parse the same on non-Windows).
+    /// POSIX shape: `/home/<user>/file` and `/Users/<user>/file` must also mask the username (runs on every host).
     #[test]
     fn redacts_posix_home_direct_file_masking_username() {
         let r = redact_path_for_log("/home/adam/notes.txt");
@@ -237,19 +194,14 @@ mod redaction_tests {
         assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
     }
 
-    /// Regression: a path that ENDS at the home dir itself (the scan root
-    /// is the home directory — no file under it) must fully mask the username,
-    /// not fall through to the generic tail and leak it. Genuine home root only
-    /// (keyword is the first component); a nested backup tree is handled below.
+    /// Regression: a path that ENDS at the home dir (scan root is the home directory) must fully mask the username, not fall through to the generic tail. Genuine home root only; a nested backup tree is handled below.
     #[test]
     fn redacts_terminal_home_dir_masking_username() {
         assert_eq!(redact_path_for_log("/Users/adam"), "…");
         assert_eq!(redact_path_for_log("/home/adam"), "…");
     }
 
-    /// Must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
-    /// already pushes the username off the kept tail, so the deeper context
-    /// (Pictures/Vacation) survives unchanged.
+    /// Must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG` already pushes the username off the kept tail, so deeper context survives.
     #[test]
     #[cfg(windows)]
     fn home_masking_leaves_deep_user_paths_unchanged() {
@@ -258,10 +210,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// A directory literally named `Users`/`home` sitting DIRECTLY above a
-    /// file (a backup tree, a NAS share) is not a home root and the next part is
-    /// the FILENAME, not a username. Home-anchored masking must fall through to
-    /// the generic tail and preserve the filename instead of collapsing to "…".
+    /// A directory literally named `Users`/`home` DIRECTLY above a file (backup tree, NAS share) is not a home root and the next part is the FILENAME; it must be preserved instead of collapsing to "…".
     #[test]
     #[cfg(windows)]
     fn home_masking_preserves_filename_for_backup_tree() {
@@ -270,34 +219,20 @@ mod redaction_tests {
     }
 }
 
-// The dedicated-thread set/clear semantics only exist on Windows; off-Windows
-// SleepGuard is a no-op unit struct, so these thread-handoff tests run on the
-// Windows target (where the assertion is real).
 #[cfg(all(test, windows))]
 mod sleep_guard_tests {
     use super::*;
 
-    /// SetThreadExecutionState is thread-scoped, so the assertion
-    /// must be set AND cleared on the same thread. The guard owns a dedicated
-    /// thread for the whole lifecycle, so acquiring on one thread and dropping
-    /// on another (the real-world Tokio-worker case) still releases cleanly.
-    /// On non-Windows the guard is a no-op; on Windows the dedicated worker
-    /// thread is named "sleep-guard" and is joined by Drop, so no thread is
-    /// leaked and the clear is provably reached.
+    /// SetThreadExecutionState is thread-scoped, so the assertion must be set AND cleared on the same thread. The guard owns a dedicated thread for its whole lifecycle, so acquiring on one thread and dropping on another (the real Tokio-worker case) still releases cleanly; the worker is joined by Drop so the clear is provably reached.
     #[test]
     fn acquire_and_drop_across_threads_does_not_panic_or_leak() {
-        // Acquire on the current thread, hand the guard to a DIFFERENT thread,
-        // and drop it there — mirroring acquire-on-worker-A / drop-on-worker-B.
         let guard = SleepGuard::acquire();
         let handle = std::thread::spawn(move || {
-            // Dropping here runs Drop on a thread that never called acquire().
             drop(guard);
         });
         handle.join().expect("guard drop thread panicked");
     }
 
-    /// The guard must be safe to acquire and drop repeatedly without wedging
-    /// the assertion (each cycle sets then clears on its own owned thread).
     #[test]
     fn repeated_acquire_release_cycles() {
         for _ in 0..8 {
@@ -307,9 +242,7 @@ mod sleep_guard_tests {
     }
 }
 
-/// CPU topology — performance / efficiency / logical-thread split.
-/// On non-hybrid CPUs (anything pre Intel 12th-gen, all AMD Zen, all ARM
-/// except Snapdragon) `e_cores = 0` and `p_cores = physical_cores`.
+/// CPU topology: performance / efficiency / logical-thread split. On non-hybrid CPUs (pre-Intel-12th-gen, all AMD Zen, all ARM except Snapdragon) `e_cores = 0` and `p_cores = physical_cores`.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuTopology {
     pub p_cores: u32,
@@ -318,10 +251,7 @@ pub struct CpuTopology {
 }
 
 impl CpuTopology {
-    /// macOS worker formula: P + E + max(1, P/2). On M1 Pro (8P+2E)
-    /// this yields 14. On i9-13900K (8P+16E) this yields 8+16+4 = 28.
-    /// On a non-hybrid 8-core CPU this yields 8+0+4 = 12. Clamped to
-    /// `logical` so we never oversubscribe SMT.
+    /// macOS worker formula P + E + max(1, P/2): 14 on M1 Pro (8P+2E), 28 on i9-13900K (8P+16E), 12 on a non-hybrid 8-core. Clamped to `logical` so SMT is never oversubscribed.
     pub fn worker_cap(self) -> u32 {
         let p = self.p_cores.max(1);
         let e = self.e_cores;
@@ -330,12 +260,7 @@ impl CpuTopology {
     }
 }
 
-/// Detect P-core / E-core split on hybrid CPUs via
-/// `GetLogicalProcessorInformationEx(RelationProcessorCore)`.
-/// `EfficiencyClass` is 0 for E-cores and >0 for P-cores on Intel hybrid
-/// parts (12th-gen+). On non-hybrid CPUs every core reports the same class
-/// and we collapse them into `p_cores`. AMD's Zen5c "dense" cores will
-/// surface here once Windows tags them via the same API.
+/// Detects the P-core / E-core split via `GetLogicalProcessorInformationEx(RelationProcessorCore)`. `EfficiencyClass` is 0 for E-cores and >0 for P-cores on Intel hybrid parts (12th-gen+); on non-hybrid CPUs every core reports the same class and collapses into `p_cores`.
 #[cfg(windows)]
 pub fn cpu_topology() -> CpuTopology {
     use windows::Win32::System::SystemInformation::{
@@ -352,21 +277,9 @@ pub fn cpu_topology() -> CpuTopology {
         if bytes == 0 {
             return CpuTopology { p_cores: physical_fallback, e_cores: 0, logical };
         }
-        // Over-align the buffer: allocate Vec<u64> (8-byte aligned, which
-        // matches the struct's required alignment) instead of Vec<u8>
-        // (which only guarantees 1-byte alignment and is UB to reinterpret).
-        // We cast u64* → struct* directly so clippy sees the alignment is
-        // satisfied; intermediate u8* hides the source alignment.
+        // Over-align the buffer: Vec<u64> (8-byte aligned, matching the struct) rather than Vec<u8> (1-byte alignment, UB to reinterpret). The u64* → struct* cast keeps clippy's alignment check satisfied.
         let words = bytes.div_ceil(8) as usize;
-        // over-allocate one full fixed-size struct of slack. windows-rs
-        // models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union
-        // variant (~80 B), but a single-group RelationProcessorCore record is only
-        // ~48 B. Without slack, `&*rec_ptr` on the FINAL record forms an 80-byte
-        // place that runs past this exactly-sized buffer — a partially-dangling
-        // reference (UB) even though only the leading bytes are ever read. The
-        // second call still passes the OS-reported (smaller) `bytes` as the length
-        // and `total_words = bytes.div_ceil(8)` still bounds the loop to real
-        // records, so this only adds zero-padded headroom.
+        // Over-allocate one full struct of slack: windows-rs models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union variant (~80 B) but a single-group RelationProcessorCore record is ~48 B, so `&*rec_ptr` on the FINAL record would form an 80-byte place past an exactly-sized buffer (a partially-dangling reference, UB). The second call still passes the OS-reported `bytes` and `total_words` bounds the loop to real records, so this only adds zero-padded headroom.
         let slack_words = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>().div_ceil(8);
         let mut aligned: Vec<u64> = vec![0u64; words + slack_words];
         let head = aligned.as_mut_ptr().cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
@@ -378,31 +291,24 @@ pub fn cpu_topology() -> CpuTopology {
         let mut offset_words: usize = 0;
         let total_words = bytes.div_ceil(8) as usize;
         while offset_words < total_words {
-            // SAFETY: offset_words ≤ total_words, so `add` stays within
-            // the allocation. The cast is from an 8-byte-aligned u64 ptr
-            // to the (also-8-byte-aligned) struct ptr — alignment safe.
+            // SAFETY: offset_words ≤ total_words so `add` stays in the allocation; the u64* → struct* cast is 8-byte-aligned on both sides.
             let rec_ptr = aligned.as_ptr().add(offset_words).cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
             let rec = &*rec_ptr;
             let size_bytes_field = rec.Size as usize;
             if size_bytes_field == 0 { break; }
             let proc_info = rec.Anonymous.Processor;
             *classes.entry(proc_info.EfficiencyClass).or_insert(0) += 1;
-            // Advance by the struct's reported size, rounded up to u64 words.
             offset_words += size_bytes_field.div_ceil(8);
         }
 
         match classes.len() {
             0 => CpuTopology { p_cores: physical_fallback, e_cores: 0, logical },
             1 => {
-                // Non-hybrid CPU — all cores in the same efficiency class.
                 let total = classes.values().copied().sum::<u32>().max(1);
                 CpuTopology { p_cores: total, e_cores: 0, logical }
             }
             _ => {
-                // Hybrid CPU. Highest class = P-cores, lowest = E-cores.
-                // Intel 12th-gen+ uses 0 for E, 1 for P. Future parts may
-                // add intermediate classes — bucket them with P-cores
-                // (better to oversubscribe than under).
+                // Hybrid CPU: highest class = P-cores, lowest = E-cores (Intel 12th-gen+ uses 0 for E, 1 for P). Intermediate classes bucket with P-cores, since oversubscribing beats under.
                 let min_class = *classes.keys().min().unwrap();
                 let e = *classes.get(&min_class).unwrap_or(&0);
                 let p = classes.values().copied().sum::<u32>().saturating_sub(e);
@@ -421,14 +327,11 @@ pub fn cpu_topology() -> CpuTopology {
     }
 }
 
-/// Cores that run heavy work at full speed: the performance cluster on Apple
-/// silicon and on hybrid Intel parts, every physical core elsewhere.
 pub fn performance_core_count() -> usize {
     #[cfg(target_os = "macos")]
     {
         let mut value: u32 = 0;
         let mut size = std::mem::size_of::<u32>();
-        // SAFETY: `value` and `size` outlive the call and `size` is the buffer's size.
         let status = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
         if status == 0 && value > 0 {
             return value as usize;
@@ -443,8 +346,7 @@ pub fn performance_core_count() -> usize {
     cpu_topology().p_cores as usize
 }
 
-/// CPUs sharing the highest `cpu_capacity`: the big cores of a hybrid part.
-/// `None` when the kernel exposes no capacities or every CPU is equal.
+/// CPUs sharing the highest `cpu_capacity`: the big cores of a hybrid part. `None` when the kernel exposes no capacities or all CPUs are equal.
 #[cfg(target_os = "linux")]
 fn linux_top_capacity_cpus() -> Option<usize> {
     let capacities: Vec<u32> = std::fs::read_dir("/sys/devices/system/cpu")
@@ -469,24 +371,18 @@ fn top_capacity_count(capacities: &[u32]) -> Option<usize> {
     (max != min).then(|| capacities.iter().filter(|&&c| c == max).count())
 }
 
-/// Number of tagging workers to spin up by default. macOS-parity formula
-/// P + E + max(1, P/2) capped at logical-cores and [2, 32]. Replaces the
-/// older `physical * 1.7` heuristic which mis-sized hybrid CPUs (treated
-/// an i9-13900K's 8P+16E like an 8-core).
+/// Default number of tagging workers: the macOS-parity formula P + E + max(1, P/2) capped at logical cores and [2, 32] (the old `physical * 1.7` mis-sized hybrid CPUs, e.g. treating an i9-13900K's 8P+16E like an 8-core).
 pub fn default_worker_cap() -> u32 {
     cpu_topology().worker_cap()
 }
 
-/// Physical memory in GiB.
 pub fn physical_memory_gb() -> f64 {
     let Ok(mut sys) = sysinfo::System::new() else { return 0.0 };
     sys.refresh_memory();
     (sys.total_memory() as f64) / (1024.0 * 1024.0 * 1024.0)
 }
 
-/// Available (not-in-use) physical memory in MiB. Polls
-/// `GlobalMemoryStatusEx` every call — call rate is bounded by the 30s
-/// memory-tier refresh in the scan loop, so this is cheap enough.
+/// Available (not-in-use) physical memory in MiB; polls `GlobalMemoryStatusEx` each call, bounded by the 30 s memory-tier refresh in the scan loop.
 #[cfg(windows)]
 pub fn available_memory_mb() -> u64 {
     use windows::Win32::System::SystemInformation::{
@@ -548,20 +444,11 @@ fn macos_available_mb(counted_mb: u64, total_mb: u64, level: Option<i32>) -> u64
     }
 }
 
-/// Memory-pressure tier. On `Low` it additionally caps the tagging worker
-/// count, the ML session pool (to 1), and the predecode read-ahead channel —
-/// see `commands::scan` + `pipeline::tagging` — so a low-RAM box keeps fewer
-/// full decoded frames resident; `Balanced`/`High` leave those at their CPU/VRAM
-/// defaults. Also drives `dbwriter_batch_size_for`. Refreshed at scan start (the
-/// dbwriter re-polls every 30s) so a mid-scan pressure shift downshifts instead
-/// of OOM'ing.
+/// Memory-pressure tier. On `Low` it also caps the tagging worker count, the ML session pool (to 1) and the predecode read-ahead channel (see `commands::scan` + `pipeline::tagging`) so a low-RAM box keeps fewer decoded frames resident. Also drives `dbwriter_batch_size_for`. Refreshed at scan start (the dbwriter re-polls every 30 s) so a mid-scan shift downshifts instead of OOM'ing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTier {
-    /// <8 GB available — be conservative, smaller batches + pool=1.
     Low,
-    /// 8–32 GB available — current defaults.
     Balanced,
-    /// >32 GB available — bigger batches, larger channels, bigger caches.
     High,
 }
 
@@ -575,7 +462,6 @@ impl MemoryTier {
     }
 }
 
-/// Snapshot the current memory tier. Cheap (one `GlobalMemoryStatusEx`).
 pub fn memory_tier() -> MemoryTier {
     let avail_mb = available_memory_mb();
     if avail_mb < 8 * 1024 {
@@ -587,22 +473,14 @@ pub fn memory_tier() -> MemoryTier {
     }
 }
 
-/// RAM++ runs in f32 on tract: about 4.5 GB resident at one pooled session
-/// and 6.4 GB at two. Below this much installed RAM the scan skips RAM++ and
-/// tags with CLIP scene tags instead. Installed RAM, not available RAM, so a
-/// machine tags the same way on every run; nominal 12 GB parts report just
-/// under 12 GiB once the iGPU reservation is taken out. A failed memory query
-/// (0.0) keeps RAM++ on.
+/// RAM++ runs in f32 on tract: ~4.5 GB resident at one pooled session, 6.4 GB at two. Below this much installed RAM the scan skips RAM++ and tags with CLIP scene tags. Installed, not available, RAM so a machine tags the same way every run; nominal 12 GB parts report just under 12 GiB after the iGPU reservation. A failed query (0.0) keeps RAM++ on.
 pub const RAM_PLUS_MIN_TOTAL_GB: f64 = 11.0;
 
 pub fn ram_plus_fits_in_memory(total_gb: f64) -> bool {
     total_gb <= 0.0 || total_gb >= RAM_PLUS_MIN_TOTAL_GB
 }
 
-/// DBWriter batch flush size for a memory tier. Discovery throughput
-/// benefits from larger batches (fewer transactions), but Low tier needs
-/// to keep per-transaction memory bounded so we don't compete with the
-/// app's own working set.
+/// DBWriter batch flush size per tier: larger batches mean fewer transactions for discovery throughput, but Low keeps per-transaction memory bounded so we don't compete with the app's working set.
 pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
     match tier {
         MemoryTier::Low => 64,
@@ -611,25 +489,12 @@ pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
     }
 }
 
-// ─── Storage-type detection (NVMe / SSD / HDD / Removable / Network) ────────
-//
-// Discovery's I/O queue depth should depend on the storage type:
-//   - NVMe: many parallel stat() helps, no seek penalty
-//   - SATA SSD: moderate parallelism wins
-//   - HDD: deep queues HURT (rotational random I/O is the worst-case
-//     access pattern); cap at 2 threads
-//   - USB / Network: 2 threads, defensive (slow + variable)
-//
-// Detection: open the volume root with FILE_READ_ATTRIBUTES, then
-// `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY, StorageDeviceSeekPenaltyProperty)`.
-// Result is a `DEVICE_SEEK_PENALTY_DESCRIPTOR` with a single bool. Combined
-// with `GetDriveTypeW` to distinguish removable / network from local fixed.
+// Storage-type detection (NVMe / SSD / HDD / Removable / Network) sets discovery's I/O queue depth: NVMe benefits from many parallel stat(), SATA SSD moderate, HDD deep queues HURT (cap at 2 threads), USB / Network 2 threads (slow and variable).
+// Detection opens the volume root with FILE_READ_ATTRIBUTES, queries `StorageDeviceSeekPenaltyProperty` via `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)`, and uses `GetDriveTypeW` to tell removable / network from local fixed.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub enum StorageType {
-    /// Any non-rotational fixed drive; the seek-penalty descriptor can't tell
-    /// NVMe from SATA SSD.
     Nvme,
     Hdd,
     Removable,
@@ -649,8 +514,6 @@ impl StorageType {
     }
 }
 
-/// Parallel-walk thread count for `path`'s underlying storage. Issue 1's
-/// adaptive I/O budget. NVMe wants depth; HDDs hate it.
 pub fn walk_concurrency_for(path: &Path) -> usize {
     let storage = storage_type_for_path(path);
     let logical = num_cpus::get().max(1);
@@ -663,9 +526,7 @@ pub fn walk_concurrency_for(path: &Path) -> usize {
     }
 }
 
-/// Detect storage type for the volume containing `path`. Returns
-/// `Unknown` if we can't read the descriptor (most commonly: the user
-/// pointed at a path on a virtual filesystem we can't query).
+/// Storage type of the volume containing `path`; `Unknown` if the descriptor can't be read (e.g. a virtual filesystem).
 #[cfg(windows)]
 pub fn storage_type_for_path(path: &Path) -> StorageType {
     use std::os::windows::ffi::OsStrExt;
@@ -681,19 +542,14 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
     };
     use windows::Win32::System::IO::DeviceIoControl;
 
-    // Win32 GetDriveTypeW return values (from fileapi.h). windows-rs 0.58
-    // doesn't export these as named constants, so we match the raw u32s.
     const DRIVE_REMOVABLE: u32 = 2;
     const DRIVE_FIXED: u32 = 3;
     const DRIVE_REMOTE: u32 = 4;
     const DRIVE_CDROM: u32 = 5;
     const DRIVE_RAMDISK: u32 = 6;
 
-    // 1. Volume-root path: walk up the path until we reach a component
-    //    whose parent has no parent (the volume root, e.g. C:\ or \\srv\share).
     let root = path.ancestors().last().unwrap_or(path);
 
-    // 2. Drive type: short-circuit removable / network / CD without any IOCTL.
     let mut root_wide: Vec<u16> = root.as_os_str().encode_wide().collect();
     if !root_wide.ends_with(&[0]) { root_wide.push(0); }
     let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
@@ -705,7 +561,6 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
         _ => return StorageType::Unknown,
     }
 
-    // 3. Volume root for CreateFile must use the `\\.\X:` form, NOT `X:\`.
     let drive_letter = root.to_string_lossy();
     let drive_letter = drive_letter.trim_end_matches(['\\', '/']);
     let unc_volume = format!(r"\\.\{}", drive_letter);
@@ -746,12 +601,7 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
             None,
         );
         if ok.is_ok() && returned as usize >= std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() {
-            // `IncursSeekPenalty == FALSE` ⇒ no seek penalty ⇒ SSD-class.
-            // We can't distinguish NVMe from SATA SSD from this descriptor
-            // alone (would need STORAGE_ADAPTER_DESCRIPTOR for BusType).
-            // For now: treat all no-seek-penalty fixed drives as NVMe-class
-            // (16-thread budget). The downside on SATA SSDs is moderate
-            // over-parallelism, which still beats single-threaded walkdir.
+            // `IncursSeekPenalty == FALSE` means SSD-class, but this descriptor can't tell NVMe from SATA SSD (that needs STORAGE_ADAPTER_DESCRIPTOR for BusType), so all no-seek-penalty fixed drives get the NVMe 16-thread budget. SATA SSDs get moderate over-parallelism, still better than single-threaded walkdir.
             if desc.IncursSeekPenalty { StorageType::Hdd } else { StorageType::Nvme }
         } else {
             StorageType::Unknown
@@ -767,14 +617,7 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
     StorageType::Unknown
 }
 
-// ─── Volume-local file identity (NTFS MFT reference) ───────────────────────
-//
-// Rename/move detection (v8 schema) keys off a volume-local file id: NTFS's
-// 64-bit MFT reference on Windows, the inode on POSIX. A rename within the
-// same volume keeps the same id, so we can re-bind a file's catalog row to
-// the new path instead of recomputing its tags + embeddings + faces. Across
-// volumes the id can collide, so a cross-volume move falls through to the
-// content-hash lookup.
+// Volume-local file identity (NTFS 64-bit MFT reference; inode on POSIX) keys rename/move detection (v8 schema): a rename within one volume keeps the id, so the catalog row is re-bound to the new path instead of recomputing tags, embeddings and faces. Ids can collide across volumes, so a cross-volume move falls through to the content-hash lookup.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileIdentity {
@@ -782,9 +625,7 @@ pub(crate) struct FileIdentity {
     pub(crate) file: u64,
 }
 
-/// Volume-qualified file identity for `path`, or `None` if the entry cannot be
-/// opened. Unlike `file_ref`, this is safe to persist as mutation authority
-/// because identical file indexes on different volumes remain distinct.
+/// Volume-qualified file identity for `path`, or `None` if the entry can't be opened. Unlike `file_ref` it is safe to persist as mutation authority because identical file indexes on different volumes stay distinct.
 #[cfg(windows)]
 pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::windows::ffi::OsStrExt;
@@ -864,14 +705,10 @@ pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdenti
     })
 }
 
-/// 64-bit volume-local file identity for rename/move heuristics. This legacy DB
-/// value intentionally omits the volume; destructive journals use
-/// [`file_identity`] instead.
+/// 64-bit volume-local file identity for rename/move heuristics. This legacy DB value omits the volume; destructive journals use [`file_identity`].
 pub fn file_ref(path: &Path) -> Option<u64> {
     file_identity(path).map(|identity| identity.file)
 }
-
-// ─── Battery / AC power detection ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -891,10 +728,7 @@ impl PowerSource {
     }
 }
 
-/// (source, battery_percent). `battery_percent` is None on desktops without
-/// a battery. First-pass: REPORT only (Settings → Diagnostics surfaces it);
-/// throttling on battery is a NEXT.md follow-up so the user can see what
-/// changed before behavior shifts under their feet.
+/// (source, battery_percent); `battery_percent` is None on desktops without a battery. REPORT only (Settings → Diagnostics); throttling on battery is a NEXT.md follow-up.
 #[cfg(windows)]
 pub fn power_status() -> (PowerSource, Option<u8>) {
     use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -908,7 +742,6 @@ pub fn power_status() -> (PowerSource, Option<u8>) {
             1 => PowerSource::Ac,
             _ => PowerSource::Unknown,
         };
-        // BatteryLifePercent: 0–100, or 255 when unknown.
         let pct = if s.BatteryLifePercent <= 100 { Some(s.BatteryLifePercent) } else { None };
         (source, pct)
     }
@@ -919,11 +752,7 @@ pub fn power_status() -> (PowerSource, Option<u8>) {
     (PowerSource::Unknown, None)
 }
 
-/// Current process RSS (resident set size) in MiB. Mirrors macOS
-/// `Hardware.swift::residentMemoryMB` (task_info MACH_TASK_BASIC_INFO).
-/// Used by the sidebar Memory stat — Windows previously hardcoded 0,
-/// so the user saw "Memory: 0 MB" mid-scan even though ML inference
-/// holds 600 MB-1.2 GB.
+/// Current process RSS in MiB. Mirrors macOS `Hardware.swift::residentMemoryMB`; feeds the sidebar Memory stat (which showed "Memory: 0 MB" mid-scan while ML inference held 600 MB-1.2 GB).
 #[cfg(windows)]
 pub fn process_memory_mb() -> u64 {
     use windows::Win32::System::ProcessStatus::{
@@ -951,7 +780,6 @@ pub fn process_memory_mb() -> u64 {
 
 #[cfg(not(windows))]
 pub fn process_memory_mb() -> u64 {
-    // Linux: read VmRSS from /proc/self/status (in kB).
     #[cfg(target_os = "linux")]
     {
         if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
@@ -971,14 +799,11 @@ pub fn process_memory_mb() -> u64 {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // macOS / other POSIX: sysinfo per-process refresh would work but
-        // adds a heavy probe; for now return 0 and let a future Linux/macOS
-        // port slot in the right libc / mach call.
+        // macOS / other POSIX: not implemented (sysinfo per-process refresh adds a heavy probe), returns 0.
         0
     }
 }
 
-/// Get the parent-process PID via OS-specific API. None if unknown.
 #[cfg(windows)]
 pub fn get_parent_pid() -> Option<u32> {
     use windows::Win32::Foundation::CloseHandle;
@@ -990,8 +815,7 @@ pub fn get_parent_pid() -> Option<u32> {
     let our_pid = std::process::id();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        // Wrap the snapshot walk in a closure so every exit (early return,
-        // loop break) falls through to the CloseHandle below.
+        // Closure so every exit (early return, loop break) falls through to the CloseHandle below.
         let result = (|| -> Option<u32> {
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -1016,7 +840,6 @@ pub fn get_parent_pid() -> Option<u32> {
 
 #[cfg(not(windows))]
 pub fn get_parent_pid() -> Option<u32> {
-    // POSIX: getppid() is always available.
     #[cfg(unix)]
     unsafe {
         Some(libc::getppid() as u32)
@@ -1025,8 +848,6 @@ pub fn get_parent_pid() -> Option<u32> {
     None
 }
 
-/// Watch the parent process. Set the shutdown notify when the parent goes
-/// away (handle invalid / process ID no longer alive).
 #[cfg(windows)]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -1042,11 +863,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
         }
     };
 
-    // HANDLE wraps *mut c_void which the windows crate doesn't mark Send.
-    // Smuggle it across the closure boundary as a usize — integers are
-    // always Send. SAFETY: a Win32 HANDLE is opaque; CloseHandle and
-    // WaitForSingleObject can be called from any thread once the handle
-    // exists. This task is the sole owner of the value across the move.
+    // HANDLE wraps *mut c_void, which the windows crate doesn't mark Send, so smuggle it across the closure as a usize. SAFETY: a Win32 HANDLE is opaque and CloseHandle / WaitForSingleObject may run on any thread once it exists; this task is its sole owner across the move.
     let handle_addr = handle.0 as usize;
 
     let wait = tokio::task::spawn_blocking(move || {
@@ -1056,12 +873,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
         r
     });
 
-    // Race the blocking wait against the shared shutdown signal so EOF /
-    // explicit Shutdown / etc. can unblock us when the parent stays alive
-    // (e.g. test harnesses, debugger sessions). If we lose the race, the
-    // blocking thread keeps its INFINITE wait until process exit; the OS
-    // reaps it. shutdown_timeout(0) on the Runtime ensures the leaked
-    // blocking task does NOT delay process exit.
+    // Race the blocking wait against the shared shutdown signal so EOF / explicit Shutdown can unblock us when the parent stays alive (test harnesses, debuggers). If we lose, the blocking thread keeps its INFINITE wait until process exit, and `shutdown_timeout(0)` on the Runtime ensures it doesn't delay exit.
     tokio::select! {
         _ = shutdown.notified() => {
             tracing::info!("watch_parent cancelled by shutdown signal");
@@ -1077,8 +889,6 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     }
 }
 
-/// POSIX: when the parent exits the engine is reparented (to init or a
-/// subreaper), so a changed `getppid()` means the app is gone.
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     use tokio::time::{Duration, MissedTickBehavior};
@@ -1112,26 +922,10 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     }
 }
 
-// ─── Sleep guard ────────────────────────────────────────────────────────────
-//
-// SetThreadExecutionState equivalent of macOS IOPMAssertion. Set on scan
-// start, cleared on scan end. The OS keeps the system awake but lets the
-// display sleep — we pass ES_SYSTEM_REQUIRED but NOT ES_DISPLAY_REQUIRED.
-//
-// SetThreadExecutionState is THREAD-SCOPED: the assertion lives on the thread
-// that set it and is only released by a matching SetThreadExecutionState
-// (ES_CONTINUOUS) on that SAME thread (or when the thread exits). The guard is
-// acquired at the top of an async scan and dropped when it returns, but the
-// future is polled across Tokio worker threads — so a naive acquire-here /
-// clear-in-Drop would SET on one worker and CLEAR on another, leaving the
-// assertion permanently armed and the machine unable to sleep after a scan
-// . We therefore pin the whole set→hold→clear lifecycle to one
-// dedicated thread the guard owns; the assertion clears on the thread that set
-// it no matter which Tokio worker runs Drop.
+// Sleep guard: the SetThreadExecutionState equivalent of macOS IOPMAssertion, set on scan start and cleared on scan end. ES_SYSTEM_REQUIRED but NOT ES_DISPLAY_REQUIRED, so the display can still sleep.
+// SetThreadExecutionState is THREAD-SCOPED: the assertion is only released by a matching ES_CONTINUOUS call on the SAME thread (or thread exit). The scan future is polled across Tokio workers, so a naive acquire-here / clear-in-Drop would SET on one worker and CLEAR on another, leaving the machine unable to sleep after a scan. The whole set→hold→clear lifecycle is therefore pinned to a dedicated thread the guard owns.
 
-/// RAII guard. While alive, prevents Windows from sleeping the system.
-/// Configure a Linux helper as a process-group leader and have the kernel kill
-/// it if the engine disappears before normal cleanup can run.
+/// RAII guard. While alive, prevents Windows from sleeping the system. Configure a Linux helper as a process-group leader and have the kernel kill it if the engine disappears before normal cleanup can run.
 #[cfg(target_os = "linux")]
 pub(crate) fn configure_child_lifetime(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -1162,24 +956,17 @@ pub(crate) fn terminate_child_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Drop = release the assertion. The set and clear both run on a dedicated
-/// owned thread so the thread-scoped assertion is released on the same thread
-/// that armed it, independent of which Tokio worker polls/drops the guard.
 pub struct SleepGuard {
     #[cfg(windows)]
     stop: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(windows)]
     thread: Option<std::thread::JoinHandle<()>>,
-    // Linux: a held `systemd-inhibit … sleep infinity` child. Alive => the
-    // sleep/idle inhibitor lock is held; killed on drop => released. `None`
-    // when systemd-inhibit is absent or failed to spawn (best-effort, matching
-    // the shell/* backends — a headless box without logind just isn't inhibited).
+    // Linux: a held `systemd-inhibit … sleep infinity` child; alive means the inhibitor lock is held, killed on drop releases it. `None` when systemd-inhibit is absent or fails to spawn (best-effort: a headless box without logind just isn't inhibited).
     #[cfg(target_os = "linux")]
     child: Option<std::process::Child>,
     #[cfg(target_os = "linux")]
     inhibit_stdin: Option<std::process::ChildStdin>,
-    // macOS app-hosted engine: an IOPM PreventSystemSleep assertion held by
-    // FileIDAppleKit, released on drop. CLI/TUI builds stay a no-op.
+    // macOS app-hosted engine: an IOPM PreventSystemSleep assertion held by FileIDAppleKit, released on drop. CLI/TUI builds are a no-op.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     _assertion: Option<crate::apple::SleepAssertion>,
 }
@@ -1191,9 +978,6 @@ impl SleepGuard {
             SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
         };
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-        // `armed_tx` lets acquire() block until the dedicated thread has either
-        // set the assertion or determined it could not — so the guard's state is
-        // known by the time `acquire` returns.
         let (armed_tx, armed_rx) = std::sync::mpsc::channel::<bool>();
         let thread = std::thread::Builder::new()
             .name("sleep-guard".to_string())
@@ -1204,9 +988,6 @@ impl SleepGuard {
                 if !armed {
                     return;
                 }
-                // Block this dedicated thread until the guard is dropped (or the
-                // sender is dropped, which also wakes us). The clear runs on THIS
-                // thread, satisfying SetThreadExecutionState's same-thread rule.
                 let _ = stop_rx.recv();
                 unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
             });
@@ -1216,8 +997,6 @@ impl SleepGuard {
                 if armed {
                     Self { stop: Some(stop_tx), thread: Some(handle) }
                 } else {
-                    // Thread set nothing (or the API returned 0); let it finish
-                    // and don't hold a stop sender — there is nothing to clear.
                     let _ = handle.join();
                     Self { stop: None, thread: None }
                 }
@@ -1226,13 +1005,7 @@ impl SleepGuard {
         }
     }
 
-    // Linux: hold a logind sleep+idle inhibitor for the guard's lifetime by
-    // keeping a `systemd-inhibit … cat` child alive over a private stdin pipe. This is the
-    // documented, dependency-free way to block suspend without linking libsystemd
-    // (mirrors the shell/* subprocess backends). Best-effort: if systemd-inhibit
-    // is missing or spawn fails (no logind, e.g. a bare container), the guard is
-    // simply inert — a scan on such a box just isn't sleep-protected, same as the
-    // pre-existing non-Windows no-op.
+    // Linux: hold a logind sleep+idle inhibitor by keeping a `systemd-inhibit … cat` child alive over a private stdin pipe, the dependency-free way to block suspend without linking libsystemd. Best-effort: if it's missing or fails to spawn (no logind, bare container) the guard is inert.
     #[cfg(target_os = "linux")]
     pub fn acquire() -> Self {
         use std::process::{Command, Stdio};
@@ -1243,8 +1016,6 @@ impl SleepGuard {
                 "--who=FileID",
                 "--why=FileID is processing your library",
                 "--mode=block",
-                // The held command exits on pipe EOF, including abrupt engine
-                // death, so no infinite descendant can be orphaned.
                 "cat",
             ])
             .stdin(Stdio::piped())
@@ -1268,10 +1039,7 @@ impl SleepGuard {
 #[cfg(target_os = "linux")]
 impl Drop for SleepGuard {
     fn drop(&mut self) {
-        // Kill the held systemd-inhibit child; that drops its inhibitor lock and
-        // lets the machine sleep normally again. Best-effort — if the child
-        // already exited there's nothing to release. `wait` reaps the zombie so
-        // long-running engines don't leak defunct children across many scans.
+        // Kill the held systemd-inhibit child, dropping its inhibitor lock. Best-effort; `wait` reaps the zombie so long-running engines don't leak defunct children across scans.
         drop(self.inhibit_stdin.take());
         if let Some(mut child) = self.child.take() {
             terminate_child_tree(&mut child);
@@ -1282,10 +1050,7 @@ impl Drop for SleepGuard {
 #[cfg(windows)]
 impl Drop for SleepGuard {
     fn drop(&mut self) {
-        // Signal the dedicated thread to clear, then join so the assertion is
-        // provably released before the guard is gone. Dropping the sender alone
-        // would also wake the thread (recv returns Err), but the explicit send +
-        // join makes the ordering deterministic for callers and tests.
+        // Signal the dedicated thread to clear, then join so the assertion is provably released before the guard is gone. The explicit send + join makes the ordering deterministic for callers and tests.
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -1306,18 +1071,9 @@ mod sleep_guard_linux_tests {
     }
 }
 
-// ─── Process priority ───────────────────────────────────────────────────────
-//
-// Default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU
-// during scans, and when a GPU driver hits TDR (device removed) the
-// high-priority workers spam retries faster than DWM can recover the GPU
-// → full system hang. NORMAL lets the compositor win under contention.
-//
-// Override via FILEID_PROCESS_PRIORITY=above_normal if the engine should
-// outrank background services (Defender, OneDrive).
+// Process priority: default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU during scans, and when a GPU driver hits TDR the high-priority workers spam retries faster than DWM can recover the GPU → full system hang. `FILEID_PROCESS_PRIORITY=above_normal` overrides to outrank background services (Defender, OneDrive).
 
-/// RAII guard. While alive, the engine process priority is set per the
-/// FILEID_PROCESS_PRIORITY env var (default NORMAL). Drop = restore NORMAL.
+/// RAII guard. While alive, the process priority follows FILEID_PROCESS_PRIORITY (default NORMAL); Drop restores NORMAL.
 pub struct PriorityBoost {
     #[cfg(windows)]
     boosted: bool,
@@ -1360,21 +1116,9 @@ impl Drop for PriorityBoost {
     }
 }
 
-// ─── llama.cpp runtime DLL search ───────────────────────────────────────────
-//
-// SEC-3 locked the DLL search path to System32 + the engine binary's
-// directory only. The llama.cpp runtimes extract into
-// %LOCALAPPDATA%\FileID\Models\llama.cpp[-cuda]\ — outside both.
-// AddDllDirectory adds a single trusted dir to the per-process search list;
-// we walk a few levels deep so DLLs at the root or in a `bin/` subdir are
-// both reachable.
+// llama.cpp runtime DLL search: SEC-3 locked the DLL search path to System32 + the engine binary's directory, but the llama.cpp runtimes extract into %LOCALAPPDATA%\FileID\Models\llama.cpp[-cuda]\, outside both. AddDllDirectory adds one trusted dir to the per-process list; we walk a few levels deep so DLLs at the root or in `bin/` are reachable.
 
-/// Register every directory under `root` (up to MAX_DEPTH levels deep)
-/// that contains at least one .dll as an additional DLL search path.
-/// Idempotent: called every time a runtime is extracted; the loader dedupes
-/// internally. Returns the directories that have DLLs but for which
-/// `AddDllDirectory` returned null. Only dirs that actually contain DLLs are
-/// registered.
+/// Registers every directory under `root` (up to MAX_DEPTH deep) that contains a .dll as an additional DLL search path. Idempotent (the loader dedupes); returns the directories for which `AddDllDirectory` returned null.
 #[cfg(windows)]
 pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use windows::core::PCWSTR;
@@ -1432,15 +1176,7 @@ pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBu
     Vec::new()
 }
 
-/// Returns the primary (largest-VRAM) non-software adapter's
-/// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
-/// physical adapter is present. Used to size the llama.cpp
-/// GPU offload.
-///
-/// VRAM is constant for the process, so the DXGI factory + adapter walk is
-/// memoized after the first call (same pattern as `RuntimeProbe::shared`,
-/// which exists because the adapters were otherwise re-walked 7-15× at
-/// startup). Safe to call from any thread.
+/// The primary (largest-VRAM) non-software adapter's `DedicatedVideoMemory` in MB; None if DXGI enumeration fails or no physical adapter exists. Sizes the llama.cpp GPU offload. VRAM is constant for the process, so the DXGI walk is memoized (the adapters were otherwise re-walked 7-15× at startup). Safe from any thread.
 pub fn dedicated_vram_mb() -> Option<u64> {
     static CELL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *CELL.get_or_init(probe_dedicated_vram_mb)
@@ -1484,16 +1220,7 @@ fn probe_dedicated_vram_mb() -> Option<u64> {
     None
 }
 
-/// Lower per-thread I/O priority to "VeryLow" so the tagging workers'
-/// bulk JPEG/PNG reads don't compete with foreground apps (File Explorer
-/// browsing, video playback). The Windows kernel I/O scheduler honors
-/// thread-level priority hints for filesystem reads.
-///
-/// `THREAD_INFORMATION_CLASS::ThreadPowerThrottling` is the modern API
-/// but it's complex. The simpler `THREAD_PRIORITY_LOWEST` via
-/// `SetThreadPriority` works on every Windows version and has the same
-/// effect on I/O scheduling on Win11. Best-effort: failures are
-/// silently ignored.
+/// Lowers per-thread I/O priority so the tagging workers' bulk reads don't compete with foreground apps (Explorer, video playback). `THREAD_PRIORITY_LOWEST` via `SetThreadPriority` works on every Windows version with the same I/O-scheduling effect on Win11 as the more complex `ThreadPowerThrottling`. Best-effort: failures are ignored.
 #[cfg(windows)]
 pub fn set_worker_background_priority() {
     use windows::Win32::System::Threading::{
@@ -1505,16 +1232,7 @@ pub fn set_worker_background_priority() {
 #[cfg(not(windows))]
 pub fn set_worker_background_priority() {}
 
-/// Suppress Windows hard-error dialogs process-wide. A headless engine must
-/// never block on a modal error box: a llama.cpp binary that loads against a
-/// missing/mismatched CUDA DLL raises a critical-error message box
-/// (STATUS_DLL_NOT_FOUND) that would otherwise wait forever for a click that
-/// can never come, wedging Deep Analyze. `SEM_FAILCRITICALERRORS` turns that
-/// into an ordinary load failure the child reports via its exit code;
-/// `SEM_NOGPFAULTERRORBOX` suppresses the WER crash dialog on a native fault.
-/// Spawned children inherit this mode by default (no `CREATE_DEFAULT_ERROR_MODE`),
-/// so setting it once at startup covers the CLI, server, and device probes.
-/// `SetErrorMode` *replaces* the mode, so we OR onto whatever the loader set.
+/// Suppresses Windows hard-error dialogs process-wide. A headless engine must never block on a modal box: a llama.cpp binary loading against a missing/mismatched CUDA DLL raises a critical-error message box (STATUS_DLL_NOT_FOUND) that would wait forever for a click, wedging Deep Analyze. `SEM_FAILCRITICALERRORS` turns that into an ordinary load failure reported via exit code; `SEM_NOGPFAULTERRORBOX` suppresses the WER crash dialog. Children inherit the mode (no `CREATE_DEFAULT_ERROR_MODE`), so setting it once at startup covers the CLI, server and device probes. `SetErrorMode` *replaces* the mode, so OR onto whatever the loader set.
 #[cfg(windows)]
 pub fn suppress_hard_error_dialogs() {
     use windows::Win32::System::Diagnostics::Debug::{
@@ -1547,28 +1265,23 @@ mod adaptive_tests {
     #[test]
     fn worker_cap_non_hybrid_8c() {
         let t = CpuTopology { p_cores: 8, e_cores: 0, logical: 16 };
-        // 8 + 0 + max(1, 8/2) = 12. Within [2, 32].
         assert_eq!(t.worker_cap(), 12);
     }
 
     #[test]
     fn worker_cap_hybrid_intel_13900k() {
         let t = CpuTopology { p_cores: 8, e_cores: 16, logical: 32 };
-        // 8 + 16 + max(1, 8/2) = 28. Within [2, 32].
         assert_eq!(t.worker_cap(), 28);
     }
 
     #[test]
     fn worker_cap_m1_pro_equivalent() {
         let t = CpuTopology { p_cores: 8, e_cores: 2, logical: 10 };
-        // 8 + 2 + 4 = 14, capped to logical=10 because we never oversubscribe SMT.
         assert_eq!(t.worker_cap(), 10);
     }
 
     #[test]
     fn worker_cap_clamped_to_32() {
-        // Threadripper-class CPU should be capped at 32 so we don't
-        // spawn tagging workers that VRAM can never feed.
         let t = CpuTopology { p_cores: 32, e_cores: 32, logical: 128 };
         assert_eq!(t.worker_cap(), 32);
     }
@@ -1589,8 +1302,6 @@ mod adaptive_tests {
 
     #[test]
     fn walk_concurrency_storage_classes_monotone() {
-        // We can't fabricate storage types directly without a path, but we
-        // can check the static mapping is monotone over the enum.
         let cases = [
             (StorageType::Hdd,        2),
             (StorageType::Removable,  2),
@@ -1598,7 +1309,6 @@ mod adaptive_tests {
         ];
         let logical = num_cpus::get().max(1);
         for (st, expected_for_low_logical) in cases {
-            // For HDD/removable/network we always return 2 regardless of cores.
             let got = match st {
                 StorageType::Hdd | StorageType::Removable | StorageType::Network => 2,
                 _ => logical,
@@ -1648,9 +1358,6 @@ mod adaptive_tests {
         }
     }
 
-    /// Real call against the test runner's CWD — at minimum we should get
-    /// back something other than a panic, and on a real Windows host it'll
-    /// classify the drive holding the source tree.
     #[test]
     fn detect_does_not_panic_on_cwd() {
         let cwd = std::env::current_dir().unwrap();

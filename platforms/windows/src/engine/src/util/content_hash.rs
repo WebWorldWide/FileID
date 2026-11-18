@@ -1,12 +1,6 @@
 //! Content-identity hashing for rename/move detection.
 //!
-//! A file's path is not a stable identity — a rename or move orphans its
-//! catalog row (tags, embeddings, faces) and forces a full recompute on the
-//! next scan. A content hash is stable across moves, so a moved file can be
-//! re-bound to its existing row. The canonical recipe is SHA-256 so databases
-//! written by the Rust engine and the macOS Swift engine agree byte-for-byte.
-//! For large files we hash a composite of head + interior samples + tail + size
-//! rather than read gigabytes per file.
+//! A path is not a stable identity: a rename or move orphans the catalog row (tags, embeddings, faces) and forces a recompute. A content hash survives moves, so a moved file re-binds to its existing row. The recipe is SHA-256 so databases written by the Rust engine and the macOS Swift engine agree byte-for-byte; large files hash head + interior samples + tail + size rather than the whole file.
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -17,14 +11,10 @@ use sha2::Digest;
 /// head+tail+size composite (reads 2 MB instead of the whole file). 16 MB
 /// matches the research recommendation and keeps full-hash cost bounded.
 pub(crate) const FULL_HASH_MAX_BYTES: u64 = 16 * 1024 * 1024;
-/// Bytes read from the head and (separately) the tail for the composite.
 const CHUNK: usize = 1024 * 1024;
 const INTERIOR_SAMPLES: u64 = 4;
 const INTERIOR_CHUNK: usize = 64 * 1024;
 
-/// 32-byte SHA-256 content identity for `path` (whose length is `size`). Same
-/// bytes -> same hash, so a moved/renamed file re-binds to its existing
-/// catalog row instead of being recomputed. Opens long paths safely.
 #[cfg(test)]
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
     Ok(content_hashes(path, size, false)?.0)
@@ -198,7 +188,6 @@ fn exact_hash_pool() -> &'static rayon::ThreadPool {
 const SAMPLE_MIN_BYTES: u64 = 1024 * 1024;
 const SAMPLE_CHUNK: usize = 64 * 1024;
 
-/// SHA-256 of the first and last `SAMPLE_CHUNK` bytes. Never proof of equality.
 fn sample_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
     let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
     let metadata = file.metadata()?;
@@ -221,8 +210,6 @@ fn sample_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
     Ok(hash)
 }
 
-/// Runs `hash` over `work` on the exact-hash pool. `should_cancel` is polled on
-/// the calling thread; items not reached after it fires stay `None`.
 fn hash_in_pool<T: Sync>(
     work: &[T],
     should_cancel: &impl Fn() -> bool,
@@ -347,7 +334,6 @@ pub struct LegacyHashes {
 }
 
 impl LegacyHashes {
-    /// Legacy digests of a file whose full contents are already in memory.
     pub(crate) fn of_full_bytes(bytes: &[u8]) -> Self {
         Self { v2: *blake3::hash(bytes).as_bytes(), v1: None }
     }
@@ -369,8 +355,6 @@ pub(crate) fn content_hashes(
     hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, legacy)
 }
 
-/// Testable core: the full-vs-composite threshold injected so the composite
-/// path can be exercised on small fixtures.
 fn hash_with_threshold(
     path: &Path,
     size: u64,
@@ -430,7 +414,6 @@ fn hash_with_threshold(
     let n = read_fill(&mut f, &mut chunk)?;
     feed(&chunk[..n], false);
 
-    // Size disambiguates files that share head+tail but differ in the middle.
     feed(&size.to_le_bytes(), false);
     let legacy = v2.zip(v1).map(|(v2, v1)| LegacyHashes {
         v2: *v2.finalize().as_bytes(),
@@ -641,7 +624,6 @@ mod tests {
 
     #[test]
     fn composite_path_is_deterministic_and_differs_from_full() {
-        // 4 KB body; force the composite branch with a tiny threshold.
         let body: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;
@@ -655,8 +637,6 @@ mod tests {
 
     #[test]
     fn composite_detects_a_changed_middle_byte_via_size_or_edges() {
-        // Two same-size buffers differing only at an edge are caught by the
-        // head/tail; this guards that the composite reads both ends.
         let mut a = vec![7u8; 4096];
         let mut b = vec![7u8; 4096];
         a[0] = 1; // head differs
@@ -672,9 +652,6 @@ mod tests {
 
     #[test]
     fn legacy_under_cap_reproduces_the_full_blake3_v001_stamped() {
-        // v0.0.1 tagging.rs stamped blake3::hash(&bytes) for files that fit
-        // the full-hash window — the digest sitting in every shipped DB for
-        // ≤16 MB files.
         let body: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;
@@ -700,8 +677,6 @@ mod tests {
     #[test]
     fn legacy_v2_reproduces_the_v001_over_cap_recipe() {
         const MB: usize = 1024 * 1024;
-        // >16 MB so the real public functions take the composite branch and
-        // the interior samples genuinely fire (offsets clear the 1 MB edges).
         let body: Vec<u8> = (0..17 * MB).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;

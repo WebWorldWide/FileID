@@ -1,8 +1,4 @@
-// Video keyframe extraction — Media Foundation IMFSourceReader.
-//
-// Pulls a single frame at a requested timestamp (25 % of duration with
-// ±0.5 s tolerance) so the Library grid has a thumbnail for video files
-// and the video preview sheet has a placeholder.
+// Video keyframe extraction via Media Foundation IMFSourceReader: one frame at 25 % of duration (±0.5 s) for Library thumbnails and the video preview placeholder.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -19,7 +15,6 @@ use windows::Win32::Media::MediaFoundation::{
     MFSTARTUP_FULL,
 };
 
-// Source-reader read sample status flags (MF_SOURCE_READERF_*).
 const READF_ENDOFSTREAM: u32 = 0x00000002;
 const READF_NEWSTREAM: u32 = 0x00000004;
 const READF_CURRENTMEDIATYPECHANGED: u32 = 0x00000010;
@@ -44,21 +39,9 @@ fn video_frame_fits_reservation(width: u32, height: u32) -> bool {
             .is_some_and(|bytes| bytes <= VIDEO_DECODE_RESERVATION_BYTES as u64)
 }
 
-/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop so the
-/// COM apartment is scoped to a single `keyframe_25pct` call.
-///
-/// Keyframe extraction runs on tokio blocking-pool threads (Deep Analyze) and on
-/// the raw decoder-pool OS threads — both RECYCLED across tasks. The old code
-/// MTA-initialized such a thread ONCE and never uninitialized, so a later shell
-/// op (trash / tags / thumbnail) scheduled on that same recycled thread found it
-/// already MTA: its own `CoInitializeEx(STA)` returned RPC_E_CHANGED_MODE, it
-/// skipped both the init and the matching uninit, and ran against the wrong
-/// apartment. Scoping the init per call (uninit on every exit path) leaves the
-/// thread in whatever apartment state it had before, so the pool stays clean.
-///
-/// `did_init` is true only when WE performed the init (S_OK / S_FALSE); on
-/// RPC_E_CHANGED_MODE (the thread was already initialized by an outer caller) we
-/// must NOT uninitialize — that caller owns the apartment and its ref count.
+/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop, scoping the COM apartment to one `keyframe_25pct` call.
+/// Keyframe extraction runs on recycled tokio blocking-pool and decoder-pool threads. Leaving such a thread MTA let a later shell op (trash / tags / thumbnail) hit RPC_E_CHANGED_MODE on its own STA init and run in the wrong apartment; per-call init with uninit on every exit path leaves the thread as it was.
+/// `did_init` is true only when we performed the init (S_OK / S_FALSE); on RPC_E_CHANGED_MODE an outer caller owns the apartment and ref count, so we must not uninitialize.
 struct ComScope {
     did_init: bool,
 }
@@ -93,7 +76,6 @@ fn ensure_mf_started() {
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    /// Tightly packed RGB8.
     pub rgb: Vec<u8>,
 }
 
@@ -110,12 +92,7 @@ fn scaled_video_dimensions(width: u32, height: u32, max_edge: u32) -> Option<(u3
     ))
 }
 
-/// Extract a frame at 25% of duration. Returns the frame as RGB8.
 pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
-    // Scoped COM init: balanced by CoUninitialize when `_com` drops at the end
-    // of this call, so a recycled blocking-pool thread isn't left MTA for a later
-    // STA-expecting shell op. Held for the whole function — the source reader and
-    // every COM object below need the apartment live.
     let _com = ComScope::enter();
     ensure_mf_started();
 
@@ -127,8 +104,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
     wide.push(0);
 
     unsafe {
-        // Source-reader attributes: enable hardware decoding + video
-        // processing (lets MF do format conversion to RGB32).
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 2).context("MFCreateAttributes")?;
         let attrs = attrs.context("attrs not initialized")?;
@@ -140,7 +115,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             MFCreateSourceReaderFromURL(PCWSTR::from_raw(wide.as_ptr()), &attrs)
                 .context("MFCreateSourceReaderFromURL")?;
 
-        // Configure video stream output to RGB32 (BGRA byte order).
         let media_type: IMFMediaType = MFCreateMediaType().context("MFCreateMediaType")?;
         media_type
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
@@ -191,8 +165,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                 .context("set unscaled fallback media type RGB32")?;
         }
 
-        // Pull duration from the source's presentation descriptor and
-        // seek to 25%. Duration is in 100-ns units (MFTIME).
         let dur_pv = reader
             .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION);
         let duration_100ns: i64 = match dur_pv {
@@ -220,8 +192,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             let _ = PropVariantClear(&pv as *const _ as *mut _);
         }
 
-        // Read until we get a non-empty video sample. Skip flags-only
-        // returns (e.g. format-changed) and gap notifications.
         let mut last_dims: Option<(u32, u32)> = None;
         for _ in 0..32 {
             let mut stream_index = 0u32;
@@ -242,7 +212,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                 break;
             }
             if (flags & (READF_CURRENTMEDIATYPECHANGED | READF_NEWSTREAM)) != 0 {
-                // Format changed — re-pull the negotiated type to read dimensions.
                 let cur = reader
                     .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
                     .context("re-get media type after format change")?;
@@ -285,7 +254,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                 .Lock(&mut p_data, Some(&mut max_len), Some(&mut cur_len))
                 .context("buffer Lock")?;
 
-            // RGB32 = BGRA. Strip alpha + reorder to RGB.
             let stride = (cur_len / h.max(1)) as usize;
             let pixel_bytes = 4usize;
             let row_pixel_bytes = (w as usize) * pixel_bytes;
@@ -329,11 +297,7 @@ fn seek_to_quarter(path: &Path) -> bool {
 }
 
 fn propvariant_to_i64(pv: &PROPVARIANT) -> Option<i64> {
-    // PROPVARIANT impls TryFrom for the integer variants; round-trip through
-    // &PROPVARIANT which the windows-rs macros convert. MF_PD_DURATION is
-    // delivered as VT_UI8 (UINT64), so try the unsigned conversion first and
-    // saturate into i64 — otherwise a VT_UI8 duration fails the i64 TryFrom,
-    // resolves to 0, and the keyframe is grabbed from frame 0 instead of 25%.
+    // MF_PD_DURATION arrives as VT_UI8 (UINT64): try the unsigned conversion first and saturate into i64, otherwise the i64 TryFrom fails, the duration resolves to 0 and the keyframe is taken from frame 0 instead of 25%.
     if let Ok(u) = u64::try_from(pv) {
         return Some(u.min(i64::MAX as u64) as i64);
     }
@@ -341,7 +305,6 @@ fn propvariant_to_i64(pv: &PROPVARIANT) -> Option<i64> {
 }
 
 fn i64_to_propvariant(v: i64) -> PROPVARIANT {
-    // PROPVARIANT impls From<i64>; type tag = VT_I8.
     PROPVARIANT::from(v)
 }
 
@@ -384,26 +347,14 @@ mod tests {
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
 
-    /// Regression for the recycled-thread apartment leak: a `ComScope` must
-    /// uninitialize the MTA apartment it created, so the SAME thread can later
-    /// enter an STA apartment (as the shell trash/tags/thumbnail ops do) without
-    /// hitting RPC_E_CHANGED_MODE. A fresh STA `CoInitializeEx` succeeds (S_OK /
-    /// S_FALSE) only if no leftover MTA apartment clashes; with the pre-fix
-    /// permanent MTA init it returned the RPC_E_CHANGED_MODE error (`is_ok()`
-    /// false), failing this assertion.
-    ///
-    /// Runs on a dedicated thread so it can't perturb (or be perturbed by) the
-    /// test harness's main-thread apartment.
+    /// Regression for the recycled-thread apartment leak: a `ComScope` must uninitialize the MTA apartment it created so the same thread can later enter an STA (as shell trash/tags/thumbnail ops do) without RPC_E_CHANGED_MODE. Runs on a dedicated thread so the harness's apartment can't interfere.
     #[test]
     fn com_scope_uninitializes_so_thread_can_re_enter_sta() {
         let handle = std::thread::spawn(|| {
-            // Scoped MTA init, then drop — must leave the thread uninitialized.
             {
                 let com = ComScope::enter();
                 assert!(com.did_init, "fresh thread should perform the MTA init");
             }
-            // The thread is now back to no-apartment, so an STA init succeeds
-            // instead of clashing with a leftover MTA apartment.
             unsafe {
                 let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
                 assert!(

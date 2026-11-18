@@ -1,11 +1,6 @@
-//! `prewarmModel` IPC handler — downloads every file in the requested model
-//! bundle, emits progress events as bytes flow, drops a `.installed`
-//! sentinel when every file lands. The app's ModelInstallerService polls
-//! the sentinel to flip its per-model status to `Installed`.
+//! `prewarmModel` IPC handler: downloads every file of the requested model bundle, emits progress events, and drops a `.installed` sentinel when all files land (the app's ModelInstallerService polls it to flip the model to `Installed`).
 //!
-//! In-flight dedupe prevents repeated "Install all" clicks from racing on
-//! the .part file (first call's rename(.part → final) running while a
-//! second call still streams bytes into the same .part).
+//! In-flight dedupe stops repeated "Install all" clicks racing on the .part file (one call's rename(.part → final) while another still streams into it).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,13 +26,10 @@ fn in_flight_downloads() -> &'static Mutex<HashSet<String>> {
     IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// True while any model download or warm-up is running.
 pub(crate) fn any_download_in_flight() -> bool {
     !in_flight_downloads().lock().is_empty()
 }
 
-/// RAII guard that removes a model_kind from the in-flight set when the
-/// prewarm function returns or unwinds.
 struct ReleaseOnDrop {
     kind: String,
     set: &'static Mutex<HashSet<String>>,
@@ -49,18 +41,11 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-/// Per-model-kind cancel flags. A prewarm download polls ITS kind's flag, so
-/// cancelling one model (the per-row Cancel button) no longer aborts every other
-/// concurrent download, and a fresh prewarm of one kind can't un-cancel a
-/// different kind's pending cancel — both were bugs of the old single
-/// process-global flag.
+/// Per-model-kind cancel flags: a prewarm polls its own kind's flag, so cancelling one model doesn't abort other concurrent downloads and a fresh prewarm of one kind can't un-cancel another's pending cancel.
 static PREWARM_CANCELS: OnceLock<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>> =
     OnceLock::new();
 
-/// Get-or-create this kind's cancel flag WITHOUT changing its value. The
-/// fresh-start reset is [`reset_prewarm_cancel`], called synchronously at
-/// dispatch time, so this getter can't clobber a cancel that raced in after the
-/// handler task was spawned.
+/// Get-or-create this kind's cancel flag WITHOUT changing its value, so it can't clobber a cancel that raced in after the handler task was spawned. The fresh-start reset is [`reset_prewarm_cancel`].
 fn prewarm_cancel_flag(model_kind: &str) -> Arc<AtomicBool> {
     let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     map.lock()
@@ -69,12 +54,7 @@ fn prewarm_cancel_flag(model_kind: &str) -> Arc<AtomicBool> {
         .clone()
 }
 
-/// Reset (creating if needed) this kind's cancel flag to un-cancelled. Called
-/// from the PrewarmModel dispatch arm BEFORE the handler task is spawned, so the
-/// flag always exists (and is false) before any subsequent CancelPrewarm for
-/// this kind is processed by the serial stdio loop — closing the lazy-create
-/// race where a cancel landing in the spawn→register window was silently
-/// dropped. Resets ONLY this kind; a different kind's pending cancel is untouched.
+/// Resets this kind's flag to un-cancelled, creating it if needed. Called from the PrewarmModel dispatch arm BEFORE the handler task is spawned, so the flag exists before any later CancelPrewarm is processed by the serial stdio loop; otherwise a cancel landing in the spawn→register window was dropped. Other kinds are untouched.
 pub fn reset_prewarm_cancel(model_kind: &str) {
     let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock();
@@ -93,10 +73,7 @@ fn prune_idle(map: &mut std::collections::HashMap<String, Arc<AtomicBool>>) {
     }
 }
 
-/// Signal cancellation for one model kind (create-or-set, so a cancel is never
-/// lost even if processed before the handler first reads the flag), or ALL known
-/// prewarm flags when `model_kind` is None (the "cancel everything" form).
-/// In-flight `download_parallel` calls poll their flag after every chunk and bail.
+/// Signals cancellation for one model kind (create-or-set, so a cancel processed before the handler first reads the flag isn't lost), or every known flag when `model_kind` is None. In-flight `download_parallel` calls poll after every chunk and bail.
 pub fn cancel_prewarm(model_kind: Option<&str>) {
     let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock();
@@ -147,10 +124,7 @@ fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'stat
     }
 }
 
-/// The Mac app's MLX models (app-hosted engine only), as `VLMDownloader`
-/// fetches them: a verified install needs no network; otherwise the pinned
-/// revision's file listing becomes the download plan. `None` when the prewarm
-/// has already reported its outcome.
+/// The Mac app's MLX models (app-hosted engine only), as `VLMDownloader` fetches them: a verified install needs no network, otherwise the pinned revision's file listing becomes the download plan. `None` once the prewarm has reported its outcome.
 async fn prepare_repo_install(
     sink: &Sink,
     model_kind: &str,
@@ -253,9 +227,7 @@ pub(crate) async fn handle_prewarm_model(
     http_client: Arc<reqwest::Client>,
 ) {
     crate::pipeline::catch_up::forget_careful_reader_failures();
-    // The Mac app's engine prewarms an MLX model as the Swift engine does:
-    // verify (or download) the repo and write its install records, then load
-    // it through FileIDAppleKit.
+    // The Mac app's engine prewarms an MLX model as the Swift engine did: verify or download the repo, write its install records, then load it through FileIDAppleKit.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if crate::apple::vlm::model_spec(&model_kind).is_ok() {
         let cancel = prewarm_cancel_flag(&model_kind);
@@ -272,9 +244,7 @@ pub(crate) async fn handle_prewarm_model(
 }
 
 async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest::Client>) {
-    // Emit an immediate "Queued" progress event so the welcome sheet row
-    // flips out of the captionless-spinner state the moment the engine
-    // sees the prewarm command.
+    // Immediate "Queued" event so the welcome sheet row leaves its captionless spinner as soon as the engine sees the command.
     sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
         ModelDownloadProgress {
             model_kind: model_kind.clone(),
@@ -288,7 +258,6 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
 
     tracing::info!(model_kind = %model_kind, "[PREWARM] entered handler");
 
-    // Per-model-kind in-flight dedupe.
     let in_flight = in_flight_downloads();
     // Check + insert under a short-lived guard. parking_lot's MutexGuard is
     // !Send, so we MUST drop it before the first .await below.
@@ -316,17 +285,13 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
         tracing::info!(model_kind = %model_kind, outcome = "duplicate_in_flight", "[PREWARM] exiting");
         return;
     }
-    // RAII guard removes us from the set on every exit path.
     let _release = ReleaseOnDrop {
         kind: model_kind.clone(),
         set: in_flight,
     };
-    // Model downloads and warm-up can outlive the user's active session.
-    // Keep the machine awake, while still allowing the display to dim.
+    // Model downloads and warm-up can outlive the user's active session: keep the machine awake but let the display dim.
     let _sleep = platform::SleepGuard::acquire();
 
-    // Per-model cancel flag (reset to un-cancelled for this fresh prewarm).
-    // download_parallel below polls it after every chunk.
     let cancel = prewarm_cancel_flag(&model_kind);
 
     // Distinguish "the engine can't resolve its models dir" (a storage/env
@@ -409,9 +374,6 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
     let total_estimate = total_bytes_estimate.max(1);
     let file_count = model.files.len();
 
-    // Per-file bytes_done counters. All file progress callbacks update their
-    // own slot so the aggregate fraction stays correct when multiple files
-    // run concurrently.
     let per_file_done: Arc<Vec<AtomicU64>> =
         Arc::new((0..file_count).map(|_| AtomicU64::new(0)).collect());
 
@@ -567,13 +529,10 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
         tracing::warn!(model_kind = %model_kind, outcome = "download_failed", error_kind = kind, failed = errs.len(), "[PREWARM] exiting");
         return;
     }
-    // Lock in the final byte counts for regular files so zip progress
-    // computes against the correct baseline.
     for idx in regular_indices.iter().copied() {
         per_file_done[idx].store(model.files[idx].approx_bytes, Ordering::Relaxed);
     }
 
-    // Now run zip files sequentially, with post-download extract.
     for idx in zip_indices.iter().copied() {
         let file = &model.files[idx];
         let label = file
@@ -648,9 +607,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
         }
         let _ = std::fs::remove_file(&file.dest);
         if let Some(parent) = file.dest.parent() {
-            // Returns the dirs whose AddDllDirectory call failed; an empty Vec is
-            // full success. Log failures (path-redacted) so a pack whose GPU DLLs
-            // won't be on the search path at load is diagnosable.
+            // Log path-redacted failures so a pack whose GPU DLLs won't be on the search path is diagnosable; an empty Vec is full success.
             let failed = platform::register_dll_dirs_under(parent);
             for dir in &failed {
                 tracing::warn!(
@@ -754,9 +711,7 @@ mod tests {
         assert_eq!(required_install_free_bytes(u64::MAX), u64::MAX);
     }
 
-    // Per-model cancel registry: cancelling one kind must not touch another, and
-    // a fresh prewarm of a kind resets only its own flag. Unique kind names keep
-    // the process-global static from cross-contaminating parallel tests.
+    // Per-model cancel registry: cancelling one kind must not touch another. Unique kind names keep the process-global static from cross-contaminating parallel tests.
     #[test]
     fn per_model_cancel_is_isolated() {
         let a = prewarm_cancel_flag("test_kind_alpha");
@@ -764,12 +719,10 @@ mod tests {
         cancel_prewarm(Some("test_kind_alpha"));
         assert!(a.load(Ordering::Relaxed), "the cancelled kind's flag must be set");
         assert!(!b.load(Ordering::Relaxed), "a different kind's flag must NOT be set");
-        // reset_prewarm_cancel (the dispatch-time fresh start) clears only its kind.
         reset_prewarm_cancel("test_kind_alpha");
         assert!(!a.load(Ordering::Relaxed), "reset clears its own kind's flag");
         assert!(!b.load(Ordering::Relaxed), "and still leaves the other kind untouched");
-        // A cancel that arrives BEFORE the flag was ever fetched must still record
-        // (create-or-set) — this is the lazy-create-race fix.
+        // A cancel arriving BEFORE the flag was ever fetched must still record (create-or-set).
         cancel_prewarm(Some("test_kind_gamma"));
         assert!(
             prewarm_cancel_flag("test_kind_gamma").load(Ordering::Relaxed),
