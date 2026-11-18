@@ -2,7 +2,7 @@
 //
 // Pipeline:
 //   1. Resolve selected registry model (Qwen3-VL, Qwen2.5-VL, Gemma 3, Mistral-Small).
-//   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
+//   2. Load via llama.cpp (Vulkan / CUDA / CPU backend).
 //   3. Per file: render the image / extract a video keyframe / pdfium
 //      first-page render → resize to model context → caption + smart name.
 //   4. Persist to `deep_analyze_results` (migration v3).

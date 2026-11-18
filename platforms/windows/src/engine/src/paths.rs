@@ -143,18 +143,10 @@ pub fn models_dir() -> Result<PathBuf> {
 /// engine binary itself never calls it.
 pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-/// The engine's runtime-dependency directory: `<root>/runtime`.
-///
-/// On macOS this is where `fileid runtime install` (or the
-/// `shared/scripts/install_onnxruntime_macos.sh` script) drops
-/// `libonnxruntime.dylib` so the engine's `load-dynamic` ONNX Runtime build can
-/// `dlopen` it — `ort`'s `download-binaries` ships only a STATIC
-/// `libonnxruntime.a` for macOS arm64, so a load-dynamic build has no runtime
-/// library otherwise (see `shared/docs/RUNTIME.md` + `src/ort_runtime.rs`).
-/// Defined cross-platform so the path is named in one place; Windows resolves
-/// its ORT DLLs via the accelerator-pack pin in `main.rs` and Linux via the
-/// system / `download-binaries` path, so neither writes here today.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// The engine's runtime-dependency directory: `<root>/runtime`. Nothing the
+/// engine runs its models on is installed here any more (tract is compiled in);
+/// the path stays so a data reset can recognise it and keep what a user put there.
+#[allow(dead_code)]
 pub fn runtime_dir() -> Result<PathBuf> { Ok(root()?.join("runtime")) }
 
 #[cfg(not(target_os = "macos"))]
@@ -191,8 +183,7 @@ fn default_models_dir() -> Result<PathBuf> {
     Ok(root()?.join("Models"))
 }
 
-/// Unit tests never load the owner's installed models: with weights there and
-/// no ONNX Runtime, every model path would panic inside `ort`.
+/// Unit tests never load the owner's installed models.
 #[cfg(all(target_os = "macos", not(feature = "apple-adapters"), test))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 

@@ -118,12 +118,6 @@
            Text="Incomplete publish layout: FileID.pri is missing from $(PublishRoot); the installed WinUI app would fail during XAML activation." />
     <Error Condition="!Exists('$(PublishRoot)\Microsoft.WindowsAppRuntime.Bootstrap.dll')"
            Text="Incomplete publish layout: the Windows App Runtime bootstrap DLL is missing from $(PublishRoot)." />
-    <Error Condition="!Exists('$(PublishRoot)\onnxruntime.dll')"
-           Text="Incomplete publish layout: onnxruntime.dll is missing from $(PublishRoot); the installed engine could not initialize inference." />
-    <Error Condition="!Exists('$(PublishRoot)\onnxruntime_providers_shared.dll')"
-           Text="Incomplete publish layout: onnxruntime_providers_shared.dll is missing from $(PublishRoot)." />
-    <Error Condition="!Exists('$(PublishRoot)\DirectML.dll')"
-           Text="Incomplete publish layout: DirectML.dll is missing from $(PublishRoot); the default Windows GPU execution provider would be unavailable." />
     <Error Condition="!Exists('$(PublishRoot)\pdfium.dll')"
            Text="Incomplete publish layout: pdfium.dll is missing from $(PublishRoot); PDF analysis would fail at runtime." />
   </Target>

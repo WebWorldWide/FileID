@@ -170,7 +170,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
 
         // 5-second timeout: a healthy CLIP encode is sub-100ms, so 5s is
-        // generous slack for cold-start ORT session create.
+        // generous slack for the first query compiling the model.
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
         await using var reg = cts.Token.Register(() =>

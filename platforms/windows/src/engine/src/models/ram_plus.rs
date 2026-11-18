@@ -1,14 +1,13 @@
 // RAM++ (Recognize Anything Plus) image tagger — the universal FileID tagger.
 //
-// WHY this and not a VLM: tagging must run on every Windows GPU/iGPU/NPU and be
+// WHY this and not a VLM: tagging must run on every machine and be
 // license-clean. RAM++ (Apache-2.0, Swin-Large @ 384px, 4585-tag English
-// vocabulary with frozen tag embeddings) is a single forward pass — exactly the
-// shape ONNX Runtime's GPU/NPU EPs (DirectML / CUDA / OpenVINO / QNN) accelerate
-// — so it rides the SAME EP chain as MobileCLIP/faces (see runtime.rs). The VLM
-// is reserved for opt-in Deep Analyze.
+// vocabulary with frozen tag embeddings) is a single forward pass that runs on
+// tract (CPU) like the other ONNX models. The VLM is reserved for opt-in Deep
+// Analyze.
 //
 // Inference order: decode → bilinear resize to 384×384 → ImageNet mean/std
-// normalize → CHW f32 → ORT session.run → sigmoid → threshold + top-k → map tag
+// normalize → CHW f32 → tract session run → sigmoid → threshold + top-k → map tag
 // indices to strings. The ONNX is produced by shared/scripts/export_ram_plus_onnx.py;
 // the contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and
 // the ImageNet constants below MUST stay in sync with that script.
@@ -18,13 +17,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::tensor::Shape;
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -117,7 +111,7 @@ fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
 }
 
 pub struct RamPlusTagger {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load. Reused on every
     /// forward instead of re-walking `session.inputs.first()` per inference.
     input_name: String,
@@ -143,10 +137,8 @@ pub struct RamPlusTagger {
 }
 
 impl RamPlusTagger {
-    /// Load the exported RAM++ ONNX + its index-aligned tag list. Registers the
-    /// same EP priority chain the rest of the ONNX stack uses (via
-    /// `runtime::priority_chain` + `configure_session_builder`) and warms up so
-    /// first-call kernel compile happens at load.
+    /// Load the exported RAM++ ONNX + its index-aligned tag list. Compiles the
+    /// graph for the fixed 384x384 input.
     pub fn load<P: AsRef<Path>, Q: AsRef<Path>>(onnx: P, tag_list: Q) -> Result<Self> {
         let onnx = onnx.as_ref();
         let tag_list = tag_list.as_ref();
@@ -167,12 +159,10 @@ impl RamPlusTagger {
         }
 
         tracing::info!(model = "RAM++", tags = tags.len(), "tag list loaded");
-        let (session, input_name) = commit_chain_session("RAM++", onnx)?;
-        let supports_dynamic_batch = session
-            .inputs
-            .first()
-            .and_then(|input| input.input_type.tensor_shape())
-            .is_some_and(ram_plus_shape_has_dynamic_batch);
+        let n = INPUT_SIZE as usize;
+        let (session, input_name) =
+            load_session("RAM++", onnx, &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(n), Dim::Fixed(n)])])?;
+        let supports_dynamic_batch = ram_plus_shape_has_dynamic_batch(&session.first_input_shape());
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
         // disabled — handy for threshold sweeps). Otherwise load the per-class
@@ -300,37 +290,29 @@ impl RamPlusTagger {
     /// ONLY part that touches `&mut self.session`, so it is what the caller
     /// serializes under the pool Mutex.
     pub fn tag_prepared(&mut self, chw: Array4<f32>) -> Result<Vec<(String, f32)>> {
-        let input = Tensor::from_array(chw).context("RAM++ input tensor")?;
+        let logits = self.logits(chw)?;
+        Ok(self.select_tags(&logits))
+    }
+
+    /// The model's raw per-tag logits for one pre-normalized input tensor.
+    fn logits(&mut self, chw: Array4<f32>) -> Result<Vec<f32>> {
         let input_name = self.input_name.clone();
-        // Extract the logits inside a block so the `outputs` borrow of
-        // `self.session` is released BEFORE the `&self` select_tags call below.
-        // `SessionOutputs` has a Drop impl, so its borrow lives to end-of-scope
-        // — calling select_tags in the same scope is the E0502 the old
-        // closure-locals workaround sidestepped; the block drops it first.
-        let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
-            let outputs: SessionOutputs = self
-                .session
-                .run(vec![(input_name, SessionInputValue::from(input))])
-                .context("RAM++ session.run")
-                .map_err(classify_inference_error)?;
-            let (_, value) = outputs
-                .iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-            let (_shape, logits) = value
-                .try_extract_tensor::<f32>()
-                .context("extract RAM++ logits as f32")?;
-            if logits.len() != self.tags.len() {
-                anyhow::bail!(
-                    "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
-                    logits.len(),
-                    self.tags.len()
-                );
-            }
-            logits.to_vec()
-        };
-        Ok(self.select_tags(&logits_vec))
+        let logits = self
+            .session
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("RAM++ session.run")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?
+            .data;
+        if logits.len() != self.tags.len() {
+            anyhow::bail!(
+                "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
+                logits.len(),
+                self.tags.len()
+            );
+        }
+        Ok(logits)
     }
 
     /// Batched [`tag`]: preprocess N images into ONE (N,3,384,384) tensor and run
@@ -360,31 +342,19 @@ impl RamPlusTagger {
             let chw = Self::preprocess(rgb, *w, *h)?;
             batch.slice_mut(s![i..i + 1, .., .., ..]).assign(&chw);
         }
-        let input = Tensor::from_array(batch).context("RAM++ batch input tensor")?;
         let input_name = self.input_name.clone();
         let num_tags = self.tags.len();
-        let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
-            let outputs: SessionOutputs = self
-                .session
-                .run(vec![(input_name, SessionInputValue::from(input))])
-                .context("RAM++ batch session.run")
-                .map_err(classify_inference_error)?;
-            let (_, value) = outputs
-                .iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-            let (_shape, logits) = value
-                .try_extract_tensor::<f32>()
-                .context("extract RAM++ batch logits as f32")?;
-            if logits.len() != bs * num_tags {
-                anyhow::bail!(
-                    "RAM++ batch output len {} != {bs} images x {num_tags} tags",
-                    logits.len()
-                );
-            }
-            logits.to_vec()
-        };
+        let logits_vec = self
+            .session
+            .run(vec![(input_name.as_str(), batch.into())])
+            .context("RAM++ batch session.run")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?
+            .data;
+        if logits_vec.len() != bs * num_tags {
+            anyhow::bail!("RAM++ batch output len {} != {bs} images x {num_tags} tags", logits_vec.len());
+        }
         Ok(logits_vec
             .chunks_exact(num_tags)
             .map(|row| self.select_tags(row))
@@ -511,7 +481,7 @@ fn fill_imagenet_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: u
     }
 }
 
-fn ram_plus_shape_has_dynamic_batch(shape: &Shape) -> bool {
+fn ram_plus_shape_has_dynamic_batch(shape: &[i64]) -> bool {
     shape.first().is_some_and(|dim| *dim < 0)
 }
 
@@ -519,13 +489,9 @@ fn sigmoid(z: f32) -> f32 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// Per-EP variant-aware ONNX path: `ram_plus/ram_plus.onnx` (or
-/// `_int8.onnx` / `_qnn.bin` on accelerated EPs when a variant is dropped in).
+/// ONNX path: `ram_plus/ram_plus.onnx`.
 pub fn default_onnx_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
-        &crate::paths::models_dir()?.join("ram_plus"),
-        "ram_plus",
-    ))
+    Ok(crate::paths::models_dir()?.join("ram_plus").join("ram_plus.onnx"))
 }
 
 pub fn default_tags_path() -> Result<PathBuf> {
@@ -599,11 +565,11 @@ mod tests {
 
     #[test]
     fn batch_guard_accepts_only_dynamic_batch_axis() {
-        assert!(ram_plus_shape_has_dynamic_batch(&Shape::new([-1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([4, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new(Vec::<i64>::new())));
+        assert!(ram_plus_shape_has_dynamic_batch(&[-1, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[1, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[4, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[]));
     }
 
     #[test]
@@ -673,5 +639,28 @@ mod tests {
         assert!(set.contains("catch"));
         assert_eq!(set.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "ram_plus/ram_plus.onnx";
+
+    #[test]
+    fn logits_match_the_golden_vectors() {
+        let (Some(onnx), Some(tags)) = (model_file(PATH), model_file("ram_plus/ram_plus_tags.txt")) else { return };
+        let mut model = RamPlusTagger::load(&onnx, &tags).unwrap();
+        let chw = RamPlusTagger::preprocess_tensor(&synthetic_rgb(384, 384), 384, 384).unwrap();
+        let logits = model.logits(chw).unwrap();
+        check(
+            "ram_plus",
+            PATH,
+            "synthetic_rgb(384, 384) through the engine's bilinear-384 + ImageNet preprocessing; the raw per-tag logits",
+            Tolerance { max_abs: 0.02, rel_norm: 2e-3 },
+            &[Probe { name: "logits", shape: vec![logits.len()], values: &logits }],
+        );
     }
 }

@@ -114,39 +114,29 @@ DBWriter (1 task, batched)
 Post-scan (orphan sweep, face clustering job auto-enqueued)
 ```
 
-ANE/GPU semaphores (3-4 for ORT inference, 2 for CLIP) bound concurrent ML calls. Sync mirrors (atomic-bool) for hot-path cancellation checks avoid the actor-hop tax inside tight loops.
+Semaphores (4 for vision-model inference, 2 for CLIP) bound concurrent ML calls. Sync mirrors (atomic-bool) for hot-path cancellation checks avoid the actor-hop tax inside tight loops.
 
-Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64 with DirectML, scaling per hardware tier (see `shared/docs/SHIP.md`).
+Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64, scaling per hardware tier (see `shared/docs/SHIP.md`).
 
 ## ML inference
 
 ### macOS
 - Apple Vision (face rects + quality + OCR)
-- ONNX Runtime (CLIP ViT-B/32 image/text, RAM++, BGE-small; CoreML EP when supported, CPU fallback)
-- ONNX Runtime + CoreML EP/CPU (SFace 128-d embedder; legacy service names still say ArcFace)
+- tract, the pure-Rust ONNX runtime inside the shared Rust engine (CLIP ViT-B/32 image/text, RAM++, BGE-small; CPU). Scan CLIP and RAM++ run on MLX through the adapters
+- tract, CPU (SFace 128-d embedder; legacy service names still say ArcFace)
 - MLX Swift LM 3.32.3 (Deep Analyze: Qwen2.5-VL, Qwen3-VL, opt-in Qwen3.5 2B, Gemma 3, Mistral Small 3.2, PaliGemma). FileID verifies the pinned VLM repository locally before its offline-only MLX factory adapter loads weights and tokenizers; model residency still passes memory admission.
 
 ### Windows
-- ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN / CPU) — see GPU acceleration strategy below
-- llama.cpp (VLMs: Qwen2.5-VL 7B, Gemma 3, Mistral-Small-3.2 — all commercial-clean) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
+- tract (CPU) for every ONNX model — see Inference acceleration below and `shared/docs/RUNTIME.md`
+- llama.cpp (VLMs: Qwen2.5-VL 7B, Gemma 3, Mistral-Small-3.2 — all commercial-clean) with backend auto-pick (CUDA / Vulkan / CPU)
 - RAM++ ONNX (4585-tag auto-tagger, primary; CLIP scene tags as fallback) + CLIP ViT-B/32 ONNX (image + text)
 - YuNet ONNX (face detection) + SFace ONNX (128-d embedding) with 5-point similarity alignment; landmarks → PnP for pose
 - Windows.Media.Ocr (built-in WinRT OCR; PaddleOCR ONNX as opt-in)
 - pdfium-render, Media Foundation (PDF + video)
 
-### GPU acceleration strategy (Windows)
+### Inference acceleration
 
-At first launch the engine probes hardware in priority order:
-
-```
-1. NVIDIA → CUDA EP (if CUDA + cuDNN runtime present), else TensorRT, else DirectML
-2. Intel → OpenVINO EP (if OpenVINO present), else DirectML
-3. Snapdragon WoA → QNN EP (if QNN present), else DirectML on Adreno
-4. AMD → DirectML
-5. CPU floor (AVX2/AVX-512 on x64; NEON on arm64)
-```
-
-**Base install ships DirectML + CPU + Vulkan (llama.cpp)** — covers every GPU vendor without extra runtime install. **Optional Performance Packs** (CUDA / OpenVINO / QNN) downloaded from Settings when matching hardware is detected. Same downloader pattern as model downloads. No telemetry.
+Every ONNX model runs on tract on the CPU, the same on Windows, macOS and Linux (AVX2/AVX-512 on x64, NEON on arm64; matmul threaded over the performance cores). There is no per-vendor execution provider and no Performance Pack. GPU inference is a later, measured, cross-platform decision (tract-metal, tract-cuda and wgpu are the candidates); see `shared/docs/RUNTIME.md` and DECISIONS (2026-11-18). llama.cpp (Describe Files, Chat) is separate: Vulkan on any GPU, CUDA if the user installs it.
 
 ## Visual language
 

@@ -194,7 +194,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             approxBytes: 0,
             installAction: () => Task.CompletedTask,
             uiDispatcher: _ui);
-        Accelerator.Message = "FileID selects an available local provider automatically.";
+        Accelerator.Message = "Scan models run on the CPU with tract, the same on every platform.";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
@@ -219,7 +219,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Accelerator.DisplayLabel = string.IsNullOrEmpty(vendor)
             ? "Bundled GPU acceleration"
             : $"Bundled acceleration ({vendor})";
-        Accelerator.Message = "FileID selects an available local provider automatically. Vulkan, OpenVINO and DirectML runtimes are included; CPU remains available.";
+        Accelerator.Message = "Scan models run on the CPU with tract, the same on every platform. Describe Files uses Vulkan, or CUDA if you install it.";
         Accelerator.Status = ModelInstallStatus.Installed;
         Accelerator.Fraction = 1.0;
     }
@@ -552,17 +552,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(RamPlus, RamPlusSentinelIds);
         SeedSlot(FaceMesh, FaceMeshSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
-        // Accelerator slot — only flip to Installed if the
-        // sentinel exists. Otherwise leave it as
-        // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
-        // Installed-with-message for non-NVIDIA / CPU).
-        if (SentinelExistsForAnyOf(AcceleratorSentinelIds))
-        {
-            Accelerator.Status = ModelInstallStatus.Installed;
-            Accelerator.Fraction = 1.0;
-            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider.";
-            AcceleratorIsRealInstall = true;
-        }
         RecomputeAggregates();
     }
 

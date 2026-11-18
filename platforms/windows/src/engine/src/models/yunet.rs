@@ -15,12 +15,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 use super::face_geometry::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
@@ -29,7 +25,7 @@ const SCORE_THRESHOLD: f32 = 0.6;
 const NMS_IOU: f32 = 0.3;
 
 pub struct YuNet {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -41,7 +37,11 @@ impl YuNet {
         if !path.exists() {
             anyhow::bail!("YuNet weights missing at {}", path.display());
         }
-        let (session, input_name) = commit_chain_session("YuNet", path)?;
+        let (session, input_name) = load_session(
+            "YuNet",
+            path,
+            &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(INPUT as usize), Dim::Fixed(INPUT as usize)])],
+        )?;
 
         // Validate the output-name contract at LOAD. detect() matches outputs by
         // literal name (cls_/obj_/bbox_/kps_ × strides 8/16/32); a mismatch makes
@@ -55,7 +55,7 @@ impl YuNet {
         // robust guard here.)
         {
             let have: std::collections::HashSet<&str> =
-                session.outputs.iter().map(|o| o.name.as_str()).collect();
+                session.output_names().iter().map(String::as_str).collect();
             let missing: Vec<String> = STRIDES
                 .iter()
                 .flat_map(|s| {
@@ -66,7 +66,7 @@ impl YuNet {
                 .filter(|key| !have.contains(key.as_str()))
                 .collect();
             if !missing.is_empty() {
-                let got: Vec<&str> = session.outputs.iter().map(|o| o.name.as_str()).collect();
+                let got: Vec<&str> = session.output_names().iter().map(String::as_str).collect();
                 anyhow::bail!(
                     "YuNet ONNX output names don't match the decode contract \
                      (missing {missing:?}; got {got:?}). The model is likely the \
@@ -118,7 +118,7 @@ impl YuNet {
             return Ok(None);
         }
         // Letterbox to a fixed 640x640 (top-left, zero-pad remainder) — the
-        // export's only input shape, and a fixed shape keeps DirectML happy.
+        // export's only input shape, and a fixed shape lets tract compile the graph once.
         let scale = (INPUT as f32 / width as f32).min(INPUT as f32 / height as f32);
         let new_w = ((width as f32 * scale) as u32).max(1);
         let new_h = ((height as f32 * scale) as u32).max(1);
@@ -139,24 +139,11 @@ impl YuNet {
 
     /// One forward pass; the per-stride output tensors by name.
     fn forward(&mut self, chw: Array4<f32>) -> Result<Vec<(String, Vec<f32>)>> {
-        let input = Tensor::from_array(chw).context("YuNet input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
-            .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("YuNet session.run")
-            .map_err(classify_inference_error)?;
+        let outputs = self.session.run(vec![(input_name.as_str(), chw.into())]).context("YuNet session.run")?;
 
         // Outputs are named cls_{s}/obj_{s}/bbox_{s}/kps_{s}; collect by name.
-        let named: Vec<(String, Vec<f32>)> = outputs
-            .iter()
-            .filter_map(|(name, val)| {
-                val.try_extract_tensor::<f32>()
-                    .ok()
-                    .map(|(_, d)| (name.to_string(), d.to_vec()))
-            })
-            .collect();
+        let named: Vec<(String, Vec<f32>)> = outputs.into_iter().map(|output| (output.name, output.data)).collect();
         Ok(named)
     }
 }
@@ -218,7 +205,7 @@ fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: 
 }
 
 /// Decode one stride's cls/obj/bbox/kps tensors into Detections. Pure function
-/// for unit-testing the decode math without an ORT session.
+/// for unit-testing the decode math without a model session.
 fn decode_stride(
     stride: u32,
     input: u32,
@@ -268,12 +255,9 @@ fn decode_stride(
     }
 }
 
-/// Per-EP variant-aware weights path: `yunet/face_detection_yunet_2023mar.onnx`.
+/// Weights path: `yunet/face_detection_yunet_2023mar.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
-        &crate::paths::models_dir()?.join("yunet"),
-        "face_detection_yunet_2023mar",
-    ))
+    Ok(crate::paths::models_dir()?.join("yunet").join("face_detection_yunet_2023mar.onnx"))
 }
 
 #[cfg(test)]
@@ -355,5 +339,33 @@ mod tests {
         let s = 32.0_f32;
         assert!((out[0].landmarks[0][0] - (0.0 + 0.1) * s).abs() < 1e-3);
         assert!((out[0].score - 1.0).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "yunet/face_detection_yunet_2023mar.onnx";
+
+    #[test]
+    fn raw_outputs_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = YuNet::load(&path).unwrap();
+        let input = YuNet::prepare(&synthetic_rgb(640, 640), 640, 640).unwrap().unwrap();
+        let mut outputs = model.forward(input.chw).unwrap();
+        outputs.sort_by(|a, b| a.0.cmp(&b.0));
+        let probes: Vec<Probe> = outputs
+            .iter()
+            .map(|(name, values)| Probe { name, shape: vec![values.len()], values })
+            .collect();
+        check(
+            "yunet",
+            PATH,
+            "synthetic_rgb(640, 640) letterboxed (identity) to BGR 1x3x640x640; the 12 raw cls/obj/bbox/kps outputs by name",
+            Tolerance { max_abs: 1e-3, rel_norm: 1e-3 },
+            &probes,
+        );
     }
 }

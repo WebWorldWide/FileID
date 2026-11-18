@@ -345,7 +345,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/app/Sources/FileID/EngineClient.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
-            "platforms/cli/src/runtime.rs",
             "platforms/linux/src/app/src/engine_client.rs",
             "platforms/linux/src/app/src/tabs/settings.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
@@ -394,7 +393,6 @@ class RuntimeEgressTests(unittest.TestCase):
         self.assertEqual(SAFE_NETWORK_CALLER_FILES, {
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
-            "platforms/cli/src/runtime.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",

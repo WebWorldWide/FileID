@@ -165,8 +165,7 @@ fn mac_app_bundle(model_kind: &str) -> Option<Bundle> {
 /// Resolve a model_kind string into a downloadable bundle: a curated manifest
 /// bundle, else a runnable catalog model. Every file carries its mandatory
 /// SHA256 pin, which the downloader verifies. A manifest that fails validation
-/// resolves nothing. Per-vendor accelerated runtimes (CUDA / OpenVINO / QNN EPs)
-/// are never downloaded; the engine uses them only when already installed.
+/// resolves nothing.
 pub fn lookup_full(model_kind: &str) -> LookupResult {
     let models_root = match paths::models_dir() {
         Ok(p) => p,
@@ -366,15 +365,6 @@ fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str
             &["mtmd.dll", "libmtmd.so", "libmtmd.dylib"],
         ]),
         "cudart.zip" => Some(&[&["cudart64_12.dll"], &["cublas64_12.dll"]]),
-        "cudnn-runtime.zip" => Some(&[&["cudnn64_9.dll"]]),
-        "ort-cuda.zip" => Some(&[
-            &["onnxruntime.dll"],
-            &["onnxruntime_providers_cuda.dll"],
-        ]),
-        "ort-openvino.zip" => Some(&[
-            &["onnxruntime.dll"],
-            &["onnxruntime_providers_openvino.dll"],
-        ]),
         _ => None,
     }
 }
@@ -486,13 +476,12 @@ mod tests {
     /// false-fail.
     #[test]
     fn all_model_urls_are_huggingface() {
-        // NOTE: the runtime/EP packs are intentionally NOT all on HF — cuDNN is
-        // on NVIDIA's CDN, llama + ort_cuda are on github (all CI-allowlisted).
-        // ort_openvino IS on HF, so it belongs here for real coverage.
+        // NOTE: the llama runtimes are intentionally NOT on HF (github,
+        // CI-allowlisted), so they are not listed here.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface", "face_mesh",
             "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
-            "gemma_3_4b", "mistral_small_3_2", "ort_openvino_x64",
+            "gemma_3_4b", "mistral_small_3_2",
         ];
         for kind in kinds {
             if let LookupResult::Found(m) = lookup_full(kind) {

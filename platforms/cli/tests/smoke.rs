@@ -95,35 +95,6 @@ fn duplicate_model_names_are_planned_once() {
     assert_eq!(body["models"].as_array().map(Vec::len), Some(1));
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn runtime_install_json_abort_and_no_source_are_machine_safe() {
-    let abort = command()
-        .args(["--json", "runtime", "install", "--force"])
-        .env(
-            "FILEID_ORT_DYLIB_URL",
-            "https://huggingface.co/fileid/runtime/resolve/main/runtime.tgz",
-        )
-        .env("FILEID_ORT_DYLIB_SHA256", "a".repeat(64))
-        .output()
-        .expect("spawn runtime abort");
-    assert!(abort.status.success());
-    let abort_json = json(&abort);
-    assert_eq!(abort_json["installed"], false);
-    assert_eq!(abort_json["aborted"], true);
-
-    let no_source = command()
-        .args(["--json", "runtime", "install", "--force", "--yes"])
-        .env_remove("FILEID_ORT_DYLIB_URL")
-        .env_remove("FILEID_ORT_DYLIB_SHA256")
-        .output()
-        .expect("spawn runtime no-source");
-    assert!(!no_source.status.success());
-    let no_source_json = json(&no_source);
-    assert_eq!(no_source_json["installed"], false);
-    assert_eq!(no_source_json["error"], "no_source_configured");
-}
-
 #[test]
 fn restricted_model_json_mode_is_single_result_and_noninteractive() {
     let models = unique_dir("restricted-json").join("Models");

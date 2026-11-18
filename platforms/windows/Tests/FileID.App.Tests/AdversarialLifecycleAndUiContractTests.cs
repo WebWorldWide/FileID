@@ -310,18 +310,18 @@ public sealed class AdversarialUiSafetyContractTests
     }
 
     [Fact]
-    public void QueuedHardwareReprobeUiChecksUnloadStateAtExecutionTime()
+    public void QueuedEngineInfoUiChecksUnloadStateAtExecutionTime()
     {
         var settings = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "Settings",
             "SettingsView.xaml.cs"));
         var branch = Slice(
             settings,
-            "nameof(EngineClient.LastHardwareReprobe)",
+            "private void OnEngineChanged",
             "private void SyncNvidiaSection");
 
         Assert.Contains(
-            "DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncReprobeUi(); });",
+            "DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncNvidiaSection(); });",
             branch, StringComparison.Ordinal);
     }
 

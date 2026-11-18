@@ -31,8 +31,9 @@ These are not run in CI and the tooling is not pinned; treat the numbers as a lo
 ## Rust (Windows engine)
 
 228 unit tests live in `#[cfg(test)]` modules across the crate (the `cargo test` gate runs all of
-them on x64 + arm64-native). Coverage is strongest on the pure-logic modules and absent on the ORT
-inference paths, which need shipped model DLLs and are exercised only by `build/iterate.ps1` on real
+them on x64 + arm64-native). Coverage is strongest on the pure-logic modules and absent on the model
+inference paths, which need the model weights and are exercised by the golden tests and
+`FILEID_TEST_MODELS_DIR` runs, and on real hardware by `build/iterate.ps1` on real
 hardware.
 
 Well-covered (pure logic, no I/O or GPU):
@@ -47,7 +48,7 @@ Well-covered (pure logic, no I/O or GPU):
 - `commands/trash` + `commands/trash_log` — HMAC seal/verify cycle.
 - `commands/deep_analyze` — caption-chunk splitting.
 
-Behaviorally tested (logic covered; the ORT/codec leaf is mocked or skipped):
+Behaviorally tested (logic covered; the model/codec leaf is mocked or skipped):
 
 - `pipeline/discovery` — kind filter + sort.
 - `pipeline/tagging` — RAM++ generic-tag suppress-list + scene fallback gating.
@@ -55,14 +56,14 @@ Behaviorally tested (logic covered; the ORT/codec leaf is mocked or skipped):
 - `pipeline/face_clustering`, `pipeline/identity_clustering` — cluster stability + uncertain-band behavior.
 - `pipeline/restructure`, `pipeline/restructure_apply`, `pipeline/restructure_semantic` — category/folder classification, containment, semantic fusion, cluster summaries.
 - `pipeline/doc_extract`, `pipeline/audio_meta` — doc keyword + audio-metadata extraction.
-- `models/registry`, `models/variants`, `models/runtime` — registry URL/alias/sentinel invariants, per-EP variant resolution, session tuning.
+- `models/registry`, `models/runtime` — registry URL/alias/sentinel invariants, the device-removed marker.
 - `models/ram_plus`, `models/sface`, `models/yunet`, `models/face_align` — preprocessing + L2-normalize + alignment math (the `Session::run` call itself is not unit-tested).
 - `models/scene_vocab`, `models/wordpiece_tokenizer`, `models/vlm` — scene-label set, tokenizer, VLM prompt/parse helpers.
 - `shell/tags`, `shell/ocr` — tag round-trip; OCR plumbing.
 
 Not unit-tested (integration-only; see exempt list): the `commands/*` dispatch handlers (covered
 indirectly via the pipeline tests + CI smokes), `coordinator.rs` / `scan_session.rs` / `job_queue.rs`
-state machines, and every `models::*` ORT `Session::builder()`/`run()` path.
+state machines, and every `models::*` model-session run path.
 
 ## .NET (Windows app + IpcSchema)
 
@@ -93,13 +94,13 @@ macOS coverage is not separately tracked here.
 |---|---|
 | `Theme/LavaLampBackground.swift` + `Motion/LavaLampBackground.cs`, Win2D canvases (Sankey, IridescentBorder), Metal/Win2D shaders | GPU-resident visuals; no CPU-runnable assertion path. |
 | `shell/video.rs` Media Foundation keyframe path | Needs a real codec; covered via `iterate.ps1` only. |
-| `models/{ram_plus,sface,yunet,mobileclip,clip_text,vlm}.rs` ORT `Session` run paths | Need shipped model DLLs; covered via on-hardware `iterate.ps1`. |
+| `models/{ram_plus,sface,yunet,mobileclip,clip_text,vlm}.rs` model-session run paths | Need the model weights; covered by the golden tests (`FILEID_TEST_MODELS_DIR`) and on-hardware `iterate.ps1`. |
 | `main.rs` `main()` / `async_main()` | Covered by the engine-startup CI smoke, not unit tests. |
 | WinUI `*.xaml.cs` wiring, `MainWindow` Mica/Acrylic + drag region | UI-thread-bound; covered by the app-startup smoke + manual verification. |
 
 ## On-hardware verification
 
-Behavior that no unit test or CI smoke can prove — real ORT execution-provider binding, GPU/NPU
+Behavior that no unit test or CI smoke can prove — real GPU
 throughput, model accuracy on real files — is verified on the dev's RTX 2060 against the `G:\TrueNAS`
 corpus via `platforms/windows/build/iterate.ps1` (+ `build/scan_assertions.py`). That harness, not a
 coverage percentage, is the source of truth for the inference paths.

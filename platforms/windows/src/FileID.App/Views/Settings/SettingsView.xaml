@@ -337,8 +337,7 @@
                     <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
                         <Button Content="Open log folder" Click="OnOpenLogsClicked" />
                         <!-- PAR-148: always-available engine lifecycle controls,
-                             mirroring macOS SettingsView's Engine section. The only
-                             other restart lives in the conditional cuDNN pill. -->
+                             mirroring macOS SettingsView's Engine section. -->
                         <Button x:Name="RestartEngineCardButton"
                                 Content="Restart engine"
                                 Click="OnRestartEngineCardClicked"
@@ -351,7 +350,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- Performance — detected hardware + EP override. -->
+            <!-- Performance — detected hardware + Describe Files GPU override. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -375,7 +374,7 @@
 
                     <!-- Active execution provider. -->
                     <StackPanel Spacing="4">
-                        <TextBlock Text="Active acceleration"
+                        <TextBlock Text="Scan inference"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    FontWeight="SemiBold"
@@ -405,10 +404,9 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Manual override. Auto-detect is the default;
-                         Settings.json persistence is wired separately. -->
+                    <!-- Manual override for the llama.cpp GPU use. Auto-detect is the default. -->
                     <StackPanel Spacing="4">
-                        <TextBlock Text="Override"
+                        <TextBlock Text="GPU use"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    FontWeight="SemiBold"
@@ -417,24 +415,19 @@
                                   Width="240"
                                   SelectedIndex="0"
                                   SelectionChanged="OnProviderOverrideChanged"
-                                  AutomationProperties.Name="GPU execution provider override"
-                                  AutomationProperties.HelpText="Persisted across launches. Takes effect on the next scan.">
+                                  AutomationProperties.Name="GPU use for Describe Files and Chat"
+                                  AutomationProperties.HelpText="Persisted across launches. Takes effect the next time Describe Files starts.">
                             <ComboBoxItem Content="Auto-detect (recommended)" Tag="auto"/>
-                            <ComboBoxItem Content="DirectML — universal" Tag="directml"/>
-                            <ComboBoxItem Content="CUDA — NVIDIA only" Tag="cuda"/>
-                            <ComboBoxItem Content="OpenVINO — Intel only" Tag="openvino"/>
-                            <ComboBoxItem Content="QNN — Snapdragon NPU" Tag="qnn"/>
                             <ComboBoxItem Content="CPU only" Tag="cpu"/>
                         </ComboBox>
                         <TextBlock x:Name="OverrideHelpText"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    TextWrapping="Wrap"
-                                   Text="Persisted across launches. Takes effect on the next scan (already-loaded models keep their EP)." />
+                                   Text="Applies to Describe Files and Chat. Scanning always runs on the CPU. Persisted across launches; takes effect the next time Describe Files starts." />
                     </StackPanel>
 
-                    <!-- NVIDIA acceleration controls for the optional CUDA
-                         execution provider used by scanning. -->
+                    <!-- NVIDIA controls for the optional CUDA llama.cpp runtime. -->
                     <StackPanel x:Name="NvidiaAccelerationSection"
                                 Visibility="Collapsed"
                                 Spacing="10">
@@ -447,7 +440,7 @@
                         <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap"
-                                   Text="CUDA is optional and installs only when you choose it. Downloads come directly from Microsoft and NVIDIA after their license terms are shown." />
+                                   Text="CUDA is optional and used only by Describe Files and Chat. Scanning runs on the CPU. FileID does not download vendor runtimes." />
 
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
@@ -470,77 +463,6 @@
                                     AutomationProperties.Name="Show CUDA runtime setup for Describe Files"
                                     ToolTipService.ToolTip="Shows the local CUDA runtime directory; FileID does not download vendor runtimes." />
                         </Grid>
-
-                        <!-- Matched ONNX Runtime + CUDA dependencies for scan inference. -->
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="CUDA for scanning"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                <TextBlock x:Name="CudnnStatusText"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                           TextWrapping="Wrap"
-                                           Text="Use a compatible locally installed ONNX Runtime CUDA provider, CUDA 12.4 runtime, and cuDNN 9. FileID uses CUDA after the engine restarts; speed depends on your GPU and workload." />
-                                <!-- diagnostics line populated after a Verify install
-                                     click when the engine reports cuDNN absent. Explains
-                                     *why* (missing cudart64, wrong directory, etc.). -->
-                                <TextBlock x:Name="CudnnDiagnosticsText"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                                           TextWrapping="Wrap"
-                                           Visibility="Collapsed"
-                                           Margin="0,4,0,0" />
-                            </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                <Button x:Name="InstallCudnnButton"
-                                        Content="Setup steps"
-                                        Click="OnInstallCudnnClicked"
-                                        AutomationProperties.Name="Show CUDA runtime setup for scanning"
-                                        ToolTipService.ToolTip="Shows the local CUDA runtime directories; FileID does not download vendor runtimes." />
-                                <Button x:Name="VerifyCudnnButton"
-                                        Content="Verify install"
-                                        Click="OnVerifyCudnnClicked"
-                                        ToolTipService.ToolTip="Re-probe installed CUDA files and report whether the scan engine can select CUDA." />
-                            </StackPanel>
-                        </Grid>
-
-                        <!-- post-verify success pill. Visible only when the
-                             re-probe confirmed cuDNN is reachable. Offers a one-click
-                             engine restart to switch from DirectML to CUDA EP. -->
-                        <Border x:Name="CudnnSuccessPill"
-                                Background="{StaticResource GoldSelectedBackgroundBrush}"
-                                BorderBrush="{StaticResource GoldBrush}"
-                                BorderThickness="1"
-                                CornerRadius="8"
-                                Padding="12,8"
-                                Visibility="Collapsed">
-                            <Grid ColumnSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                    <TextBlock x:Name="CudnnSuccessTitle"
-                                               Style="{StaticResource BodyStrongTextBlockStyle}"
-                                               Foreground="{StaticResource GoldBrush}"
-                                               Text="cuDNN detected — restart engine to switch to CUDA" />
-                                    <TextBlock x:Name="CudnnSuccessDetail"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                               TextWrapping="Wrap"
-                                               Text="The current engine session loaded DirectML at startup; a restart picks CUDA on this next spawn." />
-                                </StackPanel>
-                                <Button Grid.Column="1"
-                                        x:Name="RestartEngineButton"
-                                        Content="Restart engine"
-                                        Click="OnRestartEngineClicked"
-                                        VerticalAlignment="Center" />
-                            </Grid>
-                        </Border>
                     </StackPanel>
                 </StackPanel>
             </Border>

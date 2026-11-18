@@ -52,7 +52,7 @@ $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 OK "isolated state dir: $State  (Models junctioned; real library untouched)"
 
-# --- colocate ORT + DirectML beside the engine -----------------------
+# --- colocate the runtime DLLs beside the engine ---------------------
 $fetch = Join-Path $BuildDir "fetch-runtime-deps.ps1"
 $outDir = Split-Path -Parent $EnginePath
 if (Test-Path $fetch) {
@@ -82,7 +82,6 @@ $psi.CreateNoWindow = $true
 $psi.Environment["LOCALAPPDATA"]   = $Temp
 $psi.Environment["FILEID_LOG"]     = "info"
 $psi.Environment["FILEID_PERF_TRACE"] = "1"
-$psi.Environment["ORT_DYLIB_PATH"] = Join-Path $outDir "onnxruntime.dll"
 # Forward the RAM++ batch-size toggle so a measurement run can A/B single
 # (unset/0) vs batched (>1) without editing this script.
 if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }

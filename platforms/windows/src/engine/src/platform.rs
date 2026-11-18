@@ -421,6 +421,22 @@ pub fn cpu_topology() -> CpuTopology {
     }
 }
 
+/// Cores that run heavy work at full speed: the performance cluster on Apple
+/// silicon and on hybrid Intel parts, every physical core elsewhere.
+pub fn performance_core_count() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        let mut value: u32 = 0;
+        let mut size = std::mem::size_of::<u32>();
+        // SAFETY: `value` and `size` outlive the call and `size` is the buffer's size.
+        let status = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
+        if status == 0 && value > 0 {
+            return value as usize;
+        }
+    }
+    cpu_topology().p_cores as usize
+}
+
 /// Number of tagging workers to spin up by default. macOS-parity formula
 /// P + E + max(1, P/2) capped at logical-cores and [2, 32]. Replaces the
 /// older `physical * 1.7` heuristic which mis-sized hybrid CPUs (treated
@@ -1249,7 +1265,7 @@ mod sleep_guard_linux_tests {
 // ─── Process priority ───────────────────────────────────────────────────────
 //
 // Default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU
-// during scans, and when DirectML hits TDR (GPU device removed) the
+// during scans, and when a GPU driver hits TDR (device removed) the
 // high-priority workers spam retries faster than DWM can recover the GPU
 // → full system hang. NORMAL lets the compositor win under contention.
 //
@@ -1300,30 +1316,21 @@ impl Drop for PriorityBoost {
     }
 }
 
-// ─── Performance-Pack DLL search ────────────────────────────────────────────
+// ─── llama.cpp runtime DLL search ───────────────────────────────────────────
 //
 // SEC-3 locked the DLL search path to System32 + the engine binary's
-// directory only. Performance Packs extract into
-// %LOCALAPPDATA%\FileID\Models\packs\<vendor>\ — outside both. Without
-// teaching the loader about those dirs, an installed CUDA / OpenVINO / QNN
-// pack stays invisible to ORT and the EP probe falls back to DirectML or
-// CPU. AddDllDirectory adds a single trusted dir to the per-process search
-// list; we walk one level deep so DLLs at the root OR in a flat `bin/`
-// subdir of the pack are both reachable.
+// directory only. The llama.cpp runtimes extract into
+// %LOCALAPPDATA%\FileID\Models\llama.cpp[-cuda]\ — outside both.
+// AddDllDirectory adds a single trusted dir to the per-process search list;
+// we walk a few levels deep so DLLs at the root or in a `bin/` subdir are
+// both reachable.
 
 /// Register every directory under `root` (up to MAX_DEPTH levels deep)
 /// that contains at least one .dll as an additional DLL search path.
-/// Idempotent: called every time a pack is extracted; the loader dedupes
-/// internally. Returns the list of directories that exist + have DLLs but
-/// for which `AddDllDirectory` returned null — callers (notably main.rs's
-/// CUDA toolkit hookup) surface these to the app as a
-/// `cuda_dll_registration_failed` engine error so a missing CUDA EP
-/// becomes diagnosable instead of silently falling back to DirectML.
-///
-/// Walks up to MAX_DEPTH so the auto-fetched cuDNN pack (which extracts
-/// to `<root>/<versioned-archive>/bin/*.dll`) gets picked up. Existing
-/// single-level callers keep working — only dirs that actually contain
-/// DLLs are registered.
+/// Idempotent: called every time a runtime is extracted; the loader dedupes
+/// internally. Returns the directories that have DLLs but for which
+/// `AddDllDirectory` returned null. Only dirs that actually contain DLLs are
+/// registered.
 #[cfg(windows)]
 pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use windows::core::PCWSTR;
@@ -1349,7 +1356,7 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
             tracing::warn!(dir = %redact_path_for_log(dir), "AddDllDirectory returned null");
             false
         } else {
-            tracing::info!(dir = %redact_path_for_log(dir), "[EP] AddDllDirectory registered pack dir");
+            tracing::info!(dir = %redact_path_for_log(dir), "AddDllDirectory registered runtime dir");
             true
         }
     }
@@ -1376,80 +1383,15 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
     failed
 }
 
-/// Load a DLL by full path so its module identity is pinned before anything
-/// else (ORT's CUDA EP, cuDNN's dispatch shim) resolves the same name through
-/// the unordered AddDllDirectory search set. Windows resolves an import by
-/// name against already-loaded modules first, so whichever copy we load here
-/// is the one every later consumer binds. Returns the Win32 error code on
-/// failure (126 = a dependency of the DLL itself is missing).
-#[cfg(windows)]
-pub fn preload_dll(path: &std::path::Path) -> Result<(), u32> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::System::LibraryLoader::{
-        LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-    };
-
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    wide.push(0);
-    unsafe {
-        LoadLibraryExW(
-            PCWSTR(wide.as_ptr()),
-            None,
-            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-        )
-    }
-    .map(|_| ())
-    // HRESULT_FROM_WIN32 shape (0x8007xxxx) → surface the familiar Win32 code
-    // (126 ERROR_MOD_NOT_FOUND, 127 ERROR_PROC_NOT_FOUND) in logs.
-    .map_err(|e| (e.code().0 as u32) & 0xFFFF)
-}
-
 #[cfg(not(windows))]
 pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     Vec::new()
 }
 
-/// Find the first file named `filename` (case-insensitive) anywhere under
-/// `root`, up to `max_depth` levels deep. Used to locate a Performance Pack's
-/// `onnxruntime.dll` (it extracts into a versioned `.../lib/` subdir) so
-/// `ORT_DYLIB_PATH` can be pinned to the matched GPU runtime. Returns None if
-/// `root` doesn't exist or the file isn't found — callers treat that as "no
-/// pack installed" and leave ORT on its default (pyke) base.
-pub fn find_file_under(root: &std::path::Path, filename: &str, max_depth: usize) -> Option<std::path::PathBuf> {
-    if !root.is_dir() {
-        return None;
-    }
-    let rd = std::fs::read_dir(root).ok()?;
-    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            subdirs.push(path);
-        } else if path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .is_some_and(|f| f.eq_ignore_ascii_case(filename))
-        {
-            return Some(path);
-        }
-    }
-    if max_depth == 0 {
-        return None;
-    }
-    for sub in subdirs {
-        if let Some(found) = find_file_under(&sub, filename, max_depth - 1) {
-            return Some(found);
-        }
-    }
-    None
-}
-
 /// Returns the primary (largest-VRAM) non-software adapter's
 /// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
-/// physical adapter is present. Used to gate the ML Session pool —
-/// without this, a multi-Session config can exhaust a 6 GB card's VRAM
-/// and wedge the DirectML driver (full system hang).
+/// physical adapter is present. Used to size the llama.cpp
+/// GPU offload.
 ///
 /// VRAM is constant for the process, so the DXGI factory + adapter walk is
 /// memoized after the first call (same pattern as `RuntimeProbe::shared`,

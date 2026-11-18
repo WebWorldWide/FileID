@@ -60,10 +60,7 @@ if (-not (Test-Path $EnginePath)) {
     exit 2
 }
 
-# V14.9-V: ensure ORT (DirectML) + DirectML DLLs sit beside FileIDEngine.exe
-# so it loads our pinned 1.22 instead of Windows System32's 1.17 (which
-# panics our ort 2.0.0-rc.10 crate) AND so the DirectML EP can initialize
-# (otherwise silent CPU fallback).
+# Ensure the runtime DLLs (pdfium.dll) sit beside FileIDEngine.exe.
 $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
 if (Test-Path $fetchScript) {
     Step "Ensuring runtime DLLs are colocated with engine"
@@ -76,7 +73,7 @@ if (Test-Path $fetchScript) {
             Copy-Item -LiteralPath $src -Destination (Join-Path $cargoOutDir $name) -Force -ErrorAction SilentlyContinue
         }
     }
-    OK "ORT + DirectML colocated"
+    OK "runtime DLLs colocated"
 }
 
 # --- 2. Resolve corpus ------------------------------------------------
@@ -126,10 +123,6 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
-# Force the bundled ORT 1.22 beside the engine — System32 ships a stale 1.17
-# that the default DLL search order (System32 first) would otherwise bind,
-# panicking our ort 2.0.0-rc.10 crate. Belt-and-suspenders with colocation.
-$psi.Environment["ORT_DYLIB_PATH"] = Join-Path (Split-Path $EnginePath) "onnxruntime.dll"
 # V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
 # wedged the DirectML driver and locked the entire system requiring a
 # hard reboot. Pool sizing is now VRAM-budgeted inside the engine and

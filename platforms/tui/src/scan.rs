@@ -2,7 +2,7 @@
 //!
 //! `startScan` runs the engine's FULL ML pipeline (image tags, CLIP embeddings,
 //! face detect/embed, perceptual + content hashes, doc text). It owns its own
-//! async runtime + ORT sessions, so — exactly like the CLI's `scan --models`
+//! async runtime + model sessions, so — exactly like the CLI's `scan --models`
 //! ([`platforms/cli/src/scan_models.rs`]) and the desktop clients — we can't run
 //! it from a library call. We spawn the `FileIDEngine` binary and speak
 //! newline-delimited JSON over stdio, reusing the engine's OWN
@@ -109,15 +109,6 @@ fn run_scan(
         anyhow::bail!("{}", message_for_missing(&missing));
     }
 
-    // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? The engine's
-    //    `load-dynamic` build needs `libonnxruntime.dylib`, but `ort`'s
-    //    `download-binaries` ships only a static lib for arm64 — a separate,
-    //    one-time install from the model download. No-op off macOS. ──
-    #[cfg(target_os = "macos")]
-    if !fileid_engine::ort_runtime::is_available() {
-        anyhow::bail!("{}", runtime_missing_message());
-    }
-
     // ── Pre-flight 2: engine binary located? ──
     let Some(engine_bin) = client::locate_engine() else {
         anyhow::bail!(
@@ -207,12 +198,6 @@ fn run_scan(
             if kind == "models_not_installed" {
                 anyhow::bail!("{}", message_for_missing(&missing_required()))
             }
-            // The engine's macOS `runtime_not_installed` (the pre-flight didn't
-            // catch it — e.g. the dylib vanished) maps to the one-time runtime
-            // install guidance, distinct from the model download (D).
-            if kind == "runtime_not_installed" {
-                anyhow::bail!("{}", runtime_missing_message())
-            }
             if kind.starts_with("face_clustering") {
                 anyhow::bail!("scan completed, but face grouping failed: {message}")
             }
@@ -273,18 +258,6 @@ pub fn missing_models_display() -> Vec<String> {
         .into_iter()
         .map(|missing| missing.display_name)
         .collect()
-}
-
-/// One-line "ONNX Runtime not installed" message (macOS). Distinct from the
-/// model download (D) — the runtime is the inference library that loads the
-/// models, and on macOS it's a separate one-time install. Shared by the scan
-/// pre-flight and the engine's `runtime_not_installed` mapping.
-fn runtime_missing_message() -> String {
-    format!(
-        "ONNX Runtime not installed — run `{}` in a shell (or `brew install onnxruntime`), \
-         then press s again. One-time setup, separate from the AI models (D).",
-        fileid_engine::ort_runtime::INSTALL_COMMAND
-    )
 }
 
 fn message_for_missing(missing: &[MissingModel]) -> String {

@@ -60,12 +60,11 @@ internal sealed class AppSettings
     public bool PeopleHideUnknown { get; set; } = false;
 
     /// <summary>
-    /// Manual GPU execution provider override. Null = auto-detect (engine
-    /// uses RuntimeProbe). Values: "directml", "cuda", "openvino", "qnn",
-    /// "cpu". Persists across launches. Read by the engine in
-    /// runtime.rs::read_user_ep_override on every session build, so a
-    /// change applies to the next scan (already-loaded models keep their
-    /// originally-built EP for the current scan's lifetime).
+    /// Manual GPU override for Describe Files and Chat (llama.cpp). Null =
+    /// auto-detect. "cpu" keeps them off the GPU; scan models always run on
+    /// the CPU. Older values ("directml", "cuda", ...) are still accepted
+    /// and ignored. Persists across launches. Read by the engine in
+    /// runtime.rs::user_forced_cpu each time Describe Files starts.
     /// </summary>
     public string? GpuExecutionProviderOverride { get; set; }
 
@@ -174,10 +173,10 @@ internal sealed class AppSettings
     /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
-    /// <summary>Whitelist of execution-provider tags the engine accepts.
-    /// Matches the Rust ExecutionProvider enum in `runtime.rs`. Anything
-    /// outside this set is silently coerced to null (auto-detect) so a
-    /// tampered settings.json can't influence DLL search via this field.</summary>
+    /// <summary>Whitelist of override tags. Only "cpu" changes engine
+    /// behaviour; the older provider names stay accepted so existing
+    /// settings files round-trip. Anything outside this set is silently
+    /// coerced to null (auto-detect).</summary>
     private static readonly HashSet<string> AllowedEpOverrides =
         new(StringComparer.OrdinalIgnoreCase)
         { "auto", "cuda", "tensorrt", "directml", "openvino", "qnn", "cpu" };

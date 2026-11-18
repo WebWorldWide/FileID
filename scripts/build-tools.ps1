@@ -94,7 +94,7 @@ foreach ($line in $RuntimeOutput) {
     }
 }
 $RuntimeNames = @($Artifacts | ForEach-Object Name)
-foreach ($required in @('onnxruntime.dll', 'onnxruntime_providers_shared.dll', 'DirectML.dll', 'pdfium.dll')) {
+foreach ($required in @('pdfium.dll')) {
     if ($RuntimeNames -notcontains $required) {
         throw "runtime fetch did not resolve $required"
     }
@@ -120,4 +120,4 @@ if ($LASTEXITCODE -ne 0) { throw 'installed fileid.exe did not start' }
 & (Join-Path $InstallDir 'fileid-tui.exe') --version
 if ($LASTEXITCODE -ne 0) { throw 'installed fileid-tui.exe did not start' }
 
-Write-Host "Done. The CLI, TUI, engine, and required ONNX/DirectML/PDFium DLLs are in $InstallDir"
+Write-Host "Done. The CLI, TUI, engine, and required PDFium DLL are in $InstallDir"

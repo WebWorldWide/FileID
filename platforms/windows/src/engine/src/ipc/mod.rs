@@ -358,13 +358,11 @@ pub struct HardwareInfo {
     /// "AMD Radeon RX 7900 XT", "Intel(R) Arc(TM) A380 Graphics", etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_name: Option<String>,
-    /// EP the engine picked: "cuda" / "tensorrt" / "directml" / "openvino"
-    /// / "qnn" / "cpu". This is what ML inference will use unless the
-    /// user overrides via Settings.
+    /// The inference backend: always "tract-cpu".
     pub execution_provider: String,
     /// Number of physical CPU cores.
     pub physical_cpu_cores: u32,
-    /// Whether each Performance Pack is detected on this machine.
+    /// Always false: there are no GPU packs; kept for contract compatibility.
     pub cuda_pack_present: bool,
     pub openvino_pack_present: bool,
     pub qnn_pack_present: bool,

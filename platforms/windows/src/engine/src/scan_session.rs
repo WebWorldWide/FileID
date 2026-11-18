@@ -288,7 +288,7 @@ impl ScanSession {
             // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
             // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
             // isn't on disk (no doc could embed → don't force a perpetual re-walk).
-            let text_embed_gate = text_embed_gate(bge_installed(), crate::ort_runtime::is_available());
+            let text_embed_gate = text_embed_gate(bge_installed());
             // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
             // to backfill its rendered-shape CLIP vector (lockstep with macOS).
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
@@ -1530,11 +1530,9 @@ fn video_clip_gate() -> &'static str {
     }
 }
 
-/// Whether this scan can give a picture its vector: the weights are installed and something can run them (the Mac
-/// adapters' own CLIP, or ONNX Runtime). With the weights and no runtime, the missing-vector gates would re-read
-/// every picture on every scan and never embed one.
+/// Whether this scan can give a picture its vector: the CLIP weights are installed.
 fn clip_can_embed() -> bool {
-    clip_installed() && (crate::pipeline::tagging::apple_scan_enabled() || crate::ort_runtime::is_available())
+    clip_installed()
 }
 
 fn clip_installed() -> bool {
@@ -1551,10 +1549,9 @@ fn bge_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// The gate applies only when a scan can actually embed a document: weights on disk and a runtime to run them.
-/// With the weights installed but no ONNX Runtime, every document would be re-read on every scan and never embed.
-fn text_embed_gate(installed: bool, runtime_available: bool) -> &'static str {
-    if installed && runtime_available {
+/// The gate applies only when a scan can actually embed a document: the weights are on disk.
+fn text_embed_gate(installed: bool) -> &'static str {
+    if installed {
         SKIP_SET_TEXT_EMBED_GATE
     } else {
         ""
@@ -2585,10 +2582,9 @@ mod tests {
     }
 
     #[test]
-    fn text_embed_gate_needs_both_the_weights_and_a_runtime() {
-        assert_eq!(text_embed_gate(true, true), SKIP_SET_TEXT_EMBED_GATE);
-        assert_eq!(text_embed_gate(true, false), "", "weights without a runtime must not re-walk every document");
-        assert_eq!(text_embed_gate(false, true), "");
+    fn text_embed_gate_needs_the_weights() {
+        assert_eq!(text_embed_gate(true), SKIP_SET_TEXT_EMBED_GATE);
+        assert_eq!(text_embed_gate(false), "");
     }
 
     #[test]

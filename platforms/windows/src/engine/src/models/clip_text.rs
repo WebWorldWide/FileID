@@ -1,25 +1,21 @@
 // CLIP text encoder — query-time semantic search. Tokenize a string
 // via `ClipTokenizer`, run the ONNX session, L2-normalize, return 512
 // floats. Held inside a process-static `OnceLock` in main.rs so
-// back-to-back queries reuse the session (avoids the 100-300 ms ORT
-// session-create on every keystroke).
+// back-to-back queries reuse the session (avoids recompiling
+// the model on every keystroke).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{
-    classify_inference_error, ensure_gpu_inference_alive,
-};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -56,21 +52,15 @@ impl ClipText {
             }
         let input = Array2::<i64>::from_shape_vec((1, CONTEXT_LEN), padded)
             .context("CLIP text input shape")?;
-        let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(tensor))])
-            .context("CLIP text session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), input.into())])
+            .context("CLIP text session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract CLIP text output as f32")?;
+        let data = &output.data;
         if data.len() != crate::models::mobileclip::CLIP_EMBED_DIM {
             anyhow::bail!(
                 "CLIP text produced a {}-d embedding, expected {} (wrong or corrupt model? text + image encoders must share the space)",
@@ -78,7 +68,7 @@ impl ClipText {
                 crate::models::mobileclip::CLIP_EMBED_DIM
             );
         }
-        let mut emb: Vec<f32> = data.to_vec();
+        let mut emb: Vec<f32> = output.data;
         l2_normalize(&mut emb);
         if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
         Ok(emb)
@@ -109,21 +99,15 @@ impl ClipText {
         }
         let input = Array2::<i64>::from_shape_vec((batch, CONTEXT_LEN), flat)
             .context("CLIP text batch input shape")?;
-        let tensor = Tensor::from_array(input).context("CLIP text batch input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(tensor))])
-            .context("CLIP text batch session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), input.into())])
+            .context("CLIP text batch session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract CLIP text batch output as f32")?;
+        let data = &output.data;
         if data.len() % batch != 0 {
             anyhow::bail!(
                 "CLIP text batch output len {} not divisible by batch {batch}",
@@ -148,28 +132,8 @@ impl ClipText {
     }
 }
 
-/// macOS: the CPU session with ONNX Runtime's default thread pool, as the Swift
-/// `CLIPTextEncoder` builds it. An explicit intra-op count (one per core) answered
-/// up to several times slower on a busy Mac, where other processes hold cores.
-#[cfg(target_os = "macos")]
-fn session(path: &Path) -> Result<(Session, String)> {
-    use ort::session::builder::GraphOptimizationLevel;
-    crate::ort_runtime::commit_environment().context("ORT environment")?;
-    let session = Session::builder()
-        .context("ORT session builder")?
-        .with_log_level(ort::logging::LogLevel::Error)
-        .context("configure session (CLIP text)")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("configure session (CLIP text)")?
-        .commit_from_file(path)
-        .context("ORT session commit (CLIP text)")?;
-    let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?.name.clone();
-    Ok((session, input_name))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn session(path: &Path) -> Result<(Session, String)> {
-    super::runtime::commit_chain_session("CLIP text", path)
+fn session(path: &Path) -> Result<(InferenceSession, String)> {
+    load_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
 }
 
 fn l2_normalize(v: &mut [f32]) {
@@ -183,4 +147,61 @@ pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?
         .join("clip_text")
         .join("clip_text.onnx"))
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, Probe, Tolerance};
+
+    const PATH: &str = "clip_text/clip_text.onnx";
+
+    fn tokenizer_next_to(path: &std::path::Path) -> ClipTokenizer {
+        let directory = path.parent().unwrap();
+        ClipTokenizer::new(
+            &std::fs::read_to_string(directory.join("vocab.json")).unwrap(),
+            &std::fs::read_to_string(directory.join("merges.txt")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn embedding_matches_the_golden_vector() {
+        let Some(path) = model_file(PATH) else { return };
+        let tokenizer = tokenizer_next_to(&path);
+        let mut model = ClipText::load(&path, tokenizer).unwrap();
+        let embedding = model.embed("a photo of a dog running on a beach at sunset").unwrap();
+        check(
+            "clip_text",
+            PATH,
+            "the query \"a photo of a dog running on a beach at sunset\" through the CLIP BPE tokenizer; L2-normalized 512-d embedding",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[Probe { name: "embedding", shape: vec![512], values: &embedding }],
+        );
+    }
+
+    #[test]
+    fn batched_embeddings_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = ClipText::load(&path, tokenizer_next_to(&path)).unwrap();
+        let queries: Vec<String> = [
+            "a photo of a dog running on a beach at sunset",
+            "invoice for the office printer",
+            "a birthday cake with candles",
+        ]
+        .map(String::from)
+        .into();
+        let batch = model.embed_batch(&queries).unwrap();
+        let single = model.embed(&queries[0]).unwrap();
+        let gap = single.iter().zip(&batch[0]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(gap < 1e-4, "row 0 of the batch drifts from the single-query embedding by {gap}");
+        let flat: Vec<f32> = batch.concat();
+        check(
+            "clip_text_batch",
+            PATH,
+            "the queries \"a photo of a dog running on a beach at sunset\", \"invoice for the office printer\" and \"a birthday cake with candles\" through the CLIP BPE tokenizer as one (3, 77) batch; L2-normalized 512-d embedding per row",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[Probe { name: "batch", shape: vec![3, 512], values: &flat }],
+        );
+    }
 }

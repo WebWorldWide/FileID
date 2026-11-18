@@ -19,7 +19,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 
 ## Stack
 
-- **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
+- **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (tract on every platform; llama.cpp for the VLMs).
 - **App** — WinUI 3 (Windows App SDK 1.6+, .NET 10, C# 14/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
 - **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed. The reserved Store product uses the separate x64 MSIX path in `build/publish-store.ps1`; see `shared/docs/WINDOWS_STORE.md` for identity and release gates.
 
@@ -39,7 +39,7 @@ platforms/windows/
 │           ├── db/            # rusqlite + bundled SQLite + FTS5; v1–v12 migrations, GRDB-faithful
 │           ├── pipeline/      # discovery, tagging, dbwriter, face/identity clustering,
 │           │                  #   deep_analyze, restructure (+ restructure_semantic = butler)
-│           ├── models/        # ORT EP picker, RAM++, CLIP ViT-B/32 + text, YuNet + SFace, llama.cpp
+│           ├── models/        # inference seam (tract), RAM++, CLIP ViT-B/32 + text, YuNet + SFace, llama.cpp
 │           └── shell/         # IFileOperation, Windows.Media.Ocr, IThumbnailProvider, …
 ├── installer/    # WiX v4 MSI + Burn bundle
 ├── build/        # build-all.ps1, publish-bundle.ps1, iterate.ps1 (+ scan_assertions.py)
@@ -54,23 +54,22 @@ platforms/windows/
 .\platforms\windows\build\build-all.ps1 -Clean -Run      # clean rebuild then launch
 .\platforms\windows\build\build-all.ps1 -WipeDbOnly      # fresh scan, keep models
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign   # release MSIs + FileIDSetup.exe
-.\platforms\windows\build\build-ort-runtime.ps1 -Architecture x64   # once: telemetry-free ONNX Runtime (~1 h)
 ```
 
-Microsoft's ONNX Runtime packages are telemetry builds; FileID ships its own source build. `fetch-runtime-deps.ps1` stops with instructions until `build/runtime-cache/onnxruntime-1.22.0-dml-notelemetry/<arch>/` exists (or download the `ort-runtime` workflow artifact into it).
+Windows builds use the default features: every ONNX model runs on tract (CPU), the same as macOS and Linux; no ONNX Runtime or DirectML DLL ships. `fetch-runtime-deps.ps1` stages only `pdfium.dll`.
 
 Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. Current dev hardware: AMD Ryzen 9 9900X (12 cores / 24 threads), 64 GB RAM, GeForce RTX 5080 (16 GB VRAM, driver 617.14), Windows 11 Pro build 26300. The former `G:\TrueNAS` corpus is not mounted; pass an available representative copy explicitly with `build\iterate.ps1 -Corpus <path>`. Earlier RTX 2060 / DirectML results are historical, not a baseline for this machine. CUDA and DirectML still need current-hardware verification.
 
 ## Current status
 
-Engine and app cover all six tabs. The existing commercial-clean model stack was previously verified on RTX 2060 / DirectML; current RTX 5080 validation and optional Qwen3-VL inference remain open without installed weights:
+Engine and app cover all six tabs. The existing commercial-clean model stack was previously verified on RTX 2060; current RTX 5080 validation and optional Qwen3-VL inference remain open without installed weights:
 - **Tagging:** RAM++ (Swin-L @384, 4585-tag ONNX) primary, per-class thresholds + generic-tag suppress-list; CLIP zero-shot scene tags are the fallback.
 - **Search:** CLIP ViT-B/32 (512-d image + text).
 - **Faces:** YuNet detect + SFace embed (128-d) + 5-point alignment; density clustering.
 - **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (unchanged default) / Gemma 3 / Mistral-Small-3.2, plus optional pinned official Qwen3-VL 4B and 8B GGUF + mmproj bundles (Apache-2.0). Select and install them on the Deep Analyze tab; they are not auto-recommended.
-- EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU); NVIDIA without the CUDA pack runs DirectML. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
+- Inference is tract CPU on every platform; there is no execution-provider picker. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
 
-In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.
+In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification.
 
 ## Conventions — Rust engine
 

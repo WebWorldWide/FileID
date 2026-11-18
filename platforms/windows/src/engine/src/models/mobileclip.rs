@@ -4,7 +4,7 @@
 // clustering and query-time semantic search.
 //
 // Inference order: resize → CLIP mean/std normalize → CHW float32
-// → ORT session.run → L2 normalize. Persisted as raw little-endian bytes
+// → tract session run → L2 normalize. Persisted as raw little-endian bytes
 // in `clip_embeddings.embedding`.
 //
 // File was originally MobileCLIP-S2 (256×256, research-only license); now
@@ -14,12 +14,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 /// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
 /// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
@@ -38,7 +34,7 @@ const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 const INV_255: f32 = 1.0 / 255.0;
 
 pub struct MobileClipImage {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -52,7 +48,11 @@ impl MobileClipImage {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
         let (session, input_name) = super::clip_space::load_verified(&[(path, "mobileclip_s2", 0)], || {
-            commit_chain_session("MobileCLIP image", path)
+            load_session(
+                "MobileCLIP image",
+                path,
+                &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(224), Dim::Fixed(224)])],
+            )
         })?;
         // Warmup with a zero 224×224 frame so first-call kernel compile
         // happens during load.
@@ -82,28 +82,22 @@ impl MobileClipImage {
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
         fill_clip_chw(&mut chw, 0, rgb, n);
 
-        let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("MobileCLIP session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("MobileCLIP session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("MobileCLIP produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract MobileCLIP output as f32")?;
+        let data = &output.data;
         if data.len() != CLIP_EMBED_DIM {
             anyhow::bail!(
                 "MobileCLIP produced a {}-d embedding, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)",
                 data.len()
             );
         }
-        let mut emb: Vec<f32> = data.to_vec();
+        let mut emb: Vec<f32> = output.data;
         l2_normalize(&mut emb);
         if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
         Ok(emb)
@@ -113,10 +107,9 @@ impl MobileClipImage {
     /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
-    /// Per-call dispatch overhead through DirectML is sizable (kernel queue
-    /// submission, fence wait, GPU↔CPU sync). Doing 4 images in one call ≈
-    /// 2× the wall time of one image, so throughput is ~2× per Session
-    /// without growing VRAM.
+    /// One call over N images lets tract's multithreaded matmul split the
+    /// batch across the performance cores; a single image gets little from
+    /// extra threads.
     pub fn embed_batch(
         &mut self,
         rgb_images: &[Vec<u8>],
@@ -140,22 +133,16 @@ impl MobileClipImage {
         for (b, rgb) in rgb_images.iter().enumerate() {
             fill_clip_chw(&mut chw, b, rgb, n);
         }
-        let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("MobileCLIP session.run (batch)")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("MobileCLIP session.run (batch)")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("MobileCLIP produced no outputs"))?;
-        let (shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract MobileCLIP batch output as f32")?;
-        let total: usize = shape.iter().map(|d| *d as usize).product();
+        let (shape, data) = (&output.shape, &output.data);
+        let total: usize = shape.iter().product();
         if total != data.len() {
             anyhow::bail!(
                 "MobileCLIP output shape product {} != data len {}",
@@ -252,5 +239,36 @@ mod tests {
         assert_close(out[9], norm(60, 2));
         assert_close(out[10], norm(90, 2));
         assert_close(out[11], norm(120, 2));
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "mobileclip/mobileclip_s2_image.onnx";
+
+    #[test]
+    fn embeddings_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = MobileClipImage::load(&path).unwrap();
+        let first = synthetic_rgb(224, 224);
+        let second: Vec<u8> = first.iter().rev().copied().collect();
+        let single = model.embed(&first).unwrap();
+        let batch = model.embed_batch(&[first, second]).unwrap();
+        let batch: Vec<f32> = batch.concat();
+        let gap = single.iter().zip(&batch[..512]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(gap < 1e-4, "batched embedding drifts from the single-image one by {gap}");
+        check(
+            "clip_image",
+            PATH,
+            "synthetic_rgb(224, 224) stretched-224 CLIP RGB; L2-normalized 512-d embedding, alone and as image 0 of a 2-image batch whose image 1 is the byte-reversed buffer",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[
+                Probe { name: "embedding", shape: vec![512], values: &single },
+                Probe { name: "batch", shape: vec![2, 512], values: &batch },
+            ],
+        );
     }
 }

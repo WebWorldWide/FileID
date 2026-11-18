@@ -64,8 +64,7 @@ is not retried on CPU by the engine.
 
 `flatpak/io.github.fileid.FileID.yaml` gives the build sandbox no network
 access. It uses the Rust SDK extension instead of downloading rustup, builds
-Cargo with `--locked --offline`, and stages the exact ONNX Runtime 1.22.0 static
-archive as a SHA-256-pinned manifest source for each supported architecture.
+Cargo with `--locked --offline`.
 
 `flatpak/cargo-sources.json` contains every registry crate from
 `platforms/linux/Cargo.lock` as an immutable URL + checksum. Regenerate and
@@ -83,13 +82,11 @@ Flathub submission still requires replacing the manifest's bounded local `dir`
 sources with the immutable archive of the audited release commit. This is done
 at release cut because the commit cannot be pinned before it exists.
 
-## ONNX Runtime by channel
+## Inference runtime
 
-Linux portable builds statically link the CPU ONNX Runtime. Flatpak supplies
-its pinned archive through `ORT_LIB_LOCATION` and sets `ORT_SKIP_DOWNLOAD=1`;
-Cargo cannot fall back to network. AppImage uses ort-sys's checksum-verified
-archive fetch on the host. Nix and AUR may instead point `ORT_LIB_LOCATION` at
-their package-managed runtime.
+Every channel builds the same engine: it runs its models on tract, a pure-Rust
+runtime compiled in from the vendored crates, so nothing is downloaded or
+linked at build time for inference and no AppRun loader hook is needed.
 
 ## No telemetry
 

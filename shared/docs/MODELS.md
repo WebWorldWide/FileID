@@ -164,10 +164,10 @@ Both engines now implement RAM++, ViT-B/32 and SFace. Cross-platform face round 
 | Capability | macOS | Windows | Notes |
 |---|---|---|---|
 | In-scan image tagging (primary) | RAM++ Swin-L @384 (ONNX) | **RAM++ Swin-L @384 (ONNX, fp16)** | Recognize Anything Plus, 4585-tag multi-label tagger, Apache-2.0. Primary auto-tagger; CLIP zero-shot scene tags are the fallback when RAM++ isn't installed. |
-| Image semantic embedding (search) | CLIP ViT-B/32 (ONNX, CoreML EP/CPU) | **CLIP ViT-B/32 (ONNX)** | OpenAI/OpenCLIP ViT-B/32, MIT. 512-d float32 LE, L2-normalized — embeddings byte-cross-compatible across platforms. |
+| Image semantic embedding (search) | CLIP ViT-B/32 (ONNX, tract CPU) | **CLIP ViT-B/32 (ONNX)** | OpenAI/OpenCLIP ViT-B/32, MIT. 512-d float32 LE, L2-normalized — embeddings byte-cross-compatible across platforms. |
 | Text semantic embedding (CLIP) | CLIP ViT-B/32 text (ONNX) + BPE vocab | **CLIP ViT-B/32 text (ONNX)** + BPE vocab | Same OpenAI BPE tokenizer port; embeddings cross-compatible. |
 | Face detection + 5-pt landmarks | Apple Vision (`VNDetectFaceRectanglesRequest`) | **YuNet (ONNX, OpenCV Zoo)** | YuNet is MIT. Different detectors → boxes aren't byte-identical, but 5-pt landmarks feed a shared alignment template so embeddings match. |
-| Face embedding | SFace (ONNX via CoreML EP/CPU) | **SFace (ONNX via DirectML / CUDA / CPU EP)** | SFace (OpenCV Zoo) is Apache-2.0, **128-d** L2-normalized. Replaces 512-d ArcFace; person-clustering DBs round-trip once both platforms are on SFace. |
+| Face embedding | SFace (ONNX, tract CPU) | **SFace (ONNX, tract CPU)** | SFace (OpenCV Zoo) is Apache-2.0, **128-d** L2-normalized. Replaces 512-d ArcFace; person-clustering DBs round-trip once both platforms are on SFace. |
 | OCR | Apple Vision `VNRecognizeTextRequest` (fast tier) | Windows.Media.Ocr (built-in WinRT) default; PaddleOCR ONNX opt-in | Built-in OCR is fast + free + multilingual on both. |
 | Vision-language models (Deep Analyze) | MLX: Qwen2.5-VL · Qwen3-VL · Gemma 3 · Mistral Small 3.2 · PaliGemma | llama.cpp: Qwen 2.5-VL 7B · optional Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only. The pinned Windows llama.cpp runtimes are x64; Linux and Windows ARM64 VLM runners remain unverified. |
 
@@ -240,7 +240,7 @@ The non-commercial InsightFace stack (ArcFace `w600k_r50` + SCRFD, *"non-commerc
 | Input | letterboxed to 640×640, BGR raw [0,255], NCHW |
 | Output | per-stride (8/16/32) cls/obj/bbox/kps → score = √(cls·obj), center/exp box, 5-point landmarks remapped to the FileID order |
 
-### SFace face embedding (Windows; macOS via CoreML EP — lockstep pending)
+### SFace face embedding (tract CPU on every platform)
 
 | Aspect | Value |
 |---|---|
@@ -299,17 +299,12 @@ VLMs cache to:
 - macOS Developer ID: `~/Documents/huggingface/models/<repo>/`; Mac App Store builds: `FileID/Models/huggingface/models/<repo>/` inside the sandbox container.
 - Windows: `%LOCALAPPDATA%\FileID\Models\vlm\<model-dir>\{model.gguf,mmproj.gguf\}`; registry-managed Hugging Face models use `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (user-initiated installs; outside Documents).
 
-## Performance Packs (Windows GPU runtimes)
+## GPU runtimes
 
-Optional. Settings → Performance → "Get faster on this hardware". Auto-suggested when matching hardware is detected. Same downloader pattern as model downloads.
-
-| Pack | Size | Activates EP | Hardware target |
-|---|---|---|---|
-| NVIDIA CUDA Pack | ~600 MB | ORT CUDA EP + cuDNN runtime + llama.cpp CUDA backend | NVIDIA GPUs (any RTX-class) |
-| Intel OpenVINO Pack | ~300 MB | ORT OpenVINO EP | Intel iGPU + Arc dGPU |
-| Snapdragon NPU Pack | ~150 MB | ORT QNN EP + (when available) llama.cpp QNN backend | Snapdragon X Elite (Hexagon NPU) on WoA |
-
-Each pack has its own canonical URL + SHA256 list. Performance Packs do not contain user data and never report installation back. They install into `%LOCALAPPDATA%\FileID\runtimes\<pack-name>\` and the engine adds them to its DLL search path. **Without a CUDA Pack, NVIDIA cards run on DirectML (~3–5× slower for ML inference but fully functional) — verified on an RTX 2060.**
+There are no Performance Packs. Every ONNX model runs on tract on the CPU. The only
+optional GPU runtime is the CUDA llama.cpp build for Describe Files and Chat, which
+the user installs locally (FileID does not download vendor runtimes); Vulkan llama.cpp
+ships in the box.
 
 ## Why we pull from upstream rather than redistribute
 

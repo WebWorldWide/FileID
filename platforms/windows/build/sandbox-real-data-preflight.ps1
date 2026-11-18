@@ -985,7 +985,6 @@ $boundary = $null
 $network = $null
 $python = $null
 $engineCopy = $null
-$ort = $null
 $llama = $null
 
 Write-JsonAtomic `
@@ -1250,76 +1249,6 @@ try {
         -Value $engineCopy
 
     try {
-        $ortProbePath = Resolve-ChildPath `
-            -Root $toolsRoot `
-            -RelativePath ([string]$configuration.paths.ortProbe)
-        $writableOrtPath = Join-Path $stateRoot "engine\onnxruntime.dll"
-        $ortOutput = Join-Path $artifactsRoot "ort-providers.json"
-        $ortProcess = Invoke-ChildProcess `
-            -FilePath $pythonPath `
-            -Arguments @(
-                "-I",
-                $ortProbePath,
-                "--dll",
-                $writableOrtPath,
-                "--output",
-                $ortOutput,
-                "--allowed-python-root",
-                $toolsRoot,
-                "--require-provider",
-                "DmlExecutionProvider"
-            ) `
-            -WorkingDirectory $stateRoot `
-            -TimeoutMilliseconds 30000
-        $ortPayload = if (Test-Path -LiteralPath $ortOutput -PathType Leaf) {
-            Get-Content -LiteralPath $ortOutput -Raw | ConvertFrom-Json
-        } else {
-            $null
-        }
-        $ortChecks = [ordered]@{
-            probeExitedZero = $ortProcess.exitCode -eq 0
-            resultWritten = $null -ne $ortPayload
-            runtimeGreen = (
-                $null -ne $ortPayload -and
-                [string]$ortPayload.result -eq "GREEN"
-            )
-            providersReported = (
-                $null -ne $ortPayload -and
-                @($ortPayload.providers).Count -gt 0
-            )
-            cpuProviderAvailable = (
-                $null -ne $ortPayload -and
-                @($ortPayload.providers) -contains "CPUExecutionProvider"
-            )
-            directMlProviderAvailable = (
-                $null -ne $ortPayload -and
-                @($ortPayload.providers) -contains "DmlExecutionProvider"
-            )
-        }
-        $ort = [ordered]@{
-            schemaVersion = 1
-            process = $ortProcess
-            payload = $ortPayload
-            checks = $ortChecks
-            result = if (@($ortChecks.Values) -contains $false) {
-                "RED"
-            } else {
-                "GREEN"
-            }
-        }
-        Write-JsonAtomic -Path $ortOutput -Value $ort
-    } catch {
-        $ort = [ordered]@{
-            result = "RED"
-            error = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
-            checks = [ordered]@{ completed = $false }
-        }
-        Write-JsonAtomic `
-            -Path (Join-Path $artifactsRoot "ort-providers.json") `
-            -Value $ort
-    }
-
-    try {
         $llamaPath = Resolve-ChildPath `
             -Root $toolsRoot `
             -RelativePath ([string]$configuration.paths.llamaMtmdCli)
@@ -1390,9 +1319,6 @@ $componentChecks = [ordered]@{
     writableEngineCopyGreen = (
         $null -ne $engineCopy -and [string]$engineCopy.result -eq "GREEN"
     )
-    ortProviderProbeGreen = (
-        $null -ne $ort -and [string]$ort.result -eq "GREEN"
-    )
     llamaDeviceProbeGreen = (
         $null -ne $llama -and [string]$llama.result -eq "GREEN"
     )
@@ -1431,7 +1357,6 @@ $summary = [ordered]@{
         "engine-copy.json"
         "llama-devices.json"
         "network-probe.json"
-        "ort-providers.json"
         "package-verification.json"
         "python-probe.json"
     )

@@ -1212,7 +1212,6 @@ fn render_help(f: &mut Frame, area: Rect) {
         hrow("d  ·  .", "external drives · show hidden"),
         Line::from(""),
         note("Press D to download AI models (~1.6 GB) for a full-AI scan."),
-        note("macOS only: one-time `fileid runtime install` for ONNX Runtime."),
     ];
     let w = 64.min(area.width.saturating_sub(4)).max(34);
     let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));

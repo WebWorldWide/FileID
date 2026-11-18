@@ -12,7 +12,7 @@
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use serde::Deserialize;
 
@@ -201,71 +201,40 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
         .collect()
 }
 
-/// SFace as the Mac pipeline runs it, shared by the extraction workers. `ort`
-/// runs a session through `&mut`, so a small pool of sessions lets workers
-/// embed at once as `ArcFaceService` does with one thread-safe ORT session.
+/// SFace as the Mac pipeline runs it, shared by the extraction workers. A
+/// session runs through `&mut`, so a small pool of sessions (one compiled model,
+/// one run state each) lets workers embed at once.
 pub struct MacSFace {
     sessions: Vec<Mutex<crate::models::sface::SFace>>,
     next: std::sync::atomic::AtomicUsize,
     version: String,
-    provider: &'static str,
 }
 
 /// Sessions in the pool: two, so the four extraction workers rarely wait on
-/// one (`ArcFaceService` runs up to four calls on one thread-safe session);
-/// `FILEID_SFACE_SESSIONS` (1–4) overrides it. DECISIONS 2026-11-11.
+/// one; `FILEID_SFACE_SESSIONS` (1–4) overrides it.
 fn sface_sessions() -> usize {
     std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
 }
 
-/// ORT CPU threads per session: the cores split between the sessions, never
-/// fewer than two (one thread changes the CPU partition's sums in the last bit,
-/// two or more give Swift's vectors exactly).
-fn sface_threads(sessions: usize) -> usize {
-    (std::thread::available_parallelism().map_or(2, usize::from) / sessions.max(1)).clamp(2, 4)
-}
-
 impl MacSFace {
-    /// Loads the installed SFace weights as `ArcFaceService` does: the CoreML
-    /// execution provider (compiled program cached under `ModelCache/CoreML`),
-    /// ORT's CPU provider when CoreML cannot bind or `FILEID_FACE_EP=cpu`.
-    /// CoreML gives the Swift engine's vectors bit for bit (DECISIONS 2026-11-11).
+    /// Loads the installed SFace weights on the shared inference seam (tract, CPU).
     pub fn load() -> Result<Self> {
-        use crate::models::sface::{Provider, SFace};
+        use crate::models::sface::SFace;
         let path = crate::models::sface::default_weights_path()?;
         anyhow::ensure!(path.is_file(), "SFace weights missing");
-        let digest = crate::commands::face_refresh::current_model().context("SFace weights unreadable")?;
-        let cpu_only = std::env::var("FILEID_FACE_EP").is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
-        let cache = if cpu_only { None } else { Some(coreml_cache_dir(&digest)?) };
-        let intra_threads = sface_threads(sface_sessions());
-        let coreml = |cache_dir: PathBuf| Provider::CoreMl { cache_dir, intra_threads };
-        let first = cache
-            .clone()
-            .and_then(|cache_dir| SFace::load_with(&path, coreml(cache_dir)).map_err(|error| tracing::warn!(?error, "arcface_coreml_ep_unavailable")).ok());
-        let (first, provider) = match first {
-            Some(model) => (model, "coreml"),
-            None => (SFace::load_with(&path, Provider::Cpu)?, "cpu"),
-        };
+        let first = SFace::load(&path)?;
         let version = first.model_version().to_string();
         let mut sessions = vec![Mutex::new(first)];
         while sessions.len() < sface_sessions() {
-            let provider = match (&cache, provider) {
-                (Some(cache_dir), "coreml") => coreml(cache_dir.clone()),
-                _ => Provider::Cpu,
-            };
-            let model = SFace::load_with(&path, provider)?;
+            let model = SFace::load(&path)?;
             anyhow::ensure!(model.model_version() == version, "SFace weights changed during load");
             sessions.push(Mutex::new(model));
         }
-        Ok(Self { sessions, next: std::sync::atomic::AtomicUsize::new(0), version, provider })
+        Ok(Self { sessions, next: std::sync::atomic::AtomicUsize::new(0), version })
     }
 
     pub fn model_version(&self) -> &str {
         &self.version
-    }
-
-    pub fn provider(&self) -> &'static str {
-        self.provider
     }
 
     pub fn embed(&self, rgba_112: &[u8]) -> Option<Vec<f32>> {
@@ -276,28 +245,6 @@ impl MacSFace {
             .unwrap_or_else(|| self.sessions[start % count].lock());
         session.embed_rgba(rgba_112).map_err(|error| tracing::warn!(?error, "SFace embed failed")).ok()
     }
-}
-
-/// `ModelCache/CoreML/<digest>-mlprogram-sub-ort<release>-macos<version>`,
-/// named like the Swift engine's `ORTSessions.CoreMLCache`.
-fn coreml_cache_dir(model: &str) -> Result<PathBuf> {
-    let digest = model.rsplit(':').next().unwrap_or(model);
-    let digest: String = digest.chars().take(32).collect();
-    let name = format!("{digest}-mlprogram-sub-ort{}-macos{}", crate::models::sface::runtime_release(), macos_version());
-    Ok(crate::paths::root()?.join("ModelCache").join("CoreML").join(name))
-}
-
-fn macos_version() -> String {
-    let mut buffer = [0u8; 64];
-    let mut length = buffer.len();
-    // SAFETY: the name is NUL-terminated; `buffer` holds `length` bytes.
-    let status = unsafe {
-        libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buffer.as_mut_ptr().cast(), &raw mut length, std::ptr::null_mut(), 0)
-    };
-    if status != 0 || length == 0 {
-        return "unknown".into();
-    }
-    String::from_utf8_lossy(&buffer[..length.min(buffer.len())]).trim_end_matches('\0').to_string()
 }
 
 /// One stored face's vector and crop JPEG.
@@ -356,7 +303,7 @@ pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
     }
     let started = std::time::Instant::now();
     Some(MacSFace::load().map(|model| {
-        tracing::info!(ep = model.provider(), ms = started.elapsed().as_millis() as u64, "arcface_model_loaded");
+        tracing::info!(ep = crate::models::inference::TRACT_CPU, ms = started.elapsed().as_millis() as u64, "arcface_model_loaded");
         let model = std::sync::Arc::new(model);
         *shared = Some(model.clone());
         model
@@ -554,11 +501,9 @@ pub struct VisionFaces {
 impl VisionFaces {
     /// One analyzer per take worker (at most four, as `CatalogTakeAuto`); each
     /// holds its own Face Mesh session when the model is installed.
-    /// The workers' Face Mesh sessions share the cores between them.
     pub fn load_workers() -> Vec<Self> {
-        let cores = std::thread::available_parallelism().map_or(1, usize::from);
-        let workers = cores.clamp(1, 4);
-        (0..workers).map(|_| Self::with_mesh(|path| crate::models::face_mesh::FaceMesh::load_cpu(path, (cores / workers).max(1)))).collect()
+        let workers = std::thread::available_parallelism().map_or(1, usize::from).clamp(1, 4);
+        (0..workers).map(|_| Self::with_mesh(crate::models::face_mesh::FaceMesh::load_cpu)).collect()
     }
 
     pub fn load() -> Self {

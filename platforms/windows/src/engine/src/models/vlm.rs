@@ -206,7 +206,7 @@ pub async fn caption(
 // GPU. We probe the runner once with `--list-devices`, and when a clearly
 // dominant (≥2 GiB more VRAM) discrete device exists we pass `--device VulkanN`
 // so Deep Analyze runs on the dGPU. Mirrors the DirectML `device_id` pinning
-// the ORT scan path does (see runtime.rs::execution_providers_for_chain).
+// the ORT scan path does (see inference/ort_backend.rs::execution_providers_for_chain).
 //
 // Unsupported clean probes select no flag; admission, cap, timeout and cleanup
 // failures terminate startup. CUDA builds list "CUDAn" (not "Vulkann") device

@@ -38,13 +38,8 @@ pub(crate) fn init() -> Result<()> {
         .with_target(true)
         .with_filter(LevelFilter::WARN);
 
-    // `ort=warn`: ORT's native logger (bridged via the ort crate's `tracing`
-    // feature) is VERBOSE-grade — per-inference CUDA arena lines would swamp
-    // the log; only its WARN/ERROR (EP registration failures, kernel errors)
-    // carry signal. The environment severity is also clamped at the source in
-    // main.rs; this keeps the file lean even when FILEID_LOG is unset.
     let env_filter = EnvFilter::try_from_env("FILEID_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,ort=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(env_filter)

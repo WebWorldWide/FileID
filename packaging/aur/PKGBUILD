@@ -13,9 +13,8 @@ pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files 
 arch=('x86_64' 'aarch64')
 url="https://github.com/WebWorldWide/FileID"
 license=('Apache-2.0')
-# Native package builds link the engine against Arch's ONNX Runtime shared
-# library instead of downloading the portable static archive.
-depends=('gtk4' 'libadwaita' 'onnxruntime' 'sqlite' 'glibc' 'glib2')
+# The engine runs its models on tract, linked into the binary: no ONNX Runtime.
+depends=('gtk4' 'libadwaita' 'sqlite' 'glibc' 'glib2')
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=('tesseract: OCR for image/document text extraction'
             'ffmpeg: video keyframe thumbnails'
@@ -40,10 +39,6 @@ build() {
   export CARGO_HOME="${srcdir}/cargo-home"
   export CARGO_TARGET_DIR="${PWD}/target"
   export RUSTUP_TOOLCHAIN=stable
-  # Point ort at Arch's shared ONNX Runtime so `download-binaries` does not
-  # fetch/link the portable static archive.
-  export ORT_LIB_LOCATION=/usr/lib
-  export ORT_PREFER_DYNAMIC_LINK=1
 
   # The GTK app and the engine binary it spawns.
   cargo build --release --frozen
@@ -55,8 +50,6 @@ check() {
   export CARGO_HOME="${srcdir}/cargo-home"
   export CARGO_TARGET_DIR="${PWD}/target"
   export RUSTUP_TOOLCHAIN=stable
-  export ORT_LIB_LOCATION=/usr/lib
-  export ORT_PREFER_DYNAMIC_LINK=1
   cargo test --frozen --manifest-path ../windows/src/engine/Cargo.toml --lib
 }
 

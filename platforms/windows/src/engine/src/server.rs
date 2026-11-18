@@ -8,7 +8,6 @@
 //! Parent exit or stdin EOF cancels active work, quiesces mutations, checkpoints
 //! the WAL when safe, flushes the sink, and exits.
 
-use crate::ort_runtime;
 use crate::{
     catalog_index, commands, coordinator, db, job_queue, logging, models, paths, pipeline,
     platform,
@@ -51,17 +50,14 @@ fn oversized_frame_message(seen: usize) -> String {
 }
 
 pub fn run() -> Result<()> {
-    ort_runtime::disable_telemetry_before_load();
-
     // SEC-3: lock DLL search FIRST. Must run before tokio::runtime spins
     // worker threads, before logging::init() opens tracing-appender file
     // handles, and before anything else that might trigger an implicit
     // LoadLibrary. Default Windows search includes CWD + every PATH
-    // entry — an attacker dropping `onnxruntime_providers_*.dll` in any
-    // of those gets code exec when we later register the EP. The
-    // SetDefaultDllDirectories call restricts to System32 + the engine
-    // binary's directory + AddDllDirectory-registered Performance Pack
-    // dirs only.
+    // entry — an attacker dropping a DLL in any of those gets code exec
+    // when a native runtime is later loaded. The SetDefaultDllDirectories
+    // call restricts to System32 + the engine binary's directory +
+    // AddDllDirectory-registered runtime dirs only.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::LibraryLoader::{
@@ -126,143 +122,28 @@ async fn async_main() -> Result<()> {
     logging::install_panic_hook();
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
+    tracing::info!(backend = models::runtime::inference_backend(), "[ML] inference backend");
 
-    // macOS: the engine's `load-dynamic` ORT build `dlopen`s
-    // `libonnxruntime.dylib`, but `download-binaries` ships only a STATIC
-    // `libonnxruntime.a` for arm64 — so the dylib must be provisioned
-    // separately (`fileid runtime install` / `brew install onnxruntime`). Pin
-    // `ORT_DYLIB_PATH` to the provisioned dylib now, before any ORT session, so
-    // the loader finds it (and honor a pre-set `ORT_DYLIB_PATH`). No-op on
-    // Windows/Linux — they keep their own runtime resolution (the Windows
-    // accelerator-pack pin below; the Linux system/download-binaries path).
-    #[cfg(target_os = "macos")]
-    if let Some(dylib) = ort_runtime::pin_dylib_path() {
-        tracing::info!(path = %platform::redact_path_for_log(&dylib), "[ORT] pinned ORT_DYLIB_PATH to installed ONNX Runtime dylib");
-    }
-
-    // VRAM probe at startup. The ML session-pool sizer clamps pool size to
-    // fit available video memory — without this clamp, a larger pool
-    // exhausts VRAM on a 6 GB RTX 2060 and wedges the DirectML driver
-    // requiring a hard reboot.
+    // VRAM probe at startup; the llama.cpp launch tuning sizes its GPU offload
+    // from it.
     if let Some(vram_mb) = platform::dedicated_vram_mb() {
         tracing::info!(dedicated_vram_mb = vram_mb, "[VRAM] dedicated video memory probed");
     } else {
-        tracing::info!("[VRAM] no dedicated GPU detected; ML pool will run at minimum");
+        tracing::info!("[VRAM] no dedicated GPU detected");
     }
 
-    // EP crash-safety gate: if the previous run died while binding a GPU
-    // execution provider (a bad/mismatched pack DLL), disable that EP now so
-    // this run falls back to DirectML instead of crash-looping. Must run
-    // before the ORT_DYLIB_PATH pin below and before the first ML session.
-    if let Some(ep) = models::ep_guard::resolve_poison_at_startup() {
-        tracing::warn!(ep = %ep, "[EP-GUARD] execution provider disabled after a prior crash; using DirectML until re-enabled");
-    }
-
-    // Replay AddDllDirectory for any Performance Packs already extracted from
-    // a prior install. Packs land in %LOCALAPPDATA%\FileID\Models\packs\<vendor>\
-    // and the llama.cpp runtime lands in Models\llama.cpp\. After SEC-3 locked
-    // the default search path, those dirs are invisible until explicitly added.
-    // Without this replay step, packs only work on the install run, not on
-    // subsequent app launches.
+    // Replay AddDllDirectory for the llama.cpp runtimes already extracted from
+    // a prior install (Models\llama.cpp\, Models\llama.cpp-cuda\). After SEC-3
+    // locked the default search path, those dirs are invisible until
+    // explicitly added; without this replay they only work on the install run.
     if let Ok(models_dir) = paths::models_dir() {
-        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("cuda"));
-        if let Some(openvino_dir) = models::runtime::pack_dir("openvino") {
-            let _ = platform::register_dll_dirs_under(&openvino_dir);
-        }
-        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
-        // Private cuDNN drop (installed on demand via the GPU acceleration pack).
-        // The archive extracts a versioned dir containing bin/, so register the
-        // parent — register_dll_dirs_under walks subdirs for DLLs.
-        let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
-
         if let Ok(executable) = std::env::current_exe()
             && let Some(application_dir) = executable.parent() {
                 let bundled_runtimes = application_dir.join("RuntimeBundles");
                 let _ = platform::register_dll_dirs_under(&bundled_runtimes.join("llama.cpp"));
             }
-
-        // Accelerator pack: the bundled base onnxruntime.dll (FileID's own
-        // DirectML + CPU build, made without telemetry) has no vendor provider
-        // DLL (onnxruntime_providers_{cuda,openvino}.dll), so the vendor EP
-        // can't bind and we fall through to DirectML (~3-5x slower). The pack
-        // supplies a COMPLETE matched ORT runtime for
-        // this GPU's vendor (NVIDIA→cuda, Intel→openvino); pin ORT's
-        // load-dynamic loader at the pack's onnxruntime.dll so the provider
-        // binds against the SAME ORT build (mismatched base vs provider =
-        // silent fallback or crash). Guarded on file presence + no pre-existing
-        // override + not crash-disabled (ep_guard) → INERT until a matching
-        // pack is installed. Must run before the first ORT session.
-        if std::env::var_os("ORT_DYLIB_PATH").is_none()
-            && let Some((ep, pack_dir)) = models::runtime::active_pack_dir()
-                && !models::ep_guard::is_disabled(ep) {
-                    // Locate the pack runtime FIRST: active_pack_dir() is
-                    // vendor-keyed and returns the cuda pack path on every
-                    // NVIDIA box, installed or not — probing the CUDA stack
-                    // before confirming the pack exists spammed five ERROR
-                    // lines ("reinstall the pack") on the perfectly healthy
-                    // no-pack DirectML default.
-                    if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
-                        // The CUDA gpu runtime carries NO DirectML EP, so
-                        // pinning it when the CUDA EP's native closure can't
-                        // load strands the whole process on CPU (the
-                        // 2026-07-20 overnight regression). Only swap out
-                        // the DirectML-capable base runtime once the full
-                        // stack is proven loadable and the pack's runtime is
-                        // not a telemetry build.
-                        if !models::runtime::pack_runtime_allowed(&pack_dir) {
-                            tracing::warn!(
-                                ep,
-                                "[EP] accelerator pack's ONNX Runtime is a Microsoft build that reports to Windows telemetry; keeping the base (DirectML) ONNX Runtime"
-                            );
-                        } else if ep == "cuda" && !models::runtime::cuda_stack_ready() {
-                            tracing::warn!(
-                                ep,
-                                "[EP] accelerator pack present but its CUDA runtime closure failed to load; keeping the base (DirectML) ONNX Runtime"
-                            );
-                        } else {
-                            tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
-                            // SAFETY: engine startup, before any ORT session or worker reads the environment.
-                            unsafe { std::env::set_var("ORT_DYLIB_PATH", &dll) };
-                        }
-                    }
-                }
-    }
-
-    // If a system-wide NVIDIA CUDA Toolkit + cuDNN is present, register the
-    // toolkit bin dir so ORT's CUDA EP can LoadLibrary the runtime DLLs.
-    // SEC-3 locked the default search path to System32 + app dir, so without
-    // this step the toolkit on PATH is invisible to the loader. Capture any
-    // AddDllDirectory failures so we can surface them via the sink — a silent
-    // fallback to DirectML would leave the user wondering why their NVIDIA
-    // card isn't being used.
-    let cuda_dll_failures: Vec<std::path::PathBuf> =
-        if let Some(cuda_bin) = models::runtime::system_cuda_toolkit_dir() {
-            tracing::info!(dir = %platform::redact_path_for_log(&cuda_bin), "[EP] registering system CUDA toolkit bin dir");
-            platform::register_dll_dirs_under(&cuda_bin)
-        } else {
-            Vec::new()
-        };
-
-    // Create the ORT environment eagerly (the ORT_DYLIB_PATH pin above must
-    // already be decided) so telemetry is off and the native log severity is
-    // clamped before the first session; see `ort_runtime::commit_environment`.
-    // ort PANICS (not Err) when the resolved dylib is missing or version-
-    // mismatched. Under lazy init that panic surfaced at first model load,
-    // inside a catch_unwind'd handler, and the engine kept serving — contain
-    // the eager path the same way so a bad dylib degrades instead of killing
-    // startup (the arm64 CI runner carries a stale system onnxruntime 1.17).
-    match std::panic::catch_unwind(ort_runtime::commit_environment) {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            tracing::warn!(%err, "[EP] eager ORT environment init failed; sessions retry it with telemetry off");
-        }
-        Err(_) => {
-            tracing::warn!(
-                "[EP] eager ORT environment init panicked (missing/incompatible onnxruntime dylib); continuing with lazy init"
-            );
-        }
     }
 
     // Open the DB up front so migrations apply (and any failure surfaces
@@ -294,21 +175,6 @@ async fn async_main() -> Result<()> {
     }
 
     let (sink, sink_writer) = Sink::spawn();
-
-    // Sent before emit_ready so the app can react while still .starting.
-    if !cuda_dll_failures.is_empty() {
-        let dirs = cuda_dll_failures
-            .iter()
-            .map(platform::redact_path_for_log)
-            .collect::<Vec<_>>()
-            .join("; ");
-        tracing::error!(failed = cuda_dll_failures.len(), dirs = %dirs, "[EP] CUDA DLL registration failed; falling back to DirectML");
-        sink.send(EngineError::event(
-            "cuda_dll_registration_failed",
-            "FileID couldn't turn on the NVIDIA speed-up, so scanning will use the standard graphics path instead.",
-        ))
-        .await;
-    }
 
     if let Some(err) = &db_open_error {
         sink.send(db_open_error_event(err, &db_path)).await;

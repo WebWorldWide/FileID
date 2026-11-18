@@ -369,13 +369,13 @@ function Resolve-NativeRuntimeDlls($architecture) {
             $resolved[[System.IO.Path]::GetFileName($path)] = $path
         }
     }
-    foreach ($required in @("onnxruntime.dll", "onnxruntime_providers_shared.dll", "DirectML.dll", "pdfium.dll")) {
+    foreach ($required in @("pdfium.dll")) {
         if (-not $resolved.ContainsKey($required) -or -not (Test-Path -LiteralPath $resolved[$required] -PathType Leaf)) {
             throw "fetch-runtime-deps.ps1 did not resolve required $architecture payload '$required'."
         }
     }
-    if ($resolved.Count -ne 4) {
-        throw "fetch-runtime-deps.ps1 returned $($resolved.Count) runtime payloads for $architecture; expected exactly four."
+    if ($resolved.Count -ne 1) {
+        throw "fetch-runtime-deps.ps1 returned $($resolved.Count) runtime payloads for $architecture; expected exactly one."
     }
     return $resolved
 }

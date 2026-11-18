@@ -77,9 +77,8 @@ bash scripts/ensure_mlx_metallib.sh
 }
 # The sandboxed variant bundles the same single engine as the Developer ID build:
 # Contents/MacOS/fileidd, started by the app as a child that inherits its sandbox
-# (Resources/FileIDEngineAppStore.entitlements). FILEID_REQUIRE_ORT=1 refuses a
-# bundle without the pinned ONNX Runtime.
-FILEID_APP_STORE=1 FILEID_REQUIRE_ORT=1 FILEID_BUILD_CONFIGURATION=release \
+# (Resources/FileIDEngineAppStore.entitlements).
+FILEID_APP_STORE=1 FILEID_BUILD_CONFIGURATION=release \
     bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
 [ -x "$APP/Contents/MacOS/fileidd" ] || { echo "fileidd is missing from the App Store bundle." >&2; exit 1; }
 [ ! -e "$APP/Contents/MacOS/FileIDEngine" ] || { echo "A Swift engine binary is in the App Store bundle; only fileidd ships." >&2; exit 1; }

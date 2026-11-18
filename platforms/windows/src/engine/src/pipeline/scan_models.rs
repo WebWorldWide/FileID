@@ -165,20 +165,18 @@ impl ModelSource {
 }
 
 /// Everything a loaded stack depends on. A resident stack is reused only
-/// while this is unchanged, so installing or repairing a model, switching the
-/// graphics provider or changing a tuning variable loads a fresh one.
+/// while this is unchanged, so installing or repairing a model or changing a
+/// tuning variable loads a fresh one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackKey {
     worker_count: usize,
-    runtime_available: bool,
-    provider: String,
     apple_scan: bool,
     tuning: Vec<Option<String>>,
     files: Vec<(PathBuf, Option<(u64, Option<SystemTime>)>)>,
 }
 
 impl StackKey {
-    pub fn current(worker_count: usize, runtime_available: bool) -> Self {
+    pub fn current(worker_count: usize) -> Self {
         let paths = [
             crate::models::sface::default_weights_path(),
             crate::models::yunet::default_weights_path(),
@@ -190,14 +188,12 @@ impl StackKey {
         ];
         Self::of(
             worker_count,
-            runtime_available,
-            crate::models::runtime::armed_provider().as_str(),
             crate::pipeline::tagging::apple_scan_enabled(),
             paths.into_iter().flatten().collect(),
         )
     }
 
-    fn of(worker_count: usize, runtime_available: bool, provider: &str, apple_scan: bool, paths: Vec<PathBuf>) -> Self {
+    fn of(worker_count: usize, apple_scan: bool, paths: Vec<PathBuf>) -> Self {
         let tuning = ["FILEID_MODEL_POOL_SIZE", "FILEID_CLIP_USE_BATCH", "FILEID_RAMPLUS_BATCH_SIZE"]
             .into_iter()
             .map(|name| std::env::var(name).ok())
@@ -209,7 +205,7 @@ impl StackKey {
                 (path, stat)
             })
             .collect();
-        Self { worker_count, runtime_available, provider: provider.to_string(), apple_scan, tuning, files }
+        Self { worker_count, apple_scan, tuning, files }
     }
 }
 
@@ -260,8 +256,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    fn key(dir: &std::path::Path, provider: &str) -> StackKey {
-        StackKey::of(4, true, provider, false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")])
+    fn key(dir: &std::path::Path, worker_count: usize) -> StackKey {
+        StackKey::of(worker_count, false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")])
     }
 
     #[test]
@@ -269,15 +265,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-stack-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("clip.onnx"), b"weights").unwrap();
-        let before = key(&dir, "cpu");
-        assert_eq!(before, key(&dir, "cpu"));
-        assert_ne!(before, key(&dir, "directml"));
-        assert_ne!(before, StackKey::of(2, true, "cpu", false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")]));
+        let before = key(&dir, 4);
+        assert_eq!(before, key(&dir, 4));
+        assert_ne!(before, key(&dir, 2));
         std::fs::write(dir.join("faces.onnx"), b"installed later").unwrap();
-        let installed = key(&dir, "cpu");
+        let installed = key(&dir, 4);
         assert_ne!(before, installed);
         std::fs::write(dir.join("clip.onnx"), b"repaired weights").unwrap();
-        assert_ne!(installed, key(&dir, "cpu"));
+        assert_ne!(installed, key(&dir, 4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -285,12 +280,12 @@ mod tests {
     fn a_resident_stack_is_reused_for_the_same_key_and_freed_for_another() {
         static SLOT: IdleSlot<(StackKey, Arc<ModelStack>)> = IdleSlot::new("test scan models", Duration::from_secs(60));
         let dir = std::env::temp_dir().join("fileid-stack-resident-missing");
-        let (cpu, gpu) = (key(&dir, "cpu"), key(&dir, "directml"));
+        let (cpu, other) = (key(&dir, 4), key(&dir, 2));
         assert!(resident_in(&SLOT, &cpu).is_none());
         let stack = Arc::new(ModelStack::empty());
         SLOT.put((cpu.clone(), stack.clone()));
         assert!(Arc::ptr_eq(&resident_in(&SLOT, &cpu).unwrap(), &stack));
-        assert!(resident_in(&SLOT, &gpu).is_none(), "another provider needs its own sessions");
+        assert!(resident_in(&SLOT, &other).is_none(), "another worker count needs its own sessions");
         assert!(!SLOT.is_loaded(), "the stale stack is freed before its replacement loads");
         drop(stack);
 
@@ -372,7 +367,7 @@ mod tests {
             UNLOADED.fetch_add(1, Ordering::AcqRel);
         }
         static SLOT: IdleSlot<(StackKey, Arc<ModelStack>)> = IdleSlot::new("test adapter holds", Duration::from_secs(60));
-        let key = StackKey::of(2, false, "cpu", true, vec![]);
+        let key = StackKey::of(2, true, vec![]);
         let mut stack = ModelStack::empty();
         stack.adapter_hold = OWNER.hold(|| true, |loaded| *loaded, unload).1;
         let scan = Arc::new(stack);

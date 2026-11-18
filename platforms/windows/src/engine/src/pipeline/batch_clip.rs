@@ -5,11 +5,9 @@
 // through a crossbeam channel. The coordinator drains up to BATCH_SIZE
 // requests (or BATCH_TIMEOUT_MS, whichever first), packs them into one
 // (N, 3, 224, 224) tensor, runs `embed_batch` once, and fans the
-// embeddings back through the oneshots. Per-batch GPU dispatch is one
-// wake instead of N, and VRAM stays at single-session footprint.
-//
-// Alternative was N-session pool, which exhausted VRAM on a 6 GB RTX
-// 2060 and wedged the DirectML driver (full system hang).
+// embeddings back through the oneshots. One forward pass serves the whole
+// batch instead of N single-image calls, and memory stays at the footprint of
+// one session.
 //
 // Failure mode: if `embed_batch` errors, every request in that batch
 // receives the error — caller decides whether to skip the file or retry.
@@ -25,11 +23,9 @@ use tokio::sync::oneshot;
 
 use crate::models::mobileclip::MobileClipImage;
 
-/// Max images per batched inference. With ~3 GB VRAM headroom on a 6 GB
-/// RTX 2060 (baseline measurement: 2.8/6 GB peak), 8 amortizes the
-/// DirectML per-call dispatch overhead better than 4 without pushing
-/// peak VRAM into the danger zone. Tunable via `FILEID_CLIP_BATCH_SIZE`
-/// — drop to 4 if a smaller GPU OOMs under sustained scan load.
+/// Max images per batched inference: 8 gives tract's multithreaded matmul
+/// enough rows to split across the performance cores. Tunable via
+/// `FILEID_CLIP_BATCH_SIZE`.
 const DEFAULT_BATCH_SIZE: usize = 8;
 
 /// Hard ceiling on how long the coordinator waits for batch fill once it has at
@@ -46,7 +42,7 @@ const DEFAULT_BATCH_SIZE: usize = 8;
 /// ~670 ms/file and runs on only pool_size=2 sessions (VRAM-clamped on the 6 GB
 /// card), so workers spend ~680 ms just WAITING for the vision-sem/RAM++ pool;
 /// CLIP (~190 ms) sits downstream and is starved. The real lever is RAM++
-/// throughput (a CUDA-specific larger pool, or a batched RAM++ ONNX re-export).
+/// throughput (a larger pool, or a batched RAM++ ONNX re-export).
 /// Kept at 20 ms (a longer wait only adds latency). See NEXT.md.
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 
