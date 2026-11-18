@@ -1,8 +1,5 @@
-//! `runFaceClustering` IPC handler: re-cluster every face in the DB and
-//! refresh the People tab. The actual clustering algorithm lives in
-//! `pipeline::face_clustering`; this handler loads embeddings, calls the
-//! algorithm, and persists the resulting `persons` + `face_prints.person_id`
-//! assignments in one transaction.
+//! `runFaceClustering` handler: loads embeddings, runs `pipeline::face_clustering`, and persists persons and
+//! face_prints.person_id in one transaction.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -722,9 +719,6 @@ fn release_active_before_terminal(active: &AtomicBool) {
     active.store(false, Ordering::Release);
 }
 
-/// Refuses to recluster unless every face cache shares one current model and
-/// processing space with valid unit vectors, so incompatible embeddings never
-/// reshape existing People.
 /// The single model and processing space every clustered face must share.
 #[derive(Default)]
 struct FaceSpaceCheck {
@@ -792,15 +786,10 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             crate::resource_scheduler::Demand { memory_mb: 64 + count.saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
             crate::resource_scheduler::Priority::Background, || false)?;
 
-        // PHASE 1 — hold the writer lock only for the DB reads. The multi-second
-        // cluster() pass below runs lock-free so suggested-merges (a read-only
-        // query) and other writes don't serialize behind it. consolidate() —
-        // which is cheap relative to clustering — runs in phase 3 under the
-        // persist lock, so its name-based auto-merge guard sees the same snapshot
-        // the persist uses (audit C1-023). The engine-side single-flight guard
-        // (main.rs) keeps two clustering runs from racing; a face inserted between
-        // phase 1 and phase 3 is benign — it lands with person_id=NULL and is
-        // picked up next run.
+        // PHASE 1: hold the writer lock only for the DB reads so the multi-second cluster() pass runs lock-free.
+        // consolidate() runs in phase 3 under the persist lock, so its name-based auto-merge guard sees the same snapshot
+        // the persist uses. The engine-side single-flight guard (main.rs) stops two runs racing; a face inserted between
+        // phases 1 and 3 lands with person_id=NULL and is picked up next run.
         let mut faces: Vec<FaceRow> = Vec::new();
         let space;
         let held: HashSet<i64>;
@@ -809,25 +798,12 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             // The space check and the load share one read of the vectors.
             let mut check = FaceSpaceCheck::default();
 
-            // (a) Load every face that has an ArcFace embedding.
-            //
-            // Pre-clustering quality gate (FILEID_FACE_CLUSTER_MIN_QUALITY): faces
-            // below this quality produce non-discriminative "noise" embeddings —
-            // ground-truth labels showed same-person cosine on such faces is ~0.14
-            // (indistinguishable from different-person ~0.16), and they chain
-            // through hub faces into low-cohesion mega-cones. Faces at/above it
-            // separate cleanly (same ~0.59 vs diff max ~0.47). Gated faces are left
-            // UNCLUSTERED (person_id NULL) — still searchable, never in a bad
-            // cluster. `face_quality` = YuNet det.score × landmark geometry, so this
-            // naturally keeps well-detected frontal faces on any corpus. 0 disables.
-            //
-            // Recalibrated on the isolated 41,855-face Family Photos catalog
-            // (2026-08-08): 0.25 admitted visually confirmed sibling, unrelated-
-            // adult, and object contamination. 0.33 separated every labelled
-            // negative, retained the clear same-person pair, cut displayable
-            // People groups from about 420 to 170, and improved every top-cluster
-            // cohesion floor. Lower-quality detections remain searchable and can
-            // be reviewed, but do not manufacture identities. 0 disables.
+            // Quality gate (FILEID_FACE_CLUSTER_MIN_QUALITY, 0 disables): faces below it give non-discriminative embeddings
+            // (same-person cosine ~0.14 vs different-person ~0.16) and chain through hub faces into low-cohesion mega-cones.
+            // Gated faces stay UNCLUSTERED (person_id NULL): still searchable, never in a bad cluster. face_quality is
+            // YuNet det.score x landmark geometry, so frontal faces on any corpus are kept.
+            // Calibrated on the isolated 41,855-face Family Photos catalog (2026-08-08): 0.33 separated every labelled
+            // negative, kept the clear same-person pair, and left the top-cluster cohesion floors improved.
             let min_cluster_quality: f32 = std::env::var("FILEID_FACE_CLUSTER_MIN_QUALITY")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
@@ -902,37 +878,23 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             };
             faces.retain(|face| !held.contains(&face.face_id));
 
-            // The user-identity snapshot (prior names/title/is_unknown + the
-            // face->person map) is read in PHASE 3 under the persist lock — NOT
-            // here — so a People-tab edit (rename / merge / mark-unknown) that
-            // commits during the lock-free phase 2 is carried forward instead of
-            // being silently clobbered by a phase-1 snapshot that predates it.
-            // (audit S0)
+            // The user-identity snapshot is read in PHASE 3 under the persist lock, not here: a People-tab edit committed
+            // during the lock-free phase 2 must be carried forward rather than clobbered by a stale capture.
             drop(conn);
         }
         let face_count = faces.len() as u64;
-        // Raw clustering only. Auto-consolidation (which applies the name-based
-        // auto-merge guard) is deferred to PHASE 3 so the name guard can be built
-        // from the identity snapshot read UNDER the persist lock, not from a
-        // phase-1 snapshot that a rename during the lock-free window would
-        // invalidate. (audit C1-023)
+        // Raw clustering only. Auto-consolidation is deferred to PHASE 3 so its name-based auto-merge guard is built from
+        // the identity snapshot read under the persist lock, not from a phase-1 snapshot a rename could invalidate.
         let (assignments, _raw_anchors) = cluster(&faces);
 
         // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
 
-        // Read the user-identity snapshot HERE — under the persist lock, inside
-        // the transaction, BEFORE the DELETE below — rather than in phase 1.
-        // Re-clustering drops + re-creates the persons table on EVERY run and is
-        // auto-fired after every scan, so the names + "not this person" verdicts
-        // the user entered must be carried forward. Reading it now (not from a
-        // phase-1 snapshot) means a People-tab edit committed during the lock-free
-        // phase 2 — which had to take this same writer lock — is reflected, instead
-        // of being silently overwritten by a stale capture (data loss). We re-attach
-        // each new cluster's identity from the prior person that owned the MAJORITY
-        // of its member faces (ties broken toward the cluster's anchor face).
-        // (audit S0)  [PriorIdentity is defined at the top of this closure.]
+        // Read the user-identity snapshot here, under the persist lock and before the DELETE below. Re-clustering drops
+        // and re-creates the persons table on every run, so names and 'not this person' verdicts must be carried forward
+        // from a read that includes any edit committed during phase 2. Each new cluster re-attaches the identity of the
+        // prior person owning the MAJORITY of its faces (ties go to the anchor face's owner).
         let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
         let mut face_to_owner: HashMap<i64, i64> = HashMap::new();
         let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
@@ -1523,11 +1485,8 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Err(err) => {
             tracing::warn!(?err, "face clustering spawn failed");
-            // PAR-111: emit a face_clustering error so the app-side auto-trigger
-            // gate (_faceClusterAutoInFlight) is released even when the
-            // clustering closure panics — a JoinError otherwise fires no
-            // completion/error event, leaving auto-clustering stuck for the
-            // session.
+            // Emit a face_clustering error so the app-side auto-trigger gate is released even when the clustering closure
+            // panics; a JoinError otherwise fires no completion or error event and auto-clustering sticks for the session.
             sink.send(EngineError::event(
                 "face_clustering_failed",
                 "FileID couldn't finish grouping faces. Try again.",

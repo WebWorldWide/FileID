@@ -1,7 +1,3 @@
-//! `startScan` IPC handler — loads ML model weights, registers the scan
-//! coordinator in the shared state slot, runs the pipeline, clears the slot
-//! when done. Pre-flight checks that required models are installed and
-//! that no scan is already running.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,19 +82,13 @@ async fn reject_gpu_device_removed(
 /// A model load that outlived its timeout.
 type LateLoader = Arc<Mutex<Option<tokio::task::JoinHandle<ModelStack>>>>;
 
-/// Loads the scan's models, or hands back the stack the last scan left loaded.
-///
-/// Each model is a pool of N sessions (one per worker slot) sharing one
-/// compiled graph so inference parallelizes instead of serializing on a single
-/// Mutex; compiling a model can take 100-500 ms, so the load runs on a
+/// Loads the scan's models, or hands back the stack the last scan left loaded. Each model is a pool of N sessions
+/// sharing one compiled graph so inference parallelizes instead of serializing on a single Mutex; the load runs on a
 /// blocking thread.
 ///
-/// Timeout is 120 s (not 30 s): on the FIRST launch the CLIP scene-label
-/// matrix is text-encoded inside load_default, which on a slow CPU takes 20+ s
-/// on its own — a 30 s budget tripped a false "model file corrupted" on real
-/// hardware. The matrix is disk-cached after the
-/// first build (scene_vocab.rs), so later launches load in a few seconds;
-/// 120 s still catches a genuinely hung or corrupt model file.
+/// The 120 s timeout (not 30 s): on first launch the CLIP scene-label matrix is text-encoded inside load_default, which
+/// takes 20+ s on a slow CPU. scene_vocab.rs disk-caches it, so later launches load in seconds; 120 s still catches a
+/// genuinely hung or corrupt model file.
 async fn load_scan_models(
     coord: ScanCoordinator,
     key: scan_models::StackKey,
@@ -144,18 +134,12 @@ async fn load_scan_models(
         return Err(ModelLoadFailure::new("gpu_device_removed", crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE));
     }
 
-    // A model that IS installed (missing ones were reported above) but whose
-    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
-    // file, or a graph tract cannot compile) must ABORT the scan — not
-    // silently skip its stage. A skipped stage still writes every file row with
-    // failed=0 and a fresh scanned_at; the incremental skip-set
-    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
-    // re-tried on later default scans — the face / image-embedding stage stays
-    // permanently empty even after the model is repaired (a real "face scanning
-    // is totally broken, and stays broken" trap). Aborting (mirroring the
-    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
-    // re-processes them once the model loads. The workers wait for this result
-    // before they analyse anything, so no file is written without its stages.
+    // A model that is installed but whose weights fail to load (corrupt or AV-quarantined .onnx, or a graph tract cannot
+    // compile) must abort the scan rather than skip its stage. A skipped stage still stamps every file failed=0 with a
+    // fresh scanned_at, and the timestamp-only incremental skip-set (scan_session.rs) never re-tries those files, so the
+    // face and embedding stage stays empty even after the model is repaired. Aborting leaves the files un-stamped so a
+    // later scan reprocesses them. Workers wait for this result before analysing anything, so no file is written
+    // without its stages.
     let failed_to_load = models_that_failed_to_load(&models, &missing_models);
     if !failed_to_load.is_empty() {
         tracing::error!(
@@ -230,14 +214,10 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    // Atomic check-and-reserve under one lock: gate + slot reservation must
-    // be a single critical section, or two StartScan commands queued back-to-
-    // back can both pass the gate before either reserves the slot. Construct
-    // the REAL coordinator now and park its clone, so a pause/cancel arriving
-    // after reservation lands on the coordinator the session actually uses —
-    // not a throwaway placeholder that the old code swapped out post-model-load
-    // (#20). If anyone else reaches here while we hold the slot, they bounce
-    // with `scan_already_running`.
+    // Atomic check-and-reserve under one lock: the gate and slot reservation must be one critical section, or two
+    // back-to-back StartScan commands can both pass the gate. The REAL coordinator is built and parked here, so a pause
+    // or cancel arriving after reservation lands on the coordinator the session uses.
+    // A caller that finds the slot held bounces with `scan_already_running`.
     let coord = ScanCoordinator::new();
     let finished_scan = coord.clone();
     let after_scan_db = db.clone();
@@ -350,8 +330,6 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
-    // (The real coordinator was reserved into scan_state above, before the
-    // first .await — no placeholder swap, so no pause/cancel can be lost #20.)
 
     // The models load when the scan first has a file to analyse, alongside the
     // walk, and stay loaded between scans (pipeline/scan_models.rs). A rescan
