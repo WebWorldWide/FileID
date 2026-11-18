@@ -270,8 +270,8 @@ mod tests {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
         let mut img = vec![0f32; dim];
-        img[0] = 0.8; // strongest toward label 0
-        img[1] = 0.6; // then label 1
+        img[0] = 0.8;
+        img[1] = 0.6;
         l2_normalize(&mut img); // already unit, but keep parity with real path
         let out = score_labels(&img, &matrix, 0.1, 2);
         assert_eq!(out.len(), 2, "top_k must cap the result count");

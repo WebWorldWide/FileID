@@ -509,7 +509,7 @@ mod tests {
     fn migrations_are_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         apply(&conn).unwrap();
-        apply(&conn).unwrap(); // second run is a no-op
+        apply(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 36);
     }

@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn legacy_sentinel_is_migrated_when_pins_valid() {
         let dir = unique_sentinel_dir("migrate");
-        std::fs::write(dir.join("ram_plus.onnx"), b"weights").unwrap(); // satisfies the pin
+        std::fs::write(dir.join("ram_plus.onnx"), b"weights").unwrap();
         let legacy = dir.join("ram_plus.installed");
         std::fs::write(&legacy, b"ram_plus").unwrap();
         let keyed = dir.join("ram_plus-deadbeef00000000.installed");
