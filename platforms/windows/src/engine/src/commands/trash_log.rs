@@ -1,13 +1,6 @@
-//! Sidecar undo log for `trashFiles` → `restoreFromTrash`.
-//!
-//! `trash_log.json` is an append-only NDJSON file capped at the last 1024
-//! entries. Lets the app's UndoStack stay process-local across restarts
-//! AND lets `restoreFromTrash` know which paths to bring back from the
-//! Recycle Bin without bloating the SQLite schema.
-//!
-//! This is the canonical Trash journal on every platform (DECISIONS
-//! 2026-11-10): the macOS Swift engine dual-writes it, and
-//! `journal_import` converts the Swift engine's older `trash-journal.json`.
+//! Sidecar undo log for `trashFiles` -> `restoreFromTrash`: an append-only NDJSON file capped at the last 1024 entries,
+//! so the UndoStack survives restarts without bloating the SQLite schema. This is the canonical Trash journal on every
+//! platform: the macOS Swift engine dual-writes it, and `journal_import` converts its older `trash-journal.json`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -246,10 +239,8 @@ pub(crate) fn restore_snapshot(
     Ok(inserted_file)
 }
 
-/// The append-only log is trimmed to the last `MAX_ENTRIES` lines so it can't
-/// grow without bound over a long-lived install (the module doc promises this
-/// cap). Trimming drops whole oldest lines verbatim — retained lines keep
-/// their HMAC, so `read_batch` still verifies them.
+/// The log is trimmed to the last `MAX_ENTRIES` lines so it cannot grow without bound. Trimming drops whole oldest
+/// lines verbatim; retained lines keep their HMAC, so `read_batch` still verifies them.
 const MAX_ENTRIES: usize = 1024;
 
 #[cfg(unix)]
@@ -714,12 +705,8 @@ mod tests {
         assert_eq!(accepted_batches, vec!["real-batch".to_string()]);
     }
 
-    // Once an entry is appended (signed), restore can FIND it by batch
-    // id. This is the recoverability guarantee the bulk trash path now orders
-    // BEFORE the irreversible DELETE commit — so a trashed file always has a
-    // findable undo-journal entry (or the whole batch is rolled back + surfaced
-    // as an error, never silently unrecoverable). Pure: signs in-memory and
-    // round-trips through find_batch_in (no filesystem).
+    // A signed entry must be findable by batch id before the bulk trash path commits its irreversible DELETE, or a
+    // trashed file could be unrecoverable.
     #[test]
     fn latest_signed_receipt_for_batch_wins() {
         let key = log_hmac_key().expect("hmac key");

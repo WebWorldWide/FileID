@@ -46,7 +46,7 @@ pub(crate) async fn handle_embed_image_query(
         Ok(Ok(None)) => {
             // No embedding for this file yet — resolve the awaiting query with
             // an empty embedding so "find similar" falls back cleanly instead
-            // of stalling 5s on a reply that never carries this query_id (#12).
+            // of stalling 5s on a reply that never carries this query_id.
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
                     query_id,
@@ -71,7 +71,7 @@ pub(crate) async fn handle_embed_image_query(
             // JoinError = the embed task panicked. Resolve the awaiting query
             // with an empty embedding (same shape as the Ok(Err) arm) so "find
             // similar" falls back cleanly instead of stalling 5s on a reply that
-            // never carries this query_id (#12).
+            // never carries this query_id.
             tracing::warn!(?err, "embed_image_query spawn failed");
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
@@ -123,7 +123,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             // Resolve the awaiting query with an empty embedding (the same shape
             // the CLIP-disabled fast path uses) so the search box drops to the
             // clean FTS fallback immediately instead of stalling 5s and tripping
-            // the global red error pill on every keystroke (#12). A user-facing
+            // the global red error pill on every keystroke. A user-facing
             // "install CLIP" nudge, if wanted, belongs on the search-box-local
             // channel, not the global engine-status error.
             tracing::warn!(?err, "CLIP text embed failed");
@@ -148,7 +148,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
         Err(err) => {
             // JoinError = the embed task panicked. Resolve with an empty
             // embedding (same shape as the Ok(Err) arm) so the search box drops
-            // to the FTS fallback immediately instead of stalling 5s (#12).
+            // to the FTS fallback immediately instead of stalling 5s.
             tracing::warn!(?err, "CLIP embed spawn failed");
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
