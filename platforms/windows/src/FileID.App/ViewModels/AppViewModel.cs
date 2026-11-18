@@ -1,12 +1,5 @@
 ﻿// AppViewModel — the shell-level state the MainWindow + sidebar bind to.
-//
-// One instance lives on the UI thread (created at App startup). It owns:
-//   - The active SidebarTab (persisted via AppSettings.ActiveTab)
-//   - Sidebar visibility (persisted)
-//   - The currently-picked library folder (path + display label)
-//   - Auto-tab-switch reactions to engine events (matches macOS:
-//     face clustering done → People; deep analyze done → Library)
-//
+// One instance lives on the UI thread (created at App startup).
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -52,8 +45,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     private readonly Dictionary<string, string> _lastTabByArea = new();
 
-    /// <summary>The page last used in <paramref name="area"/>, or the area's
-    /// first page (macOS Area.remembered).</summary>
     public SidebarTab RememberedTab(string area)
     {
         if (_activeTab.Area == area) return _activeTab;
@@ -71,10 +62,8 @@ internal sealed class AppViewModel : INotifyPropertyChanged
     private string? _pendingChatDraft;
     private string? _pendingLibraryQuery;
 
-    /// <summary>Raised after the title-bar search hands a draft to Chat.</summary>
     public event EventHandler? ChatDraftRequested;
 
-    /// <summary>Raised after the title-bar search hands a query to Library.</summary>
     public event EventHandler? LibraryQueryRequested;
 
     public void RequestChatDraft(string draft)
@@ -93,8 +82,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     private IReadOnlyList<CatalogHit>? _pendingTakeCandidates;
 
-    /// <summary>Opens Best Takes with these search results as its clip pool
-    /// (the macOS "Best takes" sheet from Search &amp; Moments).</summary>
     public void RequestBestTakes(IReadOnlyList<CatalogHit> candidates)
     {
         _pendingTakeCandidates = candidates;
@@ -111,10 +98,8 @@ internal sealed class AppViewModel : INotifyPropertyChanged
     private string? _pendingMomentsQuery;
     private IReadOnlyList<CatalogHit>? _pendingToolFiles;
 
-    /// <summary>Raised after Chat hands a search to Search &amp; Moments.</summary>
     public event EventHandler? MomentsQueryRequested;
 
-    /// <summary>Raised after Chat hands chosen files to File Tools.</summary>
     public event EventHandler? ToolFilesRequested;
 
     public void RequestMomentsQuery(string query)
@@ -147,10 +132,8 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     private ChatScope? _chatScope;
 
-    /// <summary>Raised when the files attached to the next chat question change.</summary>
     public event EventHandler? ChatScopeChanged;
 
-    /// <summary>Files attached to the next chat question, or null for the whole library.</summary>
     public ChatScope? ChatScope
     {
         get => _chatScope;
@@ -162,7 +145,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Opens Chat with these files attached as the next question's scope.</summary>
     public void RequestChatScope(ChatScope? scope)
     {
         if (scope is null) return;
@@ -259,15 +241,12 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     private IReadOnlyList<LibraryRoot> _libraryRoots = Array.Empty<LibraryRoot>();
 
-    /// <summary>The scanned locations from the last listRoots reply.</summary>
     public IReadOnlyList<LibraryRoot> LibraryRoots => _libraryRoots;
 
     private LibraryScope? _scope;
 
-    /// <summary>The location Library, Search &amp; Moments and Chat show; null for "All locations".</summary>
     public LibraryScope? Scope => _scope;
 
-    /// <summary>Picks a location, or "All locations" for null, and remembers it.</summary>
     public void ChooseScope(long? rootId)
     {
         _settings.LibraryScopeRootId = rootId;
@@ -275,7 +254,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         ApplyScope();
     }
 
-    /// <summary>Takes a fresh listRoots reply: keeps the stored choice while its location exists.</summary>
     public void ApplyRoots(IReadOnlyList<LibraryRoot> roots)
     {
         _libraryRoots = roots;
@@ -310,7 +288,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         if (!same) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Scope)));
     }
 
-    /// <summary>Toggles the sidebar visible/hidden state. Invoked by Ctrl+Shift+S.</summary>
     public void ToggleSidebar() => SidebarVisible = !SidebarVisible;
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -4,12 +4,9 @@ using System.Text.RegularExpressions;
 
 namespace FileID.ViewModels;
 
-/// <summary>Decides when the Library shows the helper's search summary
-/// ("3 good matches, 1 weaker.") in place of the plain result count. The
-/// helper writes the sentence; the app only checks it is one.</summary>
+/// <summary>The helper writes the sentence; the app only checks it is one.</summary>
 internal static partial class SearchStrengthPolicy
 {
-    /// <summary>Shorter searches show the plain count, as on the Mac.</summary>
     public const int MinQueryLength = 3;
 
     private const int MaxLength = 80;
@@ -17,10 +14,6 @@ internal static partial class SearchStrengthPolicy
     [GeneratedRegex(@"^(No matches\.|No good matches, \d{1,9} weaker\.|\d{1,9} good match(es)?(, \d{1,9} weaker)?\.)$", RegexOptions.CultureInvariant)]
     private static partial Regex SummaryShape();
 
-    /// <summary>The summary to show for a typed search, or null to keep the
-    /// plain count: the search is too short, the helper sent no message, or
-    /// the message is some other note (for example "Visual similarity
-    /// results.").</summary>
     public static string? Label(string? query, string? message)
     {
         if (query is null || query.Trim().Length < MinQueryLength) return null;
@@ -35,8 +28,6 @@ internal static partial class SearchStrengthPolicy
     [GeneratedRegex(@"^(\d{1,9}) good match(?:es)?(?:, (\d{1,9}) weaker)?\.$", RegexOptions.CultureInvariant)]
     private static partial Regex GoodShape();
 
-    /// <summary>The helper's good and weaker counts, or null when
-    /// <paramref name="message"/> is not one of its summary sentences.</summary>
     public static (int Good, int Weaker)? Counts(string? message)
     {
         var text = message?.Trim();
@@ -51,18 +42,12 @@ internal static partial class SearchStrengthPolicy
         return null;
     }
 
-    /// <summary>How a typed search is shown. <see cref="KeywordOnly"/> keeps the
-    /// name, tag and text matches and holds the weaker look-alikes back behind
-    /// "Show N weaker matches" (<see cref="HiddenWeaker"/>).</summary>
     public readonly record struct Decision(bool KeywordOnly, string? Label, int HiddenWeaker)
     {
-        /// <summary>The Mac's addKeywordRows: whenever the helper's list is shown,
-        /// the name, tag and text matches it lacks follow its rows.</summary>
         public bool AddKeywordRows => !KeywordOnly;
     }
 
-    /// <summary>The helper's rows in its order, then the keyword rows it lacks in
-    /// theirs, de-duplicated by file id with no extra cap.</summary>
+    /// <summary>The helper's rows in its order, then the keyword rows it lacks in theirs, de-duplicated by file id with no extra cap.</summary>
     public static IReadOnlyList<T> AppendKeywordRows<T>(IReadOnlyList<T> engineRows, IReadOnlyList<T> keywordRows, Func<T, long> id)
     {
         if (keywordRows.Count == 0) return engineRows;
@@ -77,11 +62,7 @@ internal static partial class SearchStrengthPolicy
         return combined;
     }
 
-    /// <summary>The Mac's rule (LibrarySearchOutcome.decide). No summary, or a
-    /// search shorter than <see cref="MinQueryLength"/>: today's behaviour
-    /// (the helper's list, <see cref="Label"/>). Good matches, or the user asked
-    /// for the weaker ones: the helper's list and summary. Otherwise only the
-    /// <paramref name="keywordCount"/> keyword matches.</summary>
+    /// <summary>Otherwise only the keywordCount keyword matches.</summary>
     public static Decision Decide(string? query, string? message, int keywordCount, bool showWeaker)
     {
         var label = Label(query, message);
@@ -95,8 +76,6 @@ internal static partial class SearchStrengthPolicy
 
     public static string WeakerButtonText(int hidden) => $"Show {hidden} weaker matches";
 
-    /// <summary>The empty-state sentence when a search found no keyword match
-    /// (the Mac's wording, title and message joined).</summary>
     public static string NoMatchesText(string query, int hiddenWeaker) =>
         hiddenWeaker > 0
             ? $"No matches for \u201C{query}\u201D. Nothing has that in its name, tags or text, and no picture matches it well. {hiddenWeaker} weaker look-alikes were set aside."

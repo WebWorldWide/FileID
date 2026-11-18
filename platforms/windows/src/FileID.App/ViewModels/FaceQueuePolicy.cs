@@ -2,8 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Text, counts and visibility for the People review queues (faces, merges, splits),
-/// Accept all suggested and the face refresh job. Lockstep with macOS FaceQueues and GTK face_queues.</summary>
+/// <summary>Lockstep with macOS FaceQueues and GTK face_queues.</summary>
 internal static class FaceQueuePolicy
 {
     public const string Faces = "faces";
@@ -135,8 +134,6 @@ internal static class FaceQueuePolicy
 
     public static bool IsJobUpdate(CatalogResponse? response) => Job(response?.Jobs) is not null;
 
-    /// <summary>The job to show and control: a pushed job updated with the newer status read after it,
-    /// or one built from the status when no push has arrived yet.</summary>
     public static CatalogJob? MergeJob(CatalogJob? job, FaceRefreshStatus? status)
     {
         if (status?.State is not { } state) return job;
@@ -195,7 +192,6 @@ internal sealed record FaceRefreshView(
     public static readonly FaceRefreshView Hidden = new(false, "", false, false, false, false, "", "");
 }
 
-/// <summary>One page-at-a-time review list keyed by a suggestion identity, deduped across pages.</summary>
 internal sealed class KeyedReviewQueue<TItem, TKey> where TKey : notnull
 {
     private readonly List<TItem> _items = new();
@@ -234,7 +230,6 @@ internal sealed class KeyedReviewQueue<TItem, TKey> where TKey : notnull
     }
 }
 
-/// <summary>Per-queue totals for the switcher. Faces is the existing suggestions queue.</summary>
 internal sealed class FaceQueueTotals
 {
     private readonly Dictionary<string, long> _totals = new() { [FaceQueuePolicy.Faces] = 0, [FaceQueuePolicy.Merges] = 0, [FaceQueuePolicy.Splits] = 0 };

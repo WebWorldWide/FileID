@@ -1,12 +1,5 @@
 ﻿// One recommendation card in the Restructure surface — Keep / Tidy / Reorganize.
-// Mirrors macOS RestructureRecommendationRow: plain-language headline + body, a
-// file/folder count badge, approve/skip + review-files toggles, and an
-// expand-in-place file list. The card tint + glyph come from the outcome so a
-// single DataTemplate renders all three (no per-outcome template).
-//
-// Brushes are built lazily in getters, which x:Bind evaluates on the UI thread
-// during layout — the same DispatcherObject-in-a-VM pattern MergeSuggestionVm
-// uses for its face BitmapImages.
+// The card tint + glyph come from the outcome so a single DataTemplate renders all three (no per-outcome template).
 
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -24,7 +17,6 @@ internal sealed class RestructureRecommendationVm : INotifyPropertyChanged
     public required int FileCount { get; init; }
     public required int FolderCount { get; init; }
 
-    /// <summary>Keep is informational — no files move, no toggles, no count.</summary>
     public bool IsInformational { get; init; }
 
     public int MatchedCount { get; init; }

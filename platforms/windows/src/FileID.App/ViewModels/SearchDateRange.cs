@@ -2,8 +2,6 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>The capture-date window Search &amp; Moments sends as capturedFrom / capturedTo:
-/// whole local days, inclusive at both ends.</summary>
 internal static class SearchDateRange
 {
     public static (double? From, double? To) Unix(DateTimeOffset? from, DateTimeOffset? to, TimeZoneInfo? zone = null)

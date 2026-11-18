@@ -16,7 +16,6 @@ internal sealed partial class EngineClient
         "restructure_busy", "apply_restructure", "db_unavailable",
     };
 
-    /// <summary>Describes up to 100 chosen files (Chat's describeFiles with a selection).</summary>
     public async Task DescribeFilesAsync(IReadOnlyList<long> fileIDs, string modelKind)
     {
         if (fileIDs.Count == 0) throw new ArgumentException("Choose at least one file to describe.", nameof(fileIDs));

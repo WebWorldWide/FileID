@@ -2,9 +2,6 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Describe Files ▸ Name style (macOS NameStyle): the saved style, the proposeNames
-/// request and the preview rows' rules. The engine proposes; the app shows, edits and applies
-/// through renameFiles.</summary>
 internal static class NameStylePolicy
 {
     public const string DefaultStyle = "short";
@@ -37,8 +34,7 @@ internal static class NameStylePolicy
             includeDate && DateToggleEnabled(style), learn);
     }
 
-    /// <summary>The Library selection when there is one, otherwise <paramref name="fallback"/>;
-    /// deduplicated and capped at the engine's 1,000.</summary>
+    /// <summary>The Library selection when there is one, otherwise fallback; deduplicated and capped at the engine's 1,000.</summary>
     public static IReadOnlyList<long> FileIds(IReadOnlyList<long> selection, IReadOnlyList<long> fallback) =>
         (selection.Count > 0 ? selection : fallback).Where(id => id > 0).Distinct().Take(MaxFiles).ToArray();
 
@@ -64,8 +60,6 @@ internal static class NameStylePolicy
     private const string GroupMarker = "|group:";
     private const string LearnedMarker = "|learned:";
 
-    /// <summary>Splits the learned preferences ("proposedName|learned:case,separator") off a
-    /// reason that <see cref="ParseReason"/> returned.</summary>
     public static (string Reason, IReadOnlyList<string> Learned) SplitLearned(string reason)
     {
         var marker = reason.IndexOf(LearnedMarker, StringComparison.Ordinal);
@@ -76,7 +70,6 @@ internal static class NameStylePolicy
     public static string ReasonChip(NameProposalRow row) =>
         row.Learned.Count == 0 ? ReasonLabel(row.Reason) : ReasonLabel(row.Reason) + " · your style";
 
-    /// <summary>What the learned preferences named in a proposeNames reason did to this name.</summary>
     public static string? LearnedHelp(IReadOnlyList<string> keys)
     {
         var parts = keys.Select(key => key switch
@@ -112,8 +105,6 @@ internal static class NameStylePolicy
         _ => null,
     };
 
-    /// <summary>The Name style card's line about what FileID learned, from a learnNames or
-    /// namePreferences reply, and the number of stored samples.</summary>
     public static (string Text, long Samples) LearnedSummary(IEnumerable<CatalogHit> hits, bool enabled)
     {
         var list = hits as IReadOnlyList<CatalogHit> ?? hits.ToArray();
@@ -128,8 +119,6 @@ internal static class NameStylePolicy
         return (items.Length == 0 ? $"No clear preference yet from {count}." : $"From {count}: {string.Join(", ", items)}.", samples);
     }
 
-    /// <summary>One sample per renamed file the user saw in the preview: singles and group
-    /// leaders, never followers, whose rename landed.</summary>
     public static IReadOnlyList<CatalogNameEdit> Edits(IEnumerable<NameProposalRow> rows, IEnumerable<long> renamed)
     {
         var landed = renamed.ToHashSet();
@@ -143,8 +132,6 @@ internal static class NameStylePolicy
     public static CatalogRequest LearnRequest(string requestId, IReadOnlyList<CatalogNameEdit> edits, CatalogNaming naming) =>
         new(requestId, "learnNames", null, null, null, null, null, null, Naming: naming, NameEdits: edits);
 
-    /// <summary>After an Undo puts names back, the learned samples to forget: the edits whose
-    /// file is among those renamed back, or null when there are none.</summary>
     public static CatalogRequest? UnlearnRequest(string requestId, IEnumerable<CatalogNameEdit> edits, IEnumerable<long> putBack)
     {
         var back = putBack.ToHashSet();
@@ -155,8 +142,6 @@ internal static class NameStylePolicy
     public static CatalogRequest PreferencesRequest(string requestId, bool reset) =>
         new(requestId, reset ? "resetNamePreferences" : "namePreferences", null, null, null, null, null, null);
 
-    /// <summary>Splits a proposeNames evidenceID into its reason and the companion group's
-    /// leader file ID ("proposedName|group:11"), matching both engines.</summary>
     public static (string Reason, long? Group) ParseReason(string? evidenceId)
     {
         var text = evidenceId ?? "noEvidence";
@@ -166,8 +151,6 @@ internal static class NameStylePolicy
             System.Globalization.CultureInfo.InvariantCulture, out var group) ? group : null);
     }
 
-    /// <summary>Rows for a reply, companions kept together leader first. A file (or group)
-    /// unticked in the last preview stays unticked; rows without a proposed name can't be ticked.</summary>
     public static IReadOnlyList<NameProposalRow> Rows(IEnumerable<CatalogHit> hits, IReadOnlyList<NameProposalRow> previous)
     {
         var unticked = previous.Where(r => r.CanCheck && !r.Checked).Select(r => r.GroupKey).ToHashSet();
@@ -194,14 +177,12 @@ internal static class NameStylePolicy
         return rows;
     }
 
-    /// <summary>The name before its last dot, like the engines' split (a leading dot is part of the stem).</summary>
     public static string Stem(string name)
     {
         var dot = name.LastIndexOf('.');
         return dot > 0 && dot + 1 < name.Length ? name[..dot] : name;
     }
 
-    /// <summary>Ticking any member of a companion group ticks the whole group. Returns the rows changed.</summary>
     public static IReadOnlyList<NameProposalRow> SetChecked(IReadOnlyList<NameProposalRow> rows, long fileId, bool isChecked)
     {
         var key = rows.FirstOrDefault(r => r.FileId == fileId)?.GroupKey;
@@ -211,7 +192,6 @@ internal static class NameStylePolicy
         return changed;
     }
 
-    /// <summary>Editing the leader's name gives every companion the same stem. Returns the followers changed.</summary>
     public static IReadOnlyList<NameProposalRow> Edit(IReadOnlyList<NameProposalRow> rows, long fileId, string text)
     {
         var row = rows.FirstOrDefault(r => r.FileId == fileId);
@@ -227,7 +207,6 @@ internal static class NameStylePolicy
     public static IEnumerable<NameProposalRow> Followers(IEnumerable<NameProposalRow> rows, NameProposalRow leader) =>
         rows.Where(r => r.IsFollower && r.Group == leader.FileId);
 
-    /// <summary>The leader's chip naming its companions' extensions: "+ ARW, XMP".</summary>
     public static string? CompanionChip(NameProposalRow row, IReadOnlyList<NameProposalRow> rows)
     {
         if (!row.IsLeader) return null;
@@ -244,8 +223,7 @@ internal static class NameStylePolicy
         return name;
     }
 
-    /// <summary>Ticked renames in row order, as one batch. A companion group goes whole or not
-    /// at all: one invalid member name holds every member back.</summary>
+    /// <summary>Ticked renames in row order, as one batch.</summary>
     public static IReadOnlyList<RenameEntry> Renames(IEnumerable<NameProposalRow> rows)
     {
         var list = rows as IReadOnlyList<NameProposalRow> ?? rows.ToArray();
@@ -258,7 +236,6 @@ internal static class NameStylePolicy
             .ToArray();
     }
 
-    /// <summary>The renames that put back the original names of the files the engine confirmed.</summary>
     public static IReadOnlyList<RenameEntry> UndoEntries(
         IEnumerable<NameProposalRow> rows, IEnumerable<RenameEntry> sent, IEnumerable<long> confirmed)
     {
