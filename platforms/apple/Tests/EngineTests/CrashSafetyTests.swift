@@ -95,6 +95,9 @@ struct CrashSafetyTests {
         let journal = root.appendingPathComponent("trash-journal.json")
         let logBefore = try Data(contentsOf: root.appendingPathComponent("trash_log.json"))
 
+        try await db.pool.write {
+            try $0.execute(sql: "INSERT INTO library_roots(path,display,kind,added_at) VALUES(?,?, 'internal',1)", arguments: [root.path, root.path])
+        }
         #expect(RustTrashLog.find("other", beside: journal) == nil)
         let result = await TrashJournal.restore(batchID: "rust-batch", database: db, journal: journal)
         #expect(result.succeeded == 1)

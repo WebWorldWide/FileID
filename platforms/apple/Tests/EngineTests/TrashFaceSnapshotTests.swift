@@ -180,6 +180,9 @@ struct TrashFaceSnapshotTests {
         try (json + "\t" + Data(mac).map { String(format: "%02x", $0) }.joined() + "\n")
             .write(to: f.root.appendingPathComponent("trash_log.json"), atomically: true, encoding: .utf8)
 
+        try await f.db.pool.write {
+            try $0.execute(sql: "INSERT INTO library_roots(path,display,kind,added_at) VALUES(?,?, 'internal',1)", arguments: [f.root.path, f.root.path])
+        }
         let result = await TrashJournal.restore(batchID: "rust-batch", database: f.db, journal: f.journal)
         #expect(result.succeeded == 1 && result.failed == 0)
         #expect(try await faces(f.db) == [[1, 1, 1], [2, 2, 1], [3, 1, 2]])
