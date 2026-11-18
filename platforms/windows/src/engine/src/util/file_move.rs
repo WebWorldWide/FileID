@@ -31,9 +31,8 @@ pub(crate) trait MoveFileIo {
     }
 }
 
-/// The volume has no hard links (FAT, exFAT, many network shares), or the
-/// source is at its link limit. A no-replace rename gives the same no-clobber
-/// guarantee there, without the moment where both names exist.
+/// FAT, exFAT, many network shares, or the source is at its link limit; a no-replace rename gives the same no-clobber
+/// guarantee without a moment where both names exist.
 fn links_unavailable(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::Unsupported {
         return true;

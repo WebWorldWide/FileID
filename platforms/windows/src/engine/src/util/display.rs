@@ -1,7 +1,5 @@
-//! User-facing formatting shared by the CLI, TUI and GTK app.
 
-/// Finder's decimal units (macOS `ByteCountFormatter`, `.file`): 1000-based,
-/// KB whole, MB one decimal, GB and up two.
+/// Finder's decimal units (`ByteCountFormatter` `.file`): 1000-based, KB whole, MB one decimal, GB and up two.
 pub fn file_size(bytes: u64) -> String {
     const UNITS: [(&str, f64, usize); 4] = [("TB", 1e12, 2), ("GB", 1e9, 2), ("MB", 1e6, 1), ("KB", 1e3, 0)];
     if bytes == 0 {
@@ -19,14 +17,10 @@ pub fn file_size(bytes: u64) -> String {
     format!("{:.*} {unit}", decimals, value / scale)
 }
 
-/// [`file_size`] for signed DB columns; negatives read as zero.
 pub fn file_size_i64(bytes: i64) -> String {
     file_size(u64::try_from(bytes).unwrap_or(0))
 }
 
-/// Transfer progress in the total's decimal unit: `182/271 MB`, `3.5/24.9 GB`
-/// (one decimal under 100 of the unit); just [`file_size`] when the total is
-/// unknown.
 pub fn size_pair(done: u64, total: Option<u64>) -> String {
     const UNITS: [(&str, f64); 5] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1e3), ("bytes", 1.0)];
     let Some(total) = total else {
@@ -38,7 +32,6 @@ pub fn size_pair(done: u64, total: Option<u64>) -> String {
     format!("{done:.decimals$}/{total:.decimals$} {unit}")
 }
 
-/// `3.4 MB/s`; `—` when the rate is unknown.
 pub fn rate(bytes_per_second: f64) -> String {
     if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
         return "—".to_string();
@@ -46,12 +39,10 @@ pub fn rate(bytes_per_second: f64) -> String {
     format!("{}/s", file_size(bytes_per_second as u64))
 }
 
-/// Last path segment, splitting on both `/` and `\`.
 pub fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(path)
 }
 
-/// At most `max` characters, ending in `…` when cut.
 pub fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -61,12 +52,10 @@ pub fn truncate(text: &str, max: usize) -> String {
     out
 }
 
-/// `"1 file"`, `"2 files"`.
 pub fn plural(count: u64, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
-/// Unix seconds as `YYYY-MM-DD HH:MM UTC`; `—` when unset or invalid.
 pub fn fmt_date(secs: f64) -> String {
     if !secs.is_finite() || secs <= 0.0 {
         return "—".to_string();
@@ -75,7 +64,6 @@ pub fn fmt_date(secs: f64) -> String {
         .map_or_else(|| "—".to_string(), |time| time.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
-/// Unix seconds as a local `YYYY-MM-DD`.
 pub fn fmt_local_day(secs: f64) -> Option<String> {
     use chrono::TimeZone as _;
     if !secs.is_finite() {

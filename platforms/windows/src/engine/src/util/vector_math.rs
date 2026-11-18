@@ -1,7 +1,5 @@
-//! Dot product and squared distance over eight independent accumulators.
-//! A single running `f32` sum cannot be reordered by the compiler, so it stays
-//! scalar; eight lanes vectorise. The lane order is fixed, so results are
-//! identical on every run and thread count.
+//! Dot product and squared distance over eight independent accumulators: a single f32 sum cannot be reordered so stays
+//! scalar, eight lanes vectorise, and the fixed lane order keeps results identical across runs and thread counts.
 
 const LANES: usize = 8;
 

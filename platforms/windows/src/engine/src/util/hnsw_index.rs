@@ -1,20 +1,12 @@
-//! Pure-Rust approximate-nearest-neighbor index over L2-normalized float
-//! embeddings (`instant-distance` HNSW). Replaces brute-force cosine when the
-//! corpus grows past ~10 k vectors (face-clustering, CLIP/BGE semantic
-//! search). No C/C++ build dependency.
-//!
-//! Vectors are expected to be **L2-normalized** before indexing; the squared
-//! Euclidean distance instant-distance computes is then monotonic in
-//! `(1 − cosine_similarity)`. Distance ordering of returned candidates matches
-//! cosine similarity; approximate retrieval can still miss true neighbors.
-// Wired into `pipeline::face_clustering` above ~5 k faces. Below threshold
-// the brute-force cosine path wins because HNSW build overhead exceeds the
-// O(n²) saving at small N.
+//! Pure-Rust approximate-nearest-neighbor index (`instant-distance` HNSW) replacing brute-force cosine past ~10 k
+//! vectors (face clustering, CLIP/BGE search). Vectors must be **L2-normalized**: squared Euclidean distance is then
+//! monotonic in `1 − cosine`. Approximate retrieval can still miss true neighbors.
+// Wired into `pipeline::face_clustering` above ~5 k faces; below that the brute-force path wins because HNSW build
+// overhead exceeds the O(n²) saving.
 
 use instant_distance::{Builder, HnswMap, Point, Search};
 use std::sync::OnceLock;
 
-/// Owned f32 embedding; `Point` implements squared-L2 over the vector.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Embedding(pub(crate) Vec<f32>);
 
@@ -24,14 +16,11 @@ impl Point for Embedding {
         if self.0.len() == tests::COUNTED_DIM {
             tests::EVALUATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        // Squared L2. For unit vectors ||a−b||² = 2(1 − a·b), so the
-        // ordering matches cosine similarity (no sqrt needed for ranking).
+        // For unit vectors ||a−b||² = 2(1 − a·b), so ordering matches cosine; no sqrt needed.
         crate::util::vector_math::squared_l2(&self.0, &other.0)
     }
 }
 
-/// Build an HNSW index from `(embedding, value)` pairs. `value` is whatever
-/// the caller wants to recover at search time (e.g. a `file_id` or `face_id`).
 pub(crate) fn build<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
     build_with_search_limit(points, 100)
 }
@@ -39,18 +28,14 @@ pub(crate) fn build<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>) -> HnswM
 pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>, limit: usize) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) =
         points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
-    // Fixed seed: instant-distance's Builder::default() seeds its layer-shuffle
-    // RNG from `rand::random()`, so the HNSW topology — and thus the approximate
-    // kNN neighbour sets — would differ run-to-run. Face clustering derives
-    // cluster IDs and inherited People names from those neighbours, so an
-    // entropy seed makes identities hop on every re-cluster. Pin it.
-    // A fixed RNG seed does not order instant-distance's parallel insertions.
-    // Keep construction local to one worker; queries retain their caller's pool.
+    // Fixed seed: instant-distance seeds its layer-shuffle RNG from `rand::random()`, so HNSW topology, and with it the
+    // kNN sets face clustering derives cluster IDs and inherited People names from, would differ run-to-run. A fixed
+    // seed does not order the parallel insertions, so construction is kept on one worker; queries retain their caller's
+    // pool.
     static BUILDER_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     let build = || Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values);
     match BUILDER_POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1).build().ok()) {
         Some(pool) => pool.install(build),
-        // The OS refused a thread: an unpinned build beats aborting clustering.
         None => {
             tracing::warn!("HNSW construction worker unavailable; building on the caller's pool");
             build()
@@ -58,32 +43,24 @@ pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f
     }
 }
 
-/// An index for search only, built on every core. Thread scheduling changes
-/// which near-equal neighbours a node keeps, so two builds of the same points
-/// can differ; never use it where results must repeat exactly (clustering).
+/// Search only, built on every core. Scheduling changes which near-equal neighbours a node keeps, so two builds can
+/// differ; never use it where results must repeat (clustering).
 pub(crate) fn build_search_index<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>, limit: usize) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) = points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
     Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values)
 }
 
-/// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a
-/// per-item sweep amortizes its internal allocations. A fresh `Search`
-/// re-`reserve_capacity`s and zero-fills an n-byte visited set on EVERY query
-/// (instant-distance 0.6), reintroducing an O(n²) term over a full clustering
-/// pass — exactly the quadratic the HNSW path exists to remove. Reusing it
-/// across the sweep makes that a no-op after the first query. Sequential use.
+/// A fresh `Search` re-reserves and zero-fills an n-byte visited set on EVERY query (instant-distance 0.6),
+/// reintroducing the O(n²) term HNSW exists to remove; reusing the scratch makes that a no-op after the first query.
+/// Sequential use.
 #[derive(Default)]
 pub(crate) struct Searcher {
     scratch: Search,
-    // Reused across queries so a per-item sweep doesn't heap-allocate a fresh
-    // query Vec each call (search takes &Embedding, which owns its Vec).
     query_buf: Embedding,
 }
 
 impl Searcher {
-    /// Top-k nearest neighbors of `query`, ascending distance (most similar
-    /// first). Distance is squared-L2; for unit-normalized vectors map to cosine
-    /// via `1 − d/2`. Reuses the scratch buffer across calls (see the type doc).
+    /// Ascending squared-L2 distance; for unit vectors cosine = `1 − d/2`.
     pub(crate) fn top_k<V: Clone>(
         &mut self,
         index: &HnswMap<Embedding, V>,
@@ -100,12 +77,9 @@ impl Searcher {
     }
 }
 
-/// An HNSW index over the distinct vectors of a set that may hold many
-/// identical ones (byte-identical files give byte-identical vectors).
-/// instant-distance's graph degenerates on thousands of tied points: building
-/// over 5,021 vectors of which 3,487 were distinct took 37 s against under a
-/// second for the same count of distinct ones. Identical vectors share one
-/// graph node here and are expanded back to their members at query time.
+/// byte-identical files give identical vectors, and instant-distance's graph degenerates on thousands of tied points
+/// (5,021 vectors, 3,487 distinct: 37 s vs under a second). Identical vectors share one graph node and are expanded at
+/// query time.
 pub(crate) struct DedupIndex {
     members: Vec<Vec<usize>>,
     group_of: Vec<usize>,
@@ -131,9 +105,8 @@ impl DedupIndex {
         Self { members, group_of, index: build(points) }
     }
 
-    /// Members nearest to member `i`, excluding `i`, as `(member, squared L2)`:
-    /// the identical ones first, then whole groups in ascending distance until
-    /// at least `k` are collected (whole groups, so ties stay the caller's to break).
+    /// `(member, squared L2)` excluding `i`: identical ones first, then whole groups by ascending distance until at
+    /// least `k` (whole groups, so ties stay the caller's to break).
     pub(crate) fn neighbours(&self, searcher: &mut Searcher, vectors: &[Vec<f32>], i: usize, k: usize) -> Vec<(usize, f32)> {
         let own = self.group_of[i];
         let mut out: Vec<(usize, f32)> = self.members[own].iter().filter(|&&j| j != i).map(|&j| (j, 0.0)).collect();
@@ -158,10 +131,8 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
-    /// Only vectors of this length are counted, so parallel tests do not add to the total.
     pub(crate) const COUNTED_DIM: usize = 37;
     pub(crate) static EVALUATIONS: AtomicU64 = AtomicU64::new(0);
-    /// Tests that read `EVALUATIONS` hold this so they do not count each other's work.
     pub(crate) static COUNTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn norm(mut v: Vec<f32>) -> Vec<f32> {
@@ -187,8 +158,7 @@ pub(crate) mod tests {
         EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Identical vectors must cost nothing extra. Counts distance evaluations instead of time, so the
-    /// result does not depend on how loaded the machine is.
+    /// Counts distance evaluations instead of time so the result does not depend on machine load.
     #[test]
     fn copies_of_a_vector_add_no_graph_work() {
         let _counting = COUNTING.lock().unwrap_or_else(|e| e.into_inner());
@@ -221,13 +191,11 @@ pub(crate) mod tests {
         let hits = Searcher::default().top_k(&idx, &norm(vec![1.0, 0.0, 0.0]), 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "x");
-        // Self-distance is ~0 (squared L2 of a unit vector with itself).
         assert!(hits[0].1 < 1e-3, "self-distance should be ~0, got {}", hits[0].1);
     }
 
     #[test]
     fn ranking_matches_cosine_similarity() {
-        // Query "x" is closest to itself, then to the "xy" mix, then to "y".
         let points = vec![
             (norm(vec![1.0, 0.0]), "x"),
             (norm(vec![1.0, 1.0]), "xy"),
@@ -248,10 +216,8 @@ pub(crate) mod tests {
 
     #[test]
     fn build_is_deterministic_across_runs() {
-        // Guards the fixed seed: two builds of the same points must
-        // return byte-identical kNN orderings, else face clustering is
-        // nondeterministic on large libraries. A spread of near-collinear
-        // vectors makes the approximate neighbour set seed-sensitive.
+        // Guards the fixed seed: near-collinear vectors make the neighbour set seed-sensitive, and two builds must
+        // return identical orderings.
         let mk = || -> Vec<(Vec<f32>, usize)> {
             (0..256usize)
                 .map(|i| {
