@@ -305,6 +305,45 @@ enum ChatFacts {
         }
     }
 
+    /// "What's in Kyle Senior Pics": the files of the folders with that name, by kind. Nil when the
+    /// catalog has no such folder, so the question is searched as words instead. Mirrors Rust `folder_answer`.
+    static func folderAnswer(_ db: GRDB.Database, _ name: String, root: LibraryRoots.Scope?) throws -> (String, [CatalogHit])? {
+        let filter = Filter(folder: "named:\(name)", root: root)
+        let (count, bytes) = try totals(db, filter)
+        guard count > 0 else { return nil }
+        var args: [DatabaseValueConvertible?] = []
+        let clause = filter.clause(&args)
+        let kinds = try Row.fetchAll(db, sql: "SELECT f.kind,COUNT(*) AS c FROM files f WHERE \(clause) GROUP BY f.kind ORDER BY c DESC,f.kind ASC",
+                                     arguments: StatementArguments(args)).map { row -> String in
+            let n: Int64 = row["c"]
+            return "\(ChatIntent.countLabel(n)) \(ChatIntent.noun([row["kind"]], n))"
+        }
+        let hits = try listed(db, filter, order: "newest", limit: shown, count: count)
+        return ("“\(name)” holds \(ChatIntent.countLabel(count)) \(count == 1 ? "file" : "files") (\(ChatIntent.bytesLabel(bytes))): \(kinds.joined(separator: ", ")).", hits)
+    }
+
+    /// "Where were my photos taken?": the library records positions, not place names, so say how many
+    /// files carry one. Mirrors Rust `places_answer`.
+    static func placesAnswer(_ db: GRDB.Database, kinds: [String], root: LibraryRoots.Scope?) throws -> String {
+        let filter = Filter(kinds: kinds, root: root)
+        let total = try totals(db, filter).count
+        var args: [DatabaseValueConvertible?] = []
+        let clause = filter.clause(&args)
+        let located = try Int64.fetchOne(db, sql: "SELECT COUNT(*) FROM files f WHERE \(clause) AND f.location_lat IS NOT NULL AND f.location_lon IS NOT NULL",
+                                         arguments: StatementArguments(args)) ?? 0
+        let things = ChatIntent.noun(kinds, 2)
+        if total == 0 { return "No \(things) in the library yet." }
+        if located == 0 { return "None of your \(ChatIntent.countLabel(total)) \(things) have a location recorded, so I can't say where they were taken." }
+        return "\(ChatIntent.countLabel(located)) of your \(ChatIntent.countLabel(total)) \(things) have a location recorded, but I can't name the places yet."
+    }
+
+    /// True when faces are grouped but no group has a name, so a person's name in a question can
+    /// only be searched as a word. Mirrors Rust `people_unnamed`.
+    static func peopleUnnamed(_ db: GRDB.Database, root: LibraryRoots.Scope?) throws -> Bool {
+        let groups = try personGroups(db, root: root)
+        return !groups.isEmpty && groups.allSatisfy { $0.name == nil }
+    }
+
     /// "How many people are in my library?" and "who is in my photos?": answered
     /// from the face groups, never from the word "people". Files with a counted
     /// face are listed. Mirrors Rust `people_answer`.

@@ -272,6 +272,54 @@ struct DiscoveryTests {
         #expect(candidates.map(\.path) == ["/lib/gone.jpg"])
     }
 
+    @Test("iCloud-only files are present for the orphan sweep but are not counted as unchanged files")
+    func cloudOnlyFilesAreNotUnchanged() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDCloudOnly-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let library = tmp.appendingPathComponent("library")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        let root = realResolved(library)
+        let current = root.appendingPathComponent("current.pdf")
+        let cloud = root.appendingPathComponent("cloud.pdf")
+        let bytes = Data("hello".utf8)
+        try bytes.write(to: current)
+        try bytes.write(to: cloud)
+        let mtime = Date(timeIntervalSince1970: 1_700_000_000)
+        for url in [current, cloud] {
+            try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
+        }
+        try await db.pool.write { conn in
+            try conn.execute(sql: """
+                INSERT INTO files (path_text, path_hash, path_search, size_bytes, modified_at, scanned_at, kind, extension)
+                VALUES (?, 0, ?, ?, ?, 1000, 'doc', 'pdf')
+                """, arguments: [current.path, current.path, Int(bytes.count), mtime.timeIntervalSince1970])
+            try conn.execute(sql: """
+                INSERT INTO text_embeddings (file_id, embedding, model)
+                VALUES (?, ?, ?)
+                """, arguments: [conn.lastInsertedRowID, Data([0, 0, 0, 0]), "bge_small_en_v1_5"])
+        }
+
+        let discovery = Discovery()
+        await discovery.simulateCloudOnly(names: ["cloud.pdf"])
+        let keptFiles = await discovery.walk(root: root, database: db, forceReprocess: false)
+        let kept = keptFiles.count
+
+        #expect(kept == 0)
+        #expect(await discovery.presentUnchanged == [
+            Discovery.PathFingerprint(current.path), Discovery.PathFingerprint(cloud.path)])
+        #expect(await discovery.currentUnchangedCount == 1)
+        #expect(await discovery.lastShortfall.cloudOnlyFiles == 1)
+
+        let onlyCloud = Discovery()
+        await onlyCloud.simulateCloudOnly(names: ["cloud.pdf", "current.pdf"])
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: current.path)
+        _ = await onlyCloud.walk(root: root, database: db, forceReprocess: false)
+        #expect(await onlyCloud.currentUnchangedCount == 0)
+    }
+
     @Test("A walk that kept nothing but found current files says nothing changed; other walks do not")
     func rescanNoChangesNotice() {
         let clean = Discovery.Shortfall()

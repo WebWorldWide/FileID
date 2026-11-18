@@ -2109,7 +2109,7 @@ struct FileIDEngineMain {
                     await sink.emit(.error(notice))
                 } else if let notice = Discovery.rescanNoChangesNotice(
                     kept: discovered, shortfall: shortfall,
-                    unchangedFiles: await discovery.presentUnchanged.count, root: url.path) {
+                    unchangedFiles: await discovery.currentUnchangedCount, root: url.path) {
                     await sink.emit(.error(notice))
                 }
             }

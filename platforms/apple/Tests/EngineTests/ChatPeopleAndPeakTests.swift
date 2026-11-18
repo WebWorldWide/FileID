@@ -56,6 +56,61 @@ struct ChatPeopleAndPeakTests {
         #expect(try await ask("how many people are in my library?", database).message == "No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups.")
     }
 
+    @Test func aNameThatMatchesNoPersonSaysPeopleAreNotNamedYet() async throws {
+        let (database, directory) = try await catalog { db in
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES (1,'/p/Kyle at the beach.jpg',1,1,0,'image','jpg'),(2,'/p/2.jpg',2,1,0,'image','jpg'),(3,'/p/Kyle Senior Pics/3.jpg',3,1,0,'image','jpg');
+                INSERT INTO persons(id,name,created_at,is_unknown) VALUES (1,NULL,0,0);
+                INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES (2,1,x'00','',0);
+                """)
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let note = "People aren't named yet — name them in People to search by person."
+        #expect(try await ask("show me photos of Kyle", database).message == "Found 2 matches for “Kyle” (photos). \(note)")
+        #expect(try await ask("show me photos of Zorro", database).message == "No matches for “Zorro” (photos). Try names or a few descriptive words; files that haven't been analyzed may still contain it. \(note)")
+        #expect(try await ask("how many photos of Kyle?", database).message == "Found 2 photos matching “Kyle”, using 2 bytes. \(note)")
+        for text in ["show me photos of kyle", "photos from Kyle Senior Pics", "show me photos of Kyle Senior Pics"] {
+            #expect(!(try await ask(text, database).message.contains(note)), Comment(rawValue: text))
+        }
+        try await database.pool.write { db in try db.execute(sql: "UPDATE persons SET name='Kyle' WHERE id=1") }
+        #expect(!(try await ask("show me photos of Kyle", database).message.contains(note)))
+        try await database.pool.write { db in try db.execute(sql: "UPDATE persons SET name='Maya' WHERE id=1") }
+        #expect(!(try await ask("show me photos of Zorro", database).message.contains(note)))
+        try await database.pool.write { db in try db.execute(sql: "DELETE FROM face_prints") }
+        #expect(!(try await ask("show me photos of Kyle", database).message.contains(note)))
+    }
+
+    @Test func everydayQuestionsAboutOneFileAFolderPlacesAndFormats() async throws {
+        let (database, directory) = try await catalog { db in
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at,location_lat,location_lon) VALUES
+                (1,'/lib/Trip/a.jpg',1,100,0,'image','jpg',1700000000,NULL,NULL),(2,'/lib/Trip/b.jpg',2,200,0,'image','jpg',1700100000,48.1,11.5),
+                (3,'/lib/Trip/c.mp4',3,5000,0,'video','mp4',1700200000,NULL,NULL),(4,'/lib/Other/d.mov',4,9000,0,'video','mov',1700300000,NULL,NULL),(5,'/lib/Other/e.arw',5,300,0,'image','arw',1700400000,NULL,NULL);
+                """)
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let largest = try await ask("what's the largest video?", database)
+        #expect(largest.message == "The largest video: d.mov (9.0 KB · 2023-11-18).", Comment(rawValue: largest.message))
+        #expect(largest.hits.count == 1)
+        #expect(try await ask("what's my oldest video?", database).message.hasPrefix("The oldest video: c.mp4"))
+        #expect(try await ask("show me my largest videos", database).message == "Found 2 videos. Largest first.")
+        #expect(try await ask("where were my photos taken?", database).message == "1 of your 3 photos have a location recorded, but I can't name the places yet.")
+        #expect(try await ask("do my videos have GPS?", database).message == "None of your 2 videos have a location recorded, so I can't say where they were taken.")
+        let folder = try await ask("what's in Trip", database)
+        #expect(folder.message == "“Trip” holds 3 files (5.3 KB): 2 photos, 1 video.", Comment(rawValue: folder.message))
+        #expect(folder.hits.count == 3)
+        #expect(try await ask("what's in the Trip folder?", database).message == "Found 3 files in Trip.")
+        #expect(try await ask("what's in Nowhere", database).message.hasPrefix("No matches"))
+        func inTalk(_ text: String) async throws -> ChatService.Prepared {
+            try await database.pool.write { db in
+                try db.execute(sql: "INSERT INTO catalog_chat(id,conversation_id,role,text,created_at) VALUES(?,?,'user',?,0)", arguments: [UUID().uuidString, "talk", text])
+            }
+            return try await ChatService.prepare(ChatRequest(requestID: text, conversationID: "talk", action: "send", text: text, useModel: false), text: text, database: database)
+        }
+        #expect(try await inTalk("show me my newest videos").hits.count == 2)
+        #expect(try await inTalk("how many JPEGs do I have?").message == "Found 2 files in JPG format, using 300 bytes.")
+    }
+
     @Test func peakQuestionsAnswerByYearOrMonthOrSayTheyCannot() async throws {
         let (database, directory) = try await catalog { db in
             for (id, taken) in [(1, 1_718_452_800), (2, 1_749_988_800), (3, 1_752_580_800), (4, 1_781_524_800), (5, 1_781_524_900), (6, 1_781_525_000)] {

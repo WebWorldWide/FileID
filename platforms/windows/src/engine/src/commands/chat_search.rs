@@ -211,7 +211,8 @@ impl SearchPlan {
                     && !fillers.contains(&word.as_str())
                     && (negative || aliases(word).is_empty())
             })
-            .map(|(_, (word, _))| *word)
+            .map(|(_, (word, _))| word.trim_end_matches(['?', '!', '.', ',', ';', ':']))
+            .filter(|word| !word.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
         if refinement && !normalized.iter().any(|word| word == "all")

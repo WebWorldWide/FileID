@@ -13,5 +13,7 @@
   {"messages":["birthday except videos"],"query":"birthday except videos","kinds":[]},
   {"messages":["Please find birthday “videos”"],"query":"birthday","kinds":["video"]},
   {"messages":["birthday videos","show them"],"query":"birthday","kinds":["video"]},
-  {"messages":["birthday photos","is he smiling"],"query":"smiling","kinds":["image"]}
+  {"messages":["birthday photos","is he smiling"],"query":"smiling","kinds":["image"]},
+  {"messages":["photos of Kyle?"],"query":"Kyle","kinds":["image"]},
+  {"messages":["Is there a dog? or a cat!"],"query":"dog or cat","kinds":[]}
 ]

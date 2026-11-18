@@ -380,6 +380,55 @@ struct ChatIntent: Codable, Equatable, Sendable {
 
     // MARK: - Questions
 
+    /// "the largest video", "my newest photo": a singular noun after an order word asks for one file.
+    private static let singularFileWords: Set<String> = ["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording"]
+
+    private static let takenWords: Set<String> = ["taken", "shot", "photographed", "filmed", "recorded", "captured"]
+    private static let geotagWords: Set<String> = ["gps", "geotagged", "geotag", "geotags", "geolocated"]
+
+    /// "where were my photos taken?", "do my photos have GPS?": a question about places. Returns the kinds it
+    /// names (empty for every file). Mirrors Rust `place_ask`; the shared cases are the corpus `placeAsks`.
+    static func placeAsk(_ text: String) -> [String]? {
+        let words = split(text).map { clean($0).replacingOccurrences(of: "'", with: "") }
+        let asks = (has(words, ["where"]) && has(words, takenWords))
+            || has(words, geotagWords)
+            || (has(words, ["location", "locations"]) && has(words, ["have", "has", "recorded", "saved", "stored", "with", "many"]))
+        guard asks else { return nil }
+        var kinds: [String] = []
+        for word in words {
+            let kind: String
+            switch word {
+            case "photo", "photos", "picture", "pictures", "image", "images", "pics": kind = "image"
+            case "video", "videos", "clip", "clips": kind = "video"
+            default: continue
+            }
+            if !kinds.contains(kind) { kinds.append(kind) }
+        }
+        return kinds.sorted()
+    }
+
+    /// "what's in Kyle Senior Pics": the name a question asks the contents of, left for the catalog to say
+    /// whether it is a folder. Mirrors Rust `asked_inside`; the shared cases are the corpus `insideAsks`.
+    static func askedInside(_ text: String) -> String? {
+        let raw = split(text)
+        let words = raw.map { clean($0).replacingOccurrences(of: "'", with: "") }
+        var at: Int
+        switch words.first {
+        case "whats": at = 1
+        case "what" where words.count > 1 && (words[1] == "is" || words[1] == "are"): at = 2
+        default: return nil
+        }
+        while at < words.count, words[at] == "all" || words[at] == "everything" { at += 1 }
+        guard at < words.count, words[at] == "in" || words[at] == "inside" else { return nil }
+        at += 1
+        if at < words.count, words[at] == "the" { at += 1 }
+        var name = raw[min(at, raw.count)...].map(original).filter { !$0.isEmpty }
+        if let last = name.last, ["folder", "directory"].contains(last.lowercased()) { name.removeLast() }
+        guard let first = name.first?.lowercased(),
+              !["this", "that", "these", "those", "my", "our", "it", "here", "there", "library", "collection"].contains(first) else { return nil }
+        return name.joined(separator: " ")
+    }
+
     private static let placeWords: Set<String> = ["photos", "pictures", "images", "library", "collection", "files"]
     private static let countPeopleTail: Set<String> = [
         "in", "on", "of", "my", "our", "the", "this", "that", "whole", "entire", "library", "collection", "photos", "pictures", "images", "photo", "files",
@@ -550,6 +599,10 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 if before == "top", !question.explicitOrder { question.order = "largest"; question.explicitOrder = true }
                 break
             }
+        }
+        if question.limit == nil, let index = words.firstIndex(where: { orderWords.contains($0) }),
+           index + 1 < words.count, singularFileWords.contains(words[index + 1]) {
+            question.limit = 1
         }
         for index in words.indices.dropLast() where ["per", "by", "each", "every"].contains(words[index]) {
             let unit = words[index + 1]
@@ -869,6 +922,31 @@ struct ChatIntent: Codable, Equatable, Sendable {
             tenths = (bytes + step / 2) / step
         }
         return "\(tenths / 10).\(tenths % 10) \(units[index])"
+    }
+
+    private static let nameLeads: Set<String> = ["of", "with", "featuring", "including", "showing"]
+    private static let notNames: Set<String> = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "christmas", "halloween", "thanksgiving", "easter", "hanukkah", "diwali", "valentines", "new", "summer", "winter",
+        "spring", "fall", "autumn", "iphone", "ipad", "mac", "macbook", "google", "apple", "instagram", "facebook", "whatsapp",
+    ]
+
+    private static func capitalisedWord(_ word: String) -> Bool {
+        guard let first = word.first, first.isUppercase else { return false }
+        return word.allSatisfy { $0.isLetter || $0 == "'" || $0 == "’" || $0 == "-" } && word.contains { $0.isLowercase }
+    }
+
+    /// The person a question is spoken about, when it asks "of Kyle" or "with Kyle Smith": one or two
+    /// capitalised words after of/with/featuring/including/showing. Longer capitalised runs are folder
+    /// or event titles, and months, weekdays, holidays and brands are not people. Mirrors Rust
+    /// `spoken_name`; the shared cases are the corpus `spokenNames`.
+    static func spokenName(_ text: String) -> String? {
+        let words = text.split(whereSeparator: \.isWhitespace).map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+        guard let lead = words.firstIndex(where: { nameLeads.contains($0.lowercased()) }) else { return nil }
+        let run = Array(words[(lead + 1)...].prefix { capitalisedWord($0) })
+        guard (1...2).contains(run.count), !notNames.contains(run[0].lowercased()) else { return nil }
+        return run.joined(separator: " ")
     }
 
     /// "15,021".
