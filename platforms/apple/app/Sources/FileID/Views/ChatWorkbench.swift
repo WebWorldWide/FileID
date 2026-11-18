@@ -132,7 +132,7 @@ struct ChatWorkbench: View {
                     }
                     .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16)
                     .padding(.vertical, isPage ? Theme.Metrics.pageInsetY : 16)
-                    .frame(maxWidth: isPage ? 760 : .infinity, alignment: .leading)
+                    .frame(maxWidth: isPage ? 760 + Theme.Metrics.pageInsetX * 2 : .infinity, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: messages.last?.id) { _, id in
@@ -246,7 +246,6 @@ struct ChatWorkbench: View {
                     .accessibilityHint("Puts this question in the message field")
                 }
             }
-            .frame(maxWidth: 460)
         }
         .padding(.vertical, 8)
     }
@@ -293,9 +292,8 @@ struct ChatWorkbench: View {
                     .opacity(readiness.hasFiles ? 1 : 0.55)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .frame(minHeight: Theme.Metrics.controlLarge)
-                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
-                    .overlay { if inputFocused { RoundedRectangle(cornerRadius: Theme.Radius.s + 3, style: .continuous).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
+                    .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                    .dsFieldBorder(focused: inputFocused)
                 if busy {
                     Button("Stop") { control("cancel") }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
@@ -380,7 +378,7 @@ struct ChatWorkbench: View {
             }
             .overlay {
                 if hits.isEmpty {
-                    MetaText("Files an answer draws on show here. Click one to open it.")
+                    MetaText("Files an answer cites appear here. Click one to open it.")
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
             }
