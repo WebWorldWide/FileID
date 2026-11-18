@@ -1,8 +1,6 @@
-//! Safe wrappers over the FileIDAppleKit scan adapters. Images stay in
-//! the adapter as decoded CGImages behind a handle; Vision, the text read, CLIP
-//! and RAM++ read them there, so the scan sees the same pixels the Swift engine
-//! sees. Results cross as JSON. Policy (which stages run, what is stored) stays
-//! in `pipeline::tagging`.
+//! Safe wrappers over the FileIDAppleKit scan adapters. Images stay in the adapter as decoded CGImages behind a handle
+//! so the scan sees the same pixels as the Swift engine; results cross as JSON. Policy (which stages run, what is
+//! stored) stays in `pipeline::tagging`.
 
 use super::ffi;
 use serde::Deserialize;
@@ -15,7 +13,6 @@ fn c_path(path: &Path) -> Option<CString> {
     CString::new(path.as_os_str().as_encoded_bytes()).ok()
 }
 
-/// Take ownership of an adapter-allocated string.
 fn take_string(pointer: *mut c_char) -> Option<String> {
     if pointer.is_null() {
         return None;
@@ -53,7 +50,6 @@ pub struct ImageInfo {
     pub captured_at: Option<f64>,
 }
 
-/// A decoded image held by the adapter, released on drop.
 #[derive(Debug)]
 pub struct Image {
     id: u64,
@@ -80,8 +76,6 @@ fn image_from(reply: *mut c_char, id: u64) -> Option<Image> {
     }
 }
 
-/// The scan's working image (ImageIO, MPF and RAW previews, the VideoToolbox
-/// HEIF decoder) with its EXIF and dHash; `None` when it cannot be decoded.
 pub fn decode_image(path: &Path, size_bytes: u64) -> Option<Image> {
     let path = c_path(path)?;
     let mut id = 0u64;
@@ -90,7 +84,6 @@ pub fn decode_image(path: &Path, size_bytes: u64) -> Option<Image> {
     image_from(reply, id)
 }
 
-/// AVFoundation keyframe at a quarter of the video's duration.
 pub fn video_keyframe(path: &Path, max_pixel_size: u32, timeout: Duration) -> Option<Image> {
     let path = c_path(path)?;
     let mut id = 0u64;
@@ -103,7 +96,6 @@ pub fn video_keyframe(path: &Path, max_pixel_size: u32, timeout: Duration) -> Op
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisionFace {
-    /// Normalized "x,y,w,h" (Vision's lower-left origin), as the Swift engine stores it.
     pub bbox: String,
     #[serde(default)]
     pub quality: Option<f64>,
@@ -136,8 +128,7 @@ pub struct TextRead {
     pub fast_ms: f64,
     #[serde(default)]
     pub careful_ms: f64,
-    /// A careful read was called for and the reader was not available (still
-    /// compiling, or paused by its breaker); an older adapter never sets it.
+    /// A careful read was called for but the reader was unavailable (still compiling, or paused by its breaker).
     #[serde(default)]
     pub careful_owed: bool,
 }
@@ -155,15 +146,13 @@ pub struct PdfRead {
 }
 
 impl Image {
-    /// The Swift engine's 9x8 CoreGraphics dHash, stored bit for bit. Call it
-    /// after Vision and CLIP: a JPEG-backed image keeps the decode its first
-    /// draw needed, and a 9x8 draw first would leave CLIP a coarse decode.
+    /// The Swift engine's 9x8 CoreGraphics dHash, stored bit for bit. Call after Vision and CLIP: a 9x8 draw first
+    /// would leave CLIP a coarse decode of a JPEG-backed image.
     pub fn dhash(&self) -> i64 {
         // SAFETY: plain handle argument.
         unsafe { ffi::fileid_apple_image_dhash(self.id) as i64 }
     }
 
-    /// Packed sRGB RGB8 at the image's own size.
     pub fn rgb(&self) -> Option<(Vec<u8>, u32, u32)> {
         let (mut pixels, mut length, mut width, mut height) = (std::ptr::null_mut::<u8>(), 0usize, 0u32, 0u32);
         // SAFETY: every out-pointer points at a local.
@@ -178,14 +167,11 @@ impl Image {
         (rgb.len() == width as usize * height as usize * 3).then_some((rgb, width, height))
     }
 
-    /// Vision's classifier, face rectangles and capture quality in one pass.
     pub fn primary_pass(&self) -> Option<PrimaryPass> {
         // SAFETY: plain handle argument.
         take_json(unsafe { ffi::fileid_apple_vision_primary(self.id) })
     }
 
-    /// The Swift engine's text read: whether to read, the fast tier, then the
-    /// accurate tier (`FILEID_CAREFUL_READ`) when the fast read missed or mangled it.
     pub fn text_read(&self, classify_tags: &[String], tags: &[String], has_camera: bool) -> Option<TextRead> {
         let request = serde_json::json!({ "classifyTags": classify_tags, "tags": tags, "hasCamera": has_camera });
         let request = CString::new(request.to_string()).ok()?;
@@ -193,7 +179,6 @@ impl Image {
         take_json(unsafe { ffi::fileid_apple_text_read(self.id, request.as_ptr()) })
     }
 
-    /// L2-normalized CLIP embedding from the MLX image tower.
     pub fn clip_embedding(&self) -> Option<Vec<f32>> {
         let mut out = vec![0f32; 512];
         // SAFETY: `out` holds `out.len()` floats.
@@ -201,7 +186,6 @@ impl Image {
         ok.then_some(out)
     }
 
-    /// RAM++ tags agreed with the primary pass, highest first.
     pub fn ram_plus_tags(&self, pass: Option<&PrimaryPass>) -> Option<Vec<(String, f32)>> {
         let confidences = serde_json::to_string(&pass.map(|p| &p.classify_confidences)).ok()?;
         let confidences = CString::new(confidences).ok()?;
@@ -212,15 +196,13 @@ impl Image {
     }
 }
 
-/// Text of an image-only PDF's first three pages.
 pub fn pdf_ocr(path: &Path) -> Option<PdfRead> {
     let path = c_path(path)?;
     // SAFETY: `path` is NUL-terminated.
     take_json(unsafe { ffi::fileid_apple_pdf_ocr(path.as_ptr()) })
 }
 
-/// Document text as the Swift engine extracts it. `None` for types the caller
-/// extracts itself; `Some(None)` when the document has no text.
+/// `None` for types the caller extracts itself; `Some(None)` when the document has no text.
 pub fn document_text(path: &Path, max_chars: usize) -> Option<Option<String>> {
     let path = c_path(path)?;
     let mut handled = false;
@@ -229,36 +211,30 @@ pub fn document_text(path: &Path, max_chars: usize) -> Option<Option<String>> {
     handled.then_some(text)
 }
 
-/// Load the MLX CLIP image tower from a verified ONNX file.
 pub fn load_clip(onnx: &Path) -> bool {
     let Some(path) = c_path(onnx) else { return false };
     // SAFETY: `path` is NUL-terminated.
     unsafe { ffi::fileid_apple_clip_load(path.as_ptr()) }
 }
 
-/// Load MLX RAM++ from its model folder.
 pub fn load_ram_plus(directory: &Path) -> bool {
     let Some(path) = c_path(directory) else { return false };
     // SAFETY: `path` is NUL-terminated.
     unsafe { ffi::fileid_apple_ramplus_load(path.as_ptr()) }
 }
 
-/// Free the MLX CLIP and RAM++ models and return MLX's cached buffers. Callers
-/// go through `scan_models::ADAPTER_MODELS`, which only unloads at zero holders.
+/// Callers go through `scan_models::ADAPTER_MODELS`, which only unloads at zero holders.
 pub fn unload_models() {
     // SAFETY: no arguments; the adapter drops its model references under its own locks.
     unsafe { ffi::fileid_apple_scan_models_unload() };
 }
 
-/// Whether the accurate text tier has been compiled.
 pub fn ocr_ready() -> bool {
     // SAFETY: no arguments.
     unsafe { ffi::fileid_apple_ocr_ready() }
 }
 
-/// Compile the accurate text tier once the engine is idle, as the Swift engine
-/// does: after three seconds, and not while a scan is decoding. A scan that
-/// starts first keeps its fast reads until the compile finishes.
+/// Like the Swift engine: after three seconds, and not while a scan is decoding.
 pub fn start_ocr_warmup_when_idle() {
     let spawned = std::thread::Builder::new().name("fileid-ocr-warmup".into()).spawn(|| {
         std::thread::sleep(Duration::from_secs(3));
