@@ -13,9 +13,8 @@ struct HostedGapsTests {
         #expect(Sidebar.highlightedArea(activeTab: .restructure) == .act)
     }
 
-    @Test("the generic card is not raised for the fall back to the Swift engine")
-    func fallbackRaisesNoCard() {
-        #expect(!Sidebar.showsErrorCard("engine_fallback"))
+    @Test("the generic card is raised for everything but a stopped folder plan")
+    func genericCardKinds() {
         #expect(Sidebar.showsErrorCard("engine_exited"))
         #expect(Sidebar.showsErrorCard("scan_failed"))
         #expect(Sidebar.showsErrorCard("something_new"))
