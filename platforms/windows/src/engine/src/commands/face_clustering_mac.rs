@@ -1,11 +1,7 @@
-//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, the
-//! Swift alignment). A port of the Swift engine's `FaceClustering.runClustering`
-//! without its vector extraction, together with the `FaceClusterPersistence`,
-//! `StablePersonAssignments`, `ExactCosineJoin` and `FaceReview` holdout and
-//! assessment it relies on, so a Swift catalog clustered here keeps the same
-//! people, person ids, names, verdicts and queues. Keep in step with those
-//! Swift files; the portable pipeline in `face_clustering.rs` stays the default
-//! for every other face space.
+//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, Swift alignment). A port of the Swift
+//! engine's clustering, persistence, stable person ids, holdout and review, so a Swift catalog keeps the same people,
+//! ids, names, verdicts and queues. Keep in step with those Swift files; the portable `face_clustering.rs` stays the
+//! default for every other face space.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -103,8 +99,6 @@ fn single_model(conn: &Connection, processing: &str) -> Option<String> {
     (models.len() == 1).then(|| models[0].clone())
 }
 
-// MARK: - Provenance (FaceCacheProvenance)
-
 fn source_revision(size: i64, modified: f64) -> String {
     format!("{size}:{}", modified.to_bits())
 }
@@ -154,8 +148,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     }
     sum
 }
-
-// MARK: - Selected partition
 
 #[derive(Debug, Clone, PartialEq)]
 struct FaceRow {
@@ -294,8 +286,6 @@ fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, ski
     Ok(current.deferred)
 }
 
-// MARK: - Identities and verdicts
-
 #[derive(Debug, Clone, PartialEq)]
 struct Prior {
     id: i64,
@@ -419,8 +409,6 @@ fn verdicts(conn: &Connection, participants: Option<&HashSet<i64>>) -> Result<Ve
     Ok(out)
 }
 
-// MARK: - Clustering pass
-
 fn hyperparameters() -> (Hyperparameters, bool) {
     (
         Hyperparameters {
@@ -510,8 +498,6 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     }
     out
 }
-
-// MARK: - Persist
 
 #[derive(Debug, Default)]
 struct Stats {
@@ -1100,8 +1086,6 @@ fn persist(
     Ok(Stats { person_count, suppressed_faces, truncated_faces, deferred })
 }
 
-// MARK: - Centroid auto-merge (tightPairAutoMerge)
-
 struct VpNode {
     vantage: usize,
     threshold: f64,
@@ -1443,8 +1427,6 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     Ok(absorbed)
 }
 
-// MARK: - Review (FaceReview.holdout / finish / assess)
-
 fn holdout(conn: &Connection, space: &Space, min_quality: f64) -> rusqlite::Result<HashSet<i64>> {
     let incremental: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM face_prints WHERE person_id IS NOT NULL AND embedding_model=?1 AND processing_version=?2)",
@@ -1735,8 +1717,6 @@ fn finish(conn: &mut Connection, pool: &[i64], held: &HashSet<i64>, space: &Spac
     tx.commit()?;
     Ok(queued)
 }
-
-// MARK: - Run
 
 fn person_count(conn: &Connection) -> u32 {
     conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0)).map_or(0, |count| count as u32)

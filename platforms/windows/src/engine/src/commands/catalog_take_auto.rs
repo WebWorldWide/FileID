@@ -291,8 +291,6 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
-// MARK: scoring
-
 pub struct ScoreJob {
     shots: Vec<CatalogTakeShot>,
     rows: HashMap<i64, FileRow>,
