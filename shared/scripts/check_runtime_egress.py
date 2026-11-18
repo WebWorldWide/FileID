@@ -70,8 +70,6 @@ EXCLUDED_SOURCE_PARTS = {
 }
 RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/client.rs",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift",
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/models/vlm_server.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
@@ -80,16 +78,12 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/server.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
     "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
     "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
     "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
     "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
     "platforms/apple/app/Sources/FileID/EngineClient.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
     "platforms/linux/src/app/src/engine_client.rs",
     "platforms/linux/src/app/src/tabs/settings.rs",
     "platforms/windows/src/engine/src/commands/trash.rs",
@@ -132,17 +126,11 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "61224908a917f143a8113c1fe8c1b6ac127e5d752737105d4cf69bc3b28d16a3",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "ef9d4332f43baeb402418fd4fea068231ceafc5261f2bfbeb9b77d4e47cf0ccf",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "7376ca71ed759b10938d9efda6d90fc6753357275367e379ba93b9c176b830fe",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "a7ab323a099d54623748affe3e90cf789403017e87b1ed9d123a9891905f870b",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
   "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "c769f501be2a2cb043e24ff951e5f3d0262bd72999faa56a2489de7123e344d7",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "3c43035bdd25ba43ea5ef9b2d4a4421c9f7f914ad26adc8ebe195bdd34c38d7b",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "a2cab1b4f247198dc5493d60813aa0e32617cefba91938fa6b1b879fa353d456",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "00fecf9ed22732df4b5410313007970bb655849f0d6c8bd3910f92f0c0aedf2a",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "50d1cf6ff252fc696895b64d683994170e551a6df40d846436997d3943fb22dc",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "c937536bd5342569378b3dfc42a3b7e47f9cdf522ea73ed7e5add0a6d8e2d8d8",
-  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
+  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "f7943366e057912438df28e7c24f49a41b701c8d2a343b9b0315c74e4b9e5abd",
   "platforms/linux/src/app/src/engine_client.rs": "15830c04297f81c826aa31394617d65fc111fa8ce40bb3f13ce63e546b20de53",
   "platforms/linux/src/app/src/tabs/settings.rs": "b1823039110538935868a76e936b1a4544d5f842b32e4c1ce1dbfc70c06ddbe2",
   "platforms/windows/src/FileID.App/App.xaml.cs": "ac4bbda42428cf1822d5bc6cbc5a121d3376a5e4d75fd2f7d9449795d5105d1e",
@@ -166,7 +154,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/vlm_server.rs": "c2f9540850b3a9f61031baac4d44c0f47353c2154de2bca49b1a379dce4a192f",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "fb83d73f21312ed331000d7f999db0cdf0ccd4ef11cbf795c093b755bc97e2b6",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "be3c426f5411a60ca7a91cc9387e578432aef5e9b9d932978fd12f1be46a41bd",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "1a70f493e8139f275c4a0e966ccd0b9c881b72c5c21ca0aaa75d45269622651e",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "b9f80fb19ae0a80eab0f9c23d848e7751fcd3d6fa77b3959f780f0308e88dc27",
   "platforms/windows/src/engine/src/platform.rs": "6b526f72778efe2873d3ac91e800db0d99905da9b8d5eda7804eb10b33b1b491",
   "platforms/windows/src/engine/src/shell/heic.rs": "890bce8f247d2da9ddd21d544efd5b34f39ec12370c6b420cd5e579f42f00862",
   "platforms/windows/src/engine/src/shell/mod.rs": "f762df3c2ebcf08884235ef89ba05a6c84db969e31af4f1c2fe9df71b6574553",
@@ -182,7 +170,6 @@ SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
     "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
 }
@@ -445,8 +432,7 @@ def _swift_transport_violations(root: Path) -> list[str]:
     failures: list[str] = []
     streaming_path = root / "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift"
     pinning_path = root / "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift"
-    vlm_path = root / "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift"
-    if not all(path.is_file() for path in (streaming_path, pinning_path, vlm_path)):
+    if not all(path.is_file() for path in (streaming_path, pinning_path)):
         return ["Apple reviewed network transport files are missing"]
     streaming_text = streaming_path.read_text(encoding="utf-8")
     streaming = _without_comments(streaming_text)
@@ -493,29 +479,6 @@ def _swift_transport_violations(root: Path) -> list[str]:
     redirect = _braced_expression(pinning, "public static func allowsRedirect")
     if redirect is None or "allowsExternalRequest(to: url)" not in redirect:
         failures.append(f"{pinning_path}: redirects must reuse the initial external URL policy")
-    delegate_redirect = _braced_expression(pinning, "willPerformHTTPRedirection")
-    if delegate_redirect is None or not all(
-        value in delegate_redirect
-        for value in ("TLSPinning.maxRedirects", "TLSPinning.allowsRedirect(to: request.url)")
-    ):
-        failures.append(f"{pinning_path}: tree-listing delegate lacks reviewed redirect enforcement")
-
-    vlm_text = vlm_path.read_text(encoding="utf-8")
-    vlm = _without_comments(vlm_text)
-    vlm_code = _mask_comments_and_strings(vlm_text)
-    if re.search(r"\.(?:dataTask|downloadTask|uploadTask|streamTask|webSocketTask|bytes)\s*\(", vlm_code) \
-            or "URLSession.shared" in vlm_code \
-            or len(re.findall(r"URLSession\s*\(", vlm_code)) != 1 \
-            or len(re.findall(r"URLRequest\s*\(", vlm_code)) != 1 \
-            or len(re.findall(r"\.data\s*\(", vlm_code)) != 1 \
-            or _swift_url_loader_sites(vlm_code) != 1:
-        failures.append(f"{vlm_path}: raw tree-listing request inventory changed")
-    listing = _braced_expression(vlm, "private func listRepoFiles")
-    vlm_guard = "guard TLSPinning.allowsExternalRequest(to: url) else"
-    if listing is None or vlm_guard not in listing or listing.index(vlm_guard) > listing.index("URLSession"):
-        failures.append(f"{vlm_path}: tree listing must reject its initial URL before session creation")
-    if listing is None or "pinDelegate.redirectRejected" not in listing:
-        failures.append(f"{vlm_path}: tree listing must surface blocked redirects")
     return failures
 
 
@@ -595,8 +558,6 @@ def source_boundary_violations(root: Path) -> list[str]:
         "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
         "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": 2,
         "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": 1,
-        "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
-        "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
     }
     for relative, expected_count in local_data_inventory.items():
         path = root / relative

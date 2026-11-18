@@ -33,7 +33,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/tui/src",
             "platforms/linux/src/app/src",
             "platforms/apple/app/Sources",
-            "platforms/apple/engine/Sources",
             "platforms/apple/shared/Sources",
             "platforms/windows/src/FileID.App",
             "platforms/windows/src/FileID.IpcSchema",
@@ -325,8 +324,6 @@ class RuntimeEgressTests(unittest.TestCase):
 
     def test_reviewed_role_inventories_are_exact(self) -> None:
         self.assertEqual(RAW_NETWORK_FILES, {
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift",
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/models/vlm_server.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
@@ -335,16 +332,12 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/server.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
             "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
             "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
             "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
             "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
             "platforms/apple/app/Sources/FileID/EngineClient.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
             "platforms/linux/src/app/src/engine_client.rs",
             "platforms/linux/src/app/src/tabs/settings.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
@@ -394,7 +387,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
         })
@@ -614,11 +606,6 @@ class RuntimeEgressTests(unittest.TestCase):
                 "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
                 "\nfunc beacon(session: URLSession, request: URLRequest) { session.dataTask(with: request) }\n",
                 "must not construct sessions or requests",
-            ),
-            (
-                "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
-                "\nfunc beacon(session: URLSession, request: URLRequest) { session.dataTask(with: request) }\n",
-                "raw tree-listing request inventory",
             ),
             (
                 "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
