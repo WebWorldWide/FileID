@@ -48,11 +48,6 @@ pub const CLIPS: Thresholds = Thresholds {
 };
 
 pub const MAX_GAP_SECONDS: f64 = NEAR_DUPLICATE.max_gap_seconds;
-pub const MAX_SPAN_SECONDS: f64 = NEAR_DUPLICATE.max_span_seconds;
-pub const MIN_COSINE: f32 = NEAR_DUPLICATE.min_cosine;
-pub const MIN_SEED_COSINE: f32 = NEAR_DUPLICATE.min_seed_cosine;
-pub const MAX_HAMMING: u32 = NEAR_DUPLICATE.max_hamming;
-pub const MAX_GROUP_SIZE: usize = NEAR_DUPLICATE.max_group_size;
 /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this
 /// similar counts as the same shot even when its file dates differ.
 pub const SIDECAR_COSINE: f32 = 0.90;
@@ -436,7 +431,7 @@ mod tests {
         for g in found {
             let angles: Vec<f32> = g.members.iter().map(|m| *m as f32 * 0.2).collect();
             let spread = angles.iter().copied().fold(f32::MIN, f32::max) - angles.iter().copied().fold(f32::MAX, f32::min);
-            assert!(spread.cos() >= MIN_SEED_COSINE);
+            assert!(spread.cos() >= NEAR_DUPLICATE.min_seed_cosine);
         }
     }
 
