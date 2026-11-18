@@ -132,6 +132,30 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
+                            // Open-source licenses
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Acknowledgements").font(Theme.Font.body(12.5, .semibold))
+                                Text("FileID is open source under the Apache License 2.0. These are the licenses of the open-source software and models it uses.")
+                                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                                HStack(spacing: 8) {
+                                    Button("Open-source acknowledgements") {
+                                        if let url = LicenseNotices.noticesURL() { NSWorkspace.shared.open(url) }
+                                    }
+                                    .buttonStyle(.dsSecondary)
+                                    .disabled(LicenseNotices.noticesURL() == nil)
+                                    .help(LicenseNotices.noticesURL() == nil
+                                          ? "The acknowledgements file is only in the packaged app."
+                                          : "Opens the list of open-source licenses.")
+                                    Button("FileID license") {
+                                        if let url = LicenseNotices.licenseURL() { NSWorkspace.shared.open(url) }
+                                    }
+                                    .buttonStyle(.dsSecondary)
+                                    .disabled(LicenseNotices.licenseURL() == nil)
+                                }
+                            }
+
+                            Divider().opacity(0.3)
+
                             // Logs
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
@@ -182,7 +206,7 @@ struct SettingsTab: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
-                            Text("(troubleshooting: background helper, storage, scan history, logs)")
+                            Text("(troubleshooting: background helper, storage, scan history, acknowledgements, logs)")
                                 .font(Theme.Font.body(12))
                                 .foregroundStyle(Theme.text3)
                         }

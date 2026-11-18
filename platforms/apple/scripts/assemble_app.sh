@@ -186,6 +186,12 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 cp "$PROJECT_DIR/Resources/FileID.icns" "$CONTENTS/Resources/FileID.icns"
+# Apache-2.0 + third-party licence texts (Settings -> Advanced -> Acknowledgements opens them).
+for notice in LICENSE THIRD_PARTY_NOTICES.txt; do
+    [ -f "$PROJECT_DIR/../../$notice" ] || { echo "❌ $PROJECT_DIR/../../$notice missing"; exit 1; }
+done
+cp "$PROJECT_DIR/../../LICENSE" "$CONTENTS/Resources/LICENSE.txt"
+cp "$PROJECT_DIR/../../THIRD_PARTY_NOTICES.txt" "$CONTENTS/Resources/THIRD_PARTY_NOTICES.txt"
 # Required-reason API declarations and "no tracking, no collected data" (App Store privacy manifest).
 cp "$PROJECT_DIR/Resources/PrivacyInfo.xcprivacy" "$CONTENTS/Resources/PrivacyInfo.xcprivacy"
 plutil -lint "$CONTENTS/Resources/PrivacyInfo.xcprivacy" >/dev/null

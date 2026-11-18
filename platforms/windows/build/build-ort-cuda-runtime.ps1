@@ -44,7 +44,8 @@ $DefaultOrtRepository = 'https://github.com/intel/onnxruntime.git'
 if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $env:FILEID_ORT_REPOSITORY }
 if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $DefaultOrtRepository }
 if ($OrtRepository -notmatch '^https://' -and -not (Test-Path -LiteralPath $OrtRepository)) {
-    throw "OrtRepository must be an https:// URL or an existing local path: $OrtRepository"
+    $ortRepositoryHost = if ($OrtRepository -match '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@]*@)?([^/:?#]+)') { $Matches[1] } else { 'no host' }
+    throw "OrtRepository must be an https:// URL or an existing local path (host given: $ortRepositoryHost)."
 }
 $CudaVersion = '12.8.1'
 $CudnnVersion = '9.8.0'

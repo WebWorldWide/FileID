@@ -354,6 +354,7 @@ struct DSMenuLabel: View {
     var systemImage: String? = nil
     var height: CGFloat = Theme.Metrics.controlSmall
     @Environment(\.fixedTextSize) private var fixed
+    @Environment(\.isEnabled) private var isEnabled
     var body: some View {
         HStack(spacing: 6) {
             if let systemImage { Image(systemName: systemImage) }
@@ -366,7 +367,10 @@ struct DSMenuLabel: View {
         .background(Color.white.opacity(0.05), in: rounded(Theme.Radius.s))
         .overlay(rounded(Theme.Radius.s).strokeBorder(Theme.hairlineStrong, lineWidth: 1))
         .contentShape(rounded(Theme.Radius.s))
+        .opacity(Self.opacity(isEnabled: isEnabled))
     }
+
+    static func opacity(isEnabled: Bool) -> Double { isEnabled ? 1 : Theme.disabledOpacity }
 }
 
 /// Plain clickable rows and tiles: whole frame is the hit area, with a soft

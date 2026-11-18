@@ -419,14 +419,15 @@ struct EngineQueryRepliesProcessTests {
     }
 
     nonisolated private static var engineBinary: URL? {
-        guard let path = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"],
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["FILEID_TEST_HOSTED_ENGINE_PATH"] ?? environment["FILEID_TEST_ENGINE_PATH"],
               FileManager.default.isExecutableFile(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
 
     @Test("Real engine replies reach the waiting caller",
           .enabled(if: engineBinary != nil && ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == nil,
-                   "needs FILEID_TEST_ENGINE_PATH; process-spawning tests hang the GitHub macOS runner"),
+                   "needs FILEID_TEST_HOSTED_ENGINE_PATH; process-spawning tests hang the GitHub macOS runner"),
           .timeLimit(.minutes(3)))
     func realEngineRepliesAreRouted() async throws {
         let binary = try #require(Self.engineBinary)

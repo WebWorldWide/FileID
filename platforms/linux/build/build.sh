@@ -59,6 +59,7 @@ cp -f "$PLATFORM_DIR/data/io.github.fileid.FileID.desktop" "$DIST_DIR/"
 FONT_SOURCE="$REPO_ROOT/platforms/apple/app/Sources/FileID/Resources/Fonts"
 mkdir -p "$DIST_DIR/fonts"
 cp -f "$FONT_SOURCE"/*.ttf "$FONT_SOURCE"/*-OFL.txt "$DIST_DIR/fonts/" || fail "font staging failed"
+cp -f "$REPO_ROOT/LICENSE" "$REPO_ROOT/THIRD_PARTY_NOTICES.txt" "$DIST_DIR/" || fail "licence staging failed"
 if [[ -n "${FILEID_LINUX_MEDIA_DIR:-}" ]]; then
   media_source="$FILEID_LINUX_MEDIA_DIR"
   [[ "$media_source" = /* && -d "$media_source" && ! -L "$media_source" ]] || fail "FILEID_LINUX_MEDIA_DIR must be an absolute regular directory"

@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The Best Takes rail section for library-wide similar takes: the find button
 /// (the takeGrouping job, with its progress and controls) and the stored
-/// proposals, each with a relation chip and the evidence behind it.
+/// proposals. A relation chip marks only the proposals whose relation differs
+/// from the section's majority (see `TakeProposals.relationsShowingChip`).
 struct RelatedTriesSection: View {
     let proposals: [CatalogTakeAutoGroup]
     let job: CatalogJob?
@@ -33,17 +34,14 @@ struct RelatedTriesSection: View {
                     .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            let chipRelations = TakeProposals.relationsShowingChip(among: proposals.map(\.relation))
             ForEach(proposals) { group in
-                ProposalRow(group: group, selected: selectedKey == group.groupKey, showsRelation: showsRelation(of: group)) { onOpen(group) }
+                ProposalRow(group: group, selected: selectedKey == group.groupKey, showsRelation: chipRelations.contains(group.relation)) { onOpen(group) }
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .animation(Theme.springStandard, value: proposals.map(\.groupKey))
         .animation(Theme.springStandard, value: job?.state)
-    }
-
-    private func showsRelation(of group: CatalogTakeAutoGroup) -> Bool {
-        TakeProposals.showsRelationChip(group.relation, among: proposals.map(\.relation))
     }
 
     private var header: some View {
