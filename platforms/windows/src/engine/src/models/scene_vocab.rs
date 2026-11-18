@@ -1,4 +1,5 @@
-// CLIP zero-shot scene tags. The image embedding (already computed for dedup and search) is scored against a label matrix precomputed by `examples/gen_scene_matrix.rs`, so scene tagging needs no text model at scan time. Replaces an ImageNet object classifier, whose labels are the wrong taxonomy for scene tags.
+// CLIP zero-shot scene tags: the image embedding (already computed for dedup and search) is scored against a label
+// matrix precomputed by `examples/gen_scene_matrix.rs`, so scene tagging needs no text model at scan time.
 
 use std::sync::{Arc, OnceLock};
 
@@ -18,7 +19,8 @@ mod scene_embeddings {
 pub use scene_embeddings::SCENE_EMBEDDINGS;
 
 
-/// Curated 1-2 word scene/content labels scored by CLIP zero-shot. Keep entries lowercase and natural: they fill the "a photo of a {}" prompt templates and are title-cased by `TagChip.FormatTag`.
+/// Keep entries lowercase and natural: they fill the "a photo of a {}" templates and are title-cased by
+/// `TagChip.FormatTag`.
 pub static SCENE_LABELS: &[&str] = &[
     "beach", "ocean", "lake", "river", "waterfall", "mountain", "hill",
     "forest", "jungle", "desert", "field", "meadow", "garden", "park",
@@ -52,10 +54,8 @@ pub static SCENE_LABELS: &[&str] = &[
     "architecture", "building interior", "construction site",
 ];
 
-/// CLIP zero-shot prompt ensembling: each label is embedded with every
-/// template and the embeddings are averaged + renormalized. A few templates
-/// recover a few percent of accuracy over a single one at no per-file cost
-/// (the averaging happens once at matrix-build time). `{}` is the label.
+/// Each label is embedded with every template, averaged and renormalized (done once at matrix-build time); `{}` is the
+/// label.
 pub static PROMPT_TEMPLATES: &[&str] = &[
     "a photo of a {}.",
     "a photo of the {}.",
@@ -64,43 +64,30 @@ pub static PROMPT_TEMPLATES: &[&str] = &[
     "a {}.",
 ];
 
-/// Minimum cosine similarity (not a softmax probability) for a label to be emitted as a tag. Both embeddings are L2-normalized, so the dot product is the cosine, and an image matching no label emits nothing. A softmax over cosine×100 made the top label look confident even at a mediocre cosine.
-/// Tuned against the shipped CLIP model: raise to drop weak tags, lower for more recall. Tune against the persisted tags.score (the raw cosine).
+/// Minimum cosine (not a softmax probability) to emit a label, so an image matching nothing emits nothing; a softmax
+/// over cosine×100 made the top label look confident at a mediocre cosine. Tune against the persisted `tags.score`.
 pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 
-/// Max scene tags emitted per file. macOS Vision surfaces a handful of
-/// labels per image; the Library card shows the top 2, the rest are
-/// searchable.
+/// The Library card shows the top 2; the rest are searchable.
 pub const SCENE_TOP_K: usize = 4;
 
-/// Prompts text-encoded per ONNX batch when building the label matrix.
 const BUILD_BATCH: usize = 64;
 
-/// The label-embedding matrix used for zero-shot scoring. Holds one
-/// L2-normalized, prompt-ensembled embedding per `SCENE_LABELS` entry.
 pub struct SceneLabeler {
     matrix: Vec<Vec<f32>>,
 }
 
 impl SceneLabeler {
-    /// Resolve a label index (returned by [`SceneLabeler::score`]) to its
-    /// human-readable label string. Method (not assoc fn) for call-site
-    /// ergonomics: `labeler.label(idx)` reads better than `SceneLabeler::label`.
     #[allow(clippy::unused_self)]
     pub fn label(&self, idx: usize) -> &'static str {
         SCENE_LABELS[idx]
     }
 
-    /// Read-only view of the prompt-ensembled label matrix (one L2-normalized
-    /// row per `SCENE_LABELS` entry). Used by the offline matrix-regeneration
-    /// harness (`examples/gen_scene_matrix.rs`); not referenced at runtime.
+    /// Used only by the offline `examples/gen_scene_matrix.rs`.
     pub fn matrix(&self) -> &[Vec<f32>] {
         &self.matrix
     }
 
-    /// Build the label matrix from an already-loaded CLIP text encoder.
-    /// Embeds every label×template prompt (batched), averages each label's
-    /// template embeddings, and L2-renormalizes.
     pub fn build(model: &mut ClipText) -> Result<Self> {
         let started = std::time::Instant::now();
         let templates = PROMPT_TEMPLATES.len();
@@ -112,7 +99,8 @@ impl SceneLabeler {
         }
 
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(prompts.len());
-        // Fast path: one batched ONNX run per BUILD_BATCH prompts. Exports that pin batch=1 fail the batched run; fall back to per-prompt embed() rather than disabling scene tagging, and stay sequential afterwards.
+        // One batched ONNX run per BUILD_BATCH prompts; exports that pin batch=1 fall back to per-prompt embed()
+        // instead of disabling scene tagging.
         let mut use_sequential = false;
         for chunk in prompts.chunks(BUILD_BATCH) {
             if !use_sequential {
@@ -164,32 +152,22 @@ impl SceneLabeler {
         Ok(Self { matrix })
     }
 
-    /// The matrix compiled in from `scene_embeddings_precomputed.rs`.
     pub fn precomputed() -> Self {
         Self { matrix: SCENE_EMBEDDINGS.iter().map(|row| row.to_vec()).collect() }
     }
 
-    /// Score an image embedding against the vocabulary. Returns up to
-    /// `top_k` `(label_index, cosine_similarity)` pairs whose cosine clears
-    /// `threshold`, highest first. Empty when nothing matches.
     pub fn score(&self, image_emb: &[f32], threshold: f32, top_k: usize) -> Vec<(usize, f32)> {
         score_labels(image_emb, &self.matrix, threshold, top_k)
     }
 }
 
-/// Process-static labeler, materialized once per engine launch on first use.
 pub fn shared_scene_labeler() -> Arc<SceneLabeler> {
     static LABELER: OnceLock<Arc<SceneLabeler>> = OnceLock::new();
     LABELER.get_or_init(|| Arc::new(SceneLabeler::precomputed())).clone()
 }
 
-/// Pure zero-shot scorer: cosine similarity (a dot product, since both sides
-/// are L2-normalized), thresholded directly, and truncated to the top `top_k`
-/// by cosine. NO softmax — emitting the argmax of a peaky softmax tagged every
-/// image with a confident wrong label; thresholding the raw cosine emits only
-/// genuine matches (and nothing when the image matches no label). Kept a free
-/// function with no I/O so it's deterministic and unit-testable with synthetic
-/// embeddings.
+/// Free function with no I/O so it is unit-testable. No softmax: the argmax of a peaky softmax tagged every image with
+/// a confident wrong label; thresholding the raw cosine emits only genuine matches.
 pub(crate) fn score_labels(
     image_emb: &[f32],
     matrix: &[Vec<f32>],
@@ -206,7 +184,6 @@ pub(crate) fn score_labels(
         .map(|(i, label)| (i, dot(image_emb, label)))
         .filter(|&(_, cos)| cos >= threshold)
         .collect();
-    // Highest cosine first; deterministic index tie-break.
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -246,7 +223,7 @@ mod tests {
     fn exact_match_clears_threshold_with_cosine_one() {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
-        let img = basis(dim, 2); // identical to matrix[2] → cosine 1.0
+        let img = basis(dim, 2);
         let out = score_labels(&img, &matrix, 0.5, 4);
         assert_eq!(out.len(), 1, "only the matching label clears 0.5: {out:?}");
         assert_eq!(out[0].0, 2, "the matching label must rank first");
@@ -257,9 +234,7 @@ mod tests {
     fn orthogonal_below_threshold_yields_no_tags() {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
-        // Orthogonal to every label → all cosines 0 → nothing clears a positive
-        // threshold (the key property: a no-match image gets NO tag, not a
-        // confident wrong one).
+        // Orthogonal to every label: a no-match image must get NO tag.
         let img = basis(dim, 7);
         let out = score_labels(&img, &matrix, 0.24, 4);
         assert!(out.is_empty(), "no-match image must emit nothing: {out:?}");
@@ -272,7 +247,7 @@ mod tests {
         let mut img = vec![0f32; dim];
         img[0] = 0.8;
         img[1] = 0.6;
-        l2_normalize(&mut img); // already unit, but keep parity with real path
+        l2_normalize(&mut img);
         let out = score_labels(&img, &matrix, 0.1, 2);
         assert_eq!(out.len(), 2, "top_k must cap the result count");
         assert_eq!(out[0].0, 0);

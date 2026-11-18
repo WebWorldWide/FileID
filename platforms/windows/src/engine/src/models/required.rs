@@ -1,5 +1,5 @@
-//! The models a scan cannot start without. `clip_text` is query-time only and
-//! RAM++ tags fall back to CLIP scene tags, so neither is required.
+//! The models a scan cannot start without. `clip_text` is query-time only and RAM++ tags fall back to CLIP scene tags,
+//! so neither is required.
 
 use super::registry::{installation_complete, lookup_full, LookupResult};
 
@@ -12,8 +12,6 @@ pub struct MissingModel {
     pub approx_bytes: u64,
 }
 
-/// Required scan models that are not fully installed in the engine's model
-/// directory — the exact gate `startScan` enforces.
 pub fn missing_required() -> Vec<MissingModel> {
     REQUIRED_SCAN_MODELS
         .iter()

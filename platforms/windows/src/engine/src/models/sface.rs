@@ -1,13 +1,7 @@
-// SFace face embedder (OpenCV Zoo `face_recognition_sface_2021dec`, Apache-2.0).
-// Maps an ALIGNED 112×112 RGB face crop to a 128-d L2-normalized embedding.
-// Replaces the non-commercial ArcFace (InsightFace) for a commercial-clean
-// face-recognition path.
-//
-// Input contract (verified against OpenCV's cv2.FaceRecognizerSF): the network
-// is fed the face crop in RGB channel order with RAW [0,255] float values — the
-// ONNX bakes its own (x-127.5)/128 normalization as the first graph ops, so we
-// do NOT pre-normalize (unlike ArcFace's (px/127.5 - 1)). The model output is
-// NOT L2-normalized, so we normalize here for cosine comparison.
+// SFace face embedder (OpenCV Zoo `face_recognition_sface_2021dec`, Apache-2.0): an ALIGNED 112×112 RGB crop → 128-d
+// L2-normalized embedding; the commercial-clean replacement for ArcFace.
+// Input is RGB with RAW [0,255] floats: the ONNX bakes (x-127.5)/128 in as its first ops, so do NOT pre-normalize.
+// Output is not L2-normalized, so normalize here.
 
 use std::path::{Path, PathBuf};
 
@@ -18,8 +12,6 @@ use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 pub struct SFace {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load and reused on
-    /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
     model_version: String,
 }
@@ -54,8 +46,6 @@ impl SFace {
         &self.model_version
     }
 
-    /// Embed a 112×112 RGBA8 face crop (alpha ignored), the buffer the macOS
-    /// pipeline aligns into; same contract as [`Self::embed`].
     pub fn embed_rgba(&mut self, rgba_112: &[u8]) -> Result<Vec<f32>> {
         if rgba_112.len() != 4 * 112 * 112 {
             anyhow::bail!("SFace embed_rgba expects 50176 RGBA8 bytes, got {}", rgba_112.len());
@@ -64,13 +54,10 @@ impl SFace {
         self.embed(&rgb)
     }
 
-    /// Embed an aligned 112×112 RGB8 face crop (3 * 112 * 112 = 37632 bytes).
-    /// Returns 128 floats, L2-normalized.
     pub fn embed(&mut self, rgb_112: &[u8]) -> Result<Vec<f32>> {
         if rgb_112.len() != 3 * 112 * 112 {
             anyhow::bail!("SFace embed expects 37632 RGB8 bytes, got {}", rgb_112.len());
         }
-        // RGB channel order, RAW [0,255] floats — the ONNX normalizes internally.
         let mut chw = Array4::<f32>::zeros((1, 3, 112, 112));
         for y in 0..112 {
             for x in 0..112 {
@@ -83,7 +70,8 @@ impl SFace {
 
         let outputs = self.session.run(vec![(self.input_name.as_str(), chw.into())]).context("SFace session.run")?;
         let mut emb: Vec<f32> = outputs.into_iter().next().ok_or_else(|| anyhow::anyhow!("SFace produced no outputs"))?.data;
-        // A wrong or quantized export with another output width would silently mis-cluster and diverge from the cross-platform face DB (128-d / 512-byte blobs): fail rather than persist an off-dim vector.
+        // Another output width would silently mis-cluster and diverge from the cross-platform face DB (128-d / 512-byte
+        // blobs): fail rather than persist it.
         if emb.len() != 128 {
             anyhow::bail!(
                 "SFace produced a {}-d embedding, expected 128 (wrong or quantized model?)",
@@ -104,7 +92,6 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Weights path: `sface/face_recognition_sface_2021dec.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::installed_model_file(
         &crate::paths::models_dir()?.join("sface").join("face_recognition_sface_2021dec.onnx"),
@@ -117,7 +104,7 @@ mod tests {
 
     #[test]
     fn l2_normalize_gives_unit_norm() {
-        let mut v = vec![3.0_f32, 4.0]; // norm 5 → 0.6, 0.8
+        let mut v = vec![3.0_f32, 4.0];
         l2_normalize(&mut v);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-5, "norm = {norm}");
@@ -127,7 +114,7 @@ mod tests {
     #[test]
     fn l2_normalize_zero_vector_is_finite() {
         let mut v = vec![0.0_f32; 4];
-        l2_normalize(&mut v); // guarded by max(1e-8) — must not produce NaN/Inf
+        l2_normalize(&mut v);
         assert!(v.iter().all(|x| x.is_finite()));
     }
 }

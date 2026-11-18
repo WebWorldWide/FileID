@@ -1,5 +1,6 @@
-// RAM++ (Apache-2.0) image tagger: the universal tagger, since tagging must run on every machine and stay license-clean. A single tract (CPU) forward pass; the VLM is reserved for opt-in Deep Analyze.
-// The ONNX comes from shared/scripts/export_ram_plus_onnx.py. Its contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and the ImageNet constants below must stay in sync with that script.
+// RAM++ (Apache-2.0) image tagger, the universal tagger that runs on every machine; the VLM is reserved for opt-in Deep
+// Analyze. The ONNX comes from shared/scripts/export_ram_plus_onnx.py; its contract (input "image" [1,3,384,384] f32,
+// output "logits" [1,4585]) and the ImageNet constants below must stay in sync with it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,33 +15,29 @@ const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 pub const INPUT_SIZE: u32 = 384;
 const INV_255: f32 = 1.0 / 255.0;
 
-/// Default sigmoid cutoff, used when no per-class sidecar (`ram_plus_thresholds.txt`) is present. Overridable via FILEID_RAMPLUS_THRESHOLD.
+/// Used when no per-class sidecar (`ram_plus_thresholds.txt`) is present; overridable via FILEID_RAMPLUS_THRESHOLD.
 const DEFAULT_THRESHOLD: f32 = 0.68;
-/// Cap RAM++'s own emissions below the scan pipeline's 16-tag total cap, biased to precision so Year/camera/OCR extras keep slots.
+/// Below the pipeline's 16-tag total cap, biased to precision so Year/camera/OCR extras keep slots.
 const DEFAULT_MAX_TAGS: usize = 8;
 
-/// Hard precision floor under the per-class thresholds: F1-balanced thresholds calibrate some common classes low and surface weak tags. Overridable via FILEID_RAMPLUS_PRECISION_FLOOR for threshold sweeps.
+/// Floor under the per-class thresholds (F1-balanced thresholds calibrate some common classes low and surface weak
+/// tags); overridable via FILEID_RAMPLUS_PRECISION_FLOOR.
 const DEFAULT_PRECISION_FLOOR: f32 = 0.62;
 
-/// RAM++ vocab tags that read as noise on a Library card and are filtered from the emitted set: medium words (`image`/`photo`), `face` (surfaced by the People tab), and `catch` plus posture/clothing fillers (`stand`/`sit`/`lay`/`pose`/`wear`).
-/// Extend without a rebuild via the `ram_plus_suppress.txt` sidecar (one tag per line, merged case-insensitively).
+/// Vocab tags that read as noise on a Library card: medium words, `face` (surfaced by the People tab) and
+/// posture/clothing fillers. Extend via the `ram_plus_suppress.txt` sidecar.
 const SUPPRESSED_TAGS: &[&str] = &[
     "image", "photo", "photograph", "photography", "picture", "face", "catch",
     "stand", "sit", "lay", "pose", "wear",
-// Dropping these frees tag slots without hurting held-out subject F1.
     "person", "people", "hair", "head", "hand", "play", "game", "make", "fill", "dark",
     "blue", "red", "white", "black", "green", "brown", "yellow", "pink", "gray", "grey", "purple",
 ];
 
-/// Generic people words; at most one survives per image (the most likely),
-/// and none when face detection ran and found no face (`tagging.rs`).
+/// At most one survives per image, and none when face detection ran and found no face (`tagging.rs`).
 pub const PEOPLE_WORDS: &[&str] = &["man", "woman", "boy", "girl", "child", "couple"];
 
-/// A broader tag dropped when its more specific partner is also present.
 const REDUNDANT_WITH: &[(&str, &str)] = &[("goggles", "sunglasses")];
 
-/// Built-in suppress check (case-insensitive). [`is_suppressed`] also folds in
-/// the per-instance sidecar set.
 fn is_suppressed_builtin(tag: &str) -> bool {
     SUPPRESSED_TAGS.iter().any(|s| s.eq_ignore_ascii_case(tag))
 }
@@ -49,9 +46,7 @@ fn is_suppressed(tag: &str, extra: &HashSet<String>) -> bool {
     is_suppressed_builtin(tag) || (!extra.is_empty() && extra.contains(&tag.to_ascii_lowercase()))
 }
 
-/// Read the optional `ram_plus_suppress.txt` sidecar next to the tag list: one
-/// tag per line, lowercased; blank lines and `#` comments ignored. Missing file
-/// → empty set (built-in suppression only). No rebuild needed to edit it.
+/// Optional `ram_plus_suppress.txt` next to the tag list: one tag per line, lowercased, `#` comments.
 fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
     let path = tag_list.with_file_name("ram_plus_suppress.txt");
     match std::fs::read_to_string(&path) {
@@ -73,33 +68,18 @@ fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
 
 pub struct RamPlusTagger {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load. Reused on every
-    /// forward instead of re-walking `session.inputs.first()` per inference.
     input_name: String,
-    /// Index-aligned with the model's logits; `tags[i]` is the label for output i.
     tags: Vec<String>,
-    /// Global fallback cutoff (DEFAULT_THRESHOLD or the FILEID_RAMPLUS_THRESHOLD
-    /// env override). Used for any class lacking a per-class threshold.
     threshold: f32,
-    /// Optional per-class cutoffs (index-aligned with `tags`), loaded from the
-    /// `ram_plus_thresholds.txt` sidecar. `None` → use the global `threshold`
-    /// for every class.
     per_class_threshold: Option<Vec<f32>>,
-    /// Effective floor under the per-class/global cutoffs (DEFAULT_PRECISION_FLOOR
-    /// or the FILEID_RAMPLUS_PRECISION_FLOOR env override).
     precision_floor: f32,
-    /// `suppressed[i]` is whether `tags[i]` is dropped (the built-in
-    /// SUPPRESSED_TAGS or the `ram_plus_suppress.txt` sidecar), decided once at
-    /// load: the name comparison for all 4,585 tags used to run for every
-    /// image while the session was locked.
+    /// Decided once at load: comparing all 4,585 names per image under the session lock was measurable.
     suppressed: Vec<bool>,
     supports_dynamic_batch: bool,
     max_tags: usize,
 }
 
 impl RamPlusTagger {
-    /// Load the exported RAM++ ONNX + its index-aligned tag list. Compiles the
-    /// graph for the fixed 384x384 input.
     pub fn load<P: AsRef<Path>, Q: AsRef<Path>>(onnx: P, tag_list: Q) -> Result<Self> {
         let onnx = onnx.as_ref();
         let tag_list = tag_list.as_ref();
@@ -125,10 +105,8 @@ impl RamPlusTagger {
             load_session("RAM++", onnx, &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(n), Dim::Fixed(n)])])?;
         let supports_dynamic_batch = ram_plus_shape_has_dynamic_batch(&session.first_input_shape());
 
-        // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
-        // disabled — handy for threshold sweeps). Otherwise load the per-class
-        // sidecar (`ram_plus_thresholds.txt`, written next to the tag list by the
-        // export) when present + length-matched; missing/mismatched → global.
+        // A set FILEID_RAMPLUS_THRESHOLD forces one global cutoff (handy for sweeps); otherwise use the length-matched
+        // `ram_plus_thresholds.txt` sidecar if present.
         let env_threshold = std::env::var("FILEID_RAMPLUS_THRESHOLD")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -167,7 +145,8 @@ impl RamPlusTagger {
             .filter(|t| (0.0..=1.0).contains(t))
             .unwrap_or(DEFAULT_PRECISION_FLOOR);
 
-// `select_tags` clamps the global cut UP to the precision floor, so a FILEID_RAMPLUS_THRESHOLD sweep below the floor is a silent no-op. Warn once so the operator lowers the floor in lockstep.
+// `select_tags` clamps the global cut UP to the precision floor, so a threshold sweep below the floor is a silent
+// no-op; warn once.
         if let Some(t) = env_threshold
             && t < precision_floor {
                 tracing::warn!(
@@ -215,21 +194,15 @@ impl RamPlusTagger {
         self.supports_dynamic_batch
     }
 
-    /// Tag one decoded RGB8 image (any size — resized internally). Returns
-    /// `(tag, confidence)` pairs above the threshold, highest-confidence first,
-    /// capped at `max_tags`. Confidence is the sigmoid probability (0..1) and is
-    /// what the pipeline persists in `tags.score`.
+    /// Pairs are `(tag, sigmoid confidence)`, best first, capped at `max_tags`; the confidence is what the pipeline
+    /// persists in `tags.score`.
     pub fn tag(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<(String, f32)>> {
         let chw = Self::preprocess_tensor(rgb, width, height)?;
         self.tag_prepared(chw)
     }
 
-    /// CPU-only preprocess (resize + ImageNet-normalize) into the model input
-    /// tensor. Split out of [`tag`] so a caller can run it OUTSIDE the per-session
-    /// Mutex + GPU permit — the GPU forward in [`tag_prepared`] is the only part
-    /// that needs the exclusive session, so one worker can prep while another's
-    /// forward pass runs (shrinks the per-session serial CPU gap). Tag output is
-    /// byte-identical to the old single-call `tag`.
+    /// Resize + ImageNet-normalize, split from [`tag`] so a caller can run it outside the per-session Mutex while
+    /// another worker's forward pass runs.
     pub fn preprocess_tensor(rgb: &[u8], width: u32, height: u32) -> Result<Array4<f32>> {
         let expected = (width as usize) * (height as usize) * 3;
         if rgb.len() != expected {
@@ -244,9 +217,7 @@ impl RamPlusTagger {
         Self::preprocess(rgb, width, height)
     }
 
-    /// Run the GPU forward on a pre-normalized input tensor + select tags. The
-    /// ONLY part that touches `&mut self.session`, so it is what the caller
-    /// serializes under the pool Mutex.
+    /// The only part that needs `&mut self.session`, so callers serialize it under the pool Mutex.
     pub fn tag_prepared(&mut self, chw: Array4<f32>) -> Result<Vec<(String, f32)>> {
         let logits = self.logits(chw)?;
         Ok(self.select_tags(&logits))
@@ -272,7 +243,8 @@ impl RamPlusTagger {
         Ok(logits)
     }
 
-/// Batched [`tag`]: one (N,3,384,384) forward over N images, returning one tag list per input in order. Batch=1 leaves some GPUs launch-bound, so batching is the throughput fix there. Requires an ONNX exported with a dynamic batch axis (`export_ram_plus_onnx.py --dynamic-batch`); a fixed-batch=1 model errors at run.
+/// One (N,3,384,384) forward; needs an ONNX exported with a dynamic batch axis (`export_ram_plus_onnx.py
+/// --dynamic-batch`), a fixed batch=1 model errors at run.
     pub fn tag_batch(&mut self, imgs: &[(&[u8], u32, u32)]) -> Result<Vec<Vec<(String, f32)>>> {
         use ndarray::s;
         if imgs.is_empty() {
@@ -311,9 +283,6 @@ impl RamPlusTagger {
             .collect())
     }
 
-    /// Apply per-class thresholds + suppress-list + top-k cap to one logits row →
-    /// `(tag, confidence)` pairs, highest first. Shared by [`tag`] + [`tag_batch`]
-    /// so both paths emit identical tags.
     fn select_tags(&self, logits: &[f32]) -> Vec<(String, f32)> {
         select_tags_from(
             logits,
@@ -326,9 +295,7 @@ impl RamPlusTagger {
         )
     }
 
-    /// Bilinear resize to 384×384 + ImageNet normalize into a (1,3,384,384)
-    /// tensor. Bilinear (not nearest) because tag quality is sensitive to
-    /// resampling; matches the export script's PIL BILINEAR.
+    /// Bilinear, not nearest: tag quality is sensitive to resampling; matches the export script's PIL BILINEAR.
     fn preprocess(rgb: &[u8], width: u32, height: u32) -> Result<Array4<f32>> {
         let resized = Self::resize_to_input(rgb, width, height)?;
         let n = INPUT_SIZE as usize;
@@ -337,10 +304,8 @@ impl RamPlusTagger {
         Ok(chw)
     }
 
-    /// The model's square RGB8 input, resized from `rgb` (borrowed, not
-    /// cloned). `resize` is a plain copy at equal dimensions, so feeding the
-    /// result back through `preprocess` yields the same tensor. Lets batch
-    /// callers shrink frames on their own thread before queueing them.
+    /// `resize` is a plain copy at equal dimensions, so feeding the result back through `preprocess` yields the same
+    /// tensor.
     pub fn resize_to_input(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
         let src = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(width, height, rgb)
             .ok_or_else(|| anyhow::anyhow!("RAM++ preprocess: bad RGB buffer"))?;
@@ -349,12 +314,10 @@ impl RamPlusTagger {
     }
 }
 
-/// Which of `tags` are suppressed (built-in list or the sidecar), index-aligned.
 fn suppression_mask(tags: &[String], extra: &HashSet<String>) -> Vec<bool> {
     tags.iter().map(|tag| is_suppressed(tag, extra)).collect()
 }
 
-/// The tag rules over one logits row; see [`RamPlusTagger::select_tags`].
 fn select_tags_from(
     logits: &[f32],
     tags: &[String],
@@ -383,11 +346,9 @@ fn select_tags_from(
     named
 }
 
-/// Collapse redundancy before the cap so freed slots go to useful tags
-/// (the Mac's `RamPlusService.refine`): "bat" goes when "baseball bat" is
-/// present (a one-word tag that is the last word of another tag), the
-/// `REDUNDANT_WITH` pairs collapse, and only the strongest people word
-/// survives. `hits` is sorted by score, highest first.
+/// Collapse redundancy before the cap (the Mac's `RamPlusService.refine`): a one-word tag that ends another present tag
+/// ("bat" vs "baseball bat") goes, `REDUNDANT_WITH` pairs collapse, only the strongest people word survives. `hits` is
+/// sorted by score.
 pub fn refine_tags(hits: &mut Vec<(String, f32)>) {
     let names: HashSet<String> = hits.iter().map(|(t, _)| t.to_ascii_lowercase()).collect();
     let heads: HashSet<&str> = names
@@ -439,7 +400,6 @@ fn sigmoid(z: f32) -> f32 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// ONNX path: `ram_plus/ram_plus.onnx`.
 pub fn default_onnx_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("ram_plus").join("ram_plus.onnx"))
 }

@@ -1,4 +1,5 @@
-// CLIP BPE tokenizer: openai/clip pre-tokenization and merges, with HF-compatible bytes-to-unicode mapping. vocab.json and merges.txt are SHA-256 pinned downloads.
+// CLIP BPE tokenizer (openai/clip pre-tokenization and merges, HF-compatible bytes-to-unicode); vocab.json and
+// merges.txt are SHA-256 pinned downloads.
 
 use std::collections::HashMap;
 
@@ -7,13 +8,10 @@ use serde_json::Value;
 
 const SOT: u32 = 49406;
 const EOT: u32 = 49407;
-/// CLIP's fixed text context length. Keep in sync with `clip_text::CONTEXT_LEN`.
+/// Keep in sync with `clip_text::CONTEXT_LEN`.
 const CLIP_CONTEXT_LEN: usize = 77;
-// DoS bounds. The BPE merge loop is O(n²) with per-iteration String clones, so
-// an unbroken multi-megabyte "word" would stall a query thread; 1 024 chars is
-// >13x the 77-token context, so truncation never changes a real query's
-// embedding. The constructor caps are defense-in-depth — vocab/merges are
-// SHA256-pinned downloads (real CLIP: 49 408 vocab / ~48 900 merges).
+// DoS bounds: the BPE merge loop is O(n²) with String clones, so an unbroken multi-megabyte "word" would stall a query
+// thread; 1 024 chars is >13x the 77-token context, so truncation never changes a real query.
 const MAX_QUERY_CHARS: usize = 1_024;
 const MAX_WORD_CHARS: usize = 256;
 const MAX_MERGES: usize = 50_000;
@@ -21,9 +19,7 @@ const MAX_VOCAB: usize = 65_536;
 
 pub struct ClipTokenizer {
     vocab: HashMap<String, u32>,
-    /// (left, right) → merge priority (lower = earlier merge).
     merges: HashMap<(String, String), usize>,
-    /// 256 mapping byte → unicode char, matches HF's bytes_to_unicode.
     byte_encoder: [char; 256],
 }
 
@@ -59,9 +55,6 @@ impl ClipTokenizer {
         Ok(Self { vocab, merges, byte_encoder: build_byte_encoder() })
     }
 
-    /// Tokenize `query` to a Vec<u32> with `<sot>` prefixed and
-    /// `<eot>` suffixed. Truncates to fit before the trailing EOT if
-    /// needed; the caller pads to the model's context length (77).
     pub fn encode(&self, query: &str) -> Vec<u32> {
         let normalized: String = normalize(query).chars().take(MAX_QUERY_CHARS).collect();
         let mut out: Vec<u32> = Vec::with_capacity(16);
@@ -81,7 +74,7 @@ impl ClipTokenizer {
                 last.push_str("</w>");
             }
             loop {
-                let mut best: Option<(usize, usize)> = None; // (idx, rank)
+                let mut best: Option<(usize, usize)> = None;
                 for i in 0..tokens.len().saturating_sub(1) {
                     let pair = (tokens[i].clone(), tokens[i + 1].clone());
                     if let Some(&rank) = self.merges.get(&pair)
@@ -100,7 +93,7 @@ impl ClipTokenizer {
             }
         }
 
-        // Keep the trailing EOT inside the 77-token context: CLIP pools the text embedding at EOT, so a dropped EOT degrades long queries.
+        // CLIP pools the text embedding at EOT, so keep it inside the 77-token context.
         out.truncate(CLIP_CONTEXT_LEN - 1);
         out.push(EOT);
         out
@@ -112,9 +105,7 @@ fn normalize(s: &str) -> String {
     lower.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// OpenAI CLIP's pre-tokenization (Swift `CLIPTokenizer`'s regex):
-/// `<|startoftext|>|<|endoftext|>|'s|'t|'re|'ve|'m|'ll|'d|\p{L}+|\p{N}|[^\s\p{L}\p{N}]+`,
-/// so "dog." is "dog" then "." as in the reference tokenizer.
+/// OpenAI CLIP's pre-tokenization (Swift `CLIPTokenizer`'s regex), so "dog." splits as "dog" then ".".
 fn split_words(s: &str) -> Vec<&str> {
     let mut words = Vec::new();
     let mut rest = s;
@@ -140,8 +131,6 @@ fn split_words(s: &str) -> Vec<&str> {
 }
 
 fn build_byte_encoder() -> [char; 256] {
-    // HF bytes_to_unicode: keep printable bytes intact, remap the rest
-    // into the high-Unicode block so tokens can be JSON-safe strings.
     let mut bs: Vec<u32> = Vec::new();
     for b in '!' as u32..='~' as u32 {
         bs.push(b);

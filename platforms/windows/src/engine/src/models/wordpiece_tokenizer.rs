@@ -1,4 +1,5 @@
-//! BERT WordPiece tokenizer in pure Rust: avoids the `tokenizers` crate (onig and a large build) and matches HF BertTokenizer(do_lower_case=True) for common English.
+//! BERT WordPiece tokenizer in pure Rust (avoids the `tokenizers` crate's onig and large build); matches HF
+//! BertTokenizer(do_lower_case=True) for common English.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,7 +9,7 @@ use anyhow::{Context, Result};
 const CLS: &str = "[CLS]";
 const SEP: &str = "[SEP]";
 const UNK: &str = "[UNK]";
-/// HF caps a single whitespace token at 100 chars before emitting `[UNK]`.
+/// HF emits `[UNK]` for a whitespace token over 100 chars.
 const MAX_INPUT_CHARS_PER_WORD: usize = 100;
 
 pub struct WordPieceTokenizer {
@@ -19,7 +20,6 @@ pub struct WordPieceTokenizer {
     lower_case: bool,
 }
 
-/// The three parallel input tensors a BERT ONNX graph expects.
 pub struct Encoding {
     pub ids: Vec<i64>,
     pub attention_mask: Vec<i64>,
@@ -27,15 +27,12 @@ pub struct Encoding {
 }
 
 impl WordPieceTokenizer {
-    /// Load from a HuggingFace-style `vocab.txt` (one token per line; the
-    /// line number is the token id).
     pub fn from_vocab_file<P: AsRef<Path>>(path: P, lower_case: bool) -> Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("reading vocab.txt at {}", path.as_ref().display()))?;
         let mut vocab = HashMap::new();
         for (i, line) in text.lines().enumerate() {
-            // A Windows checkout may leave a trailing \r; tokens never carry
-            // surrounding whitespace.
+            // A Windows checkout may leave a trailing \r.
             let tok = line.trim_end_matches(['\r', '\n']);
             vocab.insert(tok.to_string(), i as i64);
         }
@@ -49,9 +46,6 @@ impl WordPieceTokenizer {
         Ok(Self { vocab, cls_id, sep_id, unk_id, lower_case })
     }
 
-    /// Encode one string into `[CLS] … [SEP]`, truncated to `max_len`
-    /// (inclusive of the two special tokens). Returns ids + attention mask +
-    /// all-zero token-type ids.
     pub fn encode(&self, text: &str, max_len: usize) -> Encoding {
         let max_len = max_len.max(2);
         let mut ids = Vec::with_capacity(max_len);
@@ -70,7 +64,8 @@ impl WordPieceTokenizer {
         Encoding { ids, attention_mask, type_ids }
     }
 
-    /// BERT basic-tokenizer stage: whitespace split, lowercasing, punctuation split. Bounded to `max_words`, so a huge extracted document is never materialized as tiny Strings; the char pre-slice bounds the lowercasing allocation.
+    /// Bounded to `max_words` so a huge extracted document is never materialized as tiny Strings; the char pre-slice
+    /// bounds the lowercasing allocation.
     fn basic_tokenize(&self, text: &str, max_words: usize) -> Vec<String> {
         let text = match text.char_indices().nth(max_words.saturating_mul(64)) {
             Some((i, _)) => &text[..i],
@@ -78,10 +73,8 @@ impl WordPieceTokenizer {
         };
         let mut out = Vec::new();
         let mut cur = String::new();
-        // Full Unicode lowering, not ASCII-only: lowercasing only the ASCII
-        // range leaves accented/non-Latin text in its original case so it never
-        // matches the (lowercased) vocab and collapses to [UNK]. Matches HF
-        // BertTokenizer(do_lower_case=True).
+        // Full Unicode lowering, not ASCII-only: otherwise accented/non-Latin text never matches the lowercased vocab
+        // and collapses to [UNK].
         let lowered;
         let src: &str = if self.lower_case {
             lowered = text.to_lowercase();
@@ -112,9 +105,6 @@ impl WordPieceTokenizer {
         out
     }
 
-    /// Greedy longest-match-first WordPiece over a single whitespace token.
-    /// Returns the `[UNK]` id for a token over the length cap or with any
-    /// unmatchable prefix, matching HF behavior.
     fn wordpiece(&self, word: &str) -> Vec<i64> {
         let chars: Vec<char> = word.chars().collect();
         if chars.len() > MAX_INPUT_CHARS_PER_WORD {
@@ -167,8 +157,8 @@ mod tests {
     #[test]
     fn wraps_with_cls_and_sep() {
         let e = toy().encode("play", 16);
-        assert_eq!(e.ids.first(), Some(&2)); // [CLS]
-        assert_eq!(e.ids.last(), Some(&3)); // [SEP]
+        assert_eq!(e.ids.first(), Some(&2));
+        assert_eq!(e.ids.last(), Some(&3));
         assert_eq!(e.attention_mask.len(), e.ids.len());
         assert!(e.attention_mask.iter().all(|&m| m == 1));
         assert!(e.type_ids.iter().all(|&t| t == 0));
@@ -220,7 +210,7 @@ mod tests {
         let word = format!("play{}", "ing".repeat(32));
         assert_eq!(word.chars().count(), MAX_INPUT_CHARS_PER_WORD);
         let e = toy().encode(&word, 256);
-        assert_eq!(e.ids.len(), 35); // [CLS] play ##ing*32 [SEP]
+        assert_eq!(e.ids.len(), 35);
         assert!(!e.ids.contains(&1));
     }
 

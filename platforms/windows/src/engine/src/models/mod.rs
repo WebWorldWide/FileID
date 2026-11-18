@@ -1,5 +1,6 @@
-// ML inference models for the shared engine. Every ONNX model runs on tract (CPU) on every platform; VLMs run in a llama.cpp subprocess (Windows/Linux) or MLX (macOS).
-// Loading is fail-soft: a missing model's load returns Err, and the pipeline's `load_optional` degrades that stage to a no-op so the scan proceeds.
+// ML inference models. ONNX models run on tract (CPU); VLMs run in a llama.cpp subprocess (Windows/Linux) or MLX
+// (macOS). Loading is fail-soft: a missing model's load returns Err and the pipeline's `load_optional` degrades that
+// stage to a no-op.
 
 pub mod bge_text;
 pub mod catalog;
@@ -44,10 +45,8 @@ pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;
 
-/// Check a session out of a pool: the first one nobody is using, starting at
-/// `preferred`; only when every session is busy does the caller wait, on its
-/// preferred one. Indexing by worker number alone let two workers queue on
-/// one session while another sat idle.
+/// The first idle session starting at `preferred`; the caller waits on its preferred one only when all are busy
+/// (indexing by worker number alone queued two workers on one session while another sat idle).
 pub fn checkout<T>(pool: &[parking_lot::Mutex<T>], preferred: usize) -> parking_lot::MutexGuard<'_, T> {
     let start = preferred % pool.len();
     (0..pool.len())

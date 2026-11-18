@@ -1,11 +1,6 @@
-// CLIP ViT-B/32 image encoder (OpenAI/OpenCLIP, MIT). The module, type and
-// `mobileclip/` install slot keep their pre-swap names as stable keys. Maps a
-// 224×224 RGB image to a 512-d L2-normalized float32 embedding for scan-time
-// clustering and query-time semantic search.
-//
-// Inference order: resize → CLIP mean/std normalize → CHW float32
-// → tract session run → L2 normalize. Persisted as raw little-endian bytes
-// in `clip_embeddings.embedding`.
+// CLIP ViT-B/32 image encoder (OpenAI/OpenCLIP, MIT): 224×224 RGB → 512-d L2-normalized float32, persisted as
+// little-endian bytes in `clip_embeddings.embedding`. The module, type and `mobileclip/` install slot keep their
+// pre-swap names as stable keys.
 
 use std::path::{Path, PathBuf};
 
@@ -14,11 +9,11 @@ use ndarray::Array4;
 
 use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
-/// Expected image-embedding width (ViT-B/32: 512). A model with another width is substituted or corrupt; rejecting it keeps an off-dimension blob out of clip_embeddings, where it would poison scene-tag dot products (`scene_vocab::dot` folds over min(len)) and semantic search.
+/// A model with another width is substituted or corrupt; rejecting it keeps off-dimension blobs out of clip_embeddings,
+/// where they would poison scene-tag dot products (`scene_vocab::dot` folds over min(len)) and semantic search.
 pub(crate) const CLIP_EMBED_DIM: usize = 512;
 
-// OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet
-// stats on a CLIP model measurably degrades the embeddings.
+// OpenAI CLIP normalization, not ImageNet: ImageNet stats measurably degrade the embeddings.
 #[allow(clippy::excessive_precision)]
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
@@ -27,8 +22,6 @@ const INV_255: f32 = 1.0 / 255.0;
 
 pub struct MobileClipImage {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load and reused on
-    /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
     input_size: u32,
 }
@@ -46,8 +39,7 @@ impl MobileClipImage {
                 &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(224), Dim::Fixed(224)])],
             )
         })?;
-        // Warmup with a zero 224×224 frame so first-call kernel compile
-        // happens during load.
+        // Zero-frame warmup so first-call kernel compile happens during load.
         let mut model = Self { session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 224 * 224])?;
@@ -59,9 +51,6 @@ impl MobileClipImage {
         Ok(model)
     }
 
-    /// Embed one 224×224 RGB8 image (the caller pre-resizes). Used by the
-    /// pooled scan path and single-image queries; the batched scan path goes
-    /// through `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
     pub fn embed(&mut self, rgb: &[u8]) -> Result<Vec<f32>> {
         let n = self.input_size as usize;
         if rgb.len() != 3 * n * n {
@@ -95,13 +84,8 @@ impl MobileClipImage {
         Ok(emb)
     }
 
-    /// Batched inference. Takes N pre-resized 224×224 RGB8 buffers, packs
-    /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
-    /// and returns N L2-normalized embeddings.
-    ///
-    /// One call over N images lets tract's multithreaded matmul split the
-    /// batch across the performance cores; a single image gets little from
-    /// extra threads.
+    /// One `session.run` over N pre-resized 224×224 RGB8 buffers lets tract's multithreaded matmul split the batch
+    /// across performance cores.
     pub fn embed_batch(
         &mut self,
         rgb_images: &[Vec<u8>],

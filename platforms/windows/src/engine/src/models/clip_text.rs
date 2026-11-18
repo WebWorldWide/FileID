@@ -1,4 +1,4 @@
-// Query-time CLIP text encoder. Held in a process-static OnceLock so back-to-back keystroke queries reuse one session.
+// Query-time CLIP text encoder, held in a process-static OnceLock so back-to-back keystroke queries reuse one session.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +12,6 @@ const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load and reused on
-    /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
     tokenizer: ClipTokenizer,
 }
@@ -37,7 +35,7 @@ impl ClipText {
         for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
             padded[i] = *t as i64;
         }
-        // CLIP pools at the EOT token: when truncating an over-length query, keep EOT in the last slot.
+        // CLIP pools at the EOT token: when truncating, keep EOT in the last slot.
         if tokens.len() > CONTEXT_LEN
             && let Some(&eot) = tokens.last() {
                 padded[CONTEXT_LEN - 1] = eot as i64;
@@ -66,12 +64,8 @@ impl ClipText {
         Ok(emb)
     }
 
-    /// Batched variant of [`ClipText::embed`] — tokenize + encode every query
-    /// in one ONNX run with a `(B, 77)` input, returning one L2-normalized
-    /// embedding per query. Used to build the zero-shot scene-label matrix at
-    /// startup; far cheaper than B separate session runs. Assumes the exported
-    /// text model has a dynamic batch axis (the Xenova MobileCLIP-S2 export
-    /// does).
+    /// Batched `embed` (`(B, 77)` input) used to build the scene-label matrix at startup; needs the export's dynamic
+    /// batch axis (Xenova MobileCLIP-S2 has one).
     pub fn embed_batch(&mut self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
         if queries.is_empty() {
             return Ok(Vec::new());

@@ -1,11 +1,5 @@
-//! Per-machine llama-server launch tuning.
-//!
-//! `fileid-bench --tune` tries a small grid of launch flags for one model and
-//! keeps the fastest configuration whose greedy output matches the baseline
-//! (the magnitude approach: speed only counts if the answer is unchanged).
-//! The result is stored per model and hardware fingerprint; a profile from a
-//! different machine, or one containing anything outside the allowlist, is
-//! ignored and the server starts with its defaults.
+//! Per-machine llama-server launch tuning from `fileid-bench --tune`. A profile from a different machine, or one
+//! containing anything outside the allowlist, is ignored and the server starts with defaults.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -28,7 +22,6 @@ struct Store {
     profiles: Vec<Profile>,
 }
 
-/// Flags auto-tuning may set, each with a validator for its value.
 const ALLOWED: [(&str, fn(&str) -> bool); 5] = [
     ("-t", |v| v.parse::<u32>().is_ok_and(|n| (1..=256).contains(&n))),
     ("-ngl", |v| v.parse::<u32>().is_ok_and(|n| n <= 999)),
@@ -37,7 +30,6 @@ const ALLOWED: [(&str, fn(&str) -> bool); 5] = [
     ("-ub", |v| v.parse::<u32>().is_ok_and(|n| (32..=8192).contains(&n))),
 ];
 
-/// True when `arguments` is a sequence of distinct allowlisted flag/value pairs.
 pub fn valid(arguments: &[String]) -> bool {
     if arguments.len() % 2 != 0 || arguments.len() > 2 * ALLOWED.len() {
         return false;
@@ -48,7 +40,6 @@ pub fn valid(arguments: &[String]) -> bool {
     })
 }
 
-/// A stable description of the machine a profile was measured on.
 pub fn hardware_fingerprint() -> String {
     let info = crate::commands::hardware::build_hardware_info();
     let memory = crate::platform::physical_memory_gb().round() as u64;
@@ -62,8 +53,7 @@ pub fn hardware_fingerprint() -> String {
     )
 }
 
-/// Model identity for tuning: its install directory name plus weight size,
-/// so a different quantization or a replaced file never reuses a profile.
+/// Install directory name plus weight size, so a different quantization or replaced file never reuses a profile.
 pub fn model_key(gguf: &Path) -> Option<(String, u64)> {
     let directory = gguf.parent()?.file_name()?.to_str()?.to_owned();
     Some((directory, std::fs::metadata(gguf).ok()?.len()))
@@ -85,7 +75,6 @@ pub fn lookup_in(path: &Path, model: &str, model_bytes: u64, hardware: &str) -> 
         .map(|p| p.arguments)
 }
 
-/// Tuned flags for this model on this machine, if a valid profile exists.
 pub fn lookup(gguf: &Path) -> Option<Vec<String>> {
     let (model, bytes) = model_key(gguf)?;
     lookup_in(&store_path().ok()?, &model, bytes, &hardware_fingerprint())
@@ -111,8 +100,7 @@ pub fn save(profile: Profile) -> Result<()> {
     save_in(&store_path()?, profile)
 }
 
-/// The candidate grid for one model. Partial GPU offload is only tried when
-/// the weights do not fit in dedicated VRAM; CPU-only machines vary threads.
+/// Partial GPU offload is only tried when the weights do not fit in dedicated VRAM; CPU-only machines vary threads.
 pub fn candidates(physical_cores: u32, vram_mb: u64, model_bytes: u64, layers: u32) -> Vec<Vec<String>> {
     let args = |pairs: &[(&str, String)]| pairs.iter().flat_map(|(f, v)| [(*f).to_owned(), v.clone()]).collect::<Vec<_>>();
     let cores = physical_cores.max(1);

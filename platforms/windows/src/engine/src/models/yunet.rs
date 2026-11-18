@@ -1,15 +1,8 @@
-// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT), the
-// commercial-clean detection path. Produces `face_geometry::Detection` (corner
-// bbox + 5 landmarks in FileID order [left_eye, right_eye, nose, mouth_left,
-// mouth_right] + score) for the downstream face pipeline (estimate_pose,
-// validate_face_geometry, alignment).
-//
-// The HF ONNX emits RAW per-stride anchor tensors (cls/obj/bbox/kps at strides
-// 8/16/32, one anchor per cell, fixed 640x640 input). Decode + NMS are done on
-// the CPU after the GPU forward pass, mirroring OpenCV's FaceDetectorYN:
+// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT) → `face_geometry::Detection` (corner bbox + 5
+// landmarks in FileID order + score). The ONNX emits RAW per-stride anchor tensors (cls/obj/bbox/kps at strides
+// 8/16/32, one anchor per cell, fixed 640x640 input); decode + NMS run on the CPU, mirroring OpenCV's FaceDetectorYN:
 //   score = sqrt(cls * obj); center/exp box; landmark = (cell + delta)*stride.
-// Input is BGR, raw [0,255] float, no normalization (matches OpenCV's blob).
-// A wrong-variant ONNX → scores under threshold → empty Vec (no panic).
+// Input is BGR, raw [0,255] float, no normalization. A wrong-variant ONNX scores under threshold → empty Vec, no panic.
 
 use std::path::{Path, PathBuf};
 
@@ -26,8 +19,6 @@ const NMS_IOU: f32 = 0.3;
 
 pub struct YuNet {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load and reused on
-    /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
 }
 
@@ -43,7 +34,9 @@ impl YuNet {
             &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(INPUT as usize), Dim::Fixed(INPUT as usize)])],
         )?;
 
-        // detect() matches outputs by literal name, and a mismatch would silently return zero faces for the whole library. Assert the 12 shipped names at load so a renamed re-export fails loudly. (cls/obj are both 1-channel, so shape alone cannot tell them apart.)
+        // detect() matches outputs by literal name, so a renamed re-export would silently return zero faces for the
+        // whole library; assert the 12 shipped names at load (cls/obj are both 1-channel, so shape alone can't tell
+        // them apart).
         {
             let have: std::collections::HashSet<&str> =
                 session.output_names().iter().map(String::as_str).collect();
@@ -78,8 +71,6 @@ impl YuNet {
         Ok(model)
     }
 
-    /// Detect faces in an RGB8 image. Returns bboxes/landmarks in the source
-    /// image's pixel coordinates (letterbox remap applied).
     pub fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
         let Some(input) = Self::prepare(rgb, width, height)? else {
             return Ok(Vec::new());
@@ -88,10 +79,8 @@ impl YuNet {
         Ok(decode_outputs(&outputs, input.scale, width, height))
     }
 
-    /// [`detect`](Self::detect) on a pooled session, holding its lock only for
-    /// the forward pass: the letterbox resize, the 4.9 MB tensor fill, the
-    /// stride decode and NMS run on the caller's thread while other workers
-    /// use the session.
+    /// Holds the session lock only for the forward pass; letterbox, tensor fill, decode and NMS run on the caller's
+    /// thread.
     pub fn detect_shared(pool: &[parking_lot::Mutex<Self>], preferred: usize, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Detection>> {
         let Some(input) = Self::prepare(rgb, width, height)? else {
             return Ok(Vec::new());
@@ -100,7 +89,6 @@ impl YuNet {
         Ok(decode_outputs(&outputs, input.scale, width, height))
     }
 
-    /// The model's input tensor for an RGB8 image; `None` for an empty image.
     fn prepare(rgb: &[u8], width: u32, height: u32) -> Result<Option<PreparedInput>> {
         if rgb.len() != (width as usize) * (height as usize) * 3 {
             anyhow::bail!("YuNet detect: rgb buffer/size mismatch");
@@ -108,8 +96,7 @@ impl YuNet {
         if width == 0 || height == 0 {
             return Ok(None);
         }
-        // Letterbox to a fixed 640x640 (top-left, zero-pad remainder) — the
-        // export's only input shape, and a fixed shape lets tract compile the graph once.
+        // Fixed 640x640 (top-left, zero-pad): the export's only input shape, and a fixed shape lets tract compile once.
         let scale = (INPUT as f32 / width as f32).min(INPUT as f32 / height as f32);
         let new_w = ((width as f32 * scale) as u32).max(1);
         let new_h = ((height as f32 * scale) as u32).max(1);
@@ -119,34 +106,30 @@ impl YuNet {
         for y in 0..new_h as usize {
             for x in 0..new_w as usize {
                 let i = (y * new_w as usize + x) * 3;
-                // YuNet expects BGR, raw [0,255] float (no normalization).
-                chw[[0, 0, y, x]] = f32::from(resized[i + 2]); // B
-                chw[[0, 1, y, x]] = f32::from(resized[i + 1]); // G
-                chw[[0, 2, y, x]] = f32::from(resized[i]); // R
+                // YuNet expects BGR, raw [0,255] float.
+                chw[[0, 0, y, x]] = f32::from(resized[i + 2]);
+                chw[[0, 1, y, x]] = f32::from(resized[i + 1]);
+                chw[[0, 2, y, x]] = f32::from(resized[i]);
             }
         }
         Ok(Some(PreparedInput { chw, scale }))
     }
 
-    /// One forward pass; the per-stride output tensors by name.
     fn forward(&mut self, chw: Array4<f32>) -> Result<Vec<(String, Vec<f32>)>> {
         let input_name = self.input_name.clone();
         let outputs = self.session.run(vec![(input_name.as_str(), chw.into())]).context("YuNet session.run")?;
 
-        // Outputs are named cls_{s}/obj_{s}/bbox_{s}/kps_{s}; collect by name.
         let named: Vec<(String, Vec<f32>)> = outputs.into_iter().map(|output| (output.name, output.data)).collect();
         Ok(named)
     }
 }
 
-/// A letterboxed input tensor and the scale that maps its boxes back.
 struct PreparedInput {
     chw: Array4<f32>,
     scale: f32,
 }
 
-/// Decode the per-stride outputs into detections in the source image's pixel
-/// coordinates, then NMS. Pure, so it runs outside the session lock.
+/// Pure, so it runs outside the session lock.
 fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: u32) -> Vec<Detection> {
     let find = |prefix: &str, s: u32| -> Option<&[f32]> {
         let key = format!("{prefix}_{s}");
@@ -182,14 +165,13 @@ fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: 
         d.bbox[1] = d.bbox[1].clamp(0.0, ih);
         d.bbox[2] = d.bbox[2].clamp(0.0, iw);
         d.bbox[3] = d.bbox[3].clamp(0.0, ih);
-        // Do not clamp landmarks: clamping an out-of-frame point skews the similarity transform and warps the aligned face. align_112 edge-clamps its samples, and validate_face_geometry tolerates landmarks up to 10% outside the bbox.
+        // Do not clamp landmarks: clamping an out-of-frame point skews the similarity transform; align_112 edge-clamps
+        // its samples and validate_face_geometry tolerates landmarks up to 10% outside the bbox.
     }
 
     nms(candidates, NMS_IOU)
 }
 
-/// Decode one stride's cls/obj/bbox/kps tensors into Detections. Pure function
-/// for unit-testing the decode math without a model session.
 fn decode_stride(
     stride: u32,
     input: u32,
@@ -199,7 +181,7 @@ fn decode_stride(
     kps: &[f32],
     out: &mut Vec<Detection>,
 ) {
-    let grid = (input / stride) as usize; // square (640/stride)
+    let grid = (input / stride) as usize;
     let cells = grid * grid;
     if cls.len() < cells || obj.len() < cells || bbox.len() < cells * 4 || kps.len() < cells * 10 {
         tracing::warn!(stride, "YuNet stride tensor undersized — skipping");
@@ -219,13 +201,11 @@ fn decode_stride(
             let cy = (rf + bbox[i * 4 + 1]) * s;
             let w = bbox[i * 4 + 2].exp() * s;
             let h = bbox[i * 4 + 3].exp() * s;
-            // Native landmark order: [right_eye, left_eye, nose, right_mouth, left_mouth].
             let mut native = [[0.0_f32; 2]; 5];
             for (k, lm) in native.iter_mut().enumerate() {
                 lm[0] = (cf + kps[i * 10 + 2 * k]) * s;
                 lm[1] = (rf + kps[i * 10 + 2 * k + 1]) * s;
             }
-            // Remap to FileID order [left_eye, right_eye, nose, mouth_left, mouth_right].
             let landmarks = [native[1], native[0], native[2], native[4], native[3]];
             if ![cx, cy, w, h].iter().chain(native.iter().flatten()).all(|v| v.is_finite()) {
                 continue;
@@ -239,7 +219,6 @@ fn decode_stride(
     }
 }
 
-/// Weights path: `yunet/face_detection_yunet_2023mar.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("yunet").join("face_detection_yunet_2023mar.onnx"))
 }
@@ -252,7 +231,6 @@ mod tests {
     fn preparation_letterboxes_to_bgr_and_rejects_bad_buffers() {
         assert!(YuNet::prepare(&[0u8; 5], 2, 1).is_err());
         assert!(YuNet::prepare(&[], 0, 0).unwrap().is_none());
-        // One red pixel next to one blue pixel, 2x1: scaled to 640x320.
         let input = YuNet::prepare(&[255, 0, 0, 0, 0, 255], 2, 1).unwrap().unwrap();
         assert!((input.scale - 320.0).abs() < 1e-3);
         assert_eq!(input.chw.dim(), (1, 3, 640, 640));
@@ -280,8 +258,6 @@ mod tests {
                 ]
             })
             .collect();
-        // Stride 32, cell (0,0): a 32px box centred on the origin in model space;
-        // at scale 0.5 it is 64px in the source and clamps to the frame.
         let found = decode_outputs(&outputs, 0.5, 1280, 1280);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].bbox.map(|v| v.round() as i32), [0, 0, 32, 32]);
@@ -308,10 +284,9 @@ mod tests {
         let mut obj = vec![0.0_f32; cells];
         let bbox = vec![0.0_f32; cells * 4];
         let mut kps = vec![0.0_f32; cells * 10];
-        let i = 0; // cell (0,0)
+        let i = 0;
         cls[i] = 1.0;
         obj[i] = 1.0;
-        // distinct landmark deltas so the remap is observable
         for k in 0..5 {
             kps[i * 10 + 2 * k] = k as f32 * 0.1;
             kps[i * 10 + 2 * k + 1] = k as f32 * 0.2;
