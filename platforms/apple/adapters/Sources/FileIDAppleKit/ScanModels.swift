@@ -1,10 +1,6 @@
-// Stage 5: CLIP image embeddings and RAM++ tags on the GPU through MLX, as the
-// Swift engine's MobileCLIPService and RamPlusService run them: the same MLX
-// graphs (FileIDImaging CLIPVisionMLX, RamPlusMLX) behind the same
-// GPURequestBatcher, one queue and MLX stream per model so concurrent scan
-// workers share GPU batches. Preprocessing and tag selection follow those
-// services line for line. The Rust engine checks the model files against the
-// manifest before it asks for a load; the ONNX Runtime fallback stays in Rust.
+// Stage 5: CLIP image embeddings and RAM++ tags on the GPU through MLX. Mirrors the Swift engine's MobileCLIPService and RamPlusService line for line
+// (same MLX graphs, GPURequestBatcher, one queue and MLX stream per model). The Rust engine checks model files against the manifest before a load;
+// the ONNX Runtime fallback stays in Rust.
 import CoreGraphics
 import Foundation
 import FileIDImaging
