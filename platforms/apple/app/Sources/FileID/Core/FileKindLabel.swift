@@ -33,6 +33,17 @@ enum PathText {
         return names.suffix(parts).joined(separator: "/")
     }
 
+    /// The ways to show a path in less room, longest first, each cut at a folder boundary:
+    /// the whole path, then "…/" plus its last three, two and one folders.
+    static func shortenings(_ path: String) -> [String] {
+        let names = path.split(separator: "/").map(String.init)
+        var options = [path]
+        for keep in [3, 2, 1] where names.count > keep {
+            options.append("…/" + names.suffix(keep).joined(separator: "/"))
+        }
+        return options
+    }
+
     /// A path for display: the home folder reads as "~" so the account name doesn't fill
     /// every row (or every screenshot). The full path stays in tooltips and Finder.
     static func abbreviated(_ path: String) -> String {

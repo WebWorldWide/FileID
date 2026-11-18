@@ -130,7 +130,7 @@ struct TitleBar: View {
                         scopeCheck(current == root.id)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(root.display).font(Theme.ChromeFont.body(13.5, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
-                            Text(root.path).font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                            PathLabel(path: root.path, font: Theme.ChromeFont.mono(11), color: Theme.text3)
                         }
                         Spacer(minLength: 8)
                         if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }

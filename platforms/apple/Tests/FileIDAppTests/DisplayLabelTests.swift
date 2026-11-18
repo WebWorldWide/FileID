@@ -30,6 +30,23 @@ struct DisplayLabelTests {
     }
 }
 
+@Suite("Path shortenings")
+struct PathShorteningTests {
+    @Test func cutsAtFolderBoundaries() {
+        #expect(PathText.shortenings("/Volumes/Adlon/Camera/Eckerts 10-4-26/Photos") == [
+            "/Volumes/Adlon/Camera/Eckerts 10-4-26/Photos",
+            "…/Camera/Eckerts 10-4-26/Photos",
+            "…/Eckerts 10-4-26/Photos",
+            "…/Photos"])
+    }
+
+    @Test func shortPathsHaveNothingToDrop() {
+        #expect(PathText.shortenings("/Volumes/Adlon") == ["/Volumes/Adlon", "…/Adlon"])
+        #expect(PathText.shortenings("/Photos") == ["/Photos"])
+        #expect(PathText.shortenings("~") == ["~"])
+    }
+}
+
 @Suite("Folder tails")
 struct PathTailTests {
     @Test func keepsTheDistinguishingPart() {

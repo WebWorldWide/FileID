@@ -1309,9 +1309,7 @@ private struct FilePreviewSheet: View {
                 Text(file.url.lastPathComponent)
                     .font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
                     .lineLimit(1).truncationMode(.middle)
-                Text(file.url.deletingLastPathComponent().path)
-                    .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                    .lineLimit(1).truncationMode(.head)
+                PathLabel(path: file.url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
             }
             Spacer(minLength: 12)
             if siblings.count > 1, let index = siblingIndex {
@@ -1861,9 +1859,7 @@ private struct LibrarySelectedPane: View {
                     Text(row.url.lastPathComponent)
                         .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
                         .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                    Text(row.url.deletingLastPathComponent().path)
-                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                        .lineLimit(1).truncationMode(.head)
+                    PathLabel(path: row.url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
                 }
 
                 if offline {
