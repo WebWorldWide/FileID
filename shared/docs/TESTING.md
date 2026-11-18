@@ -112,7 +112,7 @@ pwsh platforms/windows/build/iterate.ps1 -Corpus C:\path -ThroughputTarget 140
 # Exit codes: 0 = all pass; 1 = assertion fail; 2 = environment/build fail
 ```
 
-`iterate.ps1` builds the engine, colocates the pinned ONNX Runtime + DirectML DLLs, wipes the DB, drives a full scan + face-clustering pass, then runs assertions A1–A12. It defaults `-Corpus` to `shared/test-corpus`, but that directory ships empty — unlike macOS there is no corpus generator, so pass `-Corpus` at a real library. A1–A11 are inline PowerShell checks (no crash, throughput, memory cap, WAL checkpointed, no WER dumps, no telemetry strings in the engine binary, …); A12 shells out to `build/scan_assertions.py` to verify DB content: that RAM++/CLIP actually emitted tags and that face embeddings are 128-d SFace blobs (512 bytes), which rejects stale 512-d/2048-byte ArcFace data from the old face stack.
+`iterate.ps1` builds the engine, colocates the PDFium DLL, wipes the DB, drives a full scan + face-clustering pass, then runs assertions A1–A12. It defaults `-Corpus` to `shared/test-corpus`, but that directory ships empty — unlike macOS there is no corpus generator, so pass `-Corpus` at a real library. A1–A11 are inline PowerShell checks (no crash, throughput, memory cap, WAL checkpointed, no WER dumps, no telemetry strings in the engine binary, …); A12 shells out to `build/scan_assertions.py` to verify DB content: that RAM++/CLIP actually emitted tags and that face embeddings are 128-d SFace blobs (512 bytes), which rejects stale 512-d/2048-byte ArcFace data from the old face stack.
 
 ### macOS engine + app (Swift)
 

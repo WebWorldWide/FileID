@@ -28,18 +28,16 @@ gate; after that merge run `--refresh` and drop stale entries if wanted.
 
 ## Licence table
 
-### Rust crates (engine, CLI, TUI, Linux app: 695 registry crates over the four locks plus tract)
+### Rust crates (engine, CLI, TUI, Linux app: 671 registry crates over the four locks plus tract)
 
 | Component | Version | Licence | How distributed | Obligation | Status |
 |---|---|---|---|---|---|
-| 695 registry crates (all four `Cargo.lock`, three targets, plus `prod-tract` locks) | locked | every one allowlisted: overwhelmingly MIT / Apache-2.0 / dual, then Unicode-3.0, BSD-2/3, ISC, Zlib, CDLA-Permissive-2.0, MPL-2.0 (below), WTFPL (TUI only: `terminfo`) | statically linked into `fileidd` / `FileIDEngine` / `fileid` / `fileid-tui` / `fileid-linux` | notices (copyright + permission text) in `THIRD_PARTY_NOTICES.txt` | OK; `cargo deny` licenses ok on all four manifests, bans ok on the engine |
+| 671 registry crates (all four `Cargo.lock`, three targets, plus `prod-tract` locks) | locked | every one allowlisted: overwhelmingly MIT / Apache-2.0 / dual, then Unicode-3.0, BSD-2/3, ISC, Zlib, CDLA-Permissive-2.0, MPL-2.0 (below), WTFPL (TUI only: `terminfo`) | statically linked into `fileidd` / `FileIDEngine` / `fileid` / `fileid-tui` / `fileid-linux` | notices (copyright + permission text) in `THIRD_PARTY_NOTICES.txt` | OK; `cargo deny` licenses ok on all four manifests, bans ok on the engine |
 | `symphonia` 0.5.5 and 15 `symphonia-*` crates | 0.5.5 | MPL-2.0 | statically linked, unmodified | file-level copyleft: keep the notice, offer the upstream source (crates.io exact version / repository, listed in the notices); FileID's own code stays Apache-2.0 | OK, documented (comment in `deny.toml` corrected; "safe to dynamically link" was wrong, static linking an unmodified MPL crate is fine) |
 | `ring` | 0.17.14 | Apache-2.0 AND ISC (+ OpenSSL/BoringSSL-style parts) | statically linked | full `LICENSE` incl. BoringSSL text | OK, full text in notices |
 | `encoding_rs` | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | statically linked | notice | OK |
 | `termina` 0.3.3 | 0.3.3 | MIT OR MPL-2.0 | TUI | elect MIT | OK |
-| `openssl`, `openssl-sys`, `native-tls`, `foreign-types*`, `ureq` | 0.10.8x / 0.9.117 | Apache-2.0 / MIT | **build-dependencies of `ort-sys`** (its `download-binaries` fetch of the Linux static ONNX Runtime), confirmed with `cargo tree -i native-tls`; not linked into the shipped binary (reqwest uses rustls); gone after the tract merge | none beyond notices | OK |
 | tract (`tract-onnx` 0.23.10 and 47 new crates: `tract-core/-data/-hir/-linalg/-nnef/-onnx-opl/-extra/-transformers`, `rustfft`, `ndarray` 0.17, `prost` 0.14, `minijinja` 3.1, `metrics`, `nom` 8, `borsh`, `libm`, ...) | 0.23.10 | all MIT / Apache-2.0 / dual (one `anymap3`: BlueOak-1.0.0 OR MIT OR Apache-2.0; elect MIT) | statically linked into the engine on every platform | notices | OK. No copyleft, no unknown, no missing licence. `tract-metal` is **not** in the tree (no Metal GPU crate was added). tract also drops the `native-tls`/`openssl*` chain from the locks |
-| `ort` / `ort-sys` | =2.0.0-rc.10 | MIT OR Apache-2.0 | Windows opt-in only (`ort-accel` cargo feature, off by default; absent from macOS and Linux builds) | notices | OK |
 
 Evidence: `~/FileIDDev/scratch/lic/deny-*.txt` (engine `bans ok, licenses ok`; CLI/TUI/Linux
 `licenses ok`; their `bans` failures are only `wildcard` on the path dependency `fileid-engine`,
@@ -74,12 +72,9 @@ which the engine-only `deny.toml` does not apply to, not a licence matter), and
 | CsWinRT, System.Reactive, Microsoft.Data.Sqlite, Caching.Memory | 2.1.5 / 6.0.1 / 9.0.0 / 9.0.0 | MIT | app DLLs | notice | OK (same caveat) |
 | SQLitePCLRaw.lib.e_sqlite3 | 3.53.3 | Apache-2.0 (SQLite: public domain) | native DLL | notice | OK |
 | Windows SDK BuildTools, test packages, WiX 4.0.5 | - | Microsoft SDK terms / MIT / Apache-2.0 / MS-RL | build and test only; WiX's compiled bootstrapper stub lands in the setup executable | MS-RL applies to WiX files only, not to FileID | OK; OWNER item 3 asks for a one-line legal read of the stub |
-| ONNX Runtime 1.22.0 (source build, no telemetry; Intel mirror of the same tree) + DirectML EP | 1.22.0 | MIT | `onnxruntime.dll` in MSI/MSIX only in `ort-accel` builds (opt-in accelerator; the default Windows build runs on tract CPU and ships no ORT) | MIT notice; ORT ThirdPartyNotices | OK for MIT; OWNER item 4 (applies only while an `ort-accel` build ships) |
-| **DirectML.dll** (`Microsoft.AI.DirectML` 1.15.4) | 1.15.4 | **Microsoft redistributable terms, not MIT** | staged unmodified, SHA-256 pinned | binary stays under Microsoft's terms; ship the package's `LICENSE.txt`; no relicensing | **OWNER item 2** |
+| ONNX Runtime 1.22.0 (source build, no telemetry) + DirectML EP, OpenVINO and CUDA/cuDNN packs | 1.22.0 | MIT / Microsoft redistributable / Apache-2.0 / NVIDIA EULAs | **no longer shipped**: the `ort-accel` feature, `onnxruntime.dll`, `DirectML.dll`, the OpenVINO/QNN/CUDA packs and their build workflows were removed (tract runs every model) | none | OK. Row kept for history; the CUDA llama.cpp runtime is installed by the user and FileID does not ship or download it |
 | PDFium (bblanchon chromium/7857) | 7857 | Apache-2.0 + BSD-3 third-party | `pdfium.dll` | its `licenses/` folder | OK; notice entry added, staging of the folder is OWNER item 4 |
 | llama.cpp b9254, whisper.cpp v1.9.0 | - | MIT | Store bundle (`THIRD-PARTY-NOTICES.txt` + `LICENSE` staged by `fetch-store-runtimes.ps1`) | notice | OK |
-| OpenVINO pack (ORT + Intel OpenVINO) | 1.22.0 | Apache-2.0 | opt-in pack with its own `licenses/` | notice | OK |
-| NVIDIA CUDA 12.8.1 / cuDNN 9.8 redistributables | - | NVIDIA EULAs (not open source) | opt-in CUDA pack, downloaded only after the user accepts the terms (`ModelLicenseGate`) | terms shown before install | OK (never default) |
 | `THIRD_PARTY_NOTICES.txt`, `LICENSE.txt` | - | - | now copied into the publish directory (MSI, harvested) and the MSIX payload; `verify-store-package.ps1` requires them | - | FIXED (Windows scripts untested here) |
 
 ### Linux
@@ -88,7 +83,6 @@ which the engine-only `deny.toml` does not apply to, not a licence matter), and
 |---|---|---|---|---|---|
 | GTK 4, libadwaita, GLib/GIO, Pango, Cairo, GdkPixbuf | system / GNOME 49 | LGPL-2.1-or-later | **dynamic**: gtk4-rs/libadwaita-rs (MIT) bind to shared objects; Flatpak/AUR/Nix use the runtime or system copies, AppImage bundles replaceable `.so` files via linuxdeploy-plugin-gtk | LGPL text + notice, no modification, user can replace the libraries | OK; LGPL text and note added to the notices |
 | llama.cpp b9254 (`llama-server`) | b9254 | MIT | built from the pinned source with the outbound-HTTP patch; `LICENSE` + `THIRD-PARTY-NOTICES.txt` staged | notice | OK |
-| ONNX Runtime 1.22.0 static (formerly the pyke `ort-rs` archive) | 1.22.0 | MIT | no longer linked: the Linux engine runs on tract, `ort` is not in the Linux build | none | OK; row kept for history |
 | FFmpeg 9.0.2 (LGPL build, GPL/nonfree off, no network) + OpenH264 2.6.0 (BSD-2-Clause) | 9.0.2 / 2.6.0 | LGPL-2.1-or-later / BSD-2-Clause | **not in any release artifact**: local development bundle only; `stage-media.ps1` refuses `CI_RELEASE`, build script states no codec patent clearance | LGPL source + text travel with any bundle; Cisco's patent grant covers only Cisco's binaries, not a source build | OK; OWNER item 5 before ever shipping it |
 | `LICENSE` + `THIRD_PARTY_NOTICES.txt` in Flatpak (`/app/share/licenses/io.github.fileid.FileID/`), AppImage, AUR, Nix, `build.sh` dist | - | - | added to every channel | Apache-2.0 §4(a) | FIXED |
 
@@ -117,7 +111,7 @@ The weights are never bundled; they are downloaded at a pinned revision after th
 |---|---|---|
 | Root `LICENSE` (Apache-2.0) | in repo; MSIX had `LICENSE.txt`; installer `license.rtf` | now also in the Mac bundle (`Contents/Resources/LICENSE.txt`), MSI publish dir, Flatpak, AppImage, AUR, Nix, Linux dist |
 | `NOTICE` file | none; none needed: FileID itself has no NOTICE, and the dependencies' Apache `NOTICE` texts (swift-crypto, swift-asn1, XGrammar) are reproduced in the notices | unchanged |
-| Third-party notices (MIT/BSD/ISC/Apache §4 attribution in binary distributions) | only the Windows Store runtime bundle and the Linux llama.cpp runtime had a notices file | `THIRD_PARTY_NOTICES.txt` (repo root, generated, ~230 KB): components, runtimes, fonts, models, 695 crates with copyright lines, every licence text. Shipped in all channels listed above |
+| Third-party notices (MIT/BSD/ISC/Apache §4 attribution in binary distributions) | only the Windows Store runtime bundle and the Linux llama.cpp runtime had a notices file | `THIRD_PARTY_NOTICES.txt` (repo root, generated, ~230 KB): components, runtimes, fonts, models, 671 crates with copyright lines, every licence text. Shipped in all channels listed above |
 | About / Settings link | none | Mac: Settings → Advanced → Acknowledgements ("Open-source acknowledgements", "FileID license") opens the bundled files. Windows/Linux UI link: OWNER item 7 |
 | Policy gate | none | `gen_third_party_notices.py --check` in `policy.yml` |
 
@@ -127,21 +121,13 @@ The weights are never bundled; they are downloaded at a pinned revision after th
    upstream Apache-2.0 `LICENSE`, a `NOTICE`, and a statement that the ONNX file is a modified
    (converted) work (Apache §4(b)); re-check `xinyu1205/recognize-anything-plus-model`'s card says
    `apache-2.0`. This audit could not reach the network.
-2. **DirectML.** Read `LICENSE.txt` inside `Microsoft.AI.DirectML` 1.15.4 and confirm the
-   redistribution terms fit the Apache-2.0 + commercial plan (expected: allowed with the
-   application, binary stays under Microsoft's terms, no relicensing). Then ship that text next to
-   `DirectML.dll` (the package's `LICENSE.txt` is not staged today) and mention DirectML in the
-   Windows installer licence page.
+2. **DirectML.** No longer shipped (resolved by removing ONNX Runtime). Nothing to confirm.
 3. **Windows NuGet.** On a Windows machine run
    `dotnet list package --include-transitive` and check each nuspec licence against
    `shared/licenses/components.json` (WindowsAppSDK especially). WiX's MS-RL bootstrapper stub in the
    setup executable deserves a one-line legal confirmation (the WiX FAQ says output is not
    subject to MS-RL).
-4. **ONNX Runtime third-party notices.** After the tract merge ORT ships only in Windows
-   `ort-accel` builds (and the OpenVINO pack). Those binaries must travel with ORT's
-   `ThirdPartyNotices.txt` (protobuf, Eigen, abseil, ...): add the file copy to
-   `build-ort-runtime.ps1` / `fetch-runtime-deps.ps1` when an `ort-accel` build is released.
-   The macOS and Linux bundles no longer contain ORT. Same for PDFium's `licenses/` folder.
+4. **ONNX Runtime third-party notices.** No longer applies: no FileID binary carries ONNX Runtime. (The Mac app still links ONNX Runtime 1.24.2 through the vendored Swift package until its own lane removes it.) PDFium's `licenses/` folder still needs staging.
 5. **FFmpeg/OpenH264.** If a media runtime is ever shipped: ship the LGPL source + licence it
    already records, and get codec patent clearance (a source-built OpenH264 has no Cisco grant).
 6. **SFace training data.** The weights are Apache-2.0 but the repo does not state the training

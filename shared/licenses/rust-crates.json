@@ -304,19 +304,6 @@
    ]
   },
   {
-   "name": "base64ct",
-   "version": "1.8.3",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/RustCrypto/formats",
-   "copyright": [
-    "Copyright (c) 2014 Steve \"Sc00bz\" Thomas (steve at tobtu dot com)",
-    "Copyright (c) 2021-2025 The RustCrypto Project Developers"
-   ]
-  },
-  {
    "name": "bit-set",
    "version": "0.11.1",
    "license": "Apache-2.0 OR MIT",
@@ -1343,30 +1330,6 @@
    ]
   },
   {
-   "name": "der",
-   "version": "0.8.0",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/RustCrypto/formats",
-   "copyright": [
-    "Copyright (c) 2020-2025 The RustCrypto Project Developers"
-   ]
-  },
-  {
-   "name": "der",
-   "version": "0.8.1",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/RustCrypto/formats",
-   "copyright": [
-    "Copyright (c) 2020-2026 The RustCrypto Project Developers"
-   ]
-  },
-  {
    "name": "deranged",
    "version": "0.5.8",
    "license": "MIT OR Apache-2.0",
@@ -1683,30 +1646,6 @@
    ]
   },
   {
-   "name": "fastrand",
-   "version": "2.4.1",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/smol-rs/fastrand",
-   "copyright": [
-    "Authors: Stjepan Glavina <stjepang@gmail.com>"
-   ]
-  },
-  {
-   "name": "fastrand",
-   "version": "2.5.0",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/smol-rs/fastrand",
-   "copyright": [
-    "Authors: Stjepan Glavina <stjepang@gmail.com>"
-   ]
-  },
-  {
    "name": "fax",
    "version": "0.2.7",
    "license": "MIT",
@@ -1886,30 +1825,6 @@
    "repository": "https://github.com/orlp/foldhash",
    "copyright": [
     "Copyright (c) 2024 Orson Peters"
-   ]
-  },
-  {
-   "name": "foreign-types",
-   "version": "0.3.2",
-   "license": "MIT/Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/sfackler/foreign-types",
-   "copyright": [
-    "Copyright (c) 2017 The foreign-types Developers"
-   ]
-  },
-  {
-   "name": "foreign-types-shared",
-   "version": "0.1.1",
-   "license": "MIT/Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/sfackler/foreign-types",
-   "copyright": [
-    "Copyright (c) 2017 The foreign-types Developers"
    ]
   },
   {
@@ -3622,18 +3537,6 @@
    ]
   },
   {
-   "name": "native-tls",
-   "version": "0.2.18",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/rust-native-tls/rust-native-tls",
-   "copyright": [
-    "Copyright (c) 2016 The rust-native-tls Developers"
-   ]
-  },
-  {
    "name": "ndarray",
    "version": "0.16.1",
    "license": "MIT OR Apache-2.0",
@@ -3964,42 +3867,6 @@
    ]
   },
   {
-   "name": "openssl",
-   "version": "0.10.80",
-   "license": "Apache-2.0",
-   "elected": [
-    "Apache-2.0"
-   ],
-   "repository": "https://github.com/rust-openssl/rust-openssl",
-   "copyright": [
-    "Copyright 2011-2017 Google Inc."
-   ]
-  },
-  {
-   "name": "openssl",
-   "version": "0.10.81",
-   "license": "Apache-2.0",
-   "elected": [
-    "Apache-2.0"
-   ],
-   "repository": "https://github.com/rust-openssl/rust-openssl",
-   "copyright": [
-    "Copyright 2011-2017 Google Inc."
-   ]
-  },
-  {
-   "name": "openssl-macros",
-   "version": "0.1.1",
-   "license": "MIT/Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "",
-   "copyright": [
-    "Copyright (c) 2022 Steven Fackler"
-   ]
-  },
-  {
    "name": "openssl-probe",
    "version": "0.2.1",
    "license": "MIT OR Apache-2.0",
@@ -4007,18 +3874,6 @@
     "MIT"
    ],
    "repository": "https://github.com/rustls/openssl-probe",
-   "copyright": [
-    "Copyright (c) 2014 Alex Crichton"
-   ]
-  },
-  {
-   "name": "openssl-sys",
-   "version": "0.9.117",
-   "license": "MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/rust-openssl/rust-openssl",
    "copyright": [
     "Copyright (c) 2014 Alex Crichton"
    ]
@@ -4045,32 +3900,6 @@
    "repository": "https://github.com/reem/rust-ordered-float",
    "copyright": [
     "Copyright (c) 2015 Jonathan Reem"
-   ]
-  },
-  {
-   "name": "ort",
-   "version": "2.0.0-rc.10",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/pykeio/ort",
-   "copyright": [
-    "Copyright (c) 2023-2025 pyke.io",
-    "Copyright (c) 2020 Nicolas Bigaouette"
-   ]
-  },
-  {
-   "name": "ort-sys",
-   "version": "2.0.0-rc.10",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/pykeio/ort",
-   "copyright": [
-    "Copyright (c) 2023-2025 pyke.io",
-    "Copyright (c) 2020 Nicolas Bigaouette"
    ]
   },
   {
@@ -4191,18 +4020,6 @@
    "repository": "https://github.com/ajrcarey/pdfium-render",
    "copyright": [
     "Authors: Alastair Carey <alastair@alastaircarey.com>"
-   ]
-  },
-  {
-   "name": "pem-rfc7468",
-   "version": "1.0.0",
-   "license": "Apache-2.0 OR MIT",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/RustCrypto/formats",
-   "copyright": [
-    "Copyright (c) 2021-2025 The RustCrypto Project Developers"
    ]
   },
   {
@@ -5706,18 +5523,6 @@
    ]
   },
   {
-   "name": "smallvec",
-   "version": "2.0.0-alpha.10",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/servo/rust-smallvec",
-   "copyright": [
-    "Copyright (c) 2018 The Servo Project Developers"
-   ]
-  },
-  {
    "name": "socket2",
    "version": "0.6.3",
    "license": "MIT OR Apache-2.0",
@@ -5739,18 +5544,6 @@
    "repository": "https://github.com/rust-lang/socket2",
    "copyright": [
     "Copyright (c) 2014 Alex Crichton"
-   ]
-  },
-  {
-   "name": "socks",
-   "version": "0.3.4",
-   "license": "MIT/Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/sfackler/rust-socks",
-   "copyright": [
-    "Copyright (c) 2015 The rust-socks Developers"
    ]
   },
   {
@@ -6199,18 +5992,6 @@
    "repository": "https://github.com/bytecodealliance/target-lexicon",
    "copyright": [
     "Authors: Dan Gohman <sunfish@mozilla.com>"
-   ]
-  },
-  {
-   "name": "tempfile",
-   "version": "3.27.0",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/Stebalien/tempfile",
-   "copyright": [
-    "Copyright (c) 2015 Steven Allen"
    ]
   },
   {
@@ -7105,54 +6886,6 @@
    ]
   },
   {
-   "name": "ureq",
-   "version": "3.3.0",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/algesten/ureq",
-   "copyright": [
-    "Copyright (c) 2019 Martin Algesten"
-   ]
-  },
-  {
-   "name": "ureq",
-   "version": "3.4.0",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/algesten/ureq",
-   "copyright": [
-    "Copyright (c) 2019 Martin Algesten"
-   ]
-  },
-  {
-   "name": "ureq-proto",
-   "version": "0.6.0",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/algesten/ureq-proto",
-   "copyright": [
-    "Copyright 2022 Martin Algesten"
-   ]
-  },
-  {
-   "name": "ureq-proto",
-   "version": "0.6.1",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/algesten/ureq-proto",
-   "copyright": [
-    "Copyright 2022 Martin Algesten"
-   ]
-  },
-  {
    "name": "url",
    "version": "2.5.8",
    "license": "MIT OR Apache-2.0",
@@ -7175,18 +6908,6 @@
    "copyright": [
     "Copyright (c) 2020 Armin Ronacher",
     "Copyright (c) 2019 Manish Goregaokar"
-   ]
-  },
-  {
-   "name": "utf8-zero",
-   "version": "0.8.1",
-   "license": "MIT OR Apache-2.0",
-   "elected": [
-    "MIT"
-   ],
-   "repository": "https://github.com/algesten/utf8-zero",
-   "copyright": [
-    "Authors: Simon Sapin <simon.sapin@exyr.org>, Martin Algesten <martin@algesten.se>"
    ]
   },
   {
@@ -7590,16 +7311,6 @@
     "Copyright 2023 dAxpeDDa",
     "Copyright (c) 2023 dAxpeDDa"
    ]
-  },
-  {
-   "name": "webpki-root-certs",
-   "version": "1.0.10",
-   "license": "CDLA-Permissive-2.0",
-   "elected": [
-    "CDLA-Permissive-2.0"
-   ],
-   "repository": "https://github.com/rustls/webpki-roots",
-   "copyright": []
   },
   {
    "name": "webpki-roots",
