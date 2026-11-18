@@ -36,6 +36,7 @@ const MAX_CENTRAL_DIRECTORY_BYTES: u64 = 32 * 1024 * 1024;
 /// extension is recognised-as-doc-but-unsupported (e.g. `.doc` legacy OLE)
 /// AND when the extension isn't a document at all — callers treat both as
 /// "no doc text" without distinguishing.
+///
 /// `bytes` is an optional pre-read content buffer (decoder thread reads the
 /// file once for hashing + extraction on small files). When supplied, the
 /// zip / text path skips a second file open; when `None`, the path-based
@@ -48,7 +49,7 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match ext.as_str() {
-        // Plain text: notes + source code + prose markup.
+        // Plain text: notes + source code + prose markup (lockstep with macOS FileTypes.code).
         "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
         | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
         | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
@@ -175,6 +176,7 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
     Ok(out)
 }
 
+/// Pull text out of named members in a zip archive.
 fn extract_zip_xml(
     path: &Path,
     bytes: Option<&[u8]>,
@@ -512,7 +514,10 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 }
             }
             Ok(Event::GeneralRef(r)) if depth > 0 => {
-                // Resolve numeric char refs and the five predefined named entities; drop unknown custom entities.
+                // The `&amp;`/`&#8217;` runs the old `unescape()` used to fold
+                // into `Text`. Resolve numeric char refs and the five
+                // predefined named entities; drop unknown custom entities
+                // (the old `unescape()` errored on those and we skipped too).
                 if let Ok(Some(ch)) = r.resolve_char_ref() {
                     out.push(ch);
                 } else if let Ok(name) = r.decode()
