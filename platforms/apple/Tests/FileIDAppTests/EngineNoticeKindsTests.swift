@@ -71,9 +71,8 @@ struct EngineNoticeKindsTests {
                 == "FileID had trouble reading text in some photos and switched to faster reading for the rest of this scan. Scan again later to read them carefully.")
     }
 
-    @Test("a stopped folder plan and a fall back explain themselves elsewhere, so the sidebar shows no card")
+    @Test("a stopped folder plan explains itself on its own page, so the sidebar shows no card")
     func cardlessKinds() {
-        #expect(!Sidebar.showsErrorCard("engine_fallback"))
         #expect(!Sidebar.showsErrorCard("plan_restructure_cancelled"))
         #expect(!EngineClient.isQuietNotice("plan_restructure_cancelled"))
         #expect(Sidebar.showsErrorCard("deep_load_failed"))

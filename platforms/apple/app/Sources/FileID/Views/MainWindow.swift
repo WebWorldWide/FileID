@@ -162,6 +162,7 @@ struct MainWindow: View {
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
                         .font(Theme.Font.body(13.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .engineUnavailableOverlay(engine: engine, activeTab: activeTab)
                         .focusSection()
                     // Chat stays beside the current page, as before the redesign;
                     // the Chat page is the same conversation at full width.

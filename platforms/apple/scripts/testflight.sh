@@ -70,17 +70,19 @@ esac
 
 echo "Building sandboxed macOS App Store binaries…"
 swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
-swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileIDEngine
 bash scripts/ensure_mlx_metallib.sh
 [ -s "$PROJECT_DIR/.build/cache/mlx.metallib" ] || {
     echo "The required MLX Metal library was not built; refusing to package." >&2
     exit 1
 }
-# The App Store gate: TestFlight builds run only the Swift engine and never
-# bundle fileidd until the owner's sandbox acceptance (CONVERGENCE.md Stage 10).
-FILEID_APP_STORE=1 FILEID_WITH_RUST_ENGINE=0 FILEID_BUILD_CONFIGURATION=release \
+# The sandboxed variant bundles the same single engine as the Developer ID build:
+# Contents/MacOS/fileidd, started by the app as a child that inherits its sandbox
+# (Resources/FileIDEngineAppStore.entitlements). FILEID_REQUIRE_ORT=1 refuses a
+# bundle without the pinned ONNX Runtime.
+FILEID_APP_STORE=1 FILEID_REQUIRE_ORT=1 FILEID_BUILD_CONFIGURATION=release \
     bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
-[ ! -e "$APP/Contents/MacOS/fileidd" ] || { echo "fileidd must not ship in App Store builds yet." >&2; exit 1; }
+[ -x "$APP/Contents/MacOS/fileidd" ] || { echo "fileidd is missing from the App Store bundle." >&2; exit 1; }
+[ ! -e "$APP/Contents/MacOS/FileIDEngine" ] || { echo "A Swift engine binary is in the App Store bundle; only fileidd ships." >&2; exit 1; }
 [ -s "$APP/Contents/MacOS/mlx.metallib" ] || {
     echo "The required MLX Metal library is missing from the app bundle." >&2
     exit 1
@@ -88,10 +90,20 @@ FILEID_APP_STORE=1 FILEID_WITH_RUST_ENGINE=0 FILEID_BUILD_CONFIGURATION=release 
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 chmod -R a+rX "$APP"
 
-codesign --force --sign "$APP_IDENTITY" --timestamp "$APP/Contents/MacOS/mlx.metallib"
+# Nested code first (inside-out, no --deep): the metallibs beside the app and
+# beside libFileIDAppleKit, the bundled dylibs, then fileidd with the inherited
+# sandbox entitlements.
+for lib in "$APP/Contents/MacOS/"*.metallib "$APP/Contents/Frameworks/"*.metallib; do
+    [ -f "$lib" ] || continue
+    codesign --force --sign "$APP_IDENTITY" --timestamp "$lib"
+done
+for lib in "$APP/Contents/Frameworks/"*.dylib; do
+    [ -f "$lib" ] || continue
+    codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime "$lib"
+done
 codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime \
     --entitlements Resources/FileIDEngineAppStore.entitlements \
-    "$APP/Contents/MacOS/FileIDEngine"
+    "$APP/Contents/MacOS/fileidd"
 codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime \
     --entitlements Resources/FileIDAppStore.entitlements "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"

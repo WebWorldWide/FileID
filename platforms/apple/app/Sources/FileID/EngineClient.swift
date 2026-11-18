@@ -268,56 +268,42 @@ public final class EngineClient {
         }
     }
 
-    /// Where the engine binaries live and how each is vetted before it starts.
-    /// The app uses its own bundle; tests point it at a folder of stand-ins.
+    /// Where the engine binary lives and how it is vetted before it starts.
+    /// The app uses its own bundle; tests point it at a folder holding a stand-in.
     struct LaunchContext {
         var directory: URL
         var environment: [String: String]
-        var defaults: UserDefaults
         var integrityFailure: (URL) -> String?
 
         static func appBundle() -> LaunchContext {
             let exec = Bundle.main.executablePath ?? CommandLine.arguments[0]
             return LaunchContext(directory: URL(fileURLWithPath: exec).deletingLastPathComponent(),
                                  environment: ProcessInfo.processInfo.environment,
-                                 defaults: .standard,
                                  integrityFailure: EngineClient.engineIntegrityFailure(binary:))
         }
 
-        func binary(for backend: EngineBackend) -> URL {
-            directory.appendingPathComponent(backend.binaryName)
-        }
+        var binary: URL { directory.appendingPathComponent(EngineBinary.name) }
 
-        func isBundled(_ backend: EngineBackend) -> Bool {
-            FileManager.default.isExecutableFile(atPath: binary(for: backend).path)
+        var isBundled: Bool {
+            FileManager.default.isExecutableFile(atPath: binary.path)
         }
     }
 
     private let launch: LaunchContext
 
-    /// The engine the live process runs; nil while none is running.
-    public private(set) var runningBackend: EngineBackend?
-    /// Engines that failed to start this session, and the note Settings shows.
-    public private(set) var fallback = EngineFallback()
+    /// Why the engine isn't running, while it can't start or keeps stopping; nil otherwise.
+    /// `EngineUnavailableCard` shows it.
+    public private(set) var startFailure: EngineStartFailure?
     private var runningReachedReady = false
+    private var startupExits = EngineStartupExits()
 
-    public var rustEngineBundled: Bool { launch.isBundled(.rust) }
-
-    /// The engine Settings ▸ Engine shows as chosen (before any fallback).
-    public var preferredBackend: EngineBackend {
-        EngineBackendPolicy.preferred(environment: launch.environment, defaults: launch.defaults,
-                                      rustBundled: rustEngineBundled)
-    }
-
-    /// Settings ▸ Engine: remember the choice and restart on it. A new choice
-    /// also forgets this session's fallback, so choosing Rust again retries it.
-    public func switchBackend(to backend: EngineBackend) {
-        launch.defaults.set(backend.rawValue, forKey: EngineBackendPolicy.defaultsKey)
-        fallback = EngineFallback()
+    /// "Try again" and Settings ▸ Restart helper: forget earlier failures and start the engine.
+    public func restart() {
+        pendingRespawn?.cancel()
+        respawnAttempts.removeAll()
+        startupExits = EngineStartupExits()
         start()
     }
-
-    nonisolated static let damagedCopyReason = "This copy of FileID is damaged. Reinstall it."
 
     public func start() {
         // A live engine here means this is a restart (Settings ▸ Restart
@@ -325,36 +311,34 @@ public final class EngineClient {
         // two live engines = two SQLite writers against one DB =
         // corruption. Single-flight stop-then-start.
         terminateRunningEngine()
-        let candidates = EngineBackendPolicy.candidates(environment: launch.environment, defaults: launch.defaults,
-                                                        rustBundled: rustEngineBundled, demoted: fallback.demoted)
-        var failure = Self.damagedCopyReason
-        for backend in candidates {
-            let binURL = launch.binary(for: backend)
-            guard launch.isBundled(backend) else {
-                Self.debug("start: \(backend.rawValue) engine binary not found next to app executable")
-                fallback.launchFailed(backend, reason: "it isn't in this copy of FileID")
-                continue
-            }
-            // Refuse to spawn an engine binary that didn't ship with this
-            // app. Prevents a malicious process from dropping a payload at
-            // FileID.app/Contents/MacOS/FileIDEngine and getting full FS
-            // access via IPC. In dev (ad-hoc signing) and notarized
-            // builds (Developer ID), both binaries share a signing
-            // identity — we require it to match the app's.
-            if let reason = launch.integrityFailure(binURL) {
-                Self.debug("start: \(reason)")
-                failure = Self.damagedCopyReason
-                fallback.launchFailed(backend, reason: "its signature doesn't match the app")
-                continue
-            }
-            if let reason = spawn(binary: binURL, backend: backend) {
-                failure = reason
-                fallback.launchFailed(backend, reason: "it couldn't be launched")
-                continue
-            }
+        startFailure = nil
+        if case .crashed = state { state = .starting }
+        guard launch.isBundled else {
+            Self.debug("start: engine binary not found next to app executable")
+            fail(EngineStartFailure(.missing))
             return
         }
-        state = .crashed(reason: failure)
+        // Refuse to spawn an engine binary that didn't ship with this
+        // app. Prevents a malicious process from dropping a payload at
+        // FileID.app/Contents/MacOS/fileidd and getting full FS
+        // access via IPC. In dev (ad-hoc signing) and notarized
+        // builds (Developer ID), both binaries share a signing
+        // identity — we require it to match the app's.
+        if let reason = launch.integrityFailure(launch.binary) {
+            Self.debug("start: \(reason)")
+            fail(EngineStartFailure(.signatureMismatch))
+            return
+        }
+        if let failure = spawn(binary: launch.binary) {
+            fail(failure)
+        }
+    }
+
+    private func fail(_ failure: EngineStartFailure) {
+        Self.debug("engine unavailable: \(failure.cause)")
+        startFailure = failure
+        if lastError?.kind == "engine_exited" { lastError = nil }
+        state = .crashed(reason: failure.summary)
     }
 
     /// Stop half of a restart: cancel any pending respawn and
@@ -381,7 +365,6 @@ public final class EngineClient {
         }
         process = nil
         stdinPipe = nil
-        runningBackend = nil
 
         // `handleEngineExit(for:)` deliberately rejects this process the moment
         // it stops being `self.process`, so a restart NEVER reaches the reset
@@ -478,8 +461,8 @@ public final class EngineClient {
     }
 
     /// Nil once the engine is running, else why it couldn't be launched.
-    private func spawn(binary: URL, backend: EngineBackend) -> String? {
-        Self.debug("spawn: starting \(backend.rawValue) engine at \(redactPathForLog(binary.path))")
+    private func spawn(binary: URL) -> EngineStartFailure? {
+        Self.debug("spawn: starting engine at \(redactPathForLog(binary.path))")
         let proc = Process()
         proc.executableURL = binary
         // swift-transformers' NetworkMonitor reports offline until its
@@ -622,12 +605,11 @@ public final class EngineClient {
             // domain+code only.
             let ns = error as NSError
             Self.debug("spawn: proc.run() FAILED: \(ns.domain) (\(ns.code))")
-            return "FileID's helper couldn't start. Quit and reopen FileID. If that doesn't help, reinstall FileID."
+            return EngineStartFailure(.couldNotLaunch)
         }
         Self.debug("spawn: engine pid=\(proc.processIdentifier), readabilityHandler armed")
         self.process = proc
         self.stdinPipe = inPipe
-        runningBackend = backend
         runningReachedReady = false
         return nil
     }
@@ -643,7 +625,7 @@ public final class EngineClient {
     }
 
     /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
-    /// (an engine that exits at once is the Rust-to-Swift fallback case).
+    /// (an engine that exits at once).
     nonisolated static func refuseSigpipe(on pipe: Pipe) {
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
@@ -728,7 +710,7 @@ public final class EngineClient {
         case .ready(let info):
             state = .ready(info)
             runningReachedReady = true
-            if let runningBackend { fallback.reachedReady(runningBackend) }
+            startupExits.reachedReady()
             if lastError?.kind == "engine_exited" { lastError = nil }
             restoreSavedFolderAccess()
             // Do NOT clear the respawn budget merely on reaching Ready — a
@@ -980,9 +962,7 @@ public final class EngineClient {
         (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process = nil
         stdinPipe = nil
-        let exitedBackend = runningBackend
         let exitedBeforeReady = !runningReachedReady
-        runningBackend = nil
 
         resetStateOnlyADeadEngineCouldClear()
 
@@ -1009,10 +989,11 @@ public final class EngineClient {
             return
         }
 
-        // A Rust engine that can't get going falls back to the Swift engine
-        // at once, with a fresh respawn budget.
-        if let exitedBackend, exitedBeforeReady, fallback.exitedBeforeReady(exitedBackend) {
-            fallBackAfterExit(of: exitedBackend)
+        // An engine that stops twice before it is ready is not coming up:
+        // say so now rather than after the whole respawn budget.
+        if exitedBeforeReady, startupExits.exitedBeforeReady() {
+            Self.debug("exit: stopped before ready \(EngineStartupExits.limit) times")
+            fail(EngineStartFailure(.exitsAtStart))
             return
         }
 
@@ -1030,12 +1011,8 @@ public final class EngineClient {
 
         let attemptIdx = respawnAttempts.count
         guard attemptIdx < Self.respawnDelays.count else {
-            if let exitedBackend, fallback.respawnsExhausted(exitedBackend) {
-                fallBackAfterExit(of: exitedBackend)
-                return
-            }
-            state = .crashed(reason: "FileID's helper keeps stopping. Press Restart, or quit and reopen FileID.")
             Self.debug("respawn: budget exhausted, marking crashed")
+            fail(EngineStartFailure(.keepsStopping))
             return
         }
 
@@ -1051,21 +1028,6 @@ public final class EngineClient {
         pendingRespawn?.cancel()
         pendingRespawn = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
-            guard let self else { return }
-            if case .crashed = self.state { return }
-            self.start()
-        }
-    }
-
-    private func fallBackAfterExit(of backend: EngineBackend) {
-        Self.debug("fallback: \(backend.rawValue) engine demoted for this session")
-        respawnAttempts.removeAll()
-        lastReadyAt = .distantPast
-        state = .starting
-        if let note = fallback.note { lastError = EngineError(kind: "engine_fallback", message: note) }
-        pendingRespawn?.cancel()
-        pendingRespawn = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard let self else { return }
             if case .crashed = self.state { return }
             self.start()

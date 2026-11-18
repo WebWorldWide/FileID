@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   build:
-    name: Build app + engine (SwiftPM)
+    name: Build app + shared engine (SwiftPM, Cargo)
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -69,7 +69,9 @@ jobs:
       - name: Resolve packages
         run: swift package resolve
 
-      - name: Build engine (release)
+      # The Swift engine is not shipped: it is built as the conformance peer
+      # (and for its own tests) only.
+      - name: Build Swift engine (conformance peer, release)
         run: swift build -c release --product FileIDEngine
 
       - name: Build app (release)
@@ -83,10 +85,22 @@ jobs:
           swift build -c release -Xswiftc -DFILEID_TEST_TRASH_ROOT --product FileIDEngine
           cp .build/release/FileIDEngine "$RUNNER_TEMP/FileIDEngine-swift-test-trash"
 
-      - name: Build App Store sandbox variant
+      - name: Build App Store sandbox variant (app)
+        run: swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
+
+      # The Rust engine as the Mac app hosts it (Contents/MacOS/fileidd):
+      # Apple adapters linked, events on fd 2, Swift-engine state root. Built
+      # with test-trash-root (implies apple-adapters; test builds only) so the
+      # Trash round trip runs against a per-case folder, never the Trash.
+      - name: Build Rust engine with Apple adapters
         run: |
-          swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileIDEngine
-          swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
+          set -euo pipefail
+          swift build -c release --product FileIDAppleKit
+          KIT_DIR="$PWD/.build/release"
+          (cd ../windows/src/engine && LIBRARY_PATH="$KIT_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo build --locked --jobs 4 --features test-trash-root --target-dir "$RUNNER_TEMP/fileid-conformance-engine-apple")
+          ENGINE="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine"
+          cp "$KIT_DIR/libFileIDAppleKit.dylib" "$(dirname "$ENGINE")/"
+          install_name_tool -add_rpath @executable_path "$ENGINE"
 
       - name: Build tests
         # Compile the test targets outside the 12-minute run cap below: with
@@ -128,10 +142,10 @@ jobs:
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
           set +e
-          # .build/release/FileIDEngine is the App Store sandbox variant by now
-          # (built last, above); the scan-cancel test scans a temporary folder
-          # and needs the plain debug engine the test build produced.
-          FILEID_TEST_SCAN_ENGINE_PATH="$PWD/.build/debug/FileIDEngine" FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --skip-build --no-parallel
+          # The query-reply test starts the shared engine as the app hosts it (the
+          # adapters build above, libFileIDAppleKit beside it); the scan-cancel
+          # test scans a temporary folder with the Swift peer the test build produced.
+          FILEID_TEST_SCAN_ENGINE_PATH="$PWD/.build/debug/FileIDEngine" FILEID_TEST_ENGINE_PATH="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --skip-build --no-parallel
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -158,20 +172,6 @@ jobs:
         timeout-minutes: 15
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine" --peer-engine "$RUNNER_TEMP/FileIDEngine-swift-test-trash"
 
-      # The Rust engine as the Mac app hosts it (Contents/MacOS/fileidd):
-      # Apple adapters linked, events on fd 2, Swift-engine state root. Built
-      # with test-trash-root (implies apple-adapters; test builds only) so the
-      # Trash round trip runs against a per-case folder, never the Trash.
-      - name: Build Rust engine with Apple adapters
-        run: |
-          set -euo pipefail
-          swift build -c release --product FileIDAppleKit
-          KIT_DIR="$PWD/.build/release"
-          (cd ../windows/src/engine && LIBRARY_PATH="$KIT_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo build --locked --jobs 4 --features test-trash-root --target-dir "$RUNNER_TEMP/fileid-conformance-engine-apple")
-          ENGINE="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine"
-          cp "$KIT_DIR/libFileIDAppleKit.dylib" "$(dirname "$ENGINE")/"
-          install_name_tool -add_rpath @executable_path "$ENGINE"
-
       - name: Engine conformance — Rust (app-hosted adapters build)
         timeout-minutes: 15
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" --flavor rust --test-trash-root --peer-engine "$RUNNER_TEMP/FileIDEngine-swift-test-trash"
@@ -179,42 +179,38 @@ jobs:
       - name: Verify catalog index recovery
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"
 
-      - name: Verify binaries exist
+      # The shipped layout: the app plus the one engine, assembled the way
+      # release.sh and testflight.sh do (App Store variant, unsigned), with the
+      # release Rust engine and no ONNX Runtime (runners do not have the pinned
+      # dylib; its absence only stops the ONNX models, not startup).
+      - name: Assemble the app bundle (fileidd only)
+        timeout-minutes: 45
         run: |
           set -euo pipefail
-          for bin in .build/release/FileID .build/release/FileIDEngine; do
-            if [[ ! -x "$bin" ]]; then
-              echo "::error::Missing executable: $bin"
+          FILEID_APP_STORE=1 FILEID_BUILD_CONFIGURATION=release bash scripts/assemble_app.sh "$RUNNER_TEMP/FileID.app" 0.0.0 1
+          CONTENTS="$RUNNER_TEMP/FileID.app/Contents"
+          for bin in "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/fileidd" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"; do
+            if [[ ! -e "$bin" ]]; then
+              echo "::error::Missing in the bundle: $bin"
               exit 1
             fi
-            size_mb=$(du -m "$bin" | cut -f1)
-            echo "$bin OK (${size_mb} MB)"
+            echo "$bin OK ($(du -m "$bin" | cut -f1) MB)"
           done
+          if [[ -e "$CONTENTS/MacOS/FileIDEngine" ]]; then
+            echo "::error::A Swift engine binary is in the bundle; only fileidd ships."
+            exit 1
+          fi
 
-      # V15.2 — engine smoke launch. Verifies the binary actually runs to
-      # the point of emitting a `ready` event and exits cleanly on stdin
-      # EOF. Catches the class of regressions where the binary builds
-      # clean but panics in main() or fails to register a ready event.
-      #
-      # NB on cross-platform parity: the Windows engine smoke also
-      # asserts `"executionProvider"` appears in the ready info, but
-      # macOS doesn't have that field — `executionProvider` is the
-      # Windows-only ORT EP picker output (DirectML / CUDA / OpenVINO /
-      # QNN). On macOS the ML pipeline uses MLX + Apple Neural Engine +
-      # CoreML with no equivalent enum. The assertion is intentionally
-      # absent here.
-      - name: Smoke — engine startup
+      # Smoke: the bundled engine starts and says ready. IPC events go to
+      # stderr in the app-hosted build; stdin EOF is its shutdown.
+      - name: Smoke — bundled engine startup
         run: |
           set -euo pipefail
-          # Launch the engine with stdin closed immediately (EOF). The
-          # engine's parent-PID watchdog should observe the broken pipe
-          # on the next LineReader read and exit cleanly. We expect a
-          # single `ready` event in stdout before shutdown.
-          : | .build/release/FileIDEngine > engine.stdout 2> engine.stderr &
+          ENGINE="$RUNNER_TEMP/FileID.app/Contents/MacOS/fileidd"
+          export HOME="$RUNNER_TEMP/smoke-home" CFFIXED_USER_HOME="$RUNNER_TEMP/smoke-home"
+          mkdir -p "$HOME"
+          : | "$ENGINE" > engine.stdout 2> engine.stderr &
           ENGINE_PID=$!
-          # 30 s budget — macos-26 runners' cold-start of GRDB + lazy
-          # MLX capability probe can stretch past the previous 15 s
-          # ceiling on the first run after a cache miss.
           BUDGET=30
           for i in $(seq 1 $BUDGET); do
             if ! kill -0 $ENGINE_PID 2>/dev/null; then
@@ -223,34 +219,19 @@ jobs:
             fi
             sleep 1
           done
-
-          # Diagnostic dump ALWAYS (not just on failure) so the workflow
-          # log shows what the engine emitted, regardless of which
-          # assertion fires. Without this the failure cause is opaque
-          # to anyone who can't read the CI logs.
-          echo "----- engine.stdout (size $(wc -c < engine.stdout) bytes) -----"
-          cat engine.stdout || true
-          echo
           echo "----- engine.stderr (size $(wc -c < engine.stderr) bytes) -----"
           cat engine.stderr || true
-          echo
           echo "----- end -----"
-
           if kill -0 $ENGINE_PID 2>/dev/null; then
             kill -9 $ENGINE_PID || true
-            echo "::error::FileIDEngine did not exit within ${BUDGET}s of stdin EOF (still alive on poll)."
+            echo "::error::fileidd did not exit within ${BUDGET}s of stdin EOF."
             exit 1
           fi
-          # NB: macOS engine writes IPC events to STDERR, not stdout
-          # (see platforms/apple/engine/.../IPC/IPCSink.swift:108 —
-          # `FileHandle.standardError.write(contentsOf: blob)`).
-          # The Windows engine writes to stdout, hence the stream
-          # asymmetry between this smoke and windows-engine.yml's.
           if ! grep -q '"ready"' engine.stderr; then
-            echo "::error::engine.stderr did not contain a ready event (engine exited but never emitted ready)."
+            echo "::error::engine.stderr did not contain a ready event."
             exit 1
           fi
-          echo "Engine startup smoke passed. ✅"
+          echo "Bundled engine startup smoke passed. ✅"
 
       # Privacy gate parity with Windows: source URL allowlist. Scans
       # every .swift under platforms/apple/ for any https?:// URL and
@@ -307,8 +288,9 @@ jobs:
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          # The ONNX Runtime framework both binaries link, scanned on its own so
+          # The ONNX Runtime framework the app links, scanned on its own so
           # an onnxruntime package update that adds Microsoft's uploader fails here.
           ort=.build/artifacts/onnxruntime-swift-package-manager/onnxruntime/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" .build/release/FileID .build/release/FileIDEngine "$ort"
+          CONTENTS="$RUNNER_TEMP/FileID.app/Contents"
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/fileidd" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$ort"
           echo "No telemetry strings detected. ✅"

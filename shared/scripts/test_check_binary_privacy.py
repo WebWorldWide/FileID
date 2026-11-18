@@ -154,7 +154,9 @@ class BinaryPrivacyTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         text = (root / ".github/workflows/macos.yml").read_text(encoding="utf-8")
         self.assertIn("onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime", text)
-        self.assertIn('.build/release/FileIDEngine "$ort"', text)
+        self.assertIn('"$CONTENTS/MacOS/fileidd"', text)
+        self.assertIn('"$ort"', text)
+        self.assertNotIn('.build/release/FileIDEngine "$ort"', text)
 
     def test_reports_missing_and_accepts_clean_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

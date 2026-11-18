@@ -29,7 +29,7 @@ struct Sidebar: View {
 
             if shouldShowEngineSection {
                 VStack(alignment: .leading, spacing: 8) {
-                    EngineStatusRow(state: engine.state, onRestart: { engine.start() })
+                    EngineStatusRow(state: engine.state, onRestart: { engine.restart() })
                     if let err = engine.lastError, Self.showsErrorCard(err.kind) { engineErrorRow(err) }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 10)
@@ -111,11 +111,10 @@ struct Sidebar: View {
     /// The area whose pill is lit: the one holding the open page, none on Settings.
     nonisolated static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
 
-    /// A fall back to the Swift engine explains itself in Settings and a stopped
-    /// folder plan on Organize Folders; the sidebar keeps its card for errors
-    /// nothing else explains.
+    /// A stopped folder plan explains itself on Organize Folders; the sidebar
+    /// keeps its card for errors nothing else explains.
     nonisolated static func showsErrorCard(_ kind: String) -> Bool {
-        kind != "engine_fallback" && kind != "plan_restructure_cancelled"
+        kind != "plan_restructure_cancelled"
     }
 
     private var shouldShowEngineSection: Bool {
