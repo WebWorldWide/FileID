@@ -107,28 +107,23 @@ echo "🔨 Building release binaries (v${VERSION}, build ${BUILD_NUM})…"
 XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
 if [ -d "$XCODE_DEV_DIR" ]; then
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
 else
     swift build -c release --product FileID
-    swift build -c release --product FileIDEngine
 fi
 
-# Developer ID builds bundle the shared Rust engine (fileidd, the default
-# engine since Stage 10) with the pinned ONNX Runtime; the Swift engine stays
-# bundled and selectable. FILEID_WITH_RUST_ENGINE=0 ships the Swift engine only.
-FILEID_WITH_RUST_ENGINE="${FILEID_WITH_RUST_ENGINE:-1}" FILEID_REQUIRE_ORT=1 \
+# The bundle's only engine is the shared Rust engine (Contents/MacOS/fileidd),
+# built by assemble_app.sh with the pinned ONNX Runtime. No Swift engine ships.
+FILEID_REQUIRE_ORT=1 \
     bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
 
 # ── Strip + scrub (must precede signing — both invalidate the cdhash) ────────
 echo "🧹 Stripping debug symbols…"
 strip -S "$APP/Contents/MacOS/FileID"
-strip -S "$APP/Contents/MacOS/FileIDEngine"
 
 # MLX's vendored C++ bakes __FILE__ into __cstring; strip doesn't touch it.
 # Same-length byte rewrite keeps the binary valid.
 echo "🧹 Rewriting embedded source paths…"
-REWRITE_BINARIES=("$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine")
-[ -f "$APP/Contents/MacOS/fileidd" ] && REWRITE_BINARIES+=("$APP/Contents/MacOS/fileidd")
+REWRITE_BINARIES=("$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/fileidd")
 python3 - "${REWRITE_BINARIES[@]}" <<'PY'
 import sys, os
 real = os.path.expanduser("~").encode()
@@ -178,14 +173,7 @@ done
 # refuses to spawn an engine whose Team ID differs from the app's.
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
-# Shared Rust engine (bundled unless FILEID_WITH_RUST_ENGINE=0): same identity
-# and entitlements as the Swift engine.
-if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
-    codesign --force --options runtime $TIMESTAMP_FLAG \
-        --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
-        "$SIGN_TMP/$APP/Contents/MacOS/fileidd"
-fi
+    "$SIGN_TMP/$APP/Contents/MacOS/fileidd"
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$APP_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileID"
@@ -196,23 +184,18 @@ codesign --force --options runtime $TIMESTAMP_FLAG \
 echo "🔍 Verifying signatures…"
 codesign --verify --deep --strict --verbose=2 "$SIGN_TMP/$APP"
 APP_TEAM=$(codesign -dv "$SIGN_TMP/$APP" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
-ENGINE_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
+ENGINE_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/fileidd" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
 echo "   app:    $APP_TEAM"
 echo "   engine: $ENGINE_TEAM"
 if [ "$APP_TEAM" != "$ENGINE_TEAM" ]; then
-    echo "❌ Team ID mismatch between app and engine — the in-app integrity gate will refuse to spawn the engine."
+    echo "❌ Team ID mismatch between app and the engine (fileidd) — the in-app integrity gate will refuse to spawn it."
     exit 1
 fi
-PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine")
-if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
-    RUST_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/fileidd" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
-    echo "   rust:   $RUST_TEAM"
-    if [ "$APP_TEAM" != "$RUST_TEAM" ]; then
-        echo "❌ Team ID mismatch between app and the Rust engine (fileidd)."
-        exit 1
-    fi
-    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
+if [ -e "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine" ]; then
+    echo "❌ A Swift engine binary is in the bundle; Developer ID bundles ship only fileidd."
+    exit 1
 fi
+PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
 ORT_CHECK=()
 if [ -f "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
     PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
@@ -299,7 +282,7 @@ if [ "$SKIP_NOTARIZE" = "0" ]; then
     fi
 else
     echo "ℹ️  Dry run (--skip-notarize): Gatekeeper assessment skipped."
-    echo "   Launch test: mount '$DMG_OUT' and open $APP — verify the engine spawns"
+    echo "   Launch test: mount '$DMG_OUT' and open $APP — verify fileidd spawns"
     echo "   (both sides share the signing team) and Deep Analyze runs"
     echo "   under the hardened runtime."
 fi
