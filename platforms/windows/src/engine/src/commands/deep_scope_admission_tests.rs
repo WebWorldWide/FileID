@@ -2,7 +2,6 @@ use super::*;
 use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
 use std::time::Duration;
 
-/// The next event other than the "Queued"/"Finding files" lines the app-hosted build sends first.
 async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
     loop {
         let event = rx.recv().await.unwrap();
@@ -134,7 +133,6 @@ async fn scope_admission_empty_request_bypasses_busy_scheduler_and_loader() {
     let holder = s.reserve(Demand { cpu: num_cpus::get().saturating_sub(2).max(1), io: 2, ..Demand::default() }, Priority::Interactive, || false).unwrap();
     let (sink, mut rx) = Sink::channel_for_test(8);
     let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
-    // A kind the Mac catalog knows: the app-hosted build refuses unknown kinds first, as Swift.
     let request = ipc::DeepAnalyzeAllPayload { model_kind: "qwen3_vl_2b".into(), skip_existing: false, tags_only: false, propose_renames: false, file_ids: Some(vec![]), excluded_folders: None };
     tokio::time::timeout(Duration::from_secs(2), handle_deep_analyze_all(sink, db, request, Arc::new(AtomicBool::new(false)))).await.unwrap();
     match next_payload(&mut rx).await {

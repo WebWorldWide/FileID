@@ -1,7 +1,6 @@
-//! Durable face refresh backlog: a `faceRefresh` catalog job that re-embeds
-//! faces whose stored vector is missing or from another model, processing or
-//! file version, one model/processing namespace at a time. Mirror of the macOS
-//! `FaceRefreshJob.swift`; keep states, SQL and messages in step.
+//! Durable face refresh backlog: a `faceRefresh` catalog job re-embedding faces whose stored vector is missing or from
+//! another model, processing or file version, one namespace at a time. Keep states, SQL and messages in step with macOS
+//! `FaceRefreshJob.swift`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,10 +18,7 @@ use crate::ipc::{CatalogJob, CatalogRequest, CatalogResponse, EventPayload, Face
 
 pub const JOB_ID: &str = "face-refresh";
 pub const JOB_KIND: &str = "faceRefresh";
-/// What this engine's own face pipeline produces (YuNet landmarks, 112 px alignment).
 pub const PORTABLE_PROCESSING: &str = "rust-align112-v1";
-/// The macOS namespaces (Vision landmarks and the Swift alignment), as
-/// `FaceCacheProvenance.processingVersion` names them.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub const MAC_PROCESSING: &str = "macos-landmark-overlap-v3-orientation";
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
@@ -56,9 +52,8 @@ const OUTDATED: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id LEFT
        OR fp.processing_version IS NULL OR fp.processing_version<>?2 OR fp.source_revision IS NULL OR r.revision IS NULL \
        OR fp.source_revision<>r.revision)";
 
-/// The face space this platform keeps People in. The engine the Mac app hosts
-/// keeps the Swift engine's namespace, so a Swift catalog shows no refresh
-/// backlog; elsewhere it is the portable pipeline's.
+/// The Mac-hosted engine keeps the Swift engine's namespace so a Swift catalog shows no refresh backlog; elsewhere the
+/// portable pipeline's.
 pub(crate) fn processing() -> &'static str {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -70,13 +65,10 @@ pub(crate) fn processing() -> &'static str {
     }
 }
 
-/// Whether this engine can compute vectors in `processing()`: the portable
-/// pipeline, or the app-hosted engine with the Vision adapters (`apple::faces`).
 pub(crate) fn refresh_supported() -> bool {
     processing() == PORTABLE_PROCESSING || cfg!(all(target_os = "macos", feature = "apple-adapters"))
 }
 
-/// The installed SFace weights' identity, cached by path, size and mtime.
 pub(crate) fn current_model() -> Option<String> {
     static CACHE: Mutex<Option<(PathBuf, u64, std::time::SystemTime, String)>> = Mutex::new(None);
     let path = crate::models::sface::default_weights_path().ok()?;
@@ -178,7 +170,6 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     Ok(super::catalog::jobs(conn)?.into_iter().filter(|job| job.kind == JOB_KIND).collect())
 }
 
-/// Seeds the backlog for one namespace and queues the job.
 pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
@@ -238,8 +229,8 @@ pub(crate) enum Source {
     Offline,
 }
 
-/// Missing: the photo is gone but its library location is there. Offline: the
-/// location itself (or the volume or drive it is on) is unreachable.
+/// Missing: the photo is gone but its library location is there. Offline: the location itself (or its volume) is
+/// unreachable.
 pub(crate) fn classify(path: &Path, roots: &[PathBuf]) -> Source {
     if path.exists() {
         return Source::Available;
@@ -267,12 +258,10 @@ pub(crate) fn roots(conn: &Connection) -> rusqlite::Result<Vec<PathBuf>> {
     statement.query_map([], |row| row.get::<_, String>(0).map(PathBuf::from))?.collect()
 }
 
-/// Re-embeds the faces of one photo. One result per box, in order.
+/// One result per box, in order.
 pub(crate) trait Backend: Send {
     fn model(&self) -> &str;
     fn embed(&mut self, path: &Path, boxes: &[String]) -> Vec<std::result::Result<Vec<f32>, &'static str>>;
-    /// Crop JPEGs (`face_crops/<id>.jpg`) for the boxes of the last `embed`, in
-    /// order, for backends that make them.
     fn take_crops(&mut self) -> Vec<Option<Vec<u8>>> {
         Vec::new()
     }
@@ -329,13 +318,11 @@ fn stat_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
         }
 }
 
-/// Runs the backend outside the database lock, one photo at a time.
 #[cfg(test)]
 pub(crate) fn embed_batch(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> Vec<(i64, Outcome)> {
     embed_batch_with_crops(batch, roots, backend).0
 }
 
-/// [`embed_batch`] plus the crop JPEGs the backend made, by face.
 pub(crate) fn embed_batch_with_crops(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> (Vec<(i64, Outcome)>, Vec<(i64, Vec<u8>)>) {
     let mut crops = Vec::new();
     let mut by_path: BTreeMap<&str, Vec<&Pending>> = BTreeMap::new();
@@ -381,16 +368,13 @@ fn valid(vector: &[f32]) -> bool {
     vector.len() == 128 && vector.iter().all(|value| value.is_finite()) && (0.95..=1.05).contains(&norm)
 }
 
-/// Stores one batch's outcomes. A vector is saved only while the face, its box
-/// and its photo's catalog size and time are unchanged.
 pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &[Pending], outcomes: &[(i64, Outcome)], at: f64) -> rusqlite::Result<Vec<i64>> {
     let tx = conn.unchecked_transaction()?;
     let mut saved = Vec::new();
     for (face, outcome) in outcomes {
         let Some(item) = batch.iter().find(|item| item.face == *face) else { continue };
         let (state, reason) = match outcome {
-            // The Mac face space saves through `FaceAnalysisCache.persist`, as
-            // the Swift engine's `FaceRefreshJob` does.
+            // The Mac face space saves through `FaceAnalysisCache.persist`, as Swift's `FaceRefreshJob`.
             Outcome::Embedded(vector) if processing.starts_with(super::face_clustering_mac::MAC_PREFIX) => {
                 let input = super::face_extract_mac::Input {
                     id: item.face,
@@ -463,7 +447,6 @@ fn require_running(conn: &Connection) -> Result<(String, String)> {
     }
 }
 
-/// Drains the backlog synchronously with `backend`.
 #[cfg(test)]
 pub(crate) fn drain(conn: &Connection, backend: &mut dyn Backend) -> Result<()> {
     loop {
@@ -575,7 +558,6 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     publish(sink, database).await;
 }
 
-/// Writes the crop JPEGs of the faces whose vectors were saved.
 fn save_crops(crops: &[(i64, Vec<u8>)], saved: &[i64]) {
     if crops.is_empty() {
         return;
@@ -592,7 +574,6 @@ fn save_crops(crops: &[(i64, Vec<u8>)], saved: &[i64]) {
     }
 }
 
-/// Pixel box, top-left origin, on the upright decoded image.
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) fn pixel_box(bbox: &str, width: u32, height: u32) -> std::result::Result<[f32; 4], &'static str> {
     let text = bbox.trim();
@@ -633,7 +614,6 @@ struct OnnxBackend {
     sface: crate::models::sface::SFace,
 }
 
-/// The app-hosted engine's backend: the Mac pipeline in `apple::faces`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 struct MacBackend {
     sface: Arc<crate::apple::faces::MacSFace>,

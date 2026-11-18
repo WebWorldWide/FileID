@@ -1,6 +1,6 @@
-//! Sidecar undo log for `trashFiles` -> `restoreFromTrash`: an append-only NDJSON file capped at the last 1024 entries,
-//! so the UndoStack survives restarts without bloating the SQLite schema. This is the canonical Trash journal on every
-//! platform: the macOS Swift engine dual-writes it, and `journal_import` converts its older `trash-journal.json`.
+//! Sidecar undo log for `trashFiles` -> `restoreFromTrash`: append-only NDJSON capped at the last 1024 entries so the
+//! UndoStack survives restarts without bloating the SQLite schema. The canonical Trash journal on every platform: the
+//! Swift engine dual-writes it and `journal_import` converts its older `trash-journal.json`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -19,32 +19,26 @@ pub(crate) struct TrashLogEntry {
 pub(crate) struct TrashLogItem {
     pub(crate) file_id: i64,
     pub(crate) original_path: String,
-    /// The library root that authorized `original_path` when it was trashed, so a put back still
-    /// finds its anchor after the catalog (and its scan sessions) was wiped.
+    /// So a put back still finds its anchor after the catalog (and its scan sessions) was wiped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) library_root: Option<String>,
-    /// Path the Trash backend recorded as the source. Identity-bound deletion
-    /// first claims a file under a unique sibling name; Windows restore looks
-    /// up that claimed path, then renames it back to `original_path`.
+    /// Identity-bound deletion first claims a file under a unique sibling name; Windows restore looks up that claimed
+    /// path, then renames it back to `original_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recycle_bin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recycle_physical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_identity: Option<crate::platform::FileIdentity>,
-    /// Where the macOS Trash put the item, once known. A write-ahead entry has
-    /// none; restore and startup recovery then find the item by its inode.
+    /// A write-ahead entry has none; restore and startup recovery then find the item by its inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) trashed_path: Option<String>,
-    /// The file's catalog rows (`SNAPSHOT_TABLES`) as they were before Trash,
-    /// put back on restore so tags, CLIP vector and take signals return at once.
+    /// Put back on restore so tags, CLIP vector and take signals return at once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) rows: Vec<SnapshotRow>,
 }
 
 impl TrashLogItem {
-    /// The inode the item had when it was trashed: the journaled identity, else
-    /// the snapshot's `file_ref` (Swift journals carry only that).
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     pub(crate) fn expected_inode(&self) -> Option<u64> {
         self.source_identity.map(|identity| identity.file).or_else(|| {
@@ -58,7 +52,6 @@ impl TrashLogItem {
     }
 }
 
-/// Catalog tables a Trash snapshot keeps, with the column naming the file.
 /// `files` comes first so the other rows' foreign keys resolve on restore.
 pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 5] = [
     ("files", "id"),
@@ -68,8 +61,8 @@ pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 5] = [
     ("face_prints", "file_id"),
 ];
 
-/// One SQLite value. Same JSON shape as the Swift engine's `TrashJournal.Value`
-/// (null is `{}`, blobs are standard base64), so either engine reads the other's.
+/// Same JSON shape as Swift's `TrashJournal.Value` (null is `{}`, blobs standard base64) so either engine reads the
+/// other's.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SnapshotValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,7 +123,6 @@ fn table_columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<V
     names.collect()
 }
 
-/// The file's rows in every `SNAPSHOT_TABLES` table this catalog has.
 pub(crate) fn snapshot_rows(
     conn: &rusqlite::Connection,
     file_id: i64,
@@ -154,10 +146,8 @@ pub(crate) fn snapshot_rows(
     Ok(out)
 }
 
-/// Puts a restored file's snapshot back, as the Swift engine does: only when
-/// neither its id nor its path is taken, every row with `INSERT OR IGNORE`,
-/// and only columns this catalog still has. Returns whether the `files` row
-/// was inserted (false: no snapshot, or the catalog already has the file).
+/// As Swift: only when neither the id nor the path is taken, every row `INSERT OR IGNORE`, only columns this catalog
+/// still has. Returns whether the `files` row was inserted.
 pub(crate) fn restore_snapshot(
     conn: &rusqlite::Connection,
     file_id: i64,
@@ -226,8 +216,8 @@ pub(crate) fn restore_snapshot(
         }
     }
     if !rows.iter().any(|row| row.table == "face_prints") {
-        // A journal from before face rows were snapshotted: a NULL `modified_at`
-        // keeps the file out of the next scan's skip set, which detects its faces again.
+        // A journal from before face rows were snapshotted: a NULL `modified_at` keeps the file out of the next scan's
+        // skip set, which detects its faces again.
         conn.execute(
             "UPDATE files SET has_faces = 0, modified_at = NULL WHERE id = ?1 AND has_faces <> 0",
             [file_id],
@@ -239,8 +229,7 @@ pub(crate) fn restore_snapshot(
     Ok(inserted_file)
 }
 
-/// The log is trimmed to the last `MAX_ENTRIES` lines so it cannot grow without bound. Trimming drops whole oldest
-/// lines verbatim; retained lines keep their HMAC, so `read_batch` still verifies them.
+/// Trimming drops whole oldest lines verbatim; retained lines keep their HMAC, so `read_batch` still verifies them.
 const MAX_ENTRIES: usize = 1024;
 
 #[cfg(unix)]
@@ -272,8 +261,7 @@ pub(crate) fn append_at(
         std::fs::create_dir_all(parent).ok();
     }
     let json = serde_json::to_string(entry)?;
-    // HMAC-sign each entry so a local attacker who appends a forged
-    // entry can't get it accepted by restoreFromTrash. Entry format is
+    // HMAC-sign each entry so a local attacker's forged append can't be accepted by restoreFromTrash. Format:
     // `{json}\t{hex_hmac}`.
     let mac = hmac::hmac_sha256_hex(key, json.as_bytes());
     {
@@ -282,19 +270,17 @@ pub(crate) fn append_at(
             .append(true)
             .open(path)?;
         writeln!(file, "{json}\t{mac}")?;
-        // Force flush so a crash immediately after delete-to-trash doesn't lose
-        // the log entry (which would orphan the Recycle Bin items).
+        // Force flush so a crash right after delete-to-trash doesn't lose the entry (which would orphan the Recycle Bin
+        // items).
         file.sync_all()?;
     }
     sync_parent(path)?;
-    // Enforce the documented cap. Best-effort: a trim failure must not fail the
-    // delete (the entry is already durably appended above).
+    // Best-effort: a trim failure must not fail the delete (the entry is already durably appended).
     trim_to_cap(path).ok();
     Ok(())
 }
 
-/// Every signed entry, keeping only the newest line of each batch (a later
-/// receipt supersedes the write-ahead line), oldest batch first.
+/// A later receipt supersedes the write-ahead line; oldest batch first.
 pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
     let mut order: Vec<String> = Vec::new();
     let mut latest: std::collections::HashMap<String, TrashLogEntry> = std::collections::HashMap::new();
@@ -318,12 +304,10 @@ pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
     order.into_iter().filter_map(|id| latest.remove(&id)).collect()
 }
 
-/// Keep only the last `MAX_ENTRIES` non-empty lines, atomically (temp + rename).
 fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
-    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power
-    // loss before append's fsync) would otherwise fail the WHOLE read forever
-    // and silently disable the cap. Undecodable lines are dropped per-line,
-    // like the HMAC-reject path.
+    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power loss before append's fsync) would fail the
+    // WHOLE read forever and silently disable the cap. Undecodable lines are dropped per line, like the HMAC-reject
+    // path.
     let raw = std::fs::read(path)?;
     let lines: Vec<&str> = raw
         .split(|b| *b == b'\n')
@@ -359,9 +343,8 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
         return Ok(None);
     }
     let key = hmac::log_hmac_key()?;
-    // Read bytes, not read_to_string: a torn line ending inside a multi-byte
-    // character (power loss mid-append) would otherwise return InvalidData
-    // for the whole file and wedge restore for EVERY batch, old and new.
+    // Read bytes, not read_to_string: a torn line ending mid-character (power loss mid-append) would return InvalidData
+    // for the whole file and wedge restore for EVERY batch.
     let raw = std::fs::read(&path)?;
     Ok(find_batch_in(&raw, &key, batch_id))
 }
@@ -376,8 +359,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
         if line.trim().is_empty() {
             continue;
         }
-        // Split {json}\t{hex_hmac}. Entries without the HMAC suffix
-        // (legacy writes or forged appends) are rejected.
+        // Entries without the HMAC suffix (legacy writes or forged appends) are rejected.
         let Some(tab) = line.find('\t') else {
             tracing::warn!("trash_log entry missing HMAC suffix -- rejecting");
             continue;
@@ -396,8 +378,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
     None
 }
 
-/// Puts back files a killed `trashFiles` left under their hidden claim name
-/// (claimed, but not yet in the Trash or renamed back). Returns how many.
+/// Claimed but not yet in the Trash or renamed back. Returns how many.
 pub(crate) fn recover_stranded_claims() -> usize {
     let Some(raw) = paths::trash_log_path().ok().and_then(|path| std::fs::read(path).ok()) else {
         return 0;
@@ -407,10 +388,9 @@ pub(crate) fn recover_stranded_claims() -> usize {
         .unwrap_or(0)
 }
 
-/// Startup repair before the app reads the library: claims a killed
-/// `trashFiles` left behind, renames a kill left half done, the Swift engine's
-/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the
-/// Trash. Returns how many claims were put back.
+/// Before the app reads the library: claims a killed `trashFiles` left behind, renames a kill left half done, the Swift
+/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the Trash.
+/// Returns how many claims were put back.
 pub(crate) fn recover_at_startup(
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
 ) -> usize {
@@ -436,14 +416,12 @@ pub(crate) fn recover_at_startup(
     reclaimed
 }
 
-/// Batches startup recovery looks at (the Swift engine keeps 50).
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 const RECONCILE_BATCHES: usize = 50;
 
-/// A kill between the Trash move and the catalog commit leaves a row for a file
-/// that is now in the Trash. For the newest batches, drops each row whose file
-/// is gone from its path and provably in the Trash (`locate` checks identity),
-/// and journals a found location the write-ahead entry did not have yet.
+/// A kill between the Trash move and the catalog commit leaves a row for a file now in the Trash. For the newest
+/// batches, drops each row whose file is gone from its path and provably in the Trash (`locate` checks identity), and
+/// journals a found location the write-ahead entry lacked.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn reconcile_trashed_rows(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -499,8 +477,6 @@ pub(crate) fn reconcile_trashed_rows(
     dropped
 }
 
-/// Only signed entries count, the claim must still be the journaled file, and an
-/// occupied original is never replaced.
 fn recover_claims_in(raw: &[u8], key: &[u8]) -> usize {
     let mut restored = 0;
     for line in raw.split(|b| *b == b'\n') {
@@ -554,7 +530,6 @@ mod tests {
         (dir, original, claim, format!("{json}\t{mac}\n"))
     }
 
-    // A kill between the claim rename and the Trash move left the file under a hidden name.
     #[test]
     fn startup_puts_a_stranded_trash_claim_back() {
         let (dir, original, claim, raw) = claimed_fixture("back");
@@ -598,8 +573,6 @@ mod tests {
         }
     }
 
-    /// A row a killed trashFiles left behind is dropped at startup and its
-    /// people are recounted.
     #[test]
     fn a_dropped_trashed_row_recounts_its_people() {
         let gone = std::env::temp_dir().join(format!("fileid-gone-{}", uuid::Uuid::new_v4())).join("face.jpg");
@@ -668,11 +641,7 @@ mod tests {
 
     #[test]
     fn forged_entry_rejected_by_hmac_check() {
-        // Manually simulate the file format:
-        //   {valid_json}\t{valid_hmac}\n
-        // Then a hostile appender:
-        //   {forged_json}\t{wrong_hmac}\n
-        // The hostile line must fail verification.
+        // A hostile appender's forged line must fail verification.
         let key = log_hmac_key().expect("hmac key");
 
         let real_entry = make_entry("real-batch");
@@ -683,8 +652,6 @@ mod tests {
         let forged_json = serde_json::to_string(&forged_entry).unwrap();
         let wrong_mac = hmac_sha256_hex(b"different-key", forged_json.as_bytes());
 
-        // Reconstruct the verification logic from read_batch inline so we
-        // don't have to touch the filesystem.
         let lines = vec![
             format!("{real_json}\t{real_mac}"),
             format!("{forged_json}\t{wrong_mac}"),
@@ -741,8 +708,8 @@ mod tests {
         assert_eq!(found.items.len(), 1);
         assert_eq!(found.items[0].original_path, entry.items[0].original_path);
 
-        // A batch that was never appended is NOT findable — the bulk path must
-        // therefore guarantee the append before claiming the trash succeeded.
+        // A never-appended batch is NOT findable: the bulk path must guarantee the append before claiming the trash
+        // succeeded.
         assert!(find_batch_in(raw.as_bytes(), &key, "never-written").is_none());
     }
 

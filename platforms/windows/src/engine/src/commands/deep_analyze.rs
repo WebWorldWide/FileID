@@ -14,7 +14,6 @@ use crate::ipc::{
 use crate::pipeline::deep_analyze::{analyze_file, analyze_file_scoped, analyze_file_via_server, AnalyzeMode};
 use crate::pipeline::naming_context::{self, NamingContext};
 
-/// Appends one caption token. The CLI emits variable whitespace per on_token call, so trim and join with one space.
 pub(super) fn same_people(lhs: &[String], rhs: &[String]) -> bool {
     let a: std::collections::BTreeSet<&String> = lhs.iter().collect();
     let b: std::collections::BTreeSet<&String> = rhs.iter().collect();
@@ -33,8 +32,6 @@ pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
     b.push_str(trimmed);
 }
 
-/// Seconds remaining at the rolling rate, mirroring the scan pipeline's EMA ETA. None without a positive rate
-/// or when nothing remains.
 pub(super) fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
     let remaining = total.saturating_sub(completed);
     if rolling_fps > 0.01 && remaining > 0 {
@@ -44,8 +41,7 @@ pub(super) fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) ->
     }
 }
 
-/// The reviewed evidence a name may use for one file, read live, in the
-/// engine's selected face space. Fails when the source changed or is gone.
+/// Read live in the engine's selected face space; fails when the source changed or is gone.
 pub(super) fn fetch_naming(conn: &rusqlite::Connection, file_id: i64) -> anyhow::Result<NamingContext> {
     let (model, processing) = naming_context::selected_space();
     naming_context::load(conn, file_id, model.as_deref(), processing)
@@ -53,9 +49,6 @@ pub(super) fn fetch_naming(conn: &rusqlite::Connection, file_id: i64) -> anyhow:
 
 pub(super) const SOURCE_CHANGED: &str = "A file changed or can't be reached. Scan the folder again, then describe it.";
 
-/// Reject Deep Analyze after the GPU device was removed in this process: one
-/// diagnostic plus a terminal complete, so the app never waits on a run that
-/// cannot start.
 pub(crate) async fn send_gpu_failure_complete(
     sink: &Sink,
     model_kind: &str,
@@ -87,8 +80,7 @@ enum SingleFileBackend {
     Server(crate::models::resident_service::ResidentLease),
 }
 
-/// The per-file CLI is optional: a runtime that only ships llama-server must
-/// still analyze a single file, the same way the batch path falls back.
+/// The per-file CLI is optional: a runtime that only ships llama-server must still analyze a single file.
 async fn single_file_backend(model_kind: &str, cancel: &Arc<AtomicBool>) -> anyhow::Result<SingleFileBackend> {
     let cli_error = match crate::models::vlm::VlmRunner::find(cancel).await {
         Ok(runner) => return Ok(SingleFileBackend::Cli(runner)),
@@ -110,7 +102,6 @@ pub(crate) async fn handle_deep_analyze_file(
     payload: ipc::DeepAnalyzeFilePayload,
     cancel: Arc<AtomicBool>,
 ) {
-    // As the Swift runner, a file that isn't a Deep Analyze target is nothing to do.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
@@ -142,15 +133,14 @@ pub(crate) async fn handle_deep_analyze_file(
             tracing::warn!(?err, "[VLM] no usable runtime for a single-file pass");
             sink.send(EngineError::event("llama_cpp_missing", "Describe Files can't run because its AI runtime isn't installed or isn't working. Install it again in Settings, under Performance."))
             .await;
-            // Always send a terminal Complete so the UI clears the 'Loading model…' card instead of stranding.
+            // Always send a terminal Complete so the UI clears the 'Loading model…' card.
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                 DeepAnalyzeComplete {
                     processed: 0,
                     failed: 1,
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel).
+                    // A load/query failure isn't a user cancel: report the ACTUAL cancel state.
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -164,7 +154,7 @@ pub(crate) async fn handle_deep_analyze_file(
     let model_kind_for_progress = model_kind.clone();
     let file_id = payload.file_id;
     let started_at = Instant::now();
-    // Accumulate per-token text for the live caption; wire emission is throttled to 4 Hz so a fast VLM does not flood the sink.
+    // Wire emission is throttled to 4 Hz so a fast VLM does not flood the sink.
     let caption_buf = Arc::new(Mutex::new(String::new()));
     let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
     let caption_buf_cb = caption_buf.clone();
@@ -177,11 +167,8 @@ pub(crate) async fn handle_deep_analyze_file(
             .and_then(|loaded| loaded)
     };
     let on_token = move |chunk: &str| {
-            // Intentional try_send + drop-on-overflow. Per-token streaming
-            // can fire 50+/sec and the original tokio::spawn(async {
-            // send.await }) pattern would pile up unbounded tasks if the
-            // sink filled. Drops are fine — UI gets the next chunk a few
-            // ms later.
+            // try_send + drop-on-overflow: tokens can fire 50+/sec and spawning an awaiting send per token would pile
+            // up tasks if the sink filled; the UI gets the next chunk a few ms later.
             append_caption_chunk(&caption_buf_cb, chunk);
             let now = Instant::now();
             let should_emit = {
@@ -253,8 +240,8 @@ pub(crate) async fn handle_deep_analyze_file(
             tracing::warn!(?err, "[VLM] single-file pass failed");
             sink.send(EngineError::event("deep_analyze_failed", "FileID couldn't describe this file. Try again."))
             .await;
-            // Terminal Complete on analyze failure too, so the card clears and Analyze-All re-enables. cancelled derives
-            // from the cooperative cancel flag: a genuine failure must report cancelled:false so the '(1 failed)' warning fires.
+            // Terminal Complete on failure too so the card clears and Analyze-All re-enables; a genuine failure must
+            // report cancelled:false so the '(1 failed)' warning fires.
             let was_cancelled = cancel.load(Ordering::Relaxed);
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                 DeepAnalyzeComplete {
@@ -280,8 +267,7 @@ pub(crate) async fn handle_deep_analyze_folder(
     if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
         return;
     }
-    // Sargable range seek on the path_text index instead of a
-    // non-sargable `LIKE 'prefix%'` full-table scan.
+    // Sargable range seek on the path_text index, not a `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
     let filter = deep_analyze_target_filter();
     let query_db = db.clone();
@@ -299,15 +285,14 @@ pub(crate) async fn handle_deep_analyze_folder(
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_folder query");
-            // Terminal Complete on query failure so the UI clears the 'Preparing…' card instead of stranding.
+            // Terminal Complete so the UI clears the 'Preparing…' card.
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                 DeepAnalyzeComplete {
                     processed: 0,
                     failed: 1,
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel).
+                    // A load/query failure isn't a user cancel: report the ACTUAL cancel state.
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -315,7 +300,6 @@ pub(crate) async fn handle_deep_analyze_folder(
             return;
         }
     };
-    // Folder-scoped Deep Analyze is a manual action → full enrichment (Both).
     run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false, true, None).await;
 }
 
@@ -373,12 +357,11 @@ pub(crate) async fn handle_deep_analyze_all(
     .await;
 }
 
-/// The `kind IN (...) AND failed = 0` predicate shared by Deep Analyze target queries. 'pdf' is included only when
-/// the pdf-analyze render path is compiled in; otherwise queuing PDFs only manufactures feature-gate failures.
-/// failed = 0 excludes rows a prior GPU death marked failed, parity with macOS.
+/// 'pdf' is included only when the pdf-analyze render path is compiled in (otherwise queuing PDFs only manufactures
+/// failures); `failed = 0` excludes rows a prior GPU death marked failed.
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
-    // The Mac app's engine runs the Swift engine's MLX analysis, which also
-    // reads documents, audio and 3D models (`DeepAnalyzeRunner.resolveTargets`).
+    // The Mac-hosted engine's MLX analysis also reads documents, audio and 3D models
+    // (`DeepAnalyzeRunner.resolveTargets`).
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         "kind IN ('image','pdf','video','doc','audio','model') AND failed = 0"
@@ -507,8 +490,7 @@ pub(super) fn scoped_catalog_path(
 pub(crate) const STOPPED_BY_HELPER: &str =
     "Describe Files stopped because FileID's helper ran into a problem. Try again, and reopen FileID if it keeps happening.";
 
-/// Why a Describe Files run stopped: `message` is the sentence the app shows,
-/// `detail` the internal error, which only goes to the log.
+/// `message` is shown by the app; `detail` is the internal error and only goes to the log.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ScopeFailure {
     pub(crate) message: String,
@@ -520,7 +502,6 @@ impl ScopeFailure {
         Self { message: STOPPED_BY_HELPER.to_owned(), detail: detail.into() }
     }
 
-    /// A scope refusal is already written for the user; anything else is internal.
     pub(crate) fn from_error(error: &anyhow::Error) -> Self {
         match error.downcast_ref::<ScopeError>() {
             Some(scope) => Self { message: scope.to_string(), detail: scope.to_string() },
@@ -605,8 +586,8 @@ async fn run_deep_analyze_batch(
             }, &ScopeFailure::from_error(&error.into())).await;
             return;
         }
-    // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
-    // caption + tags + rename (the manual Deep Analyze pass).
+    // TagsOnly = one VLM call per file (background auto-tag, ~3× faster); Both = caption + tags + rename (manual Deep
+    // Analyze).
     let mode = if tags_only {
         AnalyzeMode::TagsOnly
     } else if propose_renames {
@@ -615,9 +596,9 @@ async fn run_deep_analyze_batch(
         AnalyzeMode::CaptionAndTags
     };
 
-    // Resolve both VLM backends before DeepAnalyzeStarting so a server-capable runtime proceeds even when the CLI check
-    // fails, while a clean runtime-missing error still surfaces when nothing is available. Weights gate first: without
-    // the model's gguf/mmproj neither backend can analyze, and erroring after Starting would strand the UI on 'Loading model…'.
+    // Resolve both backends before DeepAnalyzeStarting so a server-only runtime proceeds while a clean runtime-missing
+    // error still surfaces. Weights gate first: without gguf/mmproj neither backend works, and erroring after Starting
+    // would strand the UI on 'Loading model…'.
     let weights = crate::models::vlm::find_weights(model_kind);
     if weights.is_none() {
         sink.send(EngineError::new(
@@ -629,9 +610,8 @@ async fn run_deep_analyze_batch(
         .await;
         return;
     }
-    // The CLI binary (llama-mtmd-cli.exe) is OPTIONAL: the persistent server only
-    // needs llama-server.exe. None just means "server-only"; the no-backend gate
-    // below surfaces a runtime error if the server also can't start.
+    // The CLI binary is optional: the persistent server only needs llama-server; the no-backend gate below surfaces a
+    // runtime error if the server can't start either.
     let discovery_started_at = std::time::Instant::now();
     let runner = match crate::models::vlm::VlmRunner::find(&cancel).await {
         Ok(runner) => Some(runner),
@@ -658,18 +638,15 @@ async fn run_deep_analyze_batch(
     ))))
     .await;
 
-    // Prefer the persistent llama-server (loads the model once, ~1-3 s/file). The per-file CLI reloads the multi-GB
-    // model on every call, which would turn a whole-library pass into hours. Fall back to the CLI when weights are
-    // missing or the server cannot start. Retained-server cleanup is awaited before batch terminal events.
+    // Prefer the persistent llama-server (loads the model once, ~1-3 s/file); the per-file CLI reloads the multi-GB
+    // model each call, turning a library pass into hours. Retained-server cleanup is awaited before batch terminal
+    // events.
     let mut server = match weights {
         Some(_) => {
             match crate::models::resident_service::ResidentService::shared().acquire(model_kind, cancel.clone()).await {
                 Ok(s) => {
-                    // Verify the server accepts our multimodal payload shape
-                    // BEFORE committing the whole batch to it. If it rejects the
-                    // request (e.g. 400 on the image_url data-URI — a format that
-                    // was never hardware-verified), fall back to the per-file CLI
-                    // instead of failing every file silently.
+                    // Verify the server accepts our multimodal payload shape (e.g. a 400 on the image_url data-URI)
+                    // BEFORE committing the batch; otherwise fall back to the per-file CLI.
                     match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s, &cancel).await {
                         Ok(()) => {
                             tracing::info!(model_kind, "[VLM-SERVER] persistent server up; payload self-test OK; using it for the batch");
@@ -723,20 +700,15 @@ async fn run_deep_analyze_batch(
     let mut shared: std::collections::HashMap<usize, (i64, Vec<String>, Option<String>)> = std::collections::HashMap::new();
     let mut processed = 0u64;
     let mut failed = 0u64;
-    // Use the persistent server until it errors; if it dies mid-batch and a CLI
-    // runner exists, fall back to per-file CLI for the remaining files instead of
-    // failing every one.
+    // Use the server until it errors; if it dies mid-batch and a CLI runner exists, fall back to it for the remaining
+    // files.
     let mut use_server = server.is_some();
     let started_at = Instant::now();
-    // Rolling files/sec over completed files → the ETA shown on the NEXT file's
-    // progress frames. EMA-smoothed (0.7 old / 0.3 new), mirroring the scan
-    // pipeline (scan_session.rs).
+    // Rolling files/sec feeds the ETA on the NEXT file's progress frames; EMA 0.7 old / 0.3 new, as scan_session.rs.
     let mut rolling_fps = 0.0f64;
 
-    // No runtime can run the (present) weights: the persistent server didn't
-    // start AND there's no CLI binary. Surface the runtime problem ONCE here
-    // instead of failing every file in the loop, then clear the UI's
-    // DeepAnalyze* state (Starting was already sent above).
+    // No runtime can run the (present) weights: surface it ONCE instead of failing every file, then clear the UI's
+    // DeepAnalyze* state.
     if server.is_none() && runner.is_none() {
         sink.send(EngineError::event(
             "llama_cpp_missing",
@@ -749,7 +721,6 @@ async fn run_deep_analyze_batch(
                 failed: 0,
                 total_seconds: started_at.elapsed().as_secs_f64(),
                 model_kind: model_kind.to_string(),
-                // Runtime-missing error, not a user cancel.
                 cancelled: cancel.load(Ordering::Relaxed),
             },
         ))))
@@ -779,9 +750,8 @@ async fn run_deep_analyze_batch(
             let already = {
                 let conn = db.lock();
                 if tags_only {
-                    // A file is done when this model analyzed it (vlm_model match): the processed marker is written even when
-                    // no tag survives filtering, so keying on a source='vlm' tag row re-analyzed such files every run.
-                    // Files with vlm_model NULL or a different model still run.
+                    // Done when this model analyzed it (vlm_model match): the processed marker is written even when no
+                    // tag survives filtering, so keying on a source='vlm' tag row re-analyzed such files every run.
                     conn.query_row(
                         "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
                         rusqlite::params![file_id, model_kind],
@@ -789,8 +759,8 @@ async fn run_deep_analyze_batch(
                     )
                     .unwrap_or(false)
                 } else {
-                    // Only a completed full pass satisfies skip-existing. A
-                    // caption-only or tags-only run may leave partial results.
+                    // Only a completed full pass satisfies skip-existing; caption-only or tags-only runs may leave
+                    // partial results.
                     conn.query_row(
                         "SELECT EXISTS(SELECT 1 FROM files \
                          WHERE id=?1 AND vlm_full_model = ?2)",
@@ -859,9 +829,7 @@ async fn run_deep_analyze_batch(
             )
             .ok()
         };
-        // ETA from the rate of the files completed BEFORE this one. The IPC
-        // currentPath carries the real path (not redacted) for parity with the
-        // macOS reference; we never log it here.
+        // The IPC currentPath carries the real path (not redacted), as the macOS reference; never logged here.
         let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
             DeepAnalyzeProgress {
@@ -877,9 +845,7 @@ async fn run_deep_analyze_batch(
 
         let sink_c = sink.clone();
         let model_kind_c = model_kind.to_string();
-        // Carry ETA + the current file path onto the streamed caption frames too,
-        // so the Deep Analyze UI keeps showing both while a caption renders
-        // token-by-token (the macOS schema usage).
+        // Carry ETA and current path onto streamed caption frames too.
         let current_path_cb = current_path.clone();
         let caption_buf = Arc::new(Mutex::new(String::new()));
         let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
@@ -913,9 +879,8 @@ async fn run_deep_analyze_batch(
                 }),
             )));
         };
-        // A queued Chat answer gets the model between files instead of waiting
-        // for the whole batch; the model stays loaded, so the batch takes it back
-        // without a reload unless the answer used a different model.
+        // A queued Chat answer gets the model between files; it stays loaded, so the batch resumes without a reload
+        // unless the answer used a different model.
         if use_server && server.is_some() && crate::models::resident_service::ResidentService::shared().has_waiters() {
             drop(server.take());
             tokio::task::yield_now().await;
@@ -934,8 +899,6 @@ async fn run_deep_analyze_batch(
                 }
             }
         }
-        // Persistent server while it's healthy (model already resident); else
-        // per-file CLI. `use_server` flips off below if the server dies.
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
         let context = {
@@ -978,15 +941,11 @@ async fn run_deep_analyze_batch(
             )
             .await
         } else {
-            // Neither backend available (server failed to start AND no CLI
-            // binary). Can't analyze this file — record a failure and move on.
             Err(anyhow::anyhow!(
                 "no VLM backend available — server failed to start and the CLI binary is missing"
             ))
         };
 
-        // Fold this file's wall time into the rolling rate driving the next
-        // file's ETA (EMA, mirroring scan_session.rs).
         let dt = file_started.elapsed().as_secs_f64();
         if dt > 0.0 {
             let instant = 1.0 / dt;
@@ -1041,13 +1000,9 @@ async fn run_deep_analyze_batch(
                     return;
                 }
                 tracing::warn!(?err, file_id, "deep analyze file failed");
-                // A per-file error (unreadable image, decode failure,
-                // one rejected request) must NOT tear down a HEALTHY persistent
-                // server and downgrade the rest of the batch to the many-times
-                // slower per-file CLI. Only genuine server DEATH justifies the
-                // fallback. Re-probe the server with the same one-shot payload
-                // self-test used at startup; abandon it for the remaining files
-                // ONLY if that probe also fails (the server is actually gone).
+                // A per-file error (unreadable image, one rejected request) must NOT tear down a HEALTHY server and
+                // drop the batch to the far slower CLI. Re-probe with the startup self-test payload and abandon the
+                // server ONLY if that also fails.
                 if use_server && runner.is_some() {
                     let probe = match server.as_ref() {
                         Some(srv) => crate::models::native_admission::probe_requests_fallback(
@@ -1135,8 +1090,7 @@ mod tests {
         assert_eq!(super::batch_eta_seconds(0.0, 0, 100), None);
         assert_eq!(super::batch_eta_seconds(2.0, 10, 100), Some(45.0));
         assert_eq!(super::batch_eta_seconds(2.0, 100, 100), None);
-        // A vanishingly small rate is treated as "no rate" (matches the scan
-        // pipeline's > 0.01 fps gate) so we don't emit an absurd ETA.
+        // A vanishingly small rate is "no rate" (the scan pipeline's > 0.01 fps gate).
         assert_eq!(super::batch_eta_seconds(0.001, 1, 100), None);
     }
 
@@ -1148,23 +1102,18 @@ mod tests {
 
     #[test]
     fn caption_chunks_trim_trailing_whitespace() {
-        // CLI emits trailing space / padding on some lines — must not
-        // produce double-spaces.
         let out = run_caption_chunks(&["A", "dog ", " sits  ", "on", "  a couch"]);
         assert_eq!(out, "A dog sits on a couch");
     }
 
     #[test]
     fn caption_chunks_drop_blank_lines() {
-        // CLI emits blank lines between tokens occasionally — must be ignored.
         let out = run_caption_chunks(&["A", "", "dog", "   ", "sits"]);
         assert_eq!(out, "A dog sits");
     }
 
     #[test]
     fn caption_chunks_handle_multi_word_lines() {
-        // Some prompts produce whole sentences per line — keep internal
-        // spacing intact, single-space at line boundary.
         let out = run_caption_chunks(&["A dog sits", "on a couch"]);
         assert_eq!(out, "A dog sits on a couch");
     }
@@ -1174,9 +1123,6 @@ mod tests {
         Arc::new(Mutex::new(conn))
     }
 
-    /// Insert a minimal `files` row, returning its id. `vlm_model` /
-    /// `vlm_description` are set only when provided so the skip predicate
-    /// tests can model "captioned by a specific model" vs "never analyzed".
     fn insert_file(
         db: &Arc<Mutex<rusqlite::Connection>>,
         path: &str,
@@ -1196,9 +1142,6 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// The shared target filter selects renderable PDFs
-    /// (when the pdf-analyze render path is compiled in) and excludes rows a
-    /// prior GPU death marked failed=1 — parity with the macOS reference.
     #[test]
     fn target_filter_includes_pdfs_and_excludes_failed() {
         let db = in_memory_db();
@@ -1224,9 +1167,7 @@ mod tests {
         assert!(!ids.contains(&dead), "failed=1 row must be excluded");
     }
 
-    /// The full-pass skip predicate keys on (file, vlm_model). A file
-    /// captioned by an OLD model is NOT "already done" for a NEW model, so a
-    /// VLM switch re-analyzes instead of skipping every prior file.
+    /// A file captioned by an OLD model is not "already done" for a NEW one, so a VLM switch re-analyzes.
     #[test]
     fn full_pass_skip_is_model_aware() {
         let db = in_memory_db();
@@ -1239,7 +1180,6 @@ mod tests {
             Some("a dog on a couch"),
         );
 
-        // This is the exact predicate the non-tags-only skip branch runs.
         let skip_for = |model: &str| -> bool {
             let conn = db.lock();
             conn.query_row(

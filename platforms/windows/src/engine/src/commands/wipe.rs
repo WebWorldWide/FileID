@@ -1,8 +1,6 @@
-//! `wipeLibrary` IPC handler — truncates all learned library state in-process
-//! on the engine's single writer connection, then clears the face-crop and
-//! thumbnail caches. Doing this in the engine (the sole DB-handle owner)
-//! avoids the cross-process file-lock race the app hit when it deleted
-//! `fileid.sqlite` right after the engine exited.
+//! `wipeLibrary`: truncates all learned library state on the engine's single writer connection, then clears the
+//! face-crop and thumbnail caches. Done in the engine (the sole DB-handle owner) to avoid the cross-process file-lock
+//! race the app hit deleting `fileid.sqlite` right after the engine exited.
 
 use std::sync::Arc;
 
@@ -62,9 +60,7 @@ pub(crate) async fn handle_wipe_library(
 
     let (ok, message) = match wiped {
         Ok(Ok(())) => {
-            // Best-effort: clear the on-disk face crops + thumbnail cache so a
-            // fresh scan doesn't surface stale art. Non-fatal — the DB is the
-            // source of truth and the next scan regenerates these.
+            // Best-effort and non-fatal: the DB is the source of truth and the next scan regenerates these.
             clear_dir_contents(paths::faces_dir().ok());
             clear_dir_contents(paths::thumbs_dir().ok());
             tracing::info!("library wiped in-process");
@@ -86,8 +82,7 @@ pub(crate) async fn handle_wipe_library(
     .await;
 }
 
-/// Delete the *contents* of a directory (keep the directory itself) so the
-/// engine's startup `ensure_state_dirs` doesn't have to recreate it.
+/// Keeps the directory itself so startup `ensure_state_dirs` doesn't have to recreate it.
 fn clear_dir_contents(dir: Option<std::path::PathBuf>) {
     let Some(dir) = dir else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };

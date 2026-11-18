@@ -1,8 +1,6 @@
-//! One-shot import of the macOS Swift engine's Trash journal when the Mac app
-//! switches to this engine: `trash-journal.json` batches become signed
-//! `trash_log.json` entries. It lives in the shared state folder
-//! (`paths::root()`), so only the app-hosted build calls this. The Swift file
-//! is left in place for a switch back.
+//! One-shot import of the Swift engine's Trash journal when the Mac app switches to this engine: `trash-journal.json`
+//! batches become signed `trash_log.json` entries in the shared state folder (`paths::root()`), so only the app-hosted
+//! build calls this. The Swift file is left for a switch back.
 
 use std::path::Path;
 
@@ -33,9 +31,8 @@ struct SwiftItem {
 pub(crate) const SWIFT_TRASH_JOURNAL: &str = "trash-journal.json";
 const IMPORT_MARKER: &str = "trash-journal.json.imported";
 
-/// Imports the Swift Trash journal from the state folder. Failures are
-/// logged: the Swift file stays, so the next start retries. (`path-moves.ndjson`
-/// is shared by both engines: see `path_moves`.)
+/// Failures are logged and the Swift file stays, so the next start retries (`path-moves.ndjson` is shared by both
+/// engines: see `path_moves`).
 pub(crate) fn import_swift_journals() {
     let Ok(root) = paths::root() else {
         return;
@@ -56,9 +53,8 @@ fn file_stamp(path: &Path) -> Option<String> {
     Some(format!("{}:{}", metadata.len(), modified.as_nanos()))
 }
 
-/// Appends every Swift batch the log does not have yet (by batch id), then
+/// Appends every Swift batch not yet in the log (by batch id; batches the Swift engine dual-wrote are skipped), then
 /// records the journal's size and mtime so an unchanged file is not read again.
-/// Batches the Swift engine dual-wrote are already in the log and are skipped.
 pub(crate) fn import_swift_trash_journal(root: &Path, log: &Path, key: &[u8]) -> anyhow::Result<usize> {
     let swift = root.join(SWIFT_TRASH_JOURNAL);
     let marker = root.join(IMPORT_MARKER);
@@ -100,8 +96,7 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
         trashed_path: (!item.trashed_path.is_empty()).then_some(item.trashed_path),
         rows: item.rows,
     };
-    // The Swift journal keeps only the inode; bind the volume too while the
-    // item is where the journal says (in the Trash, or never moved).
+    // The Swift journal keeps only the inode; bind the volume too while the item is where the journal says.
     if let Some(inode) = converted.expected_inode() {
         converted.source_identity = [converted.trashed_path.as_deref(), Some(converted.original_path.as_str())]
             .into_iter()
@@ -122,7 +117,6 @@ mod tests {
         dir
     }
 
-    // A Swift `trash-journal.json` exactly as `JSONEncoder` writes `[TrashJournal.Batch]`.
     fn swift_journal(batch: &str, original: &Path, trashed: &Path, inode: u64) -> String {
         serde_json::json!([{
             "id": batch,
@@ -147,8 +141,8 @@ mod tests {
         .to_string()
     }
 
-    // The app's last Trash batch, made by the Swift engine, restores after the
-    // switch: it imports once, identity-bound, with its catalog snapshot intact.
+    // The app's last Trash batch made by the Swift engine restores after the switch: imported once, identity-bound,
+    // catalog snapshot intact.
     #[test]
     fn swift_trash_batch_imports_once_with_identity_and_snapshot() {
         let root = scratch("trash");

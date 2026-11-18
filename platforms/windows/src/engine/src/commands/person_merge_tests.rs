@@ -11,7 +11,6 @@ fn db() -> Connection {
     conn
 }
 
-/// A person with `faces` faces, one file each; the last face is the representative.
 fn person(conn: &Connection, first: Option<&str>, title: Option<&str>, unknown: bool, faces: i64) -> (i64, Vec<i64>) {
     conn.execute(
         "INSERT INTO persons(name,first_name,title,file_count,created_at,is_unknown) VALUES(?1,?1,?2,?3,100.0,?4)",
@@ -264,9 +263,8 @@ fn journal_rows_use_the_swift_field_names() {
     assert_eq!(serde_json::from_str::<Value>(&plan).unwrap(), json!({"type": KIND, "resolution": "merge", "personID": keep.0}));
 }
 
-/// The three strings are what the Swift engine's `PersonMergeJournal.merge`
-/// writes (JSONSerialization, sorted keys) for person 2 "Bo" merged into the
-/// unnamed, hidden person 1.
+/// The strings `PersonMergeJournal.merge` writes (sorted keys) for person 2 "Bo" merged into the unnamed, hidden person
+/// 1.
 #[test]
 fn a_merge_journaled_by_the_swift_engine_is_undone_here() {
     const BEFORE: &str = r#"{"keepNames":[null,null,null,null,null,null],"keepRepresentative":2,"keepUnknown":1,"other":{"anchor_radius":0.41999999999999998,"created_at":100,"first_name":"Bo","is_unknown":0,"last_clustered_at":null,"last_name":null,"middle_name":null,"name":"Bo","representative_face_id":5,"suffix":null,"title":"Uncle"},"otherPersonID":2,"personID":1,"resolution":"merge","verifications":[{"bboxA":null,"bboxB":"0,0,1,1","confidence":1,"faceA":1,"faceB":3,"fileA":null,"fileB":13,"model":"user-verified","personA":1,"personB":2,"samePerson":0,"verifiedAt":5}]}"#;

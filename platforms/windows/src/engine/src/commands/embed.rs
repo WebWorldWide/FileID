@@ -1,15 +1,10 @@
-//! CLIP embedding query handlers — text → vector, file → vector. Used by
-//! the Library tab's semantic search box and the "similar files" similarity
-//! seed. Both emit `clipTextEmbedding` so the existing consumer dispatches
-//! uniformly regardless of source.
+//! CLIP embedding queries (text → vector, file → vector) for the Library semantic search box and "similar files"; both
+//! emit `clipTextEmbedding`.
 
 use crate::ipc::{
     self, sink::Sink, ClipTextEmbedding, EngineError, EventPayload, IpcEvent, Wrap,
 };
 
-/// Pull the stored CLIP image embedding for a file_id from `clip_embeddings`
-/// and emit it as a `clipTextEmbedding` event so the app's existing CLIP-
-/// search consumer can use it as a similarity seed.
 pub(crate) async fn handle_embed_image_query(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -26,8 +21,7 @@ pub(crate) async fn handle_embed_image_query(
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .ok();
-        // A row from another model or engine (wrong width, NaN) would make a
-        // meaningless search seed; treat it as missing.
+        // A row from another model or engine (wrong width, NaN) would be a meaningless seed: treat it as missing.
         Ok(blob.and_then(|b| crate::models::clip_space::decode(&b)))
     })
     .await;
@@ -44,9 +38,8 @@ pub(crate) async fn handle_embed_image_query(
             .await;
         }
         Ok(Ok(None)) => {
-            // No embedding for this file yet — resolve the awaiting query with
-            // an empty embedding so "find similar" falls back cleanly instead
-            // of stalling 5s on a reply that never carries this query_id.
+            // Resolve with an empty embedding so "find similar" falls back cleanly instead of stalling 5 s on a reply
+            // that never carries this query_id.
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
                     query_id,
@@ -68,10 +61,7 @@ pub(crate) async fn handle_embed_image_query(
             .await;
         }
         Err(err) => {
-            // JoinError = the embed task panicked. Resolve the awaiting query
-            // with an empty embedding (same shape as the Ok(Err) arm) so "find
-            // similar" falls back cleanly instead of stalling 5s on a reply that
-            // never carries this query_id.
+            // The embed task panicked: resolve with an empty embedding (as the Ok(Err) arm) instead of stalling 5 s.
             tracing::warn!(?err, "embed_image_query spawn failed");
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
@@ -85,15 +75,12 @@ pub(crate) async fn handle_embed_image_query(
     }
 }
 
-/// Tokenize + embed a free-text query through CLIP-text. The model stays
-/// loaded between queries (avoids the 100–300 ms create cost on every
-/// keystroke) and is parked after `models::idle::PARK_AFTER` of no use.
+/// The model stays loaded between queries (avoids a 100–300 ms create per keystroke) and parks after
+/// `models::idle::PARK_AFTER`.
 pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQueryPayload) {
     let query = payload.query.clone();
     let query_id = payload.query_id.clone();
 
-    // A previously reported GPU reset: emit an empty embedding so search
-    // falls back to FTS5 without a timeout or another model submission.
     if crate::coordinator::process_gpu_device_removed() {
         sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
             ClipTextEmbedding {
@@ -120,12 +107,8 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             .await;
         }
         Ok(Err(err)) => {
-            // Resolve the awaiting query with an empty embedding (the same shape
-            // the CLIP-disabled fast path uses) so the search box drops to the
-            // clean FTS fallback immediately instead of stalling 5s and tripping
-            // the global red error pill on every keystroke. A user-facing
-            // "install CLIP" nudge, if wanted, belongs on the search-box-local
-            // channel, not the global engine-status error.
+            // Resolve with an empty embedding so search drops to the FTS fallback instead of stalling 5 s and tripping
+            // the global error pill on every keystroke; any "install CLIP" nudge belongs on a search-box-local channel.
             tracing::warn!(?err, "CLIP text embed failed");
             if crate::models::runtime::error_has_device_removed_marker(&err) {
                 sink.send(EngineError::new(
@@ -146,9 +129,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             .await;
         }
         Err(err) => {
-            // JoinError = the embed task panicked. Resolve with an empty
-            // embedding (same shape as the Ok(Err) arm) so the search box drops
-            // to the FTS fallback immediately instead of stalling 5s.
+            // The embed task panicked: resolve with an empty embedding instead of stalling 5 s.
             tracing::warn!(?err, "CLIP embed spawn failed");
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
@@ -165,8 +146,6 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
 pub(crate) static CLIP_TEXT: crate::models::idle::IdleSlot<crate::models::clip_text::ClipText> =
     crate::models::idle::IdleSlot::new("CLIP text", crate::models::idle::PARK_AFTER);
 
-/// CLIP text embedding of `query` on the calling thread, reusing the
-/// process-wide session while it is loaded. Used by search and Chat.
 pub(crate) fn embed_text_blocking(query: &str) -> anyhow::Result<Vec<f32>> {
     if crate::coordinator::process_gpu_device_removed() {
         anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);

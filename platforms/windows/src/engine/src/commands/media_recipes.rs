@@ -339,12 +339,10 @@ pub(super) fn summary(recipe: &ToolRecipe) -> &'static str {
 pub(super) trait MediaRuntime: Send + Sync {
     fn probe(&self, path: &Path) -> Result<MediaProbe>;
     fn run(&self, args: &[String], stage: &File, cancelled: &AtomicBool) -> Result<()>;
-    /// Writes the recipe's output for `source` to the empty, just-created
-    /// `stage`. FFmpeg runtimes stream into `stage_file`.
+    /// `stage` is empty and just created; FFmpeg runtimes stream into `stage_file`.
     fn export(&self, recipe: &ToolRecipe, source: &Path, probe: &MediaProbe, _stage: &Path, stage_file: &File, cancelled: &AtomicBool) -> Result<()> {
         self.run(&ffmpeg_args(recipe, source, probe)?, stage_file, cancelled)
     }
-    /// Probes a staged output, whose `.part` name carries no media type.
     fn probe_stage(&self, path: &Path, _recipe: &ToolRecipe) -> Result<MediaProbe> {
         self.probe(path)
     }
@@ -366,9 +364,8 @@ pub(super) fn detail(kind: &str) -> &'static str {
     }
 }
 
-/// AVFoundation in the Mac app's engine (FileIDAppleKit): the Swift engine's
-/// `CommonMediaTools`, with its summaries and capability details. Exports
-/// run in process, as in the Swift engine.
+/// FileIDAppleKit AVFoundation: the Swift engine's `CommonMediaTools` with its summaries and capability details;
+/// exports run in process.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(super) struct AppleRuntime;
 
@@ -395,7 +392,6 @@ impl MediaRuntime for AppleRuntime {
     }
 
     fn export(&self, recipe: &ToolRecipe, source: &Path, _: &MediaProbe, stage: &Path, _: &File, cancelled: &AtomicBool) -> Result<()> {
-        // AVAssetExportSession creates its output; the placeholder is ours and empty.
         ensure!(std::fs::metadata(stage)?.len() == 0, "The staged output is occupied.");
         std::fs::remove_file(stage)?;
         crate::apple::media::export_common(recipe, source, stage, cancelled)?;
@@ -435,8 +431,7 @@ thread_local! {
     pub(super) static TEST_RUNTIME: std::cell::RefCell<Option<Arc<dyn MediaRuntime>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The reviewed launcher in `video_export`: the vetted LGPL/OpenH264 build
-/// with networking compiled out, run in the engine's lifetime job.
+/// The reviewed launcher in `video_export`: the vetted LGPL/OpenH264 build with networking compiled out.
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 struct VettedRuntime;
 

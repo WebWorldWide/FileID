@@ -77,8 +77,6 @@ struct Library {
     _dir: TempDir,
 }
 
-/// Faces 1–2 in a present photo (2 fails), 3 in a photo deleted from a present
-/// location, 4 on an unplugged location, 5 already current.
 fn library() -> Library {
     let dir = tempdir();
     let root = dir.path().join("library");

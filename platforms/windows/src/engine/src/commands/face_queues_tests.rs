@@ -71,7 +71,6 @@ fn listed(conn: &Connection, queue: &str) -> FaceReviewPage {
     list(conn, &payload).unwrap()
 }
 
-/// Alex (named, two faces) and an unnamed fragment of the same face.
 fn pair() -> Connection {
     let conn = db();
     person(&conn, 1, None, false);
@@ -173,7 +172,6 @@ fn dismissal_survives_new_person_ids_and_undo_forgets_it() {
     assert_eq!(merge_pairs(&conn), vec![(2, 10)]);
 }
 
-/// One person holding two different faces: four along x, three along y.
 fn mixed() -> Connection {
     let conn = db();
     person(&conn, 1, Some("Kim"), false);

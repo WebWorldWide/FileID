@@ -1,13 +1,9 @@
-//! The timeline's video decoder: the vetted FFmpeg runtime on Windows and
-//! Linux, AVFoundation worker processes in the Mac app's engine
-//! (`crate::apple::media`).
 
 use super::video_export::AnalysisProbe;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-/// Whether this engine can decode video for timeline analysis.
 pub(crate) fn available() -> bool {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     return true;
@@ -15,7 +11,6 @@ pub(crate) fn available() -> bool {
     super::video_export::available()
 }
 
-/// Duration, displayed size and whether there is audio.
 pub(crate) fn probe(source: &Path, cancel: &AtomicBool) -> Result<AnalysisProbe> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -33,7 +28,6 @@ pub(crate) fn probe(source: &Path, cancel: &AtomicBool) -> Result<AnalysisProbe>
     super::video_export::analysis_probe(source, cancel)
 }
 
-/// One frame at `seconds`, `size` pixels, written to `output` as a JPEG.
 pub(crate) fn frame_jpeg(source: &Path, seconds: f64, size: (u32, u32), output: &Path, cancel: &AtomicBool) -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -49,22 +43,19 @@ pub(crate) fn frame_jpeg(source: &Path, seconds: f64, size: (u32, u32), output: 
     }
 }
 
-/// The Mac engine samples a whole video once into a frame pool, as the Swift
-/// engine does: half-second signatures for activity windows and small JPEGs
-/// for the moment windows, from one sequential hardware decode.
+/// The Mac engine samples a whole video once, as Swift does: half-second signatures for activity windows and small
+/// JPEGs for moment windows, from one sequential hardware decode.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const FRAME_POOL: bool = true;
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 pub(crate) const FRAME_POOL: bool = false;
 
-/// The pool's frames: `(seconds, signature, jpeg)`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pool {
     pub(crate) frames: Vec<(f64, Vec<u8>, std::path::PathBuf)>,
 }
 
 impl Pool {
-    /// The pool frame closest to `seconds`.
     pub(crate) fn nearest(&self, seconds: f64) -> Option<&std::path::Path> {
         self.frames
             .iter()
@@ -73,7 +64,6 @@ impl Pool {
     }
 }
 
-/// Samples the frame pool into `directory`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) fn pool(source: &Path, duration: f64, directory: &Path, cancel: &AtomicBool) -> Result<Pool> {
     let manifest = crate::apple::media::sample_pool(
@@ -94,13 +84,11 @@ pub(crate) fn pool(_: &Path, _: f64, _: &Path, _: &AtomicBool) -> Result<Pool> {
     anyhow::bail!("This engine samples video signals in chunks")
 }
 
-/// The Swift engine's `VideoFramePool.maxPixelSize`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const POOL_MAX_SIDE: u32 = 448;
 
-/// The CLIP image tower for pool frames: MLX through FileIDAppleKit in the Mac
-/// app's engine (the Swift engine's `CLIPVisionMLX`, on the GPU), tract
-/// elsewhere. `None` when neither can load; callers fall back to luma.
+/// MLX through FileIDAppleKit in the Mac-hosted engine (Swift's `CLIPVisionMLX`), tract elsewhere. `None` when neither
+/// can load; callers fall back to luma.
 enum ClipEncoder {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     Mlx {
@@ -115,7 +103,6 @@ impl ClipEncoder {
         let weights = crate::models::mobileclip::default_weights_path().ok().filter(|path| path.is_file())?;
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {
-            // The adapter keeps CLIP while this encoder or a scan holds it.
             let (_, hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
                 || {
                     crate::models::clip_space::load_verified(&[(&weights, "mobileclip_s2", 0)], || {
@@ -149,10 +136,9 @@ impl ClipEncoder {
     }
 }
 
-/// The Swift engine's `TimelineAnalysis.poolFrames`: a CLIP vector for every
-/// pool frame when the image encoder is installed, else the frame's luma
-/// signature minus its mean; `change` is the luma change from the previous
-/// pool frame. Scenes cut on these vectors; activity windows read `change`.
+/// Swift's `TimelineAnalysis.poolFrames`: a CLIP vector per pool frame when the image encoder is installed, else the
+/// luma signature minus its mean; `change` is the luma change from the previous frame. Scenes cut on the vectors;
+/// activity windows read `change`.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn scene_frames(pool: &Pool) -> Vec<crate::pipeline::video_scene_selection::Frame> {
     use crate::pipeline::video_scene_selection::{luma_change, Frame};
@@ -175,8 +161,6 @@ pub(crate) fn scene_frames(pool: &Pool) -> Vec<crate::pipeline::video_scene_sele
         .collect()
 }
 
-/// The pool frames nearest each whole second: the 1 fps signal sequence the
-/// chunked decoder produces.
 pub(crate) fn whole_seconds(pool: &Pool) -> Vec<(f64, Vec<u8>)> {
     let mut picked: Vec<(f64, Vec<u8>)> = Vec::new();
     for (seconds, signature, _) in &pool.frames {
@@ -241,8 +225,8 @@ mod tests {
         assert_eq!(pool.nearest(0.2), Some(std::path::Path::new("0.jpg")));
     }
 
-    // Without the CLIP image encoder (tests install none), scene vectors are
-    // the luma signatures minus their mean, as in the Swift engine.
+    // Without the CLIP image encoder (tests install none), scene vectors are luma signatures minus their mean, as in
+    // Swift.
     #[test]
     fn scene_frames_fall_back_to_centred_luma_with_luma_change() {
         let missing = std::path::PathBuf::from("/nonexistent/frame.jpg");

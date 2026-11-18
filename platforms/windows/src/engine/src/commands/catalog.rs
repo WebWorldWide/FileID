@@ -118,7 +118,6 @@ fn execute_with_index(
             return Ok(result);
         }
     }
-    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
     if ["search", "detail", "jobs"].contains(&request.action.as_str())
         && let Some(mut reader) = crate::db::reader_for(&database)?
     {
@@ -128,8 +127,7 @@ fn execute_with_index(
     execute(&mut conn, &request)
 }
 
-/// Scores outside the database lock: the lock is held only to read the files
-/// and their cached signals, and again to store new signals.
+/// The lock is held only to read files and cached signals, and again to store new ones.
 fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
     use super::catalog_take_auto::{prepare, store, TakeFaceAnalyzer};
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
@@ -306,7 +304,6 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "pauseJob" | "resumeJob" | "cancelJob" => {
             let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
-            // Only jobs with a worker in this engine can change state (Swift `FileIDEngineMain`).
             if !super::timeline::is_timeline_job(&tx, id)?
                 && !super::take_grouping::is_job(&tx, id)?
                 && !super::face_refresh::is_job(&tx, id)?
@@ -418,7 +415,6 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     let mut statement = conn.prepare("SELECT id,kind,file_ids_json,state,progress,error,created_at,updated_at FROM catalog_jobs ORDER BY created_at DESC LIMIT 200")?;
     let rows = statement
         .query_map([], |r| {
-            // One malformed row (another engine, a hand edit) must not hide every job.
             let json: Option<String> = r.get(2)?;
             let ids = json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
             Ok(CatalogJob {

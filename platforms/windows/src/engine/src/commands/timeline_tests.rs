@@ -20,7 +20,6 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     );
     let (id, response) = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), true).unwrap();
     assert_eq!(response.status, "ok");
-    // The Mac app's engine uses Apple Speech, which needs no model install.
     let speech_note = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
         "any speech"
     } else {
@@ -42,7 +41,6 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let recipe: Recipe = serde_json::from_str(&recipe).unwrap();
     assert_eq!(recipe.model_kind, "qwen3_vl_4b");
     assert_eq!(recipe.timeline_mode.as_deref(), Some("moments"));
-    // The Mac app's engine shares the Swift engine's scene-pool coverage ids.
     if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
         assert!(recipe.model_version.starts_with("timeline-scene-v1/qwen3_vl_4b@"), "{}", recipe.model_version);
         assert!(!recipe.model_version.ends_with("@unversioned"));
@@ -186,7 +184,6 @@ fn chapter_suggestions_replace_drafts_but_keep_user_edits() {
     };
     upsert_chapter(&conn, &edited).unwrap();
 
-    // The source file is absent, so persistence must refuse rather than write.
     assert!(persist_chapter_suggestions(&conn, 1, &source, "frame-v", 40.0).is_err());
 
     let titles = |conn: &Connection| -> Vec<String> {
@@ -258,7 +255,6 @@ fn chapter_suggestions_persist_when_source_is_unchanged() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Runs only where the vetted FFmpeg runtime is staged (FILEID_FFMPEG_DIR).
 #[test]
 fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
     if !video_export::available() {
@@ -290,8 +286,6 @@ fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Scripted stand-in for the resident VLM: deterministic captions, a fixed
-/// moment answer, and an optional pause request after N caption calls.
 struct ScriptedModel {
     captions: Vec<&'static str>,
     calls: std::sync::atomic::AtomicUsize,
@@ -399,8 +393,7 @@ fn count(database: &Arc<Mutex<Connection>>, sql: &str) -> i64 {
 
 #[tokio::test]
 async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
-    // A still picture has no change peaks, so samples land on exact interval
-    // boundaries: 0, 10, 20 and 30 seconds.
+    // A still picture has no change peaks, so samples land on exact interval boundaries (0, 10, 20, 30 s).
     let Some((directory, database)) = media_fixture("color=c=gray:size=64x36:rate=5:duration=35") else {
         return;
     };
@@ -487,7 +480,6 @@ async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
 
 #[tokio::test]
 async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
-    // Brightness ramps for three seconds, then holds: activity windows cover only the ramp.
     let Some((directory, database)) =
         media_fixture("color=c=black:size=64x36:rate=5:duration=6,geq=lum=if(lt(T\\,3)\\,40+T*60\\,16):cb=128:cr=128")
     else {
@@ -717,7 +709,6 @@ fn wav_header_sizes_are_rewritten_for_streamed_audio() {
 
 struct OrderedModel {
     log: Arc<Mutex<Vec<String>>>,
-    /// The first window's reply is not moment JSON.
     malformed_first: bool,
 }
 
@@ -890,7 +881,6 @@ async fn a_malformed_moment_reply_leaves_only_its_window_incomplete() {
     .await
     .unwrap();
 
-    // As in the Swift engine: the job goes on, the bad window stays incomplete.
     let statuses = |status: &str| {
         count(
             &database,
@@ -946,8 +936,8 @@ fn moment_plan_falls_back_to_overlapping_windows_without_a_grid() {
 
 #[test]
 fn on_disk_check_accepts_either_engines_rounding_of_the_same_modified_time() {
-    // A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and
-    // 518318480 ns; one engine stores ...256673 bits, Foundation's Date gives ...256674.
+    // A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and 518318480 ns; one engine stores
+    // ...256673 bits, Foundation's Date gives ...256674.
     let nanos = std::time::Duration::new(1_794_731_299, 518_318_480);
     let plain = nanos.as_secs_f64();
     let foundation = f64::from_bits(4_745_314_456_662_256_674);

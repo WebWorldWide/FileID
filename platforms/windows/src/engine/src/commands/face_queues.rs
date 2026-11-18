@@ -1,6 +1,5 @@
-//! Durable merge and split suggestion queues for People. Mirror of the macOS
-//! `FaceQueues.swift`; keep thresholds, ordering, messages and journal shapes
-//! in step (cross-engine conformance reads both journals).
+//! Durable merge and split suggestion queues for People; keep thresholds, ordering, messages and journal shapes in step
+//! with macOS `FaceQueues.swift` (cross-engine conformance reads both journals).
 
 use std::collections::{HashMap, HashSet};
 
@@ -137,8 +136,6 @@ fn owner_at(conn: &Connection, file: Option<i64>, bbox: Option<&str>) -> rusqlit
     owner_of(conn, None, file, bbox)
 }
 
-/// Person pairs that must never be suggested: a different-people verdict, a
-/// "not this person" constraint or a dismissal between faces they own now.
 fn blocked_pairs(conn: &Connection) -> rusqlite::Result<HashSet<(i64, i64)>> {
     type Side = (Option<i64>, Option<i64>, Option<String>);
     let mut blocked = HashSet::new();
@@ -236,8 +233,7 @@ pub(crate) struct SplitRow {
     pub split: Vec<i64>,
 }
 
-/// Deterministic two-means over a person's unit vectors. Seeds are the face
-/// farthest from the centroid and the face farthest from that one.
+/// Seeds: the face farthest from the centroid and the face farthest from that one.
 pub(crate) fn two_groups(vectors: &[&[f32]]) -> Option<(Vec<usize>, Vec<f32>, Vec<f32>)> {
     let whole = centroid(vectors.iter().copied())?;
     let farthest = |from: &[f32]| {
@@ -331,8 +327,6 @@ fn resolve_face(conn: &Connection, legacy: Option<i64>, file: Option<i64>, bbox:
     conn.query_row("SELECT id FROM face_prints WHERE id=?1", [legacy], |row| row.get(0)).optional()
 }
 
-/// Faces the user said belong together (a user-merged verdict) or a dismissed
-/// split, so a person holding them is never offered for splitting.
 fn split_blocks(conn: &Connection) -> rusqlite::Result<(Vec<(i64, i64)>, HashSet<i64>)> {
     type Side = (Option<i64>, Option<i64>, Option<String>);
     let rows: Vec<(Side, Side)> = {
@@ -364,8 +358,7 @@ fn split_blocks(conn: &Connection) -> rusqlite::Result<(Vec<(i64, i64)>, HashSet
     Ok((linked, dismissed))
 }
 
-/// Rebuilds both queues for one face space. Called by runFaceClustering after
-/// the review assessment, inside its transaction.
+/// Called by runFaceClustering after the review assessment, inside its transaction.
 pub(crate) fn refresh(conn: &Connection, model: &str, processing: &str, settings: &QueueSettings, at: f64) -> rusqlite::Result<(usize, usize)> {
     let namespace = format!("{model}|{processing}");
     let created: HashMap<(i64, i64), f64> = {
@@ -570,8 +563,7 @@ fn restore_verification(conn: &Connection, pair: (i64, i64), same: i64, model: &
     Ok(())
 }
 
-/// Writes a verdict between two people's anchor faces the way markPersonsDifferent
-/// and mergeClusters store theirs: persons ordered, faces ordered by face ID.
+/// Stored as markPersonsDifferent and mergeClusters store theirs: persons ordered, faces ordered by face ID.
 fn write_verification(conn: &Connection, people: (i64, i64), anchors: (&Anchor, &Anchor), same: i64, model: &str, at: f64) -> rusqlite::Result<()> {
     let pair = ordered(people.0, people.1);
     let (first, second) = if same == 1 {

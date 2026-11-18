@@ -79,16 +79,12 @@ async fn reject_gpu_device_removed(
     *scan_state.lock() = None;
 }
 
-/// A model load that outlived its timeout.
 type LateLoader = Arc<Mutex<Option<tokio::task::JoinHandle<ModelStack>>>>;
 
-/// Loads the scan's models, or hands back the stack the last scan left loaded. Each model is a pool of N sessions
-/// sharing one compiled graph so inference parallelizes instead of serializing on a single Mutex; the load runs on a
-/// blocking thread.
-///
-/// The 120 s timeout (not 30 s): on first launch the CLIP scene-label matrix is text-encoded inside load_default, which
-/// takes 20+ s on a slow CPU. scene_vocab.rs disk-caches it, so later launches load in seconds; 120 s still catches a
-/// genuinely hung or corrupt model file.
+/// Each model is a pool of N sessions sharing one compiled graph, so inference parallelizes instead of serializing on
+/// one Mutex; loads on a blocking thread. The 120 s timeout: on first launch the CLIP scene-label matrix is
+/// text-encoded inside load_default (20+ s on a slow CPU), cached by scene_vocab.rs; 120 s still catches a hung or
+/// corrupt model file.
 async fn load_scan_models(
     coord: ScanCoordinator,
     key: scan_models::StackKey,
@@ -134,12 +130,11 @@ async fn load_scan_models(
         return Err(ModelLoadFailure::new("gpu_device_removed", crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE));
     }
 
-    // A model that is installed but whose weights fail to load (corrupt or AV-quarantined .onnx, or a graph tract cannot
-    // compile) must abort the scan rather than skip its stage. A skipped stage still stamps every file failed=0 with a
-    // fresh scanned_at, and the timestamp-only incremental skip-set (scan_session.rs) never re-tries those files, so the
-    // face and embedding stage stays empty even after the model is repaired. Aborting leaves the files un-stamped so a
-    // later scan reprocesses them. Workers wait for this result before analysing anything, so no file is written
-    // without its stages.
+    // An installed model whose weights fail to load (corrupt or AV-quarantined .onnx, or a graph tract cannot compile)
+    // must abort the scan, not skip its stage: a skipped stage still stamps every file failed=0 with a fresh
+    // scanned_at, the incremental skip-set (scan_session.rs) never retries them, and the face/embedding stage stays
+    // empty even after repair. Aborting leaves files un-stamped for a later scan. Workers wait for this result, so no
+    // file is written without its stages.
     let failed_to_load = models_that_failed_to_load(&models, &missing_models);
     if !failed_to_load.is_empty() {
         tracing::error!(
@@ -181,13 +176,10 @@ fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> V
     failed_to_load
 }
 
-/// An absolute path with no NUL, the only kind a scan may start from (the Swift engine's
-/// `isUsableScanRoot`).
 fn is_usable_scan_root(path: &str) -> bool {
     Path::new(path).is_absolute() && !path.contains('\0')
 }
 
-/// Whether the scan ran to the end (not refused, cancelled or failed).
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -199,8 +191,8 @@ pub(crate) async fn handle_start_scan(
 ) -> bool {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
-    // A relative or empty path would be resolved against the engine's own folder, and a NUL
-    // would cut it short: either would scan a folder the person never chose.
+    // A relative or empty path would resolve against the engine's own folder and a NUL would cut it short: either scans
+    // a folder the person never chose.
     if !is_usable_scan_root(&payload.root_path) {
         sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
         sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
@@ -214,10 +206,9 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    // Atomic check-and-reserve under one lock: the gate and slot reservation must be one critical section, or two
-    // back-to-back StartScan commands can both pass the gate. The REAL coordinator is built and parked here, so a pause
-    // or cancel arriving after reservation lands on the coordinator the session uses.
-    // A caller that finds the slot held bounces with `scan_already_running`.
+    // Atomic check-and-reserve under one lock, or two back-to-back StartScan commands can both pass the gate. The REAL
+    // coordinator is built and parked here so a pause/cancel after reservation lands on the one the session uses. A
+    // caller finding the slot held bounces with `scan_already_running`.
     let coord = ScanCoordinator::new();
     let finished_scan = coord.clone();
     let after_scan_db = db.clone();
@@ -290,11 +281,8 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    // Missing models never block a scan (macOS parity): every file is still
-    // catalogued — kind, size, dates, content hash, perceptual hash, text — and
-    // only the stages whose weights are absent skip, each logging once at load.
-    // Front ends offer the install before scanning; a later rescan fills the
-    // embeddings and faces in.
+    // Missing models never block a scan: every file is still catalogued (kind, size, dates, hashes, text) and only
+    // stages whose weights are absent skip, each logging once at load. A later rescan fills in embeddings and faces.
     let missing_models: Vec<&str> = models::required::missing_required()
         .into_iter()
         .map(|missing| missing.kind)
@@ -302,19 +290,15 @@ pub(crate) async fn handle_start_scan(
     if !missing_models.is_empty() {
         tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; their stages will skip");
     }
-    // Emit Discovering immediately so the UI flips out of IdlePanel within
-    // microseconds, regardless of how long ModelStack takes to load. Use
-    // .await (not try_send) so the event can't be silently dropped under
-    // sink load.
+    // Emit Discovering immediately so the UI leaves IdlePanel however long ModelStack takes; .await, not try_send, so
+    // it can't be dropped under sink load.
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Discovering,
     ))))
     .await;
 
-    // Baseline Progress so the sidebar stats flip from "—" to "0"
-    // immediately. Without it, if no file ever reaches DBWriter (empty
-    // folder, all-filtered, or a downstream stall), every stat row stays
-    // at "—" indefinitely — identical to "scan did nothing".
+    // Baseline Progress so sidebar stats flip from "—" to "0"; otherwise a scan where no file reaches DBWriter (empty
+    // folder, all filtered, downstream stall) looks like it did nothing.
     let session_id = uuid::Uuid::new_v4().to_string();
     sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
         session_id: session_id.clone(),
@@ -331,9 +315,8 @@ pub(crate) async fn handle_start_scan(
     .await;
 
 
-    // The models load when the scan first has a file to analyse, alongside the
-    // walk, and stay loaded between scans (pipeline/scan_models.rs). A rescan
-    // that finds nothing new loads nothing.
+    // Models load when the scan first has a file to analyse and stay loaded between scans (pipeline/scan_models.rs); a
+    // rescan that finds nothing new loads nothing.
     let models_worker_count = platform::default_worker_cap() as usize;
     let stack_key = scan_models::StackKey::current(models_worker_count);
     let evictions_before = scan_models::evictions();
@@ -346,12 +329,9 @@ pub(crate) async fn handle_start_scan(
         }
     });
 
-    // The single largest live allocation during a scan is the set of full
-    // decoded RGB frames each in-flight worker future owns. On a low-RAM box
-    // (MemoryTier::Low, <8 GB) cap the worker count so that working set stays
-    // bounded; non-Low tiers keep the full CPU-topology cap unchanged. Pool
-    // arrays are indexed worker_idx % pool.len(), so worker_count and pool_size
-    // stay decoupled.
+    // The largest live allocation is the full decoded RGB frames each in-flight worker owns: on a low-RAM box
+    // (MemoryTier::Low, <8 GB) cap the worker count to bound it. Pool arrays are indexed worker_idx % pool.len(), so
+    // worker_count and pool_size stay decoupled.
     let worker_count = match platform::memory_tier() {
         platform::MemoryTier::Low => platform::default_worker_cap().min(6) as usize,
         _ => platform::default_worker_cap() as usize,
@@ -398,8 +378,7 @@ pub(crate) async fn handle_start_scan(
                 sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Failed)))).await;
                 sink.send(EngineError::event(failure.kind, failure.message)).await;
             }
-            // A loader that outlived its two minutes keeps the scan slot until
-            // it really exits.
+            // A loader that outlived its two minutes keeps the scan slot until it really exits.
             let late = late_loader.lock().take();
             if let Some(load_task) = late {
                 let late_result = load_task.await;
@@ -429,8 +408,7 @@ pub(crate) async fn handle_start_scan(
         }
     };
 
-    // Keep the stack for the next scan, unless another model asked for the
-    // memory while this scan ran.
+    // Keep the stack for the next scan unless another model asked for the memory meanwhile.
     if let Some(stack) = models_for_keep.loaded()
         && scan_models::evictions() == evictions_before
     {
@@ -454,10 +432,6 @@ pub(crate) async fn handle_start_scan(
     !finished_scan.is_cancelled() && !finished_scan.is_gpu_dead()
 }
 
-/// `purgeExcluded` handler — immediately remove cataloged rows under the
-/// given excluded folders (files on disk untouched). Sent when the user adds
-/// an exclusion so the Library reflects it without waiting for a rescan; the
-/// same purge also runs at every scan start as the durable backstop.
 #[cfg(test)]
 mod tests {
     use super::*;

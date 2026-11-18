@@ -128,7 +128,6 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
         capabilities: vec![],
     }
 }
-/// The Swift engine's wording in the Mac app's engine (the reference there).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const UNSUPPORTED_RECIPE: &str = "Choose files, an output folder, and a supported recipe.";
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
@@ -159,7 +158,6 @@ fn portable_capabilities() -> Vec<ToolCapability> {
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
 }
 
-/// The FFmpeg video export, or the AVFoundation one in the Mac app's engine.
 fn video_preview(recipe: &ToolRecipe, source: &Path) -> Result<String> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     return Ok(crate::apple::media::convert_video(recipe, source, None, &AtomicBool::new(false))?.summary);
@@ -183,13 +181,10 @@ fn video_check(recipe: &ToolRecipe, source: &Path) -> Result<()> {
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     video_preview(recipe, source).map(drop)
 }
-/// Writes the video export to the just-created, empty stage; returns the
-/// framing and stabilization summary.
 fn video_export(recipe: &ToolRecipe, source: &Path, (stage, file): (&Path, &File), cancelled: &AtomicBool) -> Result<String> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         let _ = file;
-        // AVAssetExportSession creates its output; the placeholder is ours and empty.
         if fs::metadata(stage)?.len() != 0 {
             bail!("The staged output is occupied.")
         }
@@ -206,7 +201,6 @@ fn video_export(recipe: &ToolRecipe, source: &Path, (stage, file): (&Path, &File
         Ok(String::new())
     }
 }
-/// The AVFoundation worker verifies its own output before it replies.
 fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -221,8 +215,7 @@ fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> 
     }
 }
 
-/// The Swift engine's video export rules and capability text for the Mac
-/// app's engine, which runs the same AVFoundation export.
+/// Swift's video export rules and capability text, as the Mac engine runs the same AVFoundation export.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 mod apple_video {
     use crate::ipc::{ToolCapability, ToolRecipe};
@@ -234,7 +227,6 @@ mod apple_video {
         ]
     }
 
-    /// The Swift engine's `MediaTools.supports` for photo, chapters and video.
     pub(super) fn supports(recipe: &ToolRecipe) -> bool {
         let aspect = recipe.video_aspect_ratio.as_deref().unwrap_or("source");
         (1..=8192).contains(&recipe.max_dimension)
@@ -300,8 +292,8 @@ fn hash(path: &Path) -> Result<String> {
     }
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
-    // Heap, not stack: a 1 MiB array on a 2 MiB blocking-pool stack can
-    // overflow, and a stack overflow aborts the whole engine.
+    // Heap, not stack: a 1 MiB array on a 2 MiB blocking-pool stack can overflow, and a stack overflow aborts the whole
+    // engine.
     let mut bytes = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut bytes)?;
@@ -332,9 +324,8 @@ fn load(conn: &Connection, id: &str) -> Result<(Plan, Vec<Receipt>, String)> {
     Ok((plan, serde_json::from_str(&inverse)?, state))
 }
 
-/// The catalog writer as the Tools actions see it. `Shared` locks for each
-/// short catalog step only, so hashing, probing, encoding and ffmpeg run with
-/// the writer free for scans and other commands.
+/// `Shared` locks per short catalog step only, so hashing, probing, encoding and ffmpeg run with the writer free for
+/// scans and other commands.
 enum Db<'a> {
     Held(&'a mut Connection),
     Shared(&'a Arc<Mutex<Connection>>),
@@ -362,9 +353,7 @@ fn execute_with_move(
     run_action(&mut Db::Held(conn), request, move_file)
 }
 
-/// The export's source still has its catalog row at the previewed path and
-/// the operation is still the one being run; the writer was free while the
-/// output was produced, so a rename, rescan or Undo may have intervened.
+/// The writer was free while the output was produced, so a rename, rescan or Undo may have intervened.
 fn require_unchanged(conn: &Connection, id: &str, item: &Item) -> Result<()> {
     let state: Option<String> = conn
         .query_row("SELECT state FROM catalog_operations WHERE id=?1", [id], |r| r.get(0))
@@ -579,8 +568,8 @@ fn run_action(
             if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
                 bail!("Export cancelled before publication")
             }
-            // Atomic claim: the plan was validated with the writer free, so a
-            // second execute of the same plan may have got here first.
+            // Atomic claim: the plan was validated with the writer free, so a second execute of the same plan may have
+            // got here first.
             let claimed = db.with(|conn| {
                 Ok(conn.execute(
                     "UPDATE catalog_operations SET state='running' WHERE id=?1 AND state='preview' AND inverse_json='[]'",
@@ -842,8 +831,8 @@ fn run_action(
     Ok(result)
 }
 
-/// Camera originals reach ~61 MP; 100 MP is the ceiling because decode holds the
-/// RGB8 frame (300 MB) next to its RGBA copy, inside the decoder's 512 MiB allocation limit.
+/// Camera originals reach ~61 MP; 100 MP is the ceiling because decode holds the RGB8 frame (300 MB) next to its RGBA
+/// copy inside the decoder's 512 MiB allocation limit.
 const PHOTO_MAX_PIXELS: u64 = 100_000_000;
 
 fn validate_image(path: &Path) -> Result<()> {
@@ -965,9 +954,8 @@ fn export_chapters(chapters: &[CatalogChapter], format: &str) -> Result<Vec<u8>>
     Ok(text.into_bytes())
 }
 
-/// The output folder as the Swift engine names it, `URL.standardizedFileURL.path`:
-/// `.` and `..` resolved and, on macOS, a leading `/private` dropped when the rest
-/// exists (`/private/var/folders/…` becomes `/var/folders/…`).
+/// As `URL.standardizedFileURL.path`: `.` and `..` resolved and, on macOS, a leading `/private` dropped when the rest
+/// exists.
 fn foundation_standardized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
@@ -1216,7 +1204,6 @@ mod tests {
             r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#
         )
         .is_err());
-        // The Mac app's engine enlarges video conventionally, as the Swift engine does.
         let mac = cfg!(all(target_os = "macos", feature = "apple-adapters"));
         for (kind, format, dimension) in [("chapters", "json", 64), ("video", "mp4", 1920), ("photo", "png", 8193)] {
             assert_eq!(mac && kind == "video", supports(&ToolRecipe {

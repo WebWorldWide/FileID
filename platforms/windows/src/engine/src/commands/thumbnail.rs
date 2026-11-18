@@ -1,9 +1,6 @@
-//! On-demand video thumbnail handler. Extracts a 25%-duration keyframe via
-//! Media Foundation, resizes it to a JPEG whose long side is the requested size
-//! (192px by default, aspect-preserved, never upscaled),
-//! base64-encodes it, and replies with a `thumbnailGenerated` event. On ANY
-//! failure the engine emits nothing — the app keeps its placeholder — and logs
-//! a redacted warning.
+//! On-demand video thumbnail: a 25%-duration keyframe via Media Foundation resized to a JPEG (default long side 192 px,
+//! aspect-preserved, never upscaled), base64-encoded into `thumbnailGenerated`. On ANY failure nothing is emitted (the
+//! app keeps its placeholder) and a redacted warning is logged.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
@@ -12,18 +9,14 @@ use base64::Engine as _;
 
 use crate::ipc::{sink::Sink, EventPayload, GenerateVideoThumbnailPayload, IpcEvent, ThumbnailGenerated, Wrap};
 
-/// Long side (in px) when the request names none. Requests are clamped to
-/// `MIN_LONG_SIDE..=MAX_LONG_SIDE`.
+/// Requests are clamped to `MIN_LONG_SIDE..=MAX_LONG_SIDE`.
 const THUMB_LONG_SIDE: u32 = 192;
 const MIN_LONG_SIDE: u32 = 64;
 const MAX_LONG_SIDE: u32 = 2048;
 
-/// Cap on concurrent Media Foundation extracts. Each one holds a full-res
-/// decoded frame (up to ~192 MB at MAX_VIDEO_PIXELS) plus a D3D video-decode
-/// context for 1-10 s, and a cache-cold scroll through a video folder fires
-/// hundreds of these commands in seconds — unbounded, they piled up on
-/// tokio's 512-thread blocking pool and OOMed the Low-memory target. Mirrors
-/// the scan pipeline's GPU semaphores (vision=4 / clip=2).
+/// Each extract holds a full-res decoded frame (up to ~192 MB at MAX_VIDEO_PIXELS) plus a D3D video-decode context for
+/// 1-10 s; a cache-cold scroll fires hundreds of commands in seconds and unbounded they piled up on tokio's 512-thread
+/// blocking pool and OOMed the Low-memory target.
 const MAX_CONCURRENT_EXTRACTS: usize = 2;
 
 fn extract_semaphore() -> &'static tokio::sync::Semaphore {
@@ -55,8 +48,6 @@ fn requested_long_side(max_pixel_size: Option<i64>) -> u32 {
     max_pixel_size.map_or(THUMB_LONG_SIDE, |size| size.clamp(MIN_LONG_SIDE as i64, MAX_LONG_SIDE as i64) as u32)
 }
 
-/// Decode a video keyframe → resize to a `long_side` JPEG → base64. Runs the
-/// blocking keyframe extract on a `spawn_blocking` thread; never panics.
 async fn build_thumbnail_b64(path: &str, long_side: u32) -> anyhow::Result<String> {
     let _permit = extract_semaphore().acquire().await?;
     let p = std::path::PathBuf::from(path);
@@ -76,8 +67,7 @@ async fn build_thumbnail_b64(path: &str, long_side: u32) -> anyhow::Result<Strin
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
-/// Scale `(w, h)` so the long side equals `target`, preserving aspect ratio.
-/// Never upscales beyond the source on the long side; clamps each side to >=1.
+/// Clamps each side to >=1.
 fn fit_long_side(w: u32, h: u32, target: u32) -> (u32, u32) {
     if w == 0 || h == 0 {
         return (1, 1);
