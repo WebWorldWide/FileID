@@ -29,7 +29,12 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # chrono declared unmaintained (no vulnerability). It also arrives through
+    # pdfium-render and rusqlite's `chrono` feature; moving the engine to jiff
+    # or time is tracked in NEXT.md. Remove this entry when that lands.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not a vulnerability; migration tracked in NEXT.md" },
+]
 
 [licenses]
 # SPDX expressions only. Anything else is unknown = deny.
