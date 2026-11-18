@@ -7,6 +7,11 @@ Short, current priorities only: open work, nothing else. History lives in `STATE
 Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDDev/scratch/prod-test/REPORT.md` (PT-1…PT-19).
 
 - [ ] **Wave 5 (2026-11-17 evening, running):** Lane R makes the Mac app run only on the Rust engine: no Swift engine binary in Developer ID bundles, no fallback or engine choice, a designed card when `fileidd` cannot start, and the App Store variant on `fileidd`. Lane P drills the UI polish (owner: "no odd edges, no weird spacing, no glitches") with a separate design reviewer. Lane Q handles Chat follow-ups and a 30-question battery.
+- [ ] **Owner direction 2026-11-18: one inference runtime on Windows, Mac and Linux (tract), unless there is a specific, measured reason.** In progress:
+  - Lane T3 (`agent/prod-tract`) removes the Windows `ort-accel` option, the ORT build/packaging and the DirectML/CUDA plumbing; makes the CPU path multithreaded on all three; fixes the tract review (Flatpak cargo sources, ORT-provenance goldens, stale docs).
+  - Lane S (`agent/prod-noort-swift`) takes ONNX Runtime out of the shipped SwiftUI app (`FileIDShared` `CLIPTextEncoder`/`ORTPrivacy`); text embeddings come from `fileidd`.
+  - GPU acceleration (tract-metal/tract-cuda/wgpu) becomes a later cross-platform decision with measurements.
+  - The tract migration review (Sonnet, 2026-11-18) said no-go until the Flatpak sources are regenerated; it also found the ORT-accel panic fallback and missing golden provenance.
 - [ ] **ONNX Runtime replacement, decided 2026-11-18: tract.** Evaluation `~/FileIDDev/scratch/onnx-eval/REPORT.md`:
   - tract 0.23.10 (pure Rust, MIT/Apache-2.0) runs all 7 model families with parity to ORT (cosine ≥ 0.999999; RAM++ 1 of 91,700 tag decisions flipped).
   - Single-thread it is 3–5× faster than ORT on CLIP image and RAM++; tract-metal does RAM++ in 224 ms.
