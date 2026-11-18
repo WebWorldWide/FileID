@@ -19,7 +19,7 @@ struct RelatedTriesSection: View {
             MetaText("Takes and other angles of the same moment, found across your whole library. Suggestions never change your files.", size: 11.5)
                 .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Find similar takes in my library", action: onFind)
+            Button("Find similar takes", action: onFind)
                 .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
                 .disabled(!TakeProposals.canFind(job))
                 .help(TakeProposals.canFind(job) ? "Look through the whole library for takes of the same moment. Runs on this Mac." : "Already looking")
@@ -90,9 +90,13 @@ private struct ProposalRow: View {
                         HStack(spacing: 6) { title.fixedSize(); RelationChip(relation: group.relation).fixedSize() }
                         VStack(alignment: .leading, spacing: 3) { title.fixedSize(); RelationChip(relation: group.relation) }
                     }
-                    Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    let suffix = group.status == "skipped" ? " · Skipped" : ""
+                    ViewThatFits(in: .horizontal) {
+                        Text("\(media) · " + TakeReview.dateText(group.capturedAt) + suffix).fixedSize()
+                        Text("\(media) · " + TakeReview.shortDateText(group.capturedAt) + suffix).fixedSize()
+                        Text("\(media) · " + TakeReview.shortDateText(group.capturedAt) + suffix).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                     Text(TakeProposals.evidenceText(group.evidence))
                         .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)

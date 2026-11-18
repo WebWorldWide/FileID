@@ -223,6 +223,7 @@ struct CleanupView: View {
     }
 
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
+        if store.totalFiles == 0 { return "Nothing scanned yet" }
         let g = visible.count
         let skipped = skippedGroups.count
         let base: String

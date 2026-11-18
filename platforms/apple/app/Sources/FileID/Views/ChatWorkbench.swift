@@ -349,10 +349,14 @@ struct ChatWorkbench: View {
 
     private var sourcesPane: some View {
         VStack(spacing: 0) {
-            HStack {
-                SectionLabel("Sources")
-                Spacer()
-                MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    SectionLabel("Sources")
+                    Spacer()
+                    MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+                }
+                // Same height as the chip row beside it, so both section labels sit on one line.
+                TagChip(text: "Names").hidden()
             }
             .padding(.horizontal, 14)
             .frame(height: Theme.Metrics.paneHeaderHeight)

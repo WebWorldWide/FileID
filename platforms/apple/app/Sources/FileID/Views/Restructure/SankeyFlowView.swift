@@ -929,7 +929,8 @@ struct SankeyFlowView: View {
     }
 
     private var sankeyHeight: CGFloat {
-        let maxNodes = max(layout.sources.count, layout.destinations.count, 4)
+        let maxNodes = max(layout.sources.count, layout.destinations.count, 1)
+        if maxNodes < 4 { return 160 + CGFloat(maxNodes) * 40 }
         return min(580, max(320, CGFloat(maxNodes) * 56))
     }
 
