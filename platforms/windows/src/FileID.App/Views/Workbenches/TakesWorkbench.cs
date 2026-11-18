@@ -20,10 +20,7 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated clips by
-/// itself and scores each try without a model. The user checks the starred best try, keeps all, skips,
-/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs; the
-/// Goal (optional) ranking panel lives in TakesWorkbench.Goal.cs.</summary>
+/// <summary>The user checks the starred best try, keeps all, skips, or moves the rest to Trash with Undo.</summary>
 internal sealed partial class TakesWorkbench : WorkbenchPanel
 {
     private static readonly TimeSpan TrashUndoWindow = TimeSpan.FromSeconds(10);
@@ -1478,7 +1475,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }
         catch (Exception)
         {
-            // Missing font resource: keep the default face.
         }
     }
 

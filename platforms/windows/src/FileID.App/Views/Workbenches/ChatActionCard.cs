@@ -12,10 +12,6 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>One proposed Chat action (CHAT.md port note, macOS ChatActionCard): what will happen,
-/// the primary button, Cancel, live progress, then the result with Undo where one exists.
-/// The card is the confirmation step: kinds that change files show their counts, examples and
-/// undo story here, and nothing runs until the primary button is pressed.</summary>
 internal sealed class ChatActionCard : UserControl
 {
     private readonly ChatAction _action;
@@ -149,7 +145,6 @@ internal sealed class ChatActionCard : UserControl
         Sync();
     }
 
-    /// <summary>Merging people asks once more on the button itself, like every merge in People.</summary>
     private async Task<bool> ConfirmedAsync() =>
         _action.Kind != "mergePeople" || await global::FileID.Views.People.SuggestedMergesSheet.ConfirmMergeAsync(_primary);
 

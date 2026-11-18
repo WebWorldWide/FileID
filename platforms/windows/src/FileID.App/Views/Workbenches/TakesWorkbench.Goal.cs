@@ -6,8 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Best Takes "Goal (optional)" panel (macOS TakeReview.goalPanel): the description model looks at
-/// all the tries together (rankTakesWithGoal) and the top try becomes the pick. Photos only.</summary>
 internal sealed partial class TakesWorkbench
 {
     private readonly TextBox _rankGoalBox = new() { PlaceholderText = TakeReviewPolicy.GoalPlaceholder, MaxLength = 500, MinHeight = 28 };

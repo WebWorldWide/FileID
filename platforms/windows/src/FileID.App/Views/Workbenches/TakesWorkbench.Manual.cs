@@ -16,10 +16,6 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Best Takes groups made by hand (DESIGN_V3_PORT "Best Takes", manual groups; macOS
-/// TakeWorkbench, GTK takes_groups.rs): YOUR GROUPS, MAKE A GROUP BY HAND with clip search and Find
-/// related, the group editor (Ctrl+S saves), the scoring job, the recommendation and the take cards
-/// with Met / Missed / Unclear / Prefer / Undo review.</summary>
 internal sealed partial class TakesWorkbench
 {
     private IReadOnlyList<CatalogHit> _candidates = Array.Empty<CatalogHit>();
@@ -336,7 +332,6 @@ internal sealed partial class TakesWorkbench
         new(Guid.NewGuid().ToString(), action, query, fileID, null, null, null, fileIDs,
             TimelineMode: timelineMode, Event: saved, EventID: eventID, TakeFeedback: feedback);
 
-    /// <summary>Runs a manual-group request now, or right after the page's current request.</summary>
     private void SendManual(CatalogRequest request)
     {
         if (Busy)
@@ -404,7 +399,7 @@ internal sealed partial class TakesWorkbench
         }
     }
 
-    /// <summary>One catalog reply for the manual flow (macOS consume). True when the group list must be read again.</summary>
+    /// <summary>True when the group list must be read again.</summary>
     private bool Consume(string action, CatalogResponse response)
     {
         var ok = response.Status == "ok";
@@ -586,7 +581,6 @@ internal sealed partial class TakesWorkbench
         ClearProposalSelection();
     }
 
-    /// <summary>Leaves the manual editor because a possible group was opened.</summary>
     private void LeaveManual()
     {
         _manualActive = false;
@@ -1275,7 +1269,6 @@ internal sealed partial class TakesWorkbench
         public CatalogJob? Job { get; set; }
     }
 
-    /// <summary>Adaptive take-card grid (macOS GridItem.adaptive(260...420), gap 12); each row is as tall as its tallest card.</summary>
     private sealed class TakeCardGrid : Panel
     {
         protected override Size MeasureOverride(Size availableSize)
