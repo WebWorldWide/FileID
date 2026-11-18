@@ -32,6 +32,8 @@ jobs:
         run: python shared/scripts/check_bootstrap_supply_chain.py
       - name: Test runtime egress release gate
         run: python shared/scripts/test_check_runtime_egress.py
+      - name: Test conformance Trash guard
+        run: python3 shared/scripts/test_conformance_trash_guard.py
       - name: Reject unreviewed runtime egress additions
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
