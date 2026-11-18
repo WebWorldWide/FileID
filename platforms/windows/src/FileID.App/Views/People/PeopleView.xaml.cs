@@ -196,7 +196,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             await RefreshReviewCountAsync();
         });
 
-    // ───── Hidden-unknowns footer ─────────────────────────────────────
     // Tracks how many is_unknown=1 clusters are currently filtered out
     // by the global HideUnknown setting; surfaces a one-tap reveal so
     // the user can flip the visibility without diving into Settings.
@@ -257,7 +256,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ───── Item 2: Continue-to-Deep-Analyze CTA ───────────────────────
     // Shows once at least one cluster is named (and not flagged unknown) so
     // the user is nudged forward into Deep Analyze, which uses those names in
     // its captions + smart filenames. Mirrors macOS PeopleView's
@@ -793,8 +791,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
-
     /// <summary>Files an undo for a confirmed merge. The helper's own record
     /// of the merge is replayed when it sent one; a helper that sent none is
     /// undone the older way, from the list of faces that moved.</summary>
@@ -1083,7 +1079,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 await ShowAlertAsync("Some merges failed",
                     $"Merged {merged} into #{dest}; {failed} failed — {firstFailure}");
             }
-            // Exit select mode + refresh.
             ViewModel.IsSelectMode = false;
             _selectedClusterIds.Clear();
             PublishCheckedPeople();

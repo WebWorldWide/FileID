@@ -3,8 +3,6 @@
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).
 //
-// structured-name editor + face grid; renamePerson IPC is
-// added as part of this sheet's wiring (engine handler + DTO).
 
 using System;
 using System.Collections.Generic;
@@ -126,7 +124,6 @@ public sealed partial class PersonDetailSheet : UserControl
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
 
-                // Pull structured name fields.
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = PersonQuery;
@@ -145,7 +142,6 @@ public sealed partial class PersonDetailSheet : UserControl
                     }
                 }
 
-                // Pull every face id for this cluster + check for an on-disk JPEG.
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = FacesQuery;
