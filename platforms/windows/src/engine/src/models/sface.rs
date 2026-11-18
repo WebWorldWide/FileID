@@ -83,10 +83,7 @@ impl SFace {
 
         let outputs = self.session.run(vec![(self.input_name.as_str(), chw.into())]).context("SFace session.run")?;
         let mut emb: Vec<f32> = outputs.into_iter().next().ok_or_else(|| anyhow::anyhow!("SFace produced no outputs"))?.data;
-        // SFace is a 128-d embedder; a wrong/quantized export with a different
-        // output width would silently mis-cluster and (worse) diverge from the
-        // cross-platform face DB, which is keyed on 128-d / 512-byte blobs. Fail
-        // loudly rather than persist an off-dim vector. (ENG-69)
+        // A wrong or quantized export with another output width would silently mis-cluster and diverge from the cross-platform face DB (128-d / 512-byte blobs): fail rather than persist an off-dim vector.
         if emb.len() != 128 {
             anyhow::bail!(
                 "SFace produced a {}-d embedding, expected 128 (wrong or quantized model?)",

@@ -81,12 +81,10 @@ mod tests {
         for id in 1..=4 {
             conn.execute("INSERT INTO persons(id,created_at,file_count) VALUES(?1,0,?2)", params![id, 99]).unwrap();
         }
-        // Person 1: two counted faces on file 1 and one on file 2, one excluded on file 3.
         face(&conn, 1, 1, Some(1), 0);
         face(&conn, 2, 1, Some(1), 0);
         face(&conn, 3, 2, Some(1), 0);
         face(&conn, 4, 3, Some(1), 1);
-        // Person 2 has only an excluded face; person 3 has none; person 4 has one.
         face(&conn, 5, 3, Some(2), 1);
         face(&conn, 6, 3, Some(4), 0);
         conn

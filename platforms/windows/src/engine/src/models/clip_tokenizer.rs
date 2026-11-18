@@ -1,18 +1,4 @@
-// CLIP BPE tokenizer — minimal port of the openai/clip tokenization
-// pipeline.
-//
-// CLIP uses a byte-pair-encoded vocab (49152 tokens) plus the special
-// `<|startoftext|>` (49406) and `<|endoftext|>` (49407) markers that
-// delimit each query. The tokenizer constructor takes the raw `vocab.json`
-// (token → id mapping) and `merges.txt` (pair-merge order) the registry
-// downloads, builds the merge-rank table, and exposes `encode(s) ->
-// Vec<u32>` that produces a token list ready for the `<sot>...<eot>`
-// + zero-pad expansion the text-encoder model expects.
-//
-// This is the smallest possible CLIP tokenizer that round-trips
-// canonical inputs ("a photo of a dog" → 49406, 320, 1125, 539, 320,
-// 1929, 49407). Edge cases (multi-byte UTF-8 in queries, weird
-// punctuation) match HuggingFace tokenizers' bytes-to-unicode mapping.
+// CLIP BPE tokenizer: openai/clip pre-tokenization and merges, with HF-compatible bytes-to-unicode mapping. vocab.json and merges.txt are SHA-256 pinned downloads.
 
 use std::collections::HashMap;
 
@@ -42,7 +28,6 @@ pub struct ClipTokenizer {
 }
 
 impl ClipTokenizer {
-    /// Construct from the raw `vocab.json` and `merges.txt` strings.
     pub fn new(vocab_json: &str, merges_txt: &str) -> Result<Self> {
         let value: Value = serde_json::from_str(vocab_json).context("parsing vocab.json")?;
         let obj = value.as_object().ok_or_else(|| anyhow::anyhow!("vocab.json not an object"))?;
@@ -57,7 +42,6 @@ impl ClipTokenizer {
 
         let mut merges = HashMap::new();
         for (rank, line) in merges_txt.lines().enumerate() {
-            // First line is "#version: ..."; skip if so.
             if rank == 0 && line.starts_with("#") {
                 continue;
             }
@@ -88,13 +72,10 @@ impl ClipTokenizer {
                 Some((i, _)) => &word[..i],
                 None => word,
             };
-            // Map each UTF-8 byte to the bytes-to-unicode char and
-            // mark word-end with `</w>` per the CLIP convention.
             let mut s = String::new();
             for b in word.bytes() {
                 s.push(self.byte_encoder[b as usize]);
             }
-            // BPE merge loop.
             let mut tokens: Vec<String> = s.chars().map(|c| c.to_string()).collect();
             if let Some(last) = tokens.last_mut() {
                 last.push_str("</w>");
@@ -119,12 +100,7 @@ impl ClipTokenizer {
             }
         }
 
-        // Truncate the content so the trailing EOT always fits inside the
-        // model's 77-token context window. The doc comment promised this but
-        // the code never did it, so for queries >77 tokens the downstream
-        // `.take(CONTEXT_LEN)` dropped the EOT entirely — CLIP relies on the
-        // EOT position for the pooled text embedding, so its absence degraded
-        // long-query search quality.
+        // Keep the trailing EOT inside the 77-token context: CLIP pools the text embedding at EOT, so a dropped EOT degrades long queries.
         out.truncate(CLIP_CONTEXT_LEN - 1);
         out.push(EOT);
         out
@@ -133,7 +109,6 @@ impl ClipTokenizer {
 
 fn normalize(s: &str) -> String {
     let lower = s.to_lowercase();
-    // Collapse runs of whitespace (CLIP's reference tokenizer does this).
     lower.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

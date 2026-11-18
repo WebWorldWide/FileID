@@ -56,18 +56,14 @@ pub fn estimate_pose(landmarks: &[[f32; 2]; 5]) -> Pose {
     let mouth_left = landmarks[3];
     let mouth_right = landmarks[4];
 
-    // Roll: angle of the eye line from horizontal.
     let dx = right_eye[0] - left_eye[0];
     let dy = right_eye[1] - left_eye[1];
     let roll = dy.atan2(dx);
 
-    // Yaw: signed displacement of the nose from the eye-midpoint,
-    // normalized by inter-ocular distance.
     let eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0;
     let inter_ocular = ((dx * dx + dy * dy).sqrt()).max(1e-3);
     let yaw = ((nose[0] - eye_mid_x) / inter_ocular).clamp(-1.0, 1.0).asin();
 
-    // Pitch: nose y vs eye-mouth midline, normalized by face height.
     let mouth_mid_y = (mouth_left[1] + mouth_right[1]) / 2.0;
     let eye_mid_y = (left_eye[1] + right_eye[1]) / 2.0;
     let face_h = (mouth_mid_y - eye_mid_y).abs().max(1e-3);
@@ -88,12 +84,10 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
     let bbox_area = bw * bh;
     let img_area = (img_w as f32) * (img_h as f32);
 
-    // Reject tiny detections (< 0.1% of image area).
     if bbox_area < img_area * 0.001 {
         return None;
     }
 
-    // Reject extreme aspect ratios — faces are roughly square.
     let aspect = bh / bw;
     if aspect < 0.6 || aspect > 2.0 {
         return None;
@@ -117,7 +111,6 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
         }
     }
 
-    // Inter-eye distance must be ≥ 15% of bbox width.
     let eye_dx = right_eye[0] - left_eye[0];
     let eye_dy = right_eye[1] - left_eye[1];
     let inter_eye = (eye_dx * eye_dx + eye_dy * eye_dy).sqrt();
@@ -203,7 +196,6 @@ mod tests {
 
     #[test]
     fn nms_keeps_highest_score_per_cluster() {
-        // Three near-identical boxes; NMS @ 0.4 must keep the top one.
         let cands = vec![
             det(0.0, 0.0, 10.0, 10.0, 0.9),
             det(1.0, 1.0, 11.0, 11.0, 0.85),
@@ -212,7 +204,6 @@ mod tests {
         ];
         let kept = nms(cands, 0.4);
         assert_eq!(kept.len(), 2, "expected 2 clusters, got {}", kept.len());
-        // Highest score in cluster 1 wins.
         assert!((kept[0].score - 0.9).abs() < 1e-6);
         assert!((kept[1].score - 0.7).abs() < 1e-6);
     }

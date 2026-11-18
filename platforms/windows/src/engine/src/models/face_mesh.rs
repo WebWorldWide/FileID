@@ -103,7 +103,6 @@ impl FaceMesh {
         Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
     }
 
-    /// One forward pass: the 478 x 3 landmark values and the presence logit.
     fn forward(&mut self, input: Array4<f32>) -> Result<(Vec<f32>, f32)> {
         let input_name = self.input_name.clone();
         let outputs = self.session.run(vec![(input_name.as_str(), input.into())]).context("Face mesh session.run")?;

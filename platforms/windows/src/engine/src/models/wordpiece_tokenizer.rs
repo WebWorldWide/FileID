@@ -1,12 +1,4 @@
-//! Minimal BERT-family WordPiece tokenizer (pure Rust, no `tokenizers` dep).
-//!
-//! Used by the BGE-small text-embedding wrapper, a BERT-architecture model
-//! needing `[CLS]`/`[SEP]`, a `vocab.txt`
-//! map, an attention mask, and token-type ids — unlike the BPE
-//! `clip_tokenizer`. Greedy longest-match-first WordPiece over a `vocab.txt`,
-//! mirroring HuggingFace `BertTokenizer(do_lower_case=True)` for the common
-//! English case. Avoids pulling the heavy `tokenizers` crate (onig + a big
-//! build) for what the model actually needs.
+//! BERT WordPiece tokenizer in pure Rust: avoids the `tokenizers` crate (onig and a large build) and matches HF BertTokenizer(do_lower_case=True) for common English.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -78,15 +70,7 @@ impl WordPieceTokenizer {
         Encoding { ids, attention_mask, type_ids }
     }
 
-    /// BERT "basic tokenizer" stage: whitespace split, optional lowercasing,
-    /// and punctuation broken into its own tokens. English-first; good enough
-    /// for the models we ship. Bounded to `max_words` outputs (the punctuation
-    /// branch may overshoot by one): every word yields at least one wordpiece,
-    /// so the encoder can never consume more —
-    /// without the bound a multi-hundred-MB extracted document would be
-    /// materialized as a Vec of tiny Strings before truncation. The char
-    /// pre-slice bounds the `to_lowercase` allocation the same way; 64 chars
-    /// per word is generous (words past 100 chars collapse to `[UNK]`).
+    /// BERT basic-tokenizer stage: whitespace split, lowercasing, punctuation split. Bounded to `max_words`, so a huge extracted document is never materialized as tiny Strings; the char pre-slice bounds the lowercasing allocation.
     fn basic_tokenize(&self, text: &str, max_words: usize) -> Vec<String> {
         let text = match text.char_indices().nth(max_words.saturating_mul(64)) {
             Some((i, _)) => &text[..i],
@@ -169,7 +153,6 @@ mod tests {
     use super::*;
 
     fn toy() -> WordPieceTokenizer {
-        // id == insertion order.
         let toks = [
             "[PAD]", "[UNK]", "[CLS]", "[SEP]", "play", "##ing", "##ed", "love", "!",
         ];
@@ -193,7 +176,6 @@ mod tests {
 
     #[test]
     fn greedy_splits_into_wordpieces() {
-        // playing → play ##ing → [CLS] play ##ing [SEP] == 2,4,5,3
         assert_eq!(toy().encode("playing", 16).ids, vec![2, 4, 5, 3]);
     }
 
@@ -204,7 +186,6 @@ mod tests {
 
     #[test]
     fn lowercases_and_splits_punctuation() {
-        // "LOVE!" → love ! → [CLS] love ! [SEP] == 2,7,8,3
         assert_eq!(toy().encode("LOVE!", 16).ids, vec![2, 7, 8, 3]);
     }
 

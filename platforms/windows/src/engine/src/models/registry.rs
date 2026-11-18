@@ -243,24 +243,7 @@ fn revision_token(model: &Model) -> String {
     format!("{h:016x}")
 }
 
-/// Sentinel file the engine drops after every file in `model.files`
-/// has landed. Welcome sheet + tagging stack poll it to know whether
-/// the model is installed without re-validating SHA256s on every
-/// launch.
-///
-/// The filename is keyed by [`revision_token`] (not just `model.id`) so a pin
-/// bump — a changed revision/sha256 for any file — yields a DIFFERENT sentinel
-/// name. The old `{id}-<oldtoken>.installed` no longer matches, so the install
-/// gate falls through to a re-fetch instead of trusting the stale artifact on
-/// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
-/// a pin change (024; the b4404→b9254 episode).
-///
-/// Pre-revision-key Windows builds dropped a bare `{id}.installed` with no token.
-/// [`migrate_legacy_sentinel`] renames that legacy marker to the current keyed
-/// name on first read so an already-present (multi-GB) install isn't reported as
-/// not-installed and re-downloaded merely because the naming scheme changed.
-/// A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
-/// is not the legacy name and is left for the re-fetch path.
+/// Sentinel the engine drops once every file in `model.files` has landed. Keyed by [`revision_token`], so a pin bump yields a new name and forces a re-fetch. A legacy bare `{id}.installed` is renamed by [`migrate_legacy_sentinel`] on first read so an existing install is not re-downloaded.
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let dir = paths::models_dir().ok()?.join(".sentinels");
     let keyed = dir.join(format!("{}-{}.installed", model.id, revision_token(model)));
@@ -423,13 +406,7 @@ fn migrate_legacy_sentinel(dir: &Path, model: &Model, keyed: &Path) {
     if !legacy.exists() {
         return;
     }
-    // A legacy bare marker carries no revision token, so it cannot signal
-    // a pin bump on its own. Re-validate the on-disk artifacts against the CURRENT
-    // pins before vouching, or a stale pre-bump install masquerades as the current
-    // one. approx_bytes is a rounded estimate, so SHA256 (the exact,
-    // mandatory pin) is the check. Runs at most once per legacy install (this
-    // branch is unreachable once keyed exists or the marker is gone), so the
-    // one-time hash is off the hot path.
+    // A legacy bare marker carries no revision token, so it cannot signal a pin bump; re-check the artifacts against the current SHA-256 pins (approx_bytes is only an estimate) before vouching.
     let pins_valid = model.files.iter().all(|f| match f.sha256.as_deref() {
         Some(expected) => file_sha256_matches(&f.dest, expected),
         None => f.dest.exists(),
@@ -614,16 +591,12 @@ mod tests {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
                 let name = p.file_name().unwrap().to_string_lossy();
-                // Revision-keyed: `ram_plus-<token>.installed` (024).
                 assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
                 assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
     }
 
-    /// A pin bump (revision/sha256 change on any file) must move the sentinel
-    /// filename so the stale `.installed` no longer matches and the install gate
-    /// re-fetches. Before the revision-key fix the name was a bare
-    /// `{id}.installed` that survived the b4404→b9254 hash bump. (024)
+    /// A pin bump must move the sentinel filename so a stale `.installed` no longer matches and the install gate re-fetches.
     #[test]
     fn pin_bump_invalidates_sentinel() {
         let LookupResult::Found(model) = lookup_full("ram_plus") else {
@@ -631,7 +604,6 @@ mod tests {
         };
         let before = sentinel_path(&model).expect("sentinel path");
 
-        // Simulate a pin bump: same id/files, one sha256 changed.
         let mut bumped = model.clone();
         assert!(!bumped.files.is_empty(), "ram_plus must have at least one file");
         bumped.files[0].sha256 =
@@ -653,7 +625,6 @@ mod tests {
         }
     }
 
-    // Build a one-file Model fixture pointing `dest` at a path under `dir`.
     fn test_model(dir: &Path, file_name: &str, sha256: Option<String>) -> Model {
         Model {
             id: "ram_plus",
@@ -688,7 +659,7 @@ mod tests {
     #[test]
     fn legacy_sentinel_is_migrated_when_pins_valid() {
         let dir = unique_sentinel_dir("migrate");
-        std::fs::write(dir.join("ram_plus.onnx"), b"weights").unwrap(); // satisfies the pin
+        std::fs::write(dir.join("ram_plus.onnx"), b"weights").unwrap();
         let legacy = dir.join("ram_plus.installed");
         std::fs::write(&legacy, b"ram_plus").unwrap();
         let keyed = dir.join("ram_plus-deadbeef00000000.installed");

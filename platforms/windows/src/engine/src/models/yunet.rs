@@ -43,16 +43,7 @@ impl YuNet {
             &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(INPUT as usize), Dim::Fixed(INPUT as usize)])],
         )?;
 
-        // Validate the output-name contract at LOAD. detect() matches outputs by
-        // literal name (cls_/obj_/bbox_/kps_ × strides 8/16/32); a mismatch makes
-        // every stride hit the skip arm and detect() return an empty Vec for the
-        // ENTIRE library — silent "zero faces". The shipped opencv
-        // face_detection_yunet_2023mar export emits exactly these 12 names, so
-        // assert them here: a future renamed re-export then fails LOUDLY at load
-        // (→ scan aborts with a reinstall message, scan.rs) instead of silently
-        // producing no faces. (YuNet's cls/obj are both 1-channel, so SCRFD-style
-        // shape-classification cannot disambiguate them — a name check is the
-        // robust guard here.)
+        // detect() matches outputs by literal name, and a mismatch would silently return zero faces for the whole library. Assert the 12 shipped names at load so a renamed re-export fails loudly. (cls/obj are both 1-channel, so shape alone cannot tell them apart.)
         {
             let have: std::collections::HashSet<&str> =
                 session.output_names().iter().map(String::as_str).collect();
@@ -174,7 +165,6 @@ fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: 
         }
     }
 
-    // Letterbox → source remap (top-left placement, no pad offset).
     if scale > 0.0 {
         for d in &mut candidates {
             for v in &mut d.bbox {
@@ -192,13 +182,7 @@ fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: 
         d.bbox[1] = d.bbox[1].clamp(0.0, ih);
         d.bbox[2] = d.bbox[2].clamp(0.0, iw);
         d.bbox[3] = d.bbox[3].clamp(0.0, ih);
-        // Do NOT clamp landmarks: the 5-point similarity transform in
-        // align_112 needs their true positions to fit the crop correctly,
-        // and align_112's bilinear sampler already edge-clamps pixel reads.
-        // Clamping a slightly-out-of-frame eye/mouth point skews the
-        // transform and warps the aligned face (#8). validate_face_geometry
-        // already tolerates landmarks up to 10% outside the bbox, and
-        // DetectedFace.landmarks is metadata-only.
+        // Do not clamp landmarks: clamping an out-of-frame point skews the similarity transform and warps the aligned face. align_112 edge-clamps its samples, and validate_face_geometry tolerates landmarks up to 10% outside the bbox.
     }
 
     nms(candidates, NMS_IOU)
@@ -335,7 +319,6 @@ mod tests {
         let mut out = Vec::new();
         decode_stride(32, INPUT, &cls, &obj, &bbox, &kps, &mut out);
         assert_eq!(out.len(), 1);
-        // FileID[0]=left_eye should equal native[1] (kps index 1).
         let s = 32.0_f32;
         assert!((out[0].landmarks[0][0] - (0.0 + 0.1) * s).abs() < 1e-3);
         assert!((out[0].score - 1.0).abs() < 1e-4);

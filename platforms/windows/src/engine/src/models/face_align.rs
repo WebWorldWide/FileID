@@ -12,7 +12,6 @@ const OUT: usize = 112;
 /// smear in the People card). A face this far off-frame, or one whose
 /// landmarks fit so badly the warp leaves the image, is better served by the
 /// bounds-clamped plain bbox crop the caller falls back to. Env-overridable.
-/// (audit 2026-07-15: found by inspecting real People-tab representative crops.)
 fn max_out_of_bounds_fraction() -> f32 {
     std::env::var("FILEID_FACE_ALIGN_MAX_OOB")
         .ok()
@@ -51,7 +50,6 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
     let mut oob = 0usize;
     for oy in 0..OUT {
         for ox in 0..OUT {
-            // Inverse map (dst->src): src = L^-1·(dst - t), L = [[a,-b],[b,a]].
             let dx = ox as f32 - tx;
             let dy = oy as f32 - ty;
             let sx = (a * dx + b * dy) / det;
@@ -126,10 +124,10 @@ fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32,
         sxx += x * x + y * y;
         sx += x;
         sy += y;
-        ba += x * cx + y * cy; // Σ(x·X + y·Y)
-        bb += x * cy - y * cx; // Σ(x·Y - y·X)
-        bxx += cx; // ΣX
-        byy += cy; // ΣY
+        ba += x * cx + y * cy;
+        bb += x * cy - y * cx;
+        bxx += cx;
+        byy += cy;
     }
     // [ sxx   0    sx   sy ] [a ]   [ ba  ]
     // [ 0    sxx  -sy   sx ] [b ] = [ bb  ]
@@ -146,7 +144,6 @@ fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32,
     Some((p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32))
 }
 
-/// 4×4 linear solve via Gaussian elimination with partial pivoting.
 fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
     for col in 0..4 {
         let mut piv = col;
@@ -179,7 +176,6 @@ fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
-/// Bilinear RGB sample with edge clamping.
 fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
     bilinear_strided(rgb, 3, width, height, x, y)
 }
@@ -358,9 +354,7 @@ mod tests {
         assert!(align_112(&rgb, w, h, &lm).is_some());
     }
 
-    /// Landmarks in the far corner of a tiny image force most of the 112×112
-    /// sampling grid off-frame; that crop is edge-clamp smear and must be
-    /// rejected so the caller falls back to the plain bbox crop. (audit)
+/// Landmarks in the far corner of a tiny image force most of the 112×112 sampling grid off-frame; that crop is edge-clamp smear, so the caller falls back to the plain bbox crop.
     #[test]
     fn mostly_out_of_frame_face_is_rejected() {
         let (w, h) = (60u32, 60u32);
