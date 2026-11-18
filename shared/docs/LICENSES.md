@@ -53,11 +53,10 @@ which the engine-only `deny.toml` does not apply to, not a licence matter), and
 | swift-transformers, swift-huggingface, swift-jinja | 1.3.4 / 0.13.0 / 2.5.1 | Apache-2.0 | same | LICENSE | OK |
 | EventSource | 1.5.1 | MIT | same | notice | OK |
 | GRDB.swift | 7.11.1 | MIT (SQLite: public domain, system library) | Mac helpers | notice | OK |
-| swift-async-algorithms, swift-collections, swift-numerics | 1.1.3 / 1.4.1 / 1.1.1 | Apache-2.0 | static | LICENSE | OK |
+| swift-collections, swift-numerics | 1.4.1 / 1.1.1 | Apache-2.0 | static | LICENSE | OK |
 | swift-asn1, swift-crypto (incl. BoringSSL, Keccak) | 1.7.3 / 4.5.2 | Apache-2.0 (+ OpenSSL/ISC in BoringSSL) | static | LICENSE + `NOTICE` files (kept in notices) | OK |
 | yyjson | 0.12.0 | MIT | static | notice | OK |
 | swift-syntax | 603.0.2 | Apache-2.0 with Swift runtime exception | build-time macros only | none shipped | OK |
-| onnxruntime-swift-package-manager (vendored, `platforms/apple/vendor/`) + ORT 1.24.2 pod | 1.24.2 | MIT, Microsoft | vendored sources keep their MIT headers and `LICENSE`; linked only by the retired Swift engine (conformance peer, built in CI, never shipped) | notice (kept while the package stays in `Package.resolved`) | OK; nothing from it is in any shipped binary |
 | ONNX Runtime dylib / DLLs | 1.22.0 | MIT | no longer shipped on any platform: the engine runs on tract; `assemble_app.sh` fails if the Mac bundle holds any `*onnxruntime*` file or `fileidd` links one; Windows packages carry no `onnxruntime.dll` or `DirectML.dll` | none | OK. Row kept for history |
 | Archivo, Instrument Serif fonts | - | OFL-1.1 | bundled; OFL text next to each font in the app, website and Linux dist | keep copyright + OFL with the fonts | OK |
 | App icon, logos | - | project-owned | bundle | - | OK |
@@ -127,7 +126,7 @@ The weights are never bundled; they are downloaded at a pinned revision after th
    `shared/licenses/components.json` (WindowsAppSDK especially). WiX's MS-RL bootstrapper stub in the
    setup executable deserves a one-line legal confirmation (the WiX FAQ says output is not
    subject to MS-RL).
-4. **ONNX Runtime third-party notices.** No longer applies: no FileID binary carries ONNX Runtime. PDFium's `licenses/` folder still needs staging.
+4. **ONNX Runtime third-party notices.** No longer applies: no FileID binary carries ONNX Runtime. (The vendored Swift package and the Swift engine were deleted 2026-11-18.) PDFium's `licenses/` folder still needs staging.
 5. **FFmpeg/OpenH264.** If a media runtime is ever shipped: ship the LGPL source + licence it
    already records, and get codec patent clearance (a source-built OpenH264 has no Cisco grant).
 6. **SFace training data.** The weights are Apache-2.0 but the repo does not state the training

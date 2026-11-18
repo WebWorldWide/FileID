@@ -108,8 +108,8 @@ queries with `split`, `present`, `matches` and `ambiguous` photos). It copies a 
 query words plus a client CLIP text vector from `--vector-engine`, default the engine under test)
 and also semantic-only, and scores the files the reply calls good matches: macro precision and
 recall over present queries, the share of present queries with a good match, and absent queries
-answered with none. Pass the Swift engine as `--vector-engine` to compare engines with identical
-client vectors; each engine still embeds its own prompt when CLIP text is installed in the home.
+answered with none. Pass another engine build as `--vector-engine` to compare builds with identical
+client vectors; each build still embeds its own prompt when CLIP text is installed in the home.
 
 ## Tags (`tag_eval.py`)
 

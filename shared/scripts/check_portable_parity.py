@@ -68,7 +68,7 @@ def run(binary, directory, exports):
         path.write_bytes(b'original fixture document')
     originals = {path: digest(path) for path in [photo, *documents]}
     database_path = state / 'FileID' / 'fileid.sqlite'
-    bootstrap = Engine(binary, state, swift=False)
+    bootstrap = Engine(binary, state)
     try:
         bootstrap.wait('ready')
     finally:
@@ -84,7 +84,7 @@ def run(binary, directory, exports):
             vector[component] = 1.0
             database.execute('INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)',
                              (file_id, struct.pack('<512f', *vector), MODEL))
-    engine = Engine(binary, state, swift=False)
+    engine = Engine(binary, state)
     try:
         engine.wait('ready')
         prepare_visual(engine)
@@ -128,7 +128,7 @@ def run(binary, directory, exports):
         assert occupied.read_bytes() == b'unrelated occupant'
     finally:
         engine.close()
-    engine = Engine(binary, state, swift=False)
+    engine = Engine(binary, state)
     try:
         engine.wait('ready')
         history = check_ok(tool(engine, 'history'))

@@ -690,10 +690,9 @@ mod tests {
     /// The migration chains forked at v14 (macOS registered
     /// "v14_fts_sync_triggers" while this engine registered
     /// "v14_files_kind_scanned_index"), which made a macOS-touched library
-    /// fail every Windows scan with SQLITE_CORRUPT. Both platforms pin the
-    /// same canonical identifier list — the macOS mirror lives in
-    /// platforms/apple/Tests/EngineTests/MigrationParityTests.swift. Update
-    /// BOTH or the chains fork again.
+    /// fail every Windows scan with SQLITE_CORRUPT. The canonical list is
+    /// pinned here and against a catalog the Swift engine wrote (see
+    /// `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
         const CANONICAL: [&str; 36] = [
@@ -736,6 +735,26 @@ mod tests {
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
+    }
+
+    /// A catalog the retired Swift engine wrote (GRDB, all 36 migrations) names
+    /// exactly the migrations registered here and holds the same tables and
+    /// indexes (index names differ for `files_on_kind`/`files_on_path_hash`).
+    #[test]
+    fn catalog_the_swift_engine_wrote_matches_the_migrations() {
+        let swift = crate::db::test_support::swift_catalog("swift-written-chat-history");
+        let names = |conn: &Connection, sql: &str| -> Vec<String> {
+            let mut statement = conn.prepare(sql).unwrap();
+            statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let swift_migrations = names(&swift.conn, "SELECT identifier FROM grdb_migrations ORDER BY rowid");
+        let ids: Vec<String> = registry().iter().map(|(id, _)| (*id).to_string()).collect();
+        assert_eq!(swift_migrations, ids);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        apply(&fresh).unwrap();
+        let tables = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+        assert_eq!(names(&swift.conn, tables), names(&fresh, tables));
     }
 
     /// V15 installed the six FTS sync triggers (same DDL macOS applies).

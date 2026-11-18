@@ -5,9 +5,9 @@ Scans `<eval>/selection/photos` into a disposable catalog, then for every questi
 `<eval>/selection/labels.json` sends a chat request scoped to all the photos with the
 local model on, and compares the photos the model answered "yes" for with the labels.
 Prints precision and recall over the questions that have matches, and how many
-no-match questions answered none. Works with either engine (`--flavor`).
+no-match questions answered none. Runs the Rust engine the Mac app hosts.
 
-    selection_eval.py --engine <bin> --flavor swift|rust --scratch <dir> --hf-root <model copy>
+    selection_eval.py --engine <bin> --flavor rust --scratch <dir> --hf-root <model copy>
         [--model qwen3_vl_2b] [--set selection] [--split tune|held] [--json out.json]
 
 labels.json: {"questions": [{"id": "Q01", "text": "...", "expected": ["s06", ...], "ignore": ["s07"], "split": "tune"}]},
@@ -46,7 +46,7 @@ def ask(engine, model, text, ids):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", required=True, type=Path)
-    parser.add_argument("--flavor", choices=["swift", "rust"], default="swift")
+    parser.add_argument("--flavor", choices=["rust"], default="rust")
     parser.add_argument("--scratch", required=True, type=Path)
     parser.add_argument("--hf-root", required=True, type=Path)
     parser.add_argument("--model", default="qwen3_vl_2b")

@@ -147,26 +147,23 @@
   ,{
     "name": "files-trash-put-back-after-wiping-the-library",
     "description": "wipeLibrary deletes the scan sessions that authorize a restore, but a Trash batch the engine journaled keeps the library root it was trashed from, so the file still goes back and is re-cataloged; a batch with no recorded root is still refused (unit-tested).",
-    "engines": ["rust"],
     "requiresTestTrashRoot": ["darwin"],
-    "knownDivergences": [
-      {"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}
-    ],
+    "knownDivergences": [{"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}],
     "tree": [
-      {"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}},
-      {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}
+        {"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}},
+        {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}
     ],
     "sql": [
-      "INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')"
+        "INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')"
     ],
     "steps": [
-      {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}},
-      {"label": "wipe", "command": {"wipeLibrary": {}}, "await": "libraryWiped"},
-      {"label": "no scan sessions left", "db": "SELECT COUNT(*) FROM scan_sessions", "expect": [[0]]},
-      {"label": "put back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
-      {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}},
-      {"label": "re-cataloged", "db": "SELECT COUNT(*) FROM files WHERE path_text='{path:docs/trash me.txt}'", "expect": [[1]]}
+        {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}},
+        {"label": "in the test Trash", "fs": {"absent": ["docs/trash me.txt"], "inTestTrash": ["trash me.txt"]}},
+        {"label": "wipe", "command": {"wipeLibrary": {}}, "await": "libraryWiped"},
+        {"label": "no scan sessions left", "db": "SELECT COUNT(*) FROM scan_sessions", "expect": [[0]]},
+        {"label": "put back", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
+        {"label": "file back", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}},
+        {"label": "re-cataloged", "db": "SELECT COUNT(*) FROM files WHERE path_text='{path:docs/trash me.txt}'", "expect": [[1]]}
     ]
   }
 ]

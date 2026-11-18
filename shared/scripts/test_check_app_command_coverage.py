@@ -87,9 +87,9 @@ class CoverageTests(unittest.TestCase):
         failures = coverage.check(self.repo(catalog='"jobs" => {}'))
         self.assertTrue(any("catalog search: not named" in failure for failure in failures))
 
-    def test_a_command_no_case_runs_on_rust_fails(self):
-        swift_only = [{"name": "controls", "engines": ["swift"], "steps": CASE[0]["steps"]}]
-        failures = coverage.check(self.repo(cases=swift_only))
+    def test_a_command_no_case_runs_fails(self):
+        searching = [{"name": "controls", "steps": [{"catalog": {"action": "search"}}]}]
+        failures = coverage.check(self.repo(cases=searching))
         self.assertTrue(any("pauseScan: the Mac app sends it but no conformance case" in failure for failure in failures))
 
     def test_a_darwin_run_false_divergence_does_not_count(self):
@@ -98,15 +98,9 @@ class CoverageTests(unittest.TestCase):
         lifted = [{**CASE[0], "knownDivergences": [{"engine": "rust", "os": ["darwin"], "run": False, "liftedByTestTrashRoot": True, "reason": "x"}]}]
         self.assertEqual(coverage.check(self.repo(cases=lifted)), [])
 
-    def test_a_swift_led_case_counts_steps_after_the_restart_into_rust(self):
-        cross = [{"name": "cross", "engines": ["swift"], "requires": ["swift", "rust"], "start": "swift", "steps": [
-            {"command": {"pauseScan": {}}},
-            {"restart": "rust"},
-            {"catalog": {"action": "search"}},
-        ]}]
-        failures = coverage.check(self.repo(cases=cross))
-        self.assertEqual(len(failures), 1)
-        self.assertIn("pauseScan", failures[0])
+    def test_a_restart_step_counts_as_a_shutdown(self):
+        restarting = [{"name": "restart", "steps": [{"restart": True}]}]
+        self.assertIn(("command", "shutdown"), coverage.exercised_on_hosted_rust(restarting))
 
 
 if __name__ == "__main__":

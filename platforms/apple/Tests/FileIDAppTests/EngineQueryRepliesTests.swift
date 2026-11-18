@@ -420,7 +420,7 @@ struct EngineQueryRepliesProcessTests {
 
     nonisolated private static var engineBinary: URL? {
         let environment = ProcessInfo.processInfo.environment
-        guard let path = environment["FILEID_TEST_HOSTED_ENGINE_PATH"] ?? environment["FILEID_TEST_ENGINE_PATH"],
+        guard let path = environment["FILEID_TEST_HOSTED_ENGINE_PATH"],
               FileManager.default.isExecutableFile(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
@@ -519,7 +519,7 @@ struct AppCLIPTextSessionTests {
         #expect(files.count > 20)
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
-            for forbidden in ["CLIPTextEncoder", "CLIPTokenizer.shared", "ORTSession(", "ORTPrivacy", "OnnxRuntimeBindings", "FileIDORT"] {
+            for forbidden in ["CLIPTextEncoder", "CLIPTokenizer.shared", "ORTSession(", "ORTPrivacy", "OnnxRuntimeBindings"] {
                 #expect(!text.contains(forbidden), "\(file.lastPathComponent) uses \(forbidden)")
             }
         }
@@ -547,7 +547,6 @@ struct ShippedAppWithoutONNXRuntimeTests {
             let end = declarations.first { $0 > name.lowerBound } ?? manifest.endIndex
             let block = manifest[start..<end]
             #expect(!block.contains("onnxruntime"), "\(target) depends on onnxruntime")
-            #expect(!block.contains("FileIDORT"), "\(target) depends on FileIDORTC or FileIDORTSupport")
         }
     }
 
@@ -560,7 +559,7 @@ struct ShippedAppWithoutONNXRuntimeTests {
             #expect(!files.isEmpty, "\(folder) has sources")
             for file in files {
                 let text = try String(contentsOf: file, encoding: .utf8)
-                #expect(!text.contains("OnnxRuntimeBindings") && !text.contains("import FileIDORT"),
+                #expect(!text.contains("OnnxRuntimeBindings"),
                         "\(file.lastPathComponent) imports ONNX Runtime")
             }
         }

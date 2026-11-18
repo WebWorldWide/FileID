@@ -34,6 +34,48 @@ pub(crate) mod test_support {
         )
         .unwrap();
     }
+
+    const SWIFT_WRITTEN: &str = "../../../../shared/test-corpus/conformance/fixtures/swift-written";
+
+    /// A file the retired Swift engine wrote, committed under
+    /// `shared/test-corpus/conformance/fixtures/swift-written`.
+    pub(crate) fn swift_written(relative: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SWIFT_WRITTEN).join(relative)
+    }
+
+    /// Re-roots the paths in a Swift-written journal: the folder the fixture was
+    /// captured in becomes `to`, in every string, so the journal names files the
+    /// test made.
+    pub(crate) fn rebase_paths(value: &mut serde_json::Value, from: &str, to: &str) {
+        match value {
+            serde_json::Value::String(text) => *text = text.replace(from, to),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| rebase_paths(item, from, to)),
+            serde_json::Value::Object(map) => map.values_mut().for_each(|item| rebase_paths(item, from, to)),
+            _ => {}
+        }
+    }
+
+    /// A copy of a catalog the Swift engine wrote, open for the test; the copy
+    /// is removed when this is dropped.
+    pub(crate) struct SwiftCatalog {
+        pub(crate) conn: Connection,
+        directory: std::path::PathBuf,
+    }
+
+    impl Drop for SwiftCatalog {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.directory).ok();
+        }
+    }
+
+    pub(crate) fn swift_catalog(fixture: &str) -> SwiftCatalog {
+        let directory = std::env::temp_dir().join(format!("fileid-swift-catalog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let copy = directory.join("fileid.sqlite");
+        std::fs::copy(swift_written(&format!("{fixture}/state/FileID/fileid.sqlite")), &copy).unwrap();
+        let conn = super::open_writer(&copy).unwrap();
+        SwiftCatalog { conn, directory }
+    }
 }
 
 use std::path::Path;

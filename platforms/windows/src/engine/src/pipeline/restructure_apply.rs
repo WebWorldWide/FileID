@@ -5308,6 +5308,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    const SWIFT_RESTRUCTURE_FOLDER: &str = "/private/tmp/fileid-conformance-fixture/swift-written-restructure-apply/tree";
+
+    // One line of the undo journal the Swift engine wrote before it adopted the
+    // library-root header (older app versions; hand-written in that format
+    // because the current Swift engine always writes the header).
+    fn headerless_swift_line(root: &Path, to: &Path) -> String {
+        let text = std::fs::read_to_string(crate::db::test_support::swift_written("journals/restructure_undo-headerless.ndjson")).unwrap();
+        let mut entry: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        crate::db::test_support::rebase_paths(&mut entry, SWIFT_RESTRUCTURE_FOLDER, &root.to_string_lossy());
+        entry["to"] = to.to_string_lossy().into_owned().into();
+        let mut line = entry.to_string();
+        line.push('\n');
+        line
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn undo_reads_a_headerless_swift_journal_inside_the_root_only() {
@@ -5321,31 +5336,62 @@ mod tests {
         insert_file_row(&conn, 1, &dst.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
-        let line = |to: &Path| {
-            let mut entry = serde_json::json!({
-                "file_id": 1,
-                "from": dst.to_string_lossy(),
-                "to": to.to_string_lossy()
-            })
-            .to_string();
-            entry.push('\n');
-            entry
-        };
 
         let outside = std::env::temp_dir().join(format!("fileid-outside-{}.jpg", uuid::Uuid::new_v4()));
-        std::fs::write(&journal, line(&outside)).unwrap();
+        std::fs::write(&journal, headerless_swift_line(&root, &outside)).unwrap();
         let apply = RestructureApply::new(Arc::clone(&db), root.clone(), false)
             .with_undo_journal_path(journal.clone());
         let err = apply.undo_last().unwrap_err();
         assert!(err.to_string().contains("different library root"));
         assert!(dst.exists());
 
-        std::fs::write(&journal, line(&src)).unwrap();
+        std::fs::write(&journal, headerless_swift_line(&root, &src)).unwrap();
         let result = apply.undo_last().unwrap();
         assert_eq!((result.applied, result.failed), (1, 0));
         assert!(src.exists());
         assert!(!dst.exists());
         assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The undo journal the Swift engine wrote for a restructure (library-root
+    // header, `source_identity` per entry) undoes here once the entries'
+    // identities are those of the files the test moved.
+    #[test]
+    fn undo_reads_the_journal_the_swift_engine_wrote() {
+        let root = undo_fixture_root("undo-owner-swift-written");
+        let conn = crate::db::test_support::memory_db();
+        let written = std::fs::read_to_string(crate::db::test_support::swift_written("journals/restructure_undo.ndjson")).unwrap();
+        let mut lines = written.lines();
+        let mut header: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        crate::db::test_support::rebase_paths(&mut header, SWIFT_RESTRUCTURE_FOLDER, &root.to_string_lossy());
+        assert_eq!(header["version"], 3);
+        let mut journal_text = format!("{header}\n");
+        let mut moved = Vec::new();
+        for line in lines.take(2) {
+            let mut entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            crate::db::test_support::rebase_paths(&mut entry, SWIFT_RESTRUCTURE_FOLDER, &root.to_string_lossy());
+            let moved_to = PathBuf::from(entry["from"].as_str().unwrap());
+            let original = PathBuf::from(entry["to"].as_str().unwrap());
+            std::fs::create_dir_all(moved_to.parent().unwrap()).unwrap();
+            std::fs::write(&moved_to, b"JPEG").unwrap();
+            entry["source_identity"] = serde_json::to_value(crate::platform::file_identity(&moved_to).unwrap()).unwrap();
+            insert_file_row(&conn, entry["file_id"].as_i64().unwrap(), &moved_to.to_string_lossy());
+            journal_text.push_str(&entry.to_string());
+            journal_text.push('\n');
+            moved.push((moved_to, original));
+        }
+        let journal = root.join("undo.ndjson");
+        std::fs::write(&journal, journal_text).unwrap();
+
+        let result = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false)
+            .with_undo_journal_path(journal.clone())
+            .undo_last()
+            .unwrap();
+        assert_eq!((result.applied, result.failed), (2, 0));
+        for (moved_to, original) in moved {
+            assert!(original.exists() && !moved_to.exists());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

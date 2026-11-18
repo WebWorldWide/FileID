@@ -5,8 +5,8 @@ Runs one engine over a copy of a scanned catalog (CLIP image vectors already sto
 every labelled query the way the Mac Library does (hybrid search with the query words and a
 client CLIP text vector) and scores the files the engine calls good matches.
 
-    search_eval.py --engine <FileIDEngine> --flavor swift|rust --catalog <snapshot.sqlite>
-                   [--vector-engine <Swift FileIDEngine>] [--modes hybrid semantic]
+    search_eval.py --engine <FileIDEngine> --flavor rust --catalog <snapshot.sqlite>
+                   [--vector-engine <FileIDEngine>] [--modes hybrid semantic]
 
 The client vector comes from `embedTextQuery` on `--vector-engine` (default: the engine under
 test), so two engines can be compared with identical client vectors; the engine under test
@@ -90,7 +90,7 @@ def score(queries, results, split):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", type=Path, required=True)
-    parser.add_argument("--flavor", choices=["swift", "rust"], required=True)
+    parser.add_argument("--flavor", choices=["rust"], default="rust")
     parser.add_argument("--catalog", type=Path, required=True, help="scanned snapshot.sqlite (copied, never opened in place)")
     parser.add_argument("--vector-engine", type=Path, help="engine that computes the client vector (default --engine)")
     parser.add_argument("--labels", type=Path, default=EVAL_ROOT / "search/labels.json")

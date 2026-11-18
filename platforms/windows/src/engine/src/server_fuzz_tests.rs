@@ -94,7 +94,7 @@ fn seeds(root: &str) -> Vec<Value> {
         .map(|payload| serde_json::to_value(payload).expect("exemplar serializes"))
         .collect();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../shared/test-corpus/conformance");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).collect();
+    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).filter(|path| path.extension().is_some_and(|extension| extension == "json")).collect();
     files.sort();
     for file in files {
         let cases: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();

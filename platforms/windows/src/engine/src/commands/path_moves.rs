@@ -168,7 +168,10 @@ mod tests {
         dir
     }
 
-    // The Swift engine's own lines (JSONEncoder output) repair the same way.
+    // The lines the Swift engine wrote for a restructure (JSONEncoder output):
+    // an intent and its "done" per move. The first move is left pending, as a
+    // kill between the move and the catalog update would, the second is
+    // finished and must never be replayed.
     #[test]
     fn pending_swift_rename_is_repaired_and_the_journal_cleared() {
         let root = scratch("swift");
@@ -182,12 +185,19 @@ mod tests {
         crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
         crate::db::test_support::insert_file(&conn, 2, &stale.to_string_lossy(), "photo");
         let journal = root.join(FILE_NAME);
-        let lines = [
-            serde_json::json!({"intent": {"id": "A", "fileID": 1, "from": from.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            // Finished: never replayed.
-            serde_json::json!({"intent": {"id": "B", "fileID": 2, "from": stale.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            serde_json::json!({"done": "B"}),
-        ];
+        let written = std::fs::read_to_string(crate::db::test_support::swift_written("journals/path-moves.ndjson")).unwrap();
+        let swift: Vec<serde_json::Value> = written.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let (first, second, second_done) = (&swift[0], &swift[2], &swift[3]);
+        assert_eq!(second["intent"]["id"], second_done["done"], "the fixture pairs each intent with its done line");
+        let patched = |line: &serde_json::Value, file_id: i64, from: &Path| {
+            let mut line = line.clone();
+            line["intent"]["fileID"] = file_id.into();
+            line["intent"]["from"] = from.to_string_lossy().into_owned().into();
+            line["intent"]["to"] = to.to_string_lossy().into_owned().into();
+            line["intent"]["fileRef"] = inode.into();
+            line
+        };
+        let lines = [patched(first, 1, &from), patched(second, 2, &stale), second_done.clone()];
         let mut text: String = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
         text.push_str("\n{\"intent\":");
         std::fs::write(&journal, text).unwrap();

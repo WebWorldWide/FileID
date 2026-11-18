@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash-safety and concurrency harness for the macOS Swift engine (and the Rust engine with --rust).
+"""Crash-safety and concurrency harness for the shared Rust engine.
 
 Every experiment builds a fresh library of APFS clones of the photos in FILEID_CRASH_SRC (never the
 originals) under FILEID_CRASH_DIR/crash-<name>-<ms>, records the SHA-256 of every file, does
@@ -10,23 +10,22 @@ restarts the engine on the same database and checks:
   * the catalog has no rows for missing files and no lost rows for present files;
   * the engine starts cleanly and any journal/undo still works.
 
-The engine always runs with FILEID_DATABASE_PATH (Swift) / FILEID_DB (Rust) inside the experiment
-directory. trashFiles uses the real macOS Trash: every scratch file name carries the experiment tag,
+The engine always runs with FILEID_DB inside the experiment directory. trashFiles uses the real macOS Trash: every scratch file name carries the experiment tag,
 so anything left behind is easy to find (`ls ~/.Trash | grep <tag>`); restore_all() puts it back.
 
-usage: FILEID_CRASH_DIR=<scratch> FILEID_CRASH_SRC=<dir of photos> FILEID_ENGINE=<FileIDEngine>
+usage: FILEID_CRASH_DIR=<scratch> FILEID_CRASH_SRC=<dir of photos> FILEID_RUST_ENGINE=<FileIDEngine>
        python3 crash_safety.py [experiment ...]      (no argument = all)
 
 The app-hosted Rust engine built with the `test-trash-root` feature (test builds only) never
-touches the real Trash: set FILEID_RUST_ENGINE to it and FILEID_CRASH_TRASH to a scratch folder,
-which the engine then uses as its Trash (FILEID_TEST_TRASH_ROOT) and this harness inspects.
+touches the real Trash: set FILEID_CRASH_TRASH to a scratch folder, which the engine then uses
+as its Trash (FILEID_TEST_TRASH_ROOT) and this harness inspects.
 """
 import glob, hashlib, json, os, random, signal, sqlite3, subprocess, sys, threading, time, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive import Engine, kind
 
 ROOT = os.path.abspath(os.environ.get("FILEID_CRASH_DIR") or sys.exit("set FILEID_CRASH_DIR"))
-RUST = os.environ.get("FILEID_RUST_ENGINE")  # set to the Rust FileIDEngine to drive the shared engine instead
+RUST = os.environ.get("FILEID_RUST_ENGINE") or sys.exit("set FILEID_RUST_ENGINE")
 SRC = os.path.abspath(os.environ.get("FILEID_CRASH_SRC") or sys.exit("set FILEID_CRASH_SRC"))
 TEST_TRASH = os.environ.get("FILEID_CRASH_TRASH")  # test-trash-root Rust build: its stand-in Trash
 TRASH = os.path.abspath(TEST_TRASH) if TEST_TRASH else os.path.expanduser("~/.Trash")
@@ -90,15 +89,13 @@ class Lab:
     def trashed(self):
         return [p for p in glob.glob(os.path.join(TRASH, "*")) if self.tag in os.path.basename(p)]
 
-    def engine(self, binary=None):
+    def engine(self):
         env = {"FILEID_TIMELINE_SPEECH": "0"}
-        if RUST:
-            binary = RUST
-            os.makedirs(self.state + "/models", exist_ok=True)
-            env.update(FILEID_DB=self.db, XDG_DATA_HOME=self.state + "/xdg", FILEID_MODELS_DIR=self.state + "/models")
-            if TEST_TRASH:
-                env.update(FILEID_TEST_TRASH_ROOT=TRASH)
-        e = Engine(self.state, binary=binary, extra_env=env)
+        os.makedirs(self.state + "/models", exist_ok=True)
+        env.update(FILEID_DB=self.db, XDG_DATA_HOME=self.state + "/xdg", FILEID_MODELS_DIR=self.state + "/models")
+        if TEST_TRASH:
+            env.update(FILEID_TEST_TRASH_ROOT=TRASH)
+        e = Engine(self.state, binary=RUST, extra_env=env)
         assert e.db == self.db
         return e
 
@@ -109,7 +106,7 @@ class Lab:
 
     @property
     def undo_journal(self):
-        return os.path.join(self.rust_root if RUST else self.state, "restructure_undo.ndjson")
+        return os.path.join(self.rust_root, "restructure_undo.ndjson")
 
     def hidden(self):
         return [os.path.relpath(os.path.join(r, f), self.lib) for r, _, fs in os.walk(self.lib) for f in fs if f.startswith(".") and f != ".DS_Store"]
@@ -122,13 +119,8 @@ class Lab:
             con.close()
 
     def journal(self):
-        """Trash batches in the Swift journal's shape; for Rust, the newest line of each batch of
-        its signed NDJSON log (signatures are the engine's business, not checked here)."""
-        if not RUST:
-            try:
-                return json.load(open(os.path.join(self.state, "trash-journal.json")))
-            except (OSError, ValueError):
-                return []
+        """Trash batches in a journal's shape: the newest line of each batch of the engine's signed
+        NDJSON log (signatures are the engine's business, not checked here)."""
         batches = {}
         try:
             for line in open(os.path.join(self.rust_root, "trash_log.json"), encoding="utf-8"):
@@ -207,7 +199,7 @@ class Lab:
                 trashed_names = {os.path.basename(t) for t in self.trashed()}
                 pending_moves = set()
                 try:
-                    for raw in open(os.path.join(self.rust_root if RUST else self.state, "path-moves.ndjson")):
+                    for raw in open(os.path.join(self.rust_root, "path-moves.ndjson")):
                         intent = json.loads(raw).get("intent")
                         if intent:
                             pending_moves.add(intent["from"])
@@ -250,8 +242,8 @@ class Lab:
         return moved
 
 
-def start(lab, binary=None):
-    e = lab.engine(binary)
+def start(lab):
+    e = lab.engine()
     e.wait(lambda p: kind(p) == "ready", 60)
     return e
 
