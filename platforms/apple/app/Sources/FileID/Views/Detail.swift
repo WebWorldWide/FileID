@@ -51,7 +51,7 @@ struct Detail: View {
         switch activeTab {
         case .library: return store.scopedTotalFiles > 0 ? "\(store.scopedTotalFiles.formatted()) files" + (store.scope.map { " in \($0.root.display)" } ?? "") : ""
         case .deep:
-            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
+            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) of \(d.total.formatted()) files" }
             return ""
         case .settings: return ""
         case .restructure: return pickedURL?.lastPathComponent ?? ""

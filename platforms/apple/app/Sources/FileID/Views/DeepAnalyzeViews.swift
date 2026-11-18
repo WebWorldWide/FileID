@@ -269,7 +269,7 @@ private struct ModelOptionRow: View {
             BadgePill(label: "Downloaded", color: Theme.delight)
         } else {
             let gb = String(format: "%.1f GB", Double(kind.approxBytes) / 1_073_741_824)
-            BadgePill(label: "\(gb) download", color: .secondary)
+            BadgePill(label: "\(gb) download", color: Theme.text3)
         }
     }
 
@@ -405,8 +405,7 @@ struct DeepAnalyzeView: View {
                 // like a 10s freeze (the wait for the VLM model to load).
                 if isStartingDeepAnalyze, engineLive {
                     startingCard
-                        .animation(.spring(response: 0.35, dampingFraction: 0.78),
-                                   value: engine.deepAnalyzeInFlight)
+                        .animation(Theme.spring, value: engine.deepAnalyzeInFlight)
                 }
                 if engine.deepAnalyzeProgress != nil, engineLive {
                     progressCard
@@ -803,7 +802,7 @@ struct DeepAnalyzeView: View {
                     if totals.pending > 0 {
                         GridRow {
                             Text("Time needed").foregroundStyle(Theme.text3)
-                            Text(perFile > 0 ? "about \(DurationText.short(Double(totals.pending) * perFile))" : "Time not measured yet")
+                            Text(perFile > 0 ? "about \(DurationText.short(Double(totals.pending) * perFile))" : "Not measured yet")
                                 .font(Theme.Font.body(13, .medium)).monospacedDigit()
                         }
                     }
@@ -1049,7 +1048,7 @@ struct DeepAnalyzeView: View {
                     if let cap = p.currentCaption, !cap.isEmpty {
                         Text(cap)
                             .font(Theme.Font.body(13.5))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(Theme.text1)
                             .lineLimit(3)
                             .multilineTextAlignment(.leading)
                             .padding(.top, 4)

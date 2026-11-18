@@ -548,6 +548,7 @@ struct ToolsWorkbench: View {
                 Spacer()
                 if busy { IndeterminateBar().frame(width: 60) }
             }
+            .frame(minHeight: Theme.Metrics.hitTarget)
             .padding(.horizontal, 14).padding(.vertical, 10)
             .padding(.top, Theme.Metrics.pageInsetY)
             Hairline()
@@ -633,7 +634,7 @@ struct ToolsWorkbench: View {
                             send(ToolRequest(requestID: UUID().uuidString, action: "undo", destination: session.destination,
                                              operationID: session.operationID, destinationBookmark: session.destinationBookmark))
                         }
-                        .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.controlLarge))
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                         .disabled(session.operationID == nil || !session.outputs.contains(where: { $0.state == "completed" }) || !session.destinationAccessReady || busy)
                         .help(session.outputs.contains(where: { $0.state == "completed" }) ? "Move the files this export created to Trash" : "Nothing exported yet")
                     }
@@ -666,7 +667,7 @@ struct ToolsWorkbench: View {
                 .rotationEffect(.degrees(angle))
                 .frame(width: geo.size.width, height: geo.size.height)
         }
-        .animation(Theme.reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: angle)
+        .animation(Theme.spring, value: angle)
     }
 
     private var summaryLine: String {

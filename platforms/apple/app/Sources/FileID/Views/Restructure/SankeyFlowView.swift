@@ -334,7 +334,7 @@ struct SankeyFlowView: View {
                 // background so they read clearly as
                 // "everything else" rather than competing with the
                 // real first-class folders.
-                .fill(isRollup ? AnyShapeStyle(Color.secondary.opacity(0.06))
+                .fill(isRollup ? AnyShapeStyle(Color.white.opacity(0.04))
                                  : AnyShapeStyle(.ultraThinMaterial))
         )
         .overlay(

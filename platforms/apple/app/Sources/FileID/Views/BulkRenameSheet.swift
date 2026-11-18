@@ -320,7 +320,7 @@ private struct BulkRenameRow: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .fill(Color.secondary.opacity(0.10))
+                    .fill(Color.white.opacity(0.05))
                     .frame(width: 64, height: 64)
                 AsyncThumbnail(url: url, size: 96) {
                     Image(systemName: kind.map(FileKind.symbolName(forKind:)) ?? FileTypes.symbolName(forExtension: url.pathExtension))
@@ -332,7 +332,7 @@ private struct BulkRenameRow: View {
             }
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
+                    .stroke(Theme.hairline, lineWidth: 1)
             )
 
             VStack(alignment: .leading, spacing: 4) {

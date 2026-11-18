@@ -571,12 +571,8 @@ struct PeopleView: View {
             } label: {
                 Label("Describe files without names",
                       systemImage: "forward.fill")
-                    .font(Theme.Font.body(12, .semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
-                    .foregroundStyle(Theme.text3)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlSmall))
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
             .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start describing every file now. You can name people later and describe again.")
             Spacer()
@@ -605,12 +601,8 @@ struct PeopleView: View {
                 onSwitchTab(.deep)
             } label: {
                 Label("Describe files", systemImage: "arrow.forward.circle.fill")
-                    .font(Theme.Font.body(12, .semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                    .foregroundStyle(.black)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlSmall))
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
             .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start writing a description and a suggested name for every file. Progress shows on the Describe Files page.")
             Spacer()
@@ -684,10 +676,7 @@ struct PeopleView: View {
                 .padding(.vertical, 16)
                 // Animate on count to avoid the per-render array
                 // allocation that mapping IDs would cause.
-                .animation(reduceMotion
-                    ? .easeOut(duration: 0.15)
-                    : .spring(response: 0.35, dampingFraction: 0.78),
-                            value: persons.count)
+                .animation(Theme.springStandard, value: persons.count)
                 hiddenUnknownsFooter
             }
         }
@@ -1608,12 +1597,8 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge \(veryLikely.count) very likely matches",
                           systemImage: "checkmark.circle.fill")
-                        .font(Theme.Font.body(13.5, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.delight.opacity(0.18)))
-                        .foregroundStyle(Theme.delight)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.delight))
                 .disabled(veryLikely.isEmpty || inFlight)
                 .help("Combine only the pairs FileID is most sure about. The rest stay here for you to check.")
                 Button {
@@ -1622,12 +1607,8 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge all \(candidates.count)",
                           systemImage: "rectangle.stack.fill")
-                        .font(Theme.Font.body(13.5, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary, lineWidth: 1))
-                        .foregroundStyle(Theme.text3)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsSecondary)
                 .disabled(candidates.isEmpty || inFlight)
                 .help("Merge every pair in the list. Be careful: the pairs marked \"Possibly same\" may be two different people.")
                 Spacer()

@@ -287,7 +287,7 @@ struct DeepAnalyzeExclusionsCard: View {
                             .foregroundStyle(message.isError ? Theme.danger : Theme.delight)
                         Text(message.text)
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(message.isError ? Theme.danger : .secondary)
+                            .foregroundStyle(message.isError ? Theme.danger : Theme.text3)
                         Spacer()
                     }
                 }
