@@ -166,7 +166,6 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// A GtkRevealer whose slide runs on the standard spring.
     pub struct SpringRevealer(ObjectSubclass<imp::SpringRevealer>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
@@ -238,7 +237,6 @@ impl SpringRevealer {
 }
 
 glib::wrapper! {
-    /// Scales its child about the centre on the tight spring (selection).
     pub struct SpringScale(ObjectSubclass<imp::SpringScale>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;

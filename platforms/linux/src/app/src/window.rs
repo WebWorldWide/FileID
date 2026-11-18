@@ -1,12 +1,5 @@
-// Main window — the Prototype v3 shell (shared/docs/DESIGN_V3.md), mirror of
-// macOS `MainWindow`: an `adw::ApplicationWindow` whose content is a
-// `gtk::Overlay` stack — the animated `LavaLampBackground` at the bottom, a
-// muted scrim over it, and the UI on top (LavaLamp → frosting → content).
-//
-// The UI is the 48 px title bar (folder switcher, search or ask, activity,
-// settings) over a hairline-split 232 px sidebar (Browse / Analyze / Act area
-// switcher, page rows, scan card) and the page, which carries a crumb + serif
-// title header. Search & Moments, Chat and File Tools are pages like macOS.
+// Main window: the LavaLamp at the bottom, a muted scrim, then the UI (title bar, sidebar,
+// page) in a gtk::Overlay stack.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -83,7 +76,6 @@ struct Shell {
     split: adw::OverlaySplitView,
     title_bar: Rc<TitleBar>,
     sidebar: Rc<Sidebar>,
-    /// Pages are built the first time they are shown.
     pages: RefCell<BuiltPages<Built>>,
     act: Rc<dyn Fn(Action)>,
     inspector_built: Cell<bool>,
@@ -196,7 +188,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .default_width(width)
         .default_height(height)
         .build();
-    // The sidebar collapses below the breakpoint and the tabs reflow narrow.
     window.set_size_request(360, 320);
 
     let engine = Rc::new(RefCell::new(EngineClient::new()));
@@ -248,7 +239,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
     window.add_breakpoint(breakpoint);
 
-    // ── Layering: LavaLamp → scrim → UI → drop hint ─────────────────────────
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&crate::lavalamp::build()));
     let scrim = gtk::Box::builder()
@@ -535,7 +525,6 @@ impl Shell {
         }
     }
 
-    /// The Chat inspector is built the first time it is opened.
     fn build_inspector(&self) {
         if self.inspector_built.replace(true) {
             return;

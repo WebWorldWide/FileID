@@ -1,5 +1,4 @@
-// Plain titles and sentences for the helper's error kinds, mirroring the Mac
-// app's `Sidebar.errorTitle` / `errorText`. Codes, model ids and raw messages
+// User-facing titles and sentences for engine error kinds. Codes, model ids and raw messages
 // belong in a tooltip (`detail`), never in primary text.
 
 pub fn title(kind: &str) -> &'static str {
@@ -51,14 +50,12 @@ pub fn text(kind: &str, message: &str) -> String {
     fixed.to_owned()
 }
 
-/// Title and sentence on one line, for places with a single label.
 pub fn sentence(kind: &str, message: &str) -> String {
     let title = title(kind);
     let text = text(kind, message);
     if text.is_empty() { title.to_owned() } else { format!("{title}. {text}") }
 }
 
-/// What a tooltip may carry: the code, the model id and the raw message.
 pub fn detail(kind: &str, message: &str, model_kind: Option<&str>) -> String {
     let mut detail = kind.to_owned();
     if let Some(model) = model_kind.filter(|model| !model.is_empty()) {
