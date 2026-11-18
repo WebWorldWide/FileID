@@ -59,7 +59,7 @@ pub async fn handle(
         Ok(Ok((response, queued))) => {
             if let Some(database) = scheduler {
                 let resumed = match (action == "resumeJob", job_id.clone()) {
-                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| super::timeline::is_timeline_job(conn, &id))
+                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| is_job_of_kind(conn, &id, super::timeline::JOB_KIND))
                         .await
                         .unwrap_or(false),
                     _ => false,
@@ -304,9 +304,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "pauseJob" | "resumeJob" | "cancelJob" => {
             let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
-            if !super::timeline::is_timeline_job(&tx, id)?
-                && !super::take_grouping::is_job(&tx, id)?
-                && !super::face_refresh::is_job(&tx, id)?
+            if !is_job_of_kind(&tx, id, super::timeline::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::take_grouping::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::face_refresh::JOB_KIND)?
             {
                 bail!("This job has no supported worker in this engine.")
             }
@@ -430,6 +430,17 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+pub(crate) fn jobs_of_kind(conn: &Connection, kind: &str) -> Result<Vec<CatalogJob>> {
+    Ok(jobs(conn)?.into_iter().filter(|job| job.kind == kind).collect())
+}
+
+pub(crate) fn is_job_of_kind(conn: &Connection, id: &str, kind: &str) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
+        .optional()?
+        .is_some_and(|found| found == kind))
 }
 
 #[cfg(test)]

@@ -219,15 +219,6 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_timeline_job(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()?
-        .is_some_and(|kind| kind == JOB_KIND))
-}
-
 /// The Mac-hosted engine runs Swift's scene-pool timeline (one caption per CLIP scene, versioned with the pinned model
 /// revision) so either engine resumes the other's coverage; other builds sample a frame every interval.
 const SCENE_PREFIX: &str = "timeline-scene-v1/";

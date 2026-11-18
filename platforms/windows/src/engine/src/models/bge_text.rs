@@ -1,6 +1,7 @@
 // BGE-small-en-v1.5 document embeddings: 384-d, L2-normalized, stored in `text_embeddings` (a different vector space
 // from CLIP). Some exports drop token_type_ids, so it is bound only when advertised.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -111,13 +112,6 @@ impl BgeText {
         // l2_normalize's max(1e-8) floor passes NaN through; never persist one.
         anyhow::ensure!(emb.iter().all(|v| v.is_finite()), "BGE produced a non-finite embedding");
         Ok(emb)
-    }
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= n;
     }
 }
 

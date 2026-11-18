@@ -2,14 +2,7 @@ use super::*;
 use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
 use std::time::Duration;
 
-async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
-    loop {
-        let event = rx.recv().await.unwrap();
-        if !matches!(event.payload, EventPayload::DeepAnalyzeStarting(_)) {
-            return event.payload;
-        }
-    }
-}
+use super::scope_handler_tests::next_payload;
 
 fn scheduler() -> Arc<ResourceScheduler> {
     ResourceScheduler::new(|| (16384, 12000), 1, 1)

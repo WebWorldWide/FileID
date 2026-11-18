@@ -1,5 +1,6 @@
 // Query-time CLIP text encoder, held in a process-static OnceLock so back-to-back keystroke queries reuse one session.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -119,13 +120,6 @@ impl ClipText {
 
 fn session(path: &Path) -> Result<(InferenceSession, String)> {
     load_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
-    }
 }
 
 pub fn default_weights_path() -> Result<PathBuf> {

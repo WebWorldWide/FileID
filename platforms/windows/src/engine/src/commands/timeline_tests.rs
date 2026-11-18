@@ -87,9 +87,9 @@ fn recovery_pauses_interrupted_timeline_jobs_only() {
         })
         .collect();
     assert_eq!(states, ["paused", "paused", "completed", "running"]);
-    assert!(is_timeline_job(&conn, "a").unwrap());
-    assert!(!is_timeline_job(&conn, "d").unwrap());
-    assert!(!is_timeline_job(&conn, "missing").unwrap());
+    assert!(crate::commands::catalog::is_job_of_kind(&conn, "a", JOB_KIND).unwrap());
+    assert!(!crate::commands::catalog::is_job_of_kind(&conn, "d", JOB_KIND).unwrap());
+    assert!(!crate::commands::catalog::is_job_of_kind(&conn, "missing", JOB_KIND).unwrap());
 }
 
 #[test]

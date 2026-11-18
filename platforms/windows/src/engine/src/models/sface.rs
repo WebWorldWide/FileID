@@ -3,6 +3,7 @@
 // Input is RGB with RAW [0,255] floats: the ONNX bakes (x-127.5)/128 in as its first ops, so do NOT pre-normalize.
 // Output is not L2-normalized, so normalize here.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -82,13 +83,6 @@ impl SFace {
         // l2_normalize's max(1e-8) floor passes NaN through; never persist one.
         anyhow::ensure!(emb.iter().all(|v| v.is_finite()), "SFace produced a non-finite embedding");
         Ok(emb)
-    }
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
     }
 }
 

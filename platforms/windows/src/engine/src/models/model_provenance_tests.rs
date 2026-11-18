@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::test_support::receipt;
 use std::sync::{atomic::AtomicU64, Barrier};
 use std::time::Duration;
 
@@ -32,9 +33,6 @@ fn files(root: &Path) -> Vec<registry::FileEntry> {
 }
 fn scheduler() -> Arc<ResourceScheduler> {
     ResourceScheduler::new(|| (16384, 12000), 1, 1)
-}
-fn receipt(root: &Path, value: serde_json::Value) {
-    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&value).unwrap()).unwrap();
 }
 async fn verify(files: Vec<registry::FileEntry>, s: Arc<ResourceScheduler>) -> Result<VerifiedModel> {
     run_verification(s, Arc::new(AtomicBool::new(false)), move |cancelled| {

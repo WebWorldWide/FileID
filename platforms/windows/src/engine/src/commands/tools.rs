@@ -990,6 +990,7 @@ mod tests {
         assert_eq!(super::foundation_standardized(Path::new("/private/tmp")), Path::new("/tmp"));
     }
 
+    use super::media_recipes::tests::{landscape as clip_probe, recipe as media_recipe};
     use super::*;
     struct Fixture {
         root: std::path::PathBuf,
@@ -1961,14 +1962,6 @@ mod tests {
         }
     }
 
-    fn clip_probe() -> MediaProbe {
-        MediaProbe {
-            duration: 3.0, video_count: 1, audio_count: 1, other_count: 0, width: 96.0, height: 54.0, rotation: 0,
-            video_codec: Some("h264".into()), audio_codec: Some("aac".into()), video_start: Some(0.0),
-            audio_start: Some(0.0), audio_duration: Some(3.0), hdr: false,
-        }
-    }
-
     fn media_fixture() -> Fixture {
         let fixture = Fixture::new();
         let clip = fixture.root.join("Clip.mov");
@@ -1982,14 +1975,6 @@ mod tests {
 
     fn media_request(fixture: &Fixture, recipe: ToolRecipe) -> ToolRequest {
         ToolRequest { recipe: Some(recipe), ..fixture.request("png") }
-    }
-
-    fn media_recipe(kind: &str, format: &str) -> ToolRecipe {
-        ToolRecipe {
-            kind: kind.into(), format: format.into(), max_dimension: 1920, allow_upscale: None, video_aspect_ratio: None,
-            video_framing: None, video_stabilization: None, trim_start_seconds: None, trim_end_seconds: None, trim_mode: None,
-            rotation_degrees: None,
-        }
     }
 
     fn count(conn: &Connection, sql: &str) -> i64 {

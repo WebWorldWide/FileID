@@ -1,6 +1,7 @@
 // CLIP zero-shot scene tags: the image embedding (already computed for dedup and search) is scored against a label
 // matrix precomputed by `examples/gen_scene_matrix.rs`, so scene tagging needs no text model at scan time.
 
+use crate::util::vector_math::l2_normalize;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
@@ -200,13 +201,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
         s += a[i] * b[i];
     }
     s
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
-    }
 }
 
 #[cfg(test)]

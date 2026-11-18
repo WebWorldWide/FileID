@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::test_support::receipt;
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
@@ -34,9 +35,6 @@ fn files(root: &Path) -> Vec<super::super::registry::FileEntry> {
 }
 fn flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
-}
-fn receipt(root: &Path, value: serde_json::Value) {
-    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&value).unwrap()).unwrap();
 }
 async fn resolve(
     job: &ModelJob,

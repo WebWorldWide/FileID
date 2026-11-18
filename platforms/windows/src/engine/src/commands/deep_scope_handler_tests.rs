@@ -2,7 +2,7 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
-async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
+pub(super) async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
     loop {
         let event = rx.recv().await.unwrap();
         if !matches!(event.payload, EventPayload::DeepAnalyzeStarting(_)) {

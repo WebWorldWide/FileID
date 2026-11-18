@@ -36,6 +36,13 @@ pub(crate) fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
     lanes.iter().sum::<f32>() + tail
 }
 
+pub(crate) fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

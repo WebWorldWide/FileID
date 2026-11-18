@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::face_review::page;
 use crate::ipc::sink::Sink;
-use crate::ipc::{CatalogJob, CatalogRequest, CatalogResponse, EventPayload, FaceRefreshStatus, FaceReviewPage, IpcEvent, Wrap};
+use crate::ipc::{CatalogRequest, CatalogResponse, EventPayload, FaceRefreshStatus, FaceReviewPage, IpcEvent, Wrap};
 
 pub const JOB_ID: &str = "face-refresh";
 pub const JOB_KIND: &str = "faceRefresh";
@@ -159,17 +159,6 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_job(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
-        .optional()?
-        .is_some_and(|kind| kind == JOB_KIND))
-}
-
-pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
-    Ok(super::catalog::jobs(conn)?.into_iter().filter(|job| job.kind == JOB_KIND).collect())
-}
-
 pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
@@ -218,7 +207,7 @@ pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest, model: Option
         "ok",
         Some("Updating faces for the current face model. People and names don't change.".into()),
     );
-    response.jobs = jobs(conn)?;
+    response.jobs = super::catalog::jobs_of_kind(conn, JOB_KIND)?;
     Ok(response)
 }
 
@@ -481,7 +470,7 @@ pub(crate) fn schedule(sink: Sink, database: Arc<Mutex<Connection>>) {
 }
 
 async fn publish(sink: &Sink, database: &Arc<Mutex<Connection>>) {
-    if let Ok(jobs) = super::timeline::with_db(database, |conn| jobs(conn)).await {
+    if let Ok(jobs) = super::timeline::with_db(database, |conn| super::catalog::jobs_of_kind(conn, JOB_KIND)).await {
         let mut response = super::catalog::response(JOB_ID, "ok", None);
         response.jobs = jobs;
         sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response)))).await;

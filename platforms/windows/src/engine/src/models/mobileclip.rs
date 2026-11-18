@@ -2,6 +2,7 @@
 // little-endian bytes in `clip_embeddings.embedding`. The module, type and `mobileclip/` install slot keep their
 // pre-swap names as stable keys.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -166,13 +167,6 @@ fn fill_clip_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: usize
         out[base + plane + p] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
         out[base + (2 * plane) + p] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
         src += 3;
-    }
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
     }
 }
 

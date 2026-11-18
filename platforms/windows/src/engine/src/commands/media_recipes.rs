@@ -477,10 +477,10 @@ pub(super) fn verify_stage(runtime: &dyn MediaRuntime, recipe: &ToolRecipe, befo
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn recipe(kind: &str, format: &str) -> ToolRecipe {
+    pub(in crate::commands) fn recipe(kind: &str, format: &str) -> ToolRecipe {
         ToolRecipe {
             kind: kind.into(), format: format.into(), max_dimension: 1920, allow_upscale: None, video_aspect_ratio: None,
             video_framing: None, video_stabilization: None, trim_start_seconds: None, trim_end_seconds: None, trim_mode: None, rotation_degrees: None,
@@ -491,7 +491,7 @@ mod tests {
         ToolRecipe { trim_start_seconds: start, trim_end_seconds: end, trim_mode: mode.map(str::to_owned), ..recipe("trim", format) }
     }
 
-    fn landscape() -> MediaProbe {
+    pub(in crate::commands) fn landscape() -> MediaProbe {
         MediaProbe {
             duration: 3.0, video_count: 1, audio_count: 1, other_count: 0, width: 96.0, height: 54.0, rotation: 0,
             video_codec: Some("h264".into()), audio_codec: Some("aac".into()), video_start: Some(0.0), audio_start: Some(0.0),

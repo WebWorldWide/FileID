@@ -15,6 +15,8 @@ pub mod clip_space;
 pub mod clip_tokenizer;
 #[cfg(test)]
 mod golden;
+#[cfg(test)]
+mod test_support;
 pub mod idle;
 pub mod inference;
 pub mod mobileclip;
