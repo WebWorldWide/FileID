@@ -555,6 +555,18 @@ pub fn memory_tier() -> MemoryTier {
     }
 }
 
+/// RAM++ runs in f32 on tract: about 4.5 GB resident at one pooled session
+/// and 6.4 GB at two. Below this much installed RAM the scan skips RAM++ and
+/// tags with CLIP scene tags instead. Installed RAM, not available RAM, so a
+/// machine tags the same way on every run; nominal 12 GB parts report just
+/// under 12 GiB once the iGPU reservation is taken out. A failed memory query
+/// (0.0) keeps RAM++ on.
+pub const RAM_PLUS_MIN_TOTAL_GB: f64 = 11.0;
+
+pub fn ram_plus_fits_in_memory(total_gb: f64) -> bool {
+    total_gb <= 0.0 || total_gb >= RAM_PLUS_MIN_TOTAL_GB
+}
+
 /// DBWriter batch flush size for a memory tier. Discovery throughput
 /// benefits from larger batches (fewer transactions), but Low tier needs
 /// to keep per-transaction memory bounded so we don't compete with the
@@ -1561,6 +1573,15 @@ mod adaptive_tests {
             };
             assert_eq!(got, expected_for_low_logical, "{:?} mismatch", st);
         }
+    }
+
+    #[test]
+    fn ram_plus_needs_about_twelve_gb_installed() {
+        assert!(ram_plus_fits_in_memory(0.0));
+        assert!(!ram_plus_fits_in_memory(8.0));
+        assert!(!ram_plus_fits_in_memory(10.9));
+        assert!(ram_plus_fits_in_memory(11.5));
+        assert!(ram_plus_fits_in_memory(16.0));
     }
 
     #[test]

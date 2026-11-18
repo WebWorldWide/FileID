@@ -654,7 +654,18 @@ impl ModelStack {
                 seed,
             )
         };
+        let installed_gb = crate::platform::physical_memory_gb();
+        let ram_plus_fits = crate::platform::ram_plus_fits_in_memory(installed_gb);
         let (ram_plus, ram_plus_batch) = match crate::models::ram_plus::default_tags_path() {
+            Ok(_) if !ram_plus_fits => {
+                tracing::warn!(
+                    model = "RAM++",
+                    installed_gb = format!("{installed_gb:.1}"),
+                    min_gb = crate::platform::RAM_PLUS_MIN_TOTAL_GB,
+                    "not enough installed memory for RAM++; tagging falls back to CLIP scene-tags"
+                );
+                (None, None)
+            }
             Ok(tags_path) if ram_batch_size > 1 => {
                 match crate::models::ram_plus::default_onnx_path() {
                     Ok(p) if p.exists() => {
