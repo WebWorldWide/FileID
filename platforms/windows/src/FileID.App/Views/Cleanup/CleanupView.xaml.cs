@@ -281,7 +281,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
-    // ─── Lazy thumbnail loading (macOS CopyTile parity) ───────────────────
     // Same pattern as LibraryView: load on ElementPrepared, cancel + release on
     // ElementClearing so off-screen tiles don't pin BitmapImages.
     private void OnMemberPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
