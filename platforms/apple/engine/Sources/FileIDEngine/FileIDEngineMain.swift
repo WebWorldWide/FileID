@@ -1545,6 +1545,7 @@ struct FileIDEngineMain {
                 action: "trashFiles", succeeded: 0, failed: uniqueIDs.count,
                 messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription, reason: "failed") })
         }
+        let libraryRoots = (try? await database.pool.read { try TrashJournal.catalogRoots($0) }) ?? []
         for id in uniqueIDs {
             guard let state = states[id] else {
                 messages.append(item(id, ok: false, "File row not found.", reason: "missing"))
@@ -1576,7 +1577,8 @@ struct FileIDEngineMain {
                 // still leaves an entry; restore finds it in the Trash by inode. Each rewrite is
                 // O(batch), so past the first files it is capped at ~4/s to keep thousands-file
                 // batches linear (Finder Put Back covers that gap).
-                journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: "", rows: rows))
+                journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: "", rows: rows,
+                                                 libraryRoot: TrashJournal.containingRoot(libraryRoots, of: state.path)))
                 identities[id] = RustTrashLog.identity(of: url)
                 dirty = true
                 if journal.count <= 64 || Date().timeIntervalSince(lastJournalWrite) >= 0.25 { writeJournal() }

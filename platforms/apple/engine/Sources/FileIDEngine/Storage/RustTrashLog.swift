@@ -23,10 +23,11 @@ enum RustTrashLog {
         var sourceIdentity: Identity?
         var trashedPath: String?
         var rows: [TrashJournal.TableRow]
+        var libraryRoot: String?
 
         enum CodingKeys: String, CodingKey {
             case fileID = "file_id", originalPath = "original_path", sourceIdentity = "source_identity"
-            case trashedPath = "trashed_path", rows
+            case trashedPath = "trashed_path", rows, libraryRoot = "library_root"
         }
     }
 
@@ -94,7 +95,8 @@ enum RustTrashLog {
     static func entry(for batch: TrashJournal.Batch, identities: [Int64: Identity]) -> Entry {
         Entry(batchID: batch.id, timestamp: batch.createdAt, items: batch.items.map { item in
             Item(fileID: item.fileID, originalPath: item.originalPath, sourceIdentity: identities[item.fileID],
-                 trashedPath: item.trashedPath.isEmpty ? nil : item.trashedPath, rows: item.rows)
+                 trashedPath: item.trashedPath.isEmpty ? nil : item.trashedPath, rows: item.rows,
+                 libraryRoot: item.libraryRoot)
         })
     }
 
@@ -105,9 +107,11 @@ enum RustTrashLog {
         var originalPath: String
         var trashedPath: String?
         var rows: [TrashJournal.TableRow]?
+        var libraryRoot: String?
 
         enum CodingKeys: String, CodingKey {
             case fileID = "file_id", originalPath = "original_path", trashedPath = "trashed_path", rows
+            case libraryRoot = "library_root"
         }
     }
 
@@ -141,7 +145,7 @@ enum RustTrashLog {
         return found.map { entry in
             TrashJournal.Batch(id: entry.batchID, createdAt: entry.timestamp, items: entry.items.map {
                 TrashJournal.Item(fileID: $0.fileID, originalPath: $0.originalPath,
-                                  trashedPath: $0.trashedPath ?? "", rows: $0.rows ?? [])
+                                  trashedPath: $0.trashedPath ?? "", rows: $0.rows ?? [], libraryRoot: $0.libraryRoot)
             })
         }
     }

@@ -25,12 +25,61 @@ enum TrashJournal {
         var originalPath: String
         var trashedPath: String
         var rows: [TableRow]
+        /// The library root that contained the file when it was trashed. Never stored in the
+        /// unsigned Swift journal: only the value read from a signature-checked Rust log line
+        /// is trusted, and only to authorize a put back after the catalog lost its roots.
+        var libraryRoot: String?
+
+        enum CodingKeys: String, CodingKey { case fileID, originalPath, trashedPath, rows }
     }
 
     struct Batch: Codable, Equatable {
         var id: String
         var createdAt: Double
         var items: [Item]
+    }
+
+    /// `path` with the longest existing ancestor resolved through symlinks, so a file that is
+    /// gone still compares against the realpath form of the roots.
+    static func canonicalPath(_ path: String) -> String {
+        var tail: [String] = []
+        var head = URL(fileURLWithPath: path).standardizedFileURL.path
+        while true {
+            if let resolved = realpath(head, nil) {
+                defer { free(resolved) }
+                return ([String(cString: resolved)] + tail.reversed()).joined(separator: "/").replacingOccurrences(of: "//", with: "/")
+            }
+            guard head != "/" else { return path }
+            tail.append((head as NSString).lastPathComponent)
+            head = (head as NSString).deletingLastPathComponent
+        }
+    }
+
+    static func isInside(_ path: String, root: String) -> Bool {
+        root == "/" || path == root || path.hasPrefix(root + "/")
+    }
+
+    /// The catalog's scanned roots, canonical.
+    static func catalogRoots(_ db: GRDB.Database) throws -> [String] {
+        try String.fetchAll(db, sql: "SELECT path FROM library_roots").map(canonicalPath)
+    }
+
+    /// The innermost of `roots` (canonical) containing `path`.
+    static func containingRoot(_ roots: [String], of path: String) -> String? {
+        let candidate = canonicalPath(path)
+        return roots.filter { isInside(candidate, root: $0) }.max { $0.split(separator: "/").count < $1.split(separator: "/").count }
+    }
+
+    /// Whether a put back may write `original`: inside a current catalog root, or inside the
+    /// signed recorded root of the item, which must still exist.
+    static func putBackAllowed(original: String, recordedRoot: String?, catalogRoots: [String]) -> Bool {
+        var roots = catalogRoots
+        if let recordedRoot, let resolved = realpath(recordedRoot, nil) {
+            roots.append(String(cString: resolved))
+            free(resolved)
+        }
+        let candidate = canonicalPath(original)
+        return roots.contains { isInside(candidate, root: $0) }
     }
 
     static let snapshotTables = ["files": "id", "clip_embeddings": "file_id", "tags": "file_id", "take_quality": "file_id", "face_prints": "file_id"]
@@ -237,14 +286,21 @@ enum TrashJournal {
     static func restore(batchID: String, database: Database, journal: URL = defaultURL,
                         move: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }) async -> BulkActionResult {
         // A batch the Rust engine made, after a switch back to this engine.
-        guard let batch = find(batchID, at: journal) ?? RustTrashLog.find(batchID, beside: journal) else {
+        let ownBatch = find(batchID, at: journal)
+        guard let batch = ownBatch ?? RustTrashLog.find(batchID, beside: journal) else {
             return BulkActionResult(action: "restoreFromTrash", succeeded: 0, failed: 1,
                                     messages: [BulkActionItem(ok: false, message: "Nothing to put back: this Trash batch is unknown or already restored.")])
         }
         var messages: [BulkActionItem] = []
         var leftover: [Item] = []
+        let currentRoots = ownBatch == nil ? ((try? await database.pool.read { try catalogRoots($0) }) ?? []) : []
         for item in batch.items {
             let original = URL(fileURLWithPath: item.originalPath)
+            if ownBatch == nil, !putBackAllowed(original: item.originalPath, recordedRoot: item.libraryRoot, catalogRoots: currentRoots) {
+                messages.append(BulkActionItem(fileID: item.fileID, ok: false,
+                                               message: "Cannot restore \(original.lastPathComponent): it is outside the folders FileID has scanned."))
+                continue
+            }
             let trashed = locate(item) ?? URL(fileURLWithPath: item.trashedPath.isEmpty ? "/nonexistent-\(UUID().uuidString)" : item.trashedPath)
             if FileManager.default.fileExists(atPath: original.path) {
                 guard alreadyRestored(item, original: original, trashed: trashed) else {
