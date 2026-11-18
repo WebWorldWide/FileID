@@ -443,7 +443,6 @@ const AUDIO_TIMEOUT: Duration = Duration::from_secs(120);
 /// 16 kHz mono 16-bit PCM: what on-device speech models expect.
 pub(crate) const SPEECH_SAMPLE_RATE: u32 = 16_000;
 
-/// The first audio stream of `[start, start + length)` as a 16 kHz mono WAV.
 pub(crate) fn audio_wav(source: &Path, start: f64, length: f64, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     ensure!(start.is_finite() && start >= 0.0 && length.is_finite() && length > 0.0 && length <= 600.0, "Invalid audio interval");
     let runtime = runtime()?;
@@ -490,7 +489,6 @@ pub(crate) fn fitted_size(width: u32, height: u32, max_side: u32) -> (u32, u32) 
     (even(f64::from(width) * scale), even(f64::from(height) * scale))
 }
 
-/// One RGB frame at `seconds`, scaled to `width`×`height`.
 pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     let runtime = runtime()?;
     let filter = format!("scale={width}:{height}:flags=bicubic");
@@ -504,7 +502,6 @@ pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, ca
     Ok(data)
 }
 
-/// Silent clip from a lavfi source such as `testsrc2=size=64x36:rate=5:duration=6`.
 #[cfg(test)]
 pub(super) fn generate_silent_test_video(source: &Path, lavfi: &str) {
     let runtime = runtime().unwrap();

@@ -36,7 +36,6 @@ public actor DeepAnalyze {
     private var loadedKind: AIModelKind?
     private var cancelRequested: Bool = false
     private var currentAnalysisTask: Task<AnalysisResult, Never>?
-    /// Keyed so a finishing prewarm only drops its own handle, never a concurrent one's.
     private var prewarmTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Single-flight handle for an in-progress model load. A
@@ -91,7 +90,6 @@ public actor DeepAnalyze {
         return 512
     }
 
-    /// Asks for tags in the caption reply instead of a second image pass.
     nonisolated static func mergedTagsEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         environment["FILEID_VLM_MERGED_TAGS"] != "0"
     }
@@ -170,7 +168,6 @@ public actor DeepAnalyze {
         if gate.bail() { task.cancel() }
     }
     public func clearCancel()   { cancelRequested = false }
-    /// Stops only the generation in flight; a batch around it keeps going.
     package func cancelCurrentAnalysis() { currentAnalysisTask?.cancel() }
     public func isCancelled() -> Bool { cancelRequested }
 
@@ -277,7 +274,6 @@ public actor DeepAnalyze {
 
     var activePrewarmCount: Int { prewarmTasks.count }
 
-    /// True while a model download or prewarm is running.
     public var hasActivePrewarm: Bool { !prewarmTasks.isEmpty }
 
     /// Idefics3 and SmolVLM tile images at a fixed size and crash on any other.
@@ -590,7 +586,6 @@ public actor DeepAnalyze {
     private var parkedKind: AIModelKind?
     package var isParked: Bool { parkedKind != nil && container == nil }
 
-    /// Reloads a parked model before use; a no-op otherwise.
     func ensureResident() async throws {
         // Starting a use invalidates any pending park before the first await, so an
         // idle unload can't free the weights between this check and the caller's lease.
@@ -708,7 +703,6 @@ public actor DeepAnalyze {
         let trimChars = CharacterSet(charactersIn: "\"'.").union(.whitespacesAndNewlines)
         for piece in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" }) {
             let lowered = piece.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            // Strip leading list markers, then surrounding quotes/punctuation.
             let noLead = String(lowered.unicodeScalars.drop(while: { leadingMarkers.contains($0) }))
             let stripped = noLead.trimmingCharacters(in: trimChars)
             if stripped.isEmpty || stripped.count > 40 { continue }
@@ -721,7 +715,6 @@ public actor DeepAnalyze {
         return out
     }
 
-    /// Describe one video moment from 2–8 ordered frames sampled at `times`.
     package func analyzeMomentSequence(imageURLs: [URL], times: [Double]) async -> AnalysisResult {
         let request = TimelineMomentAnalysis.request(times: times)
         return await analyzeSequence(imageURLs: imageURLs, times: times, prompt: request.prompt, labels: request.labels)
@@ -1373,7 +1366,6 @@ public actor DeepAnalyze {
     private static func parseSections(_ rawOutput: String) -> AnalysisResult {
         var description = rawOutput
         var name: String? = nil
-        // Look for "DESCRIPTION:" + "FILENAME:" markers.
         if let dRange = rawOutput.range(of: "DESCRIPTION:", options: .caseInsensitive) {
             let afterD = rawOutput[dRange.upperBound...]
             if let fRange = afterD.range(of: "FILENAME:", options: .caseInsensitive) {
@@ -1501,19 +1493,15 @@ public actor DeepAnalyze {
         // 3. split_whitespace().join("-") — drops leading/trailing/runs of spaces.
         let collapsedRuns = cleaned.split(whereSeparator: { $0 == " " })
         var out = collapsedRuns.joined(separator: "-")
-        // 4. Collapse repeated '-' → single '-'.
         while out.contains("--") {
             out = out.replacingOccurrences(of: "--", with: "-")
         }
-        // 5. Cap at 80 chars; don't end mid-word (truncate at last '-').
         if out.count > 80 {
             out = String(out.prefix(80))
             if let idx = out.lastIndex(of: "-") {
                 out = String(out[..<idx])
             }
         }
-        // 6. Empty → literal "untitled" (NOT nil); callers flatMap over a
-        //    non-nil value so the signature stays String?.
         return out.isEmpty ? "untitled" : out
     }
 

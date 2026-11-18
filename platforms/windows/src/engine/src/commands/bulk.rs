@@ -1,7 +1,4 @@
-//! Bulk action handlers — every `BulkActionResult`-shaped IPC. Apply tags,
-//! rename files, trash files, merge person clusters, rename persons, mark
-//! persons as unknown, find merge suggestions. They share the
-//! `emit_bulk_result` tail so the wire shape stays uniform.
+//! Bulk action handlers: every `BulkActionResult`-shaped IPC (apply tags, rename files, trash files, merge/rename/mark-unknown persons, merge suggestions), sharing the `emit_bulk_result` tail so the wire shape stays uniform.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -115,12 +112,7 @@ fn no_clobber_rename_bound(
     crate::util::rename_no_replace(src, dst).map_err(Into::into)
 }
 
-/// best-effort durable record of an on-disk rename whose DB row is
-/// now stale (either the per-move UPDATE failed, or the end-of-batch commit
-/// rolled back every move's UPDATE). Mirrors restructure_apply.rs's B5
-/// `record_path_update_failure`: NDJSON, append-only, a recovery HINT (the
-/// next scan self-heals via rename-heal on the NTFS file_ref) — not a restore
-/// authority like trash_log, so no HMAC. Written beside the trash log.
+/// Best-effort durable record of an on-disk rename whose DB row is now stale (the per-move UPDATE failed, or the end-of-batch commit rolled back every UPDATE). Mirrors restructure_apply.rs's `record_path_update_failure`: NDJSON, append-only, a recovery HINT (the next scan self-heals via rename-heal on the NTFS file_ref), not a restore authority like trash_log, so no HMAC. Written beside the trash log.
 fn record_rename_recovery(file_id: i64, src: &str, dst: &str) {
     let Ok(trash) = crate::paths::trash_log_path() else {
         return;
@@ -131,15 +123,12 @@ fn record_rename_recovery(file_id: i64, src: &str, dst: &str) {
     write_rename_recovery_line(dir, &rename_recovery_line(file_id, src, dst));
 }
 
-/// Pure NDJSON line builder for the rename recovery sidecar (kept separate so
-/// the wire shape is unit-testable without touching the filesystem).
+/// Pure NDJSON line builder, separate so the wire shape is testable without the filesystem.
 fn rename_recovery_line(file_id: i64, src: &str, dst: &str) -> String {
     serde_json::json!({ "file_id": file_id, "src": src, "dst": dst }).to_string()
 }
 
-/// Append one recovery line to `dir/rename_recover.ndjson`, creating it if
-/// absent. Best-effort: a write failure is swallowed (the next scan still
-/// self-heals via rename-heal on the NTFS file_ref).
+/// Appends one line to `dir/rename_recover.ndjson`, creating it if absent. Best-effort: a write failure is swallowed (the next scan still self-heals).
 fn write_rename_recovery_line(dir: &std::path::Path, line: &str) {
     let path = dir.join("rename_recover.ndjson");
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -214,18 +203,14 @@ fn apply_tags_row(
     }
 }
 
-/// Bulk-apply tags to a set of files. Updates DB `tags` table + writes the
-/// sidecar JSON so Explorer + future scans see the same set.
+/// Bulk-applies tags: updates the DB `tags` table and writes the sidecar JSON so Explorer and future scans see the same set.
 pub(crate) async fn handle_apply_tags(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::ApplyTagsPayload,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        // Bound the request so a pathological payload can't make the handler do
-        // quadratic work (tags × files) under the DB lock or balloon the messages
-        // Vec. The IPC peer is the trusted sibling app, but a bug there must not
-        // be able to wedge the engine.
+        // Bound the request so a pathological payload can't make the handler do quadratic work (tags × files) under the DB lock or balloon the messages Vec; the IPC peer is the trusted app, but a bug there must not wedge the engine.
         const MAX_TAGS: usize = 2000;
         const MAX_FILES: usize = 100_000;
         if payload.tags.len() > MAX_TAGS || payload.file_ids.len() > MAX_FILES {
@@ -250,16 +235,12 @@ pub(crate) async fn handle_apply_tags(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        // (result index, path, tags) to persist to disk (sidecar JSON + IPropertyStore COM)
-        // AFTER the tx commits and the writer lock drops — never inside it. (audit P0)
+        // (result index, path, tags) persisted to disk (sidecar JSON + IPropertyStore COM) AFTER the tx commits and the writer lock drops, never inside it.
         let mut sidecar_writes: Vec<(usize, i64, String, Vec<String>, Vec<String>)> =
             Vec::new();
         let conn = db.lock();
         let mut tx = conn.unchecked_transaction()?;
-        // Cache prepared statements outside the per-file loop. Raw
-        // `tx.execute(sql, ...)` re-parses SQL on every call;
-        // `prepare_cached` keeps the parsed statement on the connection
-        // so per-tag inserts reuse it.
+        // Cache prepared statements outside the per-file loop: `tx.execute` re-parses SQL every call, `prepare_cached` reuses it for per-tag inserts.
         for fid in &payload.file_ids {
             let path: Result<String, _> = tx
                 .prepare_cached("SELECT path_text FROM files WHERE id = ?1")?
@@ -303,9 +284,7 @@ pub(crate) async fn handle_apply_tags(
             }
         }
         tx.commit()?;
-        // Release the single writer lock BEFORE the per-file fs + COM sidecar
-        // writes so a large bulk-tag can't wedge the engine's only writer (and
-        // any concurrent scan flush) for the whole operation.
+        // Release the single writer lock BEFORE the per-file fs + COM sidecar writes so a large bulk-tag can't wedge the only writer (and a concurrent scan flush) for the whole operation.
         drop(conn);
         let mut sidecar_failures = Vec::new();
         for (message_index, file_id, path, previous, current) in &sidecar_writes {
@@ -354,10 +333,7 @@ pub(crate) async fn handle_apply_tags(
     emit_bulk_result(&sink, "applyTags", result).await;
 }
 
-/// Bulk-rename a set of files (filename only, same directory). Each move is a
-/// no-clobber `MoveFileExW` (no `MOVEFILE_REPLACE_EXISTING`) + DB row update.
-/// The `files.extension` value for a renamed path: lowercased, empty when the
-/// new name has none, so kind filters follow the rename as they do on macOS.
+/// The `files.extension` value for a renamed path: lowercased, empty when the new name has none, so kind filters follow the rename as on macOS. (Renames are no-clobber `MoveFileExW`, no `MOVEFILE_REPLACE_EXISTING`, plus a DB row update.)
 fn renamed_extension(path: &str) -> String {
     std::path::Path::new(path)
         .extension()
@@ -365,8 +341,7 @@ fn renamed_extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// True when `new_name` is the suggested name taken as-is or with the `_2`…`_99`
-/// bump the apps add when that name is taken (same rule as the macOS engine).
+/// True when `new_name` is the suggested name as-is or with the `_2`…`_99` bump the apps add when it's taken (same rule as the macOS engine).
 fn applies_proposed_name(proposed: &str, new_name: &str, original_extension: &str) -> bool {
     let proposed = proposed.trim();
     if proposed.is_empty() {
@@ -408,8 +383,7 @@ fn file_name_of(path: &std::path::Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Same folder and same lowercased companion stem, plus whether the file is a
-/// RAW, JPEG/HEIC or MOV rather than an `.xmp`/`.aae` sidecar.
+/// Same folder and lowercased companion stem, plus whether the file is a RAW, JPEG/HEIC or MOV rather than an `.xmp`/`.aae` sidecar.
 fn companion_key(path: &std::path::Path) -> Option<(CompanionKey, bool)> {
     use crate::util::smart_name_companions::{base, Role};
     let (stem, _, role) = base(&file_name_of(path))?;
@@ -434,7 +408,6 @@ fn plan_rename(
                 ))
             },
         );
-    // Reject anything that isn't a single Normal path component.
     if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
         return Err((
             "new name must be a single filename (no slashes, no '..', no '.', no drive)".into(),
@@ -473,8 +446,7 @@ fn plan_rename(
     })
 }
 
-/// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see
-/// `smart_name_companions::following_sidecars`). Each folder is read once.
+/// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see `smart_name_companions::following_sidecars`); each folder is read once.
 fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRename]) {
     use crate::util::smart_name_companions::{self as companions, Role};
     let mut folders: Vec<(PathBuf, Vec<usize>)> = Vec::new();
@@ -510,8 +482,7 @@ fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRe
     }
 }
 
-/// Moves each sidecar planned for `p` to `<new stem><its old suffix>`.
-/// Best-effort: an occupied target or an error leaves it in place and returns a note.
+/// Moves each sidecar planned for `p` to `<new stem><its old suffix>`. Best-effort: an occupied target or an error leaves it in place and returns a note.
 fn move_following_sidecars(p: &PlannedRename) -> Vec<String> {
     let Some(dir) = p.dest.parent() else { return Vec::new() };
     let (stem, _) = crate::util::smart_name_style::split_name(&file_name_of(&p.dest));
@@ -536,20 +507,13 @@ fn move_following_sidecars(p: &PlannedRename) -> Vec<String> {
     notes
 }
 
-/// Records a landed move: follows the tags sidecar (and, unless a group
-/// rollback left this file behind, the planned `.xmp`/`.aae` sidecars), then
-/// writes the row in its own autocommit statement, taking the writer lock only
-/// for that UPDATE, so a kill mid-batch leaves at most the in-flight group out
-/// of step.
+/// Records a landed move: follows the tags sidecar (and, unless a group rollback left this file behind, the planned `.xmp`/`.aae` sidecars), then writes the row in its own autocommit statement holding the writer lock only for that UPDATE, so a kill mid-batch leaves at most the in-flight group out of step.
 fn commit_rename(
     db: &parking_lot::Mutex<rusqlite::Connection>,
     p: &PlannedRename,
     mut notes: Vec<String>,
     follow_sidecars: bool,
 ) -> BulkActionItem {
-    // Move the on-disk tags sidecar to follow the renamed file (#27).
-    // Best-effort: a missing sidecar (the common case) or any error is
-    // ignored so it never turns a successful rename into a failure.
     crate::shell::tags::move_sidecar(&p.src, &p.dest);
     if follow_sidecars {
         notes.extend(move_following_sidecars(p));
@@ -559,22 +523,10 @@ fn commit_rename(
     };
     let src_text = p.src.to_string_lossy().to_string();
     let dest_text = p.dest.to_string_lossy().to_string();
-    // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
-    // on it). ENG-92: a file renamed on disk whose DB write failed is
-    // reported as failed and recorded for recovery (the next scan's
-    // rename-heal also rebinds it via content_hash/file_ref).
+    // Keep path_hash in sync with path_text (lookups/dedup key on it). A file renamed on disk whose DB write failed is reported failed and recorded for recovery; the next scan's rename-heal also rebinds it via content_hash/file_ref.
     let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
     let updated = db.lock().execute(
-        // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
-        // renamed/moved file stays findable by its accented name. (audit parity)
-        // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE,
-        // so a PLAIN update colliding with a LIVE row already at dest (a
-        // check→rename TOCTOU on non-Windows, or an external desync) would
-        // silently REPLACE-delete that row + cascade its user metadata. OR
-        // ABORT raises instead, routing into the Err arm below (record +
-        // report failed) rather than losing data. (audit 2026-07 sibling)
-        // An applied suggestion is cleared only if it is still the one
-        // validated above, so a newer Deep Analyze proposal survives.
+        // path_search is NFC-normalized so an NFD-accented renamed file stays findable by its accented name. OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a PLAIN update colliding with a LIVE row at dest (a check→rename TOCTOU on non-Windows, or an external desync) would silently REPLACE-delete that row and cascade its user metadata; OR ABORT routes into the Err arm (record + report failed) instead. An applied suggestion is cleared only if it is still the one validated above, so a newer Deep Analyze proposal survives.
         "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, \
          vlm_proposed_name = CASE WHEN ?6 IS NOT NULL AND vlm_proposed_name IS ?6 THEN NULL ELSE vlm_proposed_name END \
          WHERE id = ?3",
@@ -607,8 +559,7 @@ fn commit_rename(
     }
 }
 
-/// Closes each rename intent once its outcome is final. A file that moved but
-/// whose catalog update failed keeps its intent open for the startup repair.
+/// Closes each rename intent once its outcome is final; a file that moved but whose catalog update failed keeps its intent open for the startup repair.
 fn settle_rename_intents(
     planned: &[PlannedRename],
     results: &[Option<BulkActionItem>],
@@ -637,12 +588,7 @@ fn rename_files_blocking(
     let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
     let mut rejected: Vec<(PathBuf, String)> = Vec::new();
 
-    // Phase 1 — resolve + validate every rename under a short writer-lock
-    // scope (read-only SELECTs). Collect the moves so the per-file
-    // filesystem work below runs with NO lock held: a large batch must not
-    // wedge the engine's only writer (and any concurrent scan flush) across
-    // every MoveFileExW — the pathology the apply-tags P0 fix removed.
-    // (audit 2026-07-08)
+    // Phase 1: resolve and validate every rename under a short writer-lock scope (read-only SELECTs) and collect the moves, so the per-file filesystem work runs with NO lock held; a large batch must not wedge the only writer across every MoveFileExW.
     let conn = db.lock();
     for (slot, entry) in payload.renames.iter().enumerate() {
         match plan_rename(&conn, slot, entry) {
@@ -656,8 +602,7 @@ fn rename_files_blocking(
         }
     }
 
-    // A companion group is re-derived from the batch: two or more members in
-    // one folder sharing a stem, at least one a RAW, JPEG/HEIC or MOV.
+    // A companion group is re-derived from the batch: two or more members in one folder sharing a stem, at least one a RAW, JPEG/HEIC or MOV.
     let mut stems: HashMap<CompanionKey, (usize, bool)> = HashMap::new();
     for path in planned.iter().map(|p| &p.src).chain(rejected.iter().map(|(path, _)| path)) {
         if let Some((key, primary)) = companion_key(path) {
@@ -700,22 +645,14 @@ fn rename_files_blocking(
         }
     }
 
-    // Phase 2 — each move is a no-clobber MoveFileExW (no
-    // MOVEFILE_REPLACE_EXISTING): the kernel re-checks the destination inside
-    // the move, so an occupied destination fails (failed++) instead of being
-    // overwritten. The un-prefixed dest is used for DB path_text + user
-    // messages so stored paths stay normal-form (#29). Mirrors
-    // restructure_apply.rs::move_file (B3). A group moves together: when one
-    // member's move fails, the members already moved are put back and the
-    // whole group is reported failed.
+    // Phase 2: each move is a no-clobber MoveFileExW (no MOVEFILE_REPLACE_EXISTING); the kernel re-checks the destination inside the move, so an occupied destination fails instead of being overwritten. The un-prefixed dest is used for DB path_text and messages so stored paths stay normal-form. Mirrors restructure_apply.rs::move_file. A group moves together: when one member fails, members already moved are put back and the whole group is reported failed.
     for unit in units {
         let mut moved = Vec::new();
         let mut failure = None;
         let mut intents = Vec::new();
         for &index in &unit {
             let p = &planned[index];
-            // Write-ahead: a kill after the move and before the catalog update
-            // is repaired at the next start (`path_moves::repair`).
+            // Write-ahead: a kill after the move and before the catalog update is repaired at the next start (`path_moves::repair`).
             if let Some(intent) = super::path_moves::begin(p.file_id, &p.src, &p.dest, p.identity.file) {
                 intents.push((index, intent));
             }
@@ -798,7 +735,6 @@ struct TrashCandidate {
 #[derive(Debug)]
 enum CheckedTrashOutcome {
     Trashed,
-    /// macOS: in the Trash at this path; journaled before the catalog commit.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     TrashedAt(PathBuf),
     Rejected(String),
@@ -1026,10 +962,7 @@ fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     checked_trash_one_with(candidate, crate::shell::trash::trash_path_as)
 }
 
-/// macOS trashes in place, as the Swift engine does, so the Trash shows the
-/// file's own name and Finder's Put Back works: the identity and content
-/// checks run on the path itself and the backend re-checks identity on both
-/// sides of FileManager.trashItem.
+/// macOS trashes in place, as the Swift engine does, so the Trash shows the file's own name and Finder's Put Back works: identity and content checks run on the path itself and the backend re-checks identity on both sides of FileManager.trashItem.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     let _exact_guards = match validate_trash_candidate_at(candidate, &candidate.path, true) {
@@ -1042,8 +975,7 @@ fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     }
 }
 
-/// Journals where each file landed before the catalog commit. Best effort:
-/// without it restore and startup recovery find the item by its inode.
+/// Journals where each file landed before the catalog commit. Best effort: without it restore and startup recovery find the item by its inode.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn bind_macos_trash_receipts(outcomes: &mut [CheckedTrashOutcome], entry: &mut TrashLogEntry) {
     let mut landed_any = false;
@@ -1205,7 +1137,6 @@ fn trash_commit_failure_result(
     }
 }
 
-/// Trash indexed files only after immediately revalidating their on-disk identity.
 pub(crate) async fn handle_trash_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1327,7 +1258,6 @@ pub(crate) async fn handle_trash_files(
                     original_path: candidate.path.to_string_lossy().into_owned(),
                     library_root: super::trash::containing_root(&library_roots, &candidate.path)
                         .map(|root| root.to_string_lossy().into_owned()),
-                    // macOS trashes in place: there is no claim to recover.
                     recycle_bin_id: (!cfg!(all(target_os = "macos", feature = "apple-adapters")))
                         .then(|| candidate.staging_path.to_string_lossy().into_owned()),
                     recycle_physical_path: None,
@@ -1463,8 +1393,6 @@ pub(crate) async fn handle_trash_files(
             ));
         }
 
-        // Tag the BulkActionResult.action with the batch id so the app can
-        // store it on the UndoStack entry without an extra IPC.
         Ok(BulkActionResult {
             command_id: None,
             action: format!("trashFiles:{}", batch_id),
@@ -1550,8 +1478,7 @@ fn persist_manual_merge_constraint(
     source_person_id: i64,
     destination_person_id: i64,
 ) -> anyhow::Result<()> {
-    // A person whose faces were all reassigned away has nothing to anchor a
-    // verdict to; the merge itself still goes ahead, as on macOS.
+    // A person whose faces were all reassigned away has nothing to anchor a verdict to; the merge still goes ahead, as on macOS.
     let (Some(source_anchor), Some(destination_anchor)) = (
         manual_merge_anchor(tx, source_person_id)?,
         manual_merge_anchor(tx, destination_person_id)?,
@@ -1678,8 +1605,6 @@ fn persist_manual_merge_constraint(
     Ok(())
 }
 
-/// Merge two person clusters: every face_print with person_id = source is
-/// reassigned to destination, then the source person row is deleted.
 pub(crate) async fn handle_merge_clusters(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1721,8 +1646,6 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
                 }],
             });
         }
-        // Self-merge guard: moving a person's faces onto itself then deleting
-        // its row would orphan every face (person_id points at a deleted row).
         if src == dst {
             return Ok(BulkActionResult {
                 command_id: None,
@@ -1744,9 +1667,7 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
         )? as u32;
-        // A named source can merge into an unnamed destination (merge direction is
-        // arbitrary), so carry one complete identity across only when every
-        // destination name field is blank; two named people keep the destination's.
+        // A named source can merge into an unnamed destination (direction is arbitrary), so one complete identity is carried across only when every destination name field is blank; two named people keep the destination's.
         tx.execute(
             "UPDATE persons SET name=(SELECT name FROM persons WHERE id=?2), title=(SELECT title FROM persons WHERE id=?2), first_name=(SELECT first_name FROM persons WHERE id=?2), middle_name=(SELECT middle_name FROM persons WHERE id=?2), last_name=(SELECT last_name FROM persons WHERE id=?2), suffix=(SELECT suffix FROM persons WHERE id=?2), is_unknown=0 WHERE id=?1 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))=0 AND EXISTS(SELECT 1 FROM persons WHERE id=?2 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))>0)",
             rusqlite::params![dst, src],
@@ -1755,25 +1676,13 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
             tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src])? == 1,
             "source person disappeared during merge"
         );
-        // Clean up face-verification verdicts referencing the merged-away source
-        // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
-        // row and surfaces stale suggestions (orphan rows that never GC). The
-        // "src != X" verdict is moot once src is folded into dst.
-        // Only GC legacy person-keyed rows that can't re-project (NULL
-        // anchors). A v13 face-anchored verdict (face_a/face_b set) must SURVIVE
-        // the merge so its (fa,fb) pair keeps re-projecting onto current cluster
-        // membership (fa→dst, fb→other) — deleting it would let two
-        // user-confirmed-different people re-merge. A row whose faces now land in
-        // one cluster is auto-inert (find_merge_suggestions `pa != pb`, consolidate
-        // `ca != cb`).
+        // Clean up face-verification verdicts referencing the merged-away source person, else findMergeSuggestions JOINs on a deleted persons row and surfaces stale suggestions. Only GC legacy person-keyed rows that can't re-project (NULL anchors): a v13 face-anchored verdict (face_a/face_b set) must SURVIVE so its pair keeps re-projecting onto current cluster membership, since deleting it would let two user-confirmed-different people re-merge. A row whose faces now land in one cluster is auto-inert (`pa != pb`, `ca != cb`).
         tx.execute(
             "DELETE FROM face_verifications WHERE (person_a = ?1 OR person_b = ?1) \
              AND (face_a IS NULL OR face_b IS NULL)",
             rusqlite::params![src],
         )?;
-        // Recompute the destination's file_count AND representative_face_id
-        // (highest-quality embedded face now in the cluster, else any face) so
-        // the People card + suggestion anchor reflect the combined membership.
+        // Recompute the destination's file_count AND representative_face_id (highest-quality embedded face now in the cluster, else any face) so the People card and suggestion anchor reflect the combined membership.
         anyhow::ensure!(
             tx.execute(
                 "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
@@ -1868,9 +1777,7 @@ pub(crate) async fn emit_bulk_result(
     }
 }
 
-/// Store a person's structured name, matching the macOS engine: the display
-/// name joins every non-empty part, and naming a person always clears the
-/// Unknown flag so they reappear in People.
+/// Stores a person's structured name as the macOS engine does: the display name joins every non-empty part, and naming a person clears the Unknown flag so they reappear in People.
 fn update_person_name(
     tx: &rusqlite::Transaction<'_>,
     payload: &ipc::RenamePersonPayload,
@@ -1990,9 +1897,7 @@ fn restore_tags_if_unchanged(
     Ok(true)
 }
 
-/// Reassign one face through the engine-owned writer. Keeping this mutation
-/// here prevents the People sheet from racing the scan writer with a second
-/// SQLite connection and makes remove/split/move equally transactional.
+/// Reassigns one face through the engine-owned writer, so the People sheet doesn't race the scan writer with a second SQLite connection and remove/split/move are equally transactional.
 pub(crate) async fn handle_reassign_face(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -2169,10 +2074,7 @@ pub(crate) async fn handle_reassign_face(
     emit_bulk_result(&sink, "reassignFace", result).await;
 }
 
-/// FEAT-CRIT-1: bulk "Mark as unknown" for multi-select people view. Sets
-/// persons.is_unknown = 1 for every id in the payload + clears the display
-/// name (so a previously-named cluster becomes anonymous when the user
-/// reverses an assignment).
+/// Bulk "Mark as unknown" for multi-select People: sets persons.is_unknown = 1 and clears the display name so a previously-named cluster becomes anonymous.
 pub(crate) async fn handle_mark_persons_as_unknown(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -2192,10 +2094,7 @@ fn mark_persons_unknown(
     let mut messages = Vec::new();
     for id in &payload.person_ids {
         match tx.execute(
-            // Clear EVERY name-bearing column (name + all five
-            // structured fields), not just name/first/last — otherwise a
-            // title/middle_name/suffix survives, the re-cluster snapshot
-            // carries a stale partial identity, and the editor pre-fills it.
+            // Clear EVERY name-bearing column (name + all five structured fields): otherwise a title/middle_name/suffix survives, the re-cluster snapshot carries a stale partial identity, and the editor pre-fills it.
             "UPDATE persons SET is_unknown = 1, name = NULL, title = NULL, first_name = NULL, middle_name = NULL, last_name = NULL, suffix = NULL WHERE id = ?1",
             rusqlite::params![id],
         ) {
@@ -2241,13 +2140,7 @@ fn mark_persons_unknown(
     })
 }
 
-/// Record a user "different people" verdict for a suggested pair. Persists into
-/// face_verifications keyed on BOTH the person pair (PK, for compat + the VLM
-/// path) and the stable (min,max) anchor face_print pair (v13), so
-/// findMergeSuggestions keeps suppressing the pair across re-clustering. Routed
-/// here so the write goes through the engine's single-writer connection rather
-/// than a second app-side writer. Completion uses the same awaited bulk result
-/// contract as the adjacent person mutations.
+/// Records a user "different people" verdict for a suggested pair into face_verifications, keyed on BOTH the person pair (PK, for compat + the VLM path) and the stable (min,max) anchor face_print pair (v13), so findMergeSuggestions keeps suppressing it across re-clustering. Goes through the engine's single-writer connection, not a second app-side writer.
 pub(crate) async fn handle_mark_persons_different(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -2269,8 +2162,7 @@ pub(crate) async fn handle_mark_persons_different(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let conn = db.lock();
-        // Each anchor face must still belong to its person, as in the Swift
-        // engine: a suggestion shown before a recluster or merge is stale.
+        // Each anchor face must still belong to its person, as in the Swift engine: a suggestion shown before a recluster or merge is stale.
         let anchored = |face: i64, person: i64| -> bool {
             conn.query_row(
                 "SELECT person_id FROM face_prints WHERE id = ?1 AND file_id IS NOT NULL AND bbox IS NOT NULL",
@@ -2296,9 +2188,7 @@ pub(crate) async fn handle_mark_persons_different(
                 }],
             });
         }
-        // Resolve the churn-stable (file_id, bbox) key for each anchor face
-        // so the verdict survives a faces_evaluated re-scan that DELETE+re-INSERTs
-        // face_print ids.
+        // Resolve the churn-stable (file_id, bbox) key per anchor face so the verdict survives a faces_evaluated re-scan that DELETE+re-INSERTs face_print ids.
         let stable_key = |id: i64| -> (Option<i64>, Option<String>) {
             conn.query_row(
                 "SELECT file_id, bbox FROM face_prints WHERE id = ?1",
@@ -2336,13 +2226,7 @@ pub(crate) async fn handle_mark_persons_different(
     emit_bulk_result(&sink, "markPersonsDifferent", result).await;
 }
 
-/// Find merge-candidate cluster pairs by SFace cosine similarity in the
-/// suggestion band (MERGE_SUGGEST_COS_LOW..MERGE_SUGGEST_COS_HIGH from
-/// face_clustering — 0.55..0.97, distinct from the clusterer's own VLM-verify
-/// band). The floor drops impostor-territory noise; the ceiling surfaces the
-/// genuine same-person fragments that over-split stranded above the Pass-1
-/// threshold. Pairs already confirmed-different in face_verifications are
-/// filtered out so the suggested-merges sheet doesn't keep re-prompting.
+/// Finds merge-candidate cluster pairs by SFace cosine similarity in the suggestion band (MERGE_SUGGEST_COS_LOW..HIGH from face_clustering, 0.55..0.97, distinct from the clusterer's VLM-verify band). The floor drops impostor-territory noise; the ceiling surfaces same-person fragments stranded above the Pass-1 threshold. Pairs already confirmed-different in face_verifications are filtered out.
 #[derive(Debug, Clone)]
 struct SuggestionPerson {
     person_id: i64,
@@ -2494,16 +2378,9 @@ pub(crate) async fn handle_find_merge_suggestions(
     db_path: std::path::PathBuf,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MergeSuggestions> {
-        // Read-only connection so this never contends on the single writer mutex
-        // (clustering can hold it for seconds on a large over-split library).
+        // Read-only connection so this never contends on the single writer mutex (clustering can hold it for seconds on a large over-split library).
         let conn = crate::db::open_read(&db_path)?;
-        // One row per person via a JOIN to the representative face (its anchor
-        // embedding + id) plus a COUNT JOIN for member size — replaces the two
-        // per-person correlated subqueries the old query ran. representative_
-        // face_id is the cluster anchor (highest-quality embedded face), kept
-        // current by clustering + handle_merge_clusters.
-        // Scope the prepared statement so its borrow of `conn` ends here,
-        // letting the writer lock be released before the cosine sweep below.
+        // One row per person via a JOIN to the representative face (anchor embedding + id) plus a COUNT JOIN for member size. representative_face_id is the cluster anchor (highest-quality embedded face), kept current by clustering + handle_merge_clusters. The prepared statement is scoped so its borrow of `conn` ends before the writer lock is released for the cosine sweep.
         let rows: Vec<(i64, i64, i64, Option<Vec<u8>>, Vec<u8>)> = {
             let mut stmt = conn.prepare(
                 "SELECT p.id, rep.id, COUNT(fpc.id), p.centroid, rep.arcface_embedding
@@ -2515,8 +2392,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                  WHERE COALESCE(p.is_unknown, 0) = 0
                  GROUP BY p.id",
             )?;
-            // Bind to a local so the borrowing iterator temporary is dropped at
-            // this `;` — before `stmt` — letting the block return an owned Vec.
+            // Bind to a local so the borrowing iterator temporary drops at this `;` before `stmt`, letting the block return an owned Vec.
             let collected: Vec<(i64, i64, i64, Option<Vec<u8>>, Vec<u8>)> = stmt
                 .query_map([], |r| {
                     Ok((
@@ -2532,31 +2408,15 @@ pub(crate) async fn handle_find_merge_suggestions(
             collected
         };
 
-        // "Different people" verdicts. Person-keyed pairs cover legacy rows;
-        // face-anchor-keyed pairs (v13) survive re-clustering because
-        // face_prints ids are stable. A candidate is suppressed if ANY key
-        // matches (legacy person pair, exact-anchor face pair, or the
-        // current-membership person pair derived below).
+        // "Different people" verdicts: person-keyed pairs cover legacy rows; face-anchor-keyed pairs (v13) survive re-clustering because face_prints ids are stable. A candidate is suppressed if ANY key matches (legacy person pair, exact-anchor face pair, or the current-membership person pair derived below).
         let mut verified_persons: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
         let mut verified_faces: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
-        // Stored verified face pairs, retained so the verdict can be re-projected
-        // onto CURRENT cluster membership below. The anchor-keyed `verified_faces`
-        // set only matches when the stored faces are still the live anchors, but
-        // anchor selection (highest-quality embedded face) changes under
-        // re-clustering — so a "different people" verdict could resurface as a
-        // suggestion even though both verified faces still belong to the same two
-        // clusters. Re-deriving the person pair from current membership closes
-        // that gap without a schema change.
+        // Stored verified face pairs, retained so the verdict can be re-projected onto CURRENT cluster membership. The anchor-keyed `verified_faces` set only matches while the stored faces are still the live anchors, but anchor selection changes under re-clustering, so a "different people" verdict could resurface although both faces still belong to the same two clusters. Re-deriving the person pair from membership closes that gap without a schema change.
         let mut verified_face_pairs: Vec<(i64, i64)> = Vec::new();
         {
-            // Propagate (not `.ok()`-swallow) any failure loading the user's
-            // "different people" verdicts: silently dropping them left
-            // `verified_persons` empty so the suppression below never fired and
-            // already-rejected pairs resurfaced as suggestions — a silent
-            // correctness loss. Failing visibly is correct: a broken verdicts
-            // read means the suggestion set can't be trusted.
+            // Propagate (not `.ok()`-swallow) any failure loading the "different people" verdicts: dropping them left `verified_persons` empty so suppression never fired and rejected pairs resurfaced, a silent correctness loss. A broken verdicts read means the suggestion set can't be trusted.
             let mut vstmt = conn.prepare(
                 "SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
                  FROM face_verifications WHERE same_person = 0",
@@ -2575,10 +2435,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            // Resolve each anchor by its churn-stable (file_id, bbox) key to
-            // the face id that CURRENTLY occupies that slot (legacy face-id fallback),
-            // so a verdict still suppresses the re-prompt after a faces_evaluated
-            // re-scan churns face_print ids — mirroring the clustering-apply path.
+            // Resolve each anchor by its churn-stable (file_id, bbox) key to the face id that CURRENTLY occupies that slot (legacy face-id fallback), so a verdict still suppresses the re-prompt after a faces_evaluated re-scan, mirroring the clustering-apply path.
             let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> Option<i64> {
                 if let (Some(f), Some(b)) = (file, bbox)
                     && let Ok(id) = conn.query_row(
@@ -2612,9 +2469,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             }
         }
 
-        // Re-project each stored face pair onto the person it CURRENTLY belongs
-        // to and suppress that (min,max) person pair. Only the verified faces are
-        // looked up (bounded by the verdict count), not the whole table.
+        // Re-project each stored face pair onto the person it CURRENTLY belongs to and suppress that (min,max) person pair; only verified faces are looked up (bounded by the verdict count).
         let mut verified_membership_persons: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
         if !verified_face_pairs.is_empty() {
@@ -2661,9 +2516,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             })
             .collect();
 
-        // Every DB read is done; the O(P²) cosine sweep below is pure in-memory
-        // math. Release the single-writer lock so the (potentially multi-second
-        // on a large over-split library) sweep doesn't serialize other writes.
+        // Every DB read is done; the O(P²) cosine sweep is pure in-memory math, so release the single-writer lock to avoid serializing other writes for seconds on a large over-split library.
         let mut candidates = suggestion_candidates(&people);
         let mut files_by_person: HashMap<i64, HashSet<i64>> = HashMap::new();
         {
@@ -3238,8 +3091,7 @@ mod tests {
         assert_eq!(stored, "newer");
     }
 
-    // C1-012: the recovery line carries the file_id + src + dst so disk vs DB
-    // can be reconciled. Pure wire-shape check (no filesystem).
+    // The recovery line carries file_id + src + dst so disk vs DB can be reconciled. Pure wire-shape check.
     #[test]
     fn rename_recovery_line_carries_id_src_dst() {
         let line = rename_recovery_line(42, r"C:\a\old.jpg", r"C:\a\new.jpg");
@@ -3249,14 +3101,11 @@ mod tests {
         assert_eq!(v["dst"], r"C:\a\new.jpg");
     }
 
-    // A commit-failure path records EVERY on-disk move to the recovery
-    // sidecar (NDJSON, append-only). Before the fix there was no sidecar at all,
-    // so a failed end-of-batch commit left the whole batch silently desynced.
+    // A commit-failure path records EVERY on-disk move to the recovery sidecar (NDJSON, append-only); previously a failed end-of-batch commit left the whole batch silently desynced.
     #[test]
     fn commit_failure_writes_recovery_sidecar_for_every_move() {
         let dir = unique_temp_dir("recover");
-        // Simulate the commit-failure reconciliation loop: write one line per
-        // on-disk move that the rolled-back transaction left stale.
+        // Simulate the commit-failure reconciliation loop: one line per on-disk move the rolled-back transaction left stale.
         let moves = [
             (1i64, r"C:\lib\a-old.jpg".to_string(), r"C:\lib\a-new.jpg".to_string()),
             (2i64, r"C:\lib\b-old.png".to_string(), r"C:\lib\b-new.png".to_string()),
@@ -3652,7 +3501,6 @@ mod tests {
             .any(|message| message.contains("Undo batch batch-123")));
     }
 
-    // C1-012: a second write appends rather than truncating (NDJSON growth).
     #[tokio::test]
     async fn bulk_join_failure_still_emits_terminal_result() {
         let joined = tokio::task::spawn_blocking(|| -> anyhow::Result<BulkActionResult> {
@@ -3828,7 +3676,6 @@ mod tests {
             )
             .unwrap();
         }
-        // b's destination is occupied, so only b fails; a and c land and persist.
         std::fs::write(directory.join("taken.txt"), b"x").unwrap();
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
         let (sink, mut events) = Sink::channel_for_test(1);

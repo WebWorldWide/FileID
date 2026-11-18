@@ -1,8 +1,4 @@
-// OCR — Windows.Media.Ocr (WinRT).
-//
-// Built into Windows since 1809 (no install, no model download).
-// Multi-language (locales picked per call); falls back to English if the
-// requested locale isn't installed. Privacy: runs entirely on-device.
+// OCR via Windows.Media.Ocr (WinRT): built in since 1809, no install or model download, runs entirely on-device. Locale is picked per call, falling back to English if the requested one isn't installed.
 
 use anyhow::{Context, Result};
 
@@ -11,17 +7,8 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-/// Ensure the calling thread has a COM apartment for the WinRT activations
-/// below. Every other shell module that touches COM/WinRT does this; OCR runs
-/// on tokio blocking-pool threads that start with NO apartment, so the first
-/// WinRT activation (DataWriter::new) was failing CO_E_NOTINITIALIZED and the
-/// error was silently swallowed by the caller — OCR produced nothing. MTA (not
-/// STA): these pool threads pump no message loop, and the blocking
-/// `RecognizeAsync(..).join()` wait below would risk an STA deadlock — the same
-/// reason `shell::heic`/`shell::video` pick MTA for their WinRT `.join()`s. The
-/// OcrEngine/SoftwareBitmap are agile, so MTA is sound. `is_ok()` is true for
-/// S_OK/S_FALSE (uninit to balance), false for RPC_E_CHANGED_MODE (thread
-/// already in another apartment; don't touch it). (audit recheck: OCR COM)
+/// Gives the calling thread a COM apartment for the WinRT activations below. OCR runs on tokio blocking-pool threads with no apartment, so without this the first activation failed CO_E_NOTINITIALIZED and the swallowed error made OCR produce nothing.
+/// MTA, not STA: these threads pump no message loop and the blocking `RecognizeAsync(..).join()` would risk an STA deadlock (same as `shell::heic`/`shell::video`); OcrEngine/SoftwareBitmap are agile. `is_ok()` is true for S_OK/S_FALSE (uninit to balance), false for RPC_E_CHANGED_MODE (another apartment owns the thread; leave it).
 fn with_com<R>(body: impl FnOnce() -> R) -> R {
     unsafe {
         let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -34,9 +21,7 @@ fn with_com<R>(body: impl FnOnce() -> R) -> R {
     }
 }
 
-/// Run OCR on a tightly-packed RGB buffer. Maps to BGRA8 in memory,
-/// populates a WinRT IBuffer, and calls SoftwareBitmap::CreateCopyFromBuffer.
-/// Returns the recognized text; empty means nothing matched.
+/// Runs OCR on a tightly-packed RGB buffer; empty text means nothing matched.
 pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
     // Cap each side at 16384 so `width * height * 4` cannot overflow u32 and
     // `SoftwareBitmap::CreateCopyFromBuffer` (which takes i32 dims) stays in
@@ -63,7 +48,6 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
     writer.WriteBytes(&bgra)?;
     let buffer = writer.DetachBuffer()?;
 
-    // Create SoftwareBitmap directly from the BGRA8 buffer.
     let soft_bitmap = SoftwareBitmap::CreateCopyFromBuffer(
         &buffer,
         BitmapPixelFormat::Bgra8,

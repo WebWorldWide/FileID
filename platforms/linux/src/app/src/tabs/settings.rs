@@ -46,8 +46,6 @@ enum Transfer {
     Installed,
     Cancelled,
     Failed(String),
-    /// The helper reported an error: plain `text` on screen, the code and
-    /// raw message in the tooltip.
     Refused { text: String, detail: String },
 }
 

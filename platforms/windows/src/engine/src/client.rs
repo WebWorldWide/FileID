@@ -56,7 +56,6 @@ pub fn locate_engine() -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
-/// Spawn the engine with piped stdin/stdout and the given stderr disposition.
 pub fn spawn(engine: &Path, envs: &[(&str, &OsStr)], stderr: Stdio) -> std::io::Result<Child> {
     let mut command = Command::new(engine);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr);

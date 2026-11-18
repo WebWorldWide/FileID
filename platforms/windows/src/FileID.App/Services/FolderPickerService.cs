@@ -59,7 +59,6 @@ internal static class FolderPickerService
 
         if (folder is null)
         {
-            // User cancelled — not an error.
             return new PickResult(null, null);
         }
 

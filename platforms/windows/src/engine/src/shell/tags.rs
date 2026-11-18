@@ -1,26 +1,9 @@
-// File tags via sidecar JSON + IPropertyStore PKEY_Keywords.
-//
-// On macOS, tags live in `xattr com.apple.metadata:_kMDItemUserTags`. On
-// Windows, the canonical location is `IPropertyStore` →
-// `PKEY_Keywords` (System.Keywords). Explorer's Details column reads
-// from there, the search index picks it up, etc.
-//
-// Two-tier strategy (both written on every `write_tags` call):
-//   1. Sidecar (`.fileid-tags.json` next to the file): always works,
-//      every file type, no Win32 interop, no schema risk on weird
-//      property handlers (Office / RAW / .HEIC etc.).
-//   2. Embedded IPropertyStore: writes PKEY_Keywords through the system
-//      property handler so Explorer's Details column shows the tags
-//      natively. Silently skipped when the file type has no registered
-//      property handler (.swift / .md / unknown extensions).
-//
-// Multi-tag PKEY_Keywords is canonically a VT_VECTOR | VT_LPWSTR
-// (SafeArray of wide strings). windows-rs 0.58 doesn't expose the SDK
-// helper `InitPropVariantFromStringVector` for that construction, so we
-// fall back to writing one VT_LPWSTR per tag joined by "; " — the
-// convention Windows Explorer / search index use when a user types
-// multiple keywords into the Details pane. Tools that read PKEY_Keywords
-// expect either shape; ours roundtrips cleanly.
+// File tags via sidecar JSON + IPropertyStore PKEY_Keywords (System.Keywords, shown in Explorer's Details column and indexed by search). macOS keeps tags in `xattr com.apple.metadata:_kMDItemUserTags`.
+// Two tiers, both written on every `write_tags`:
+// 1. Sidecar (`.fileid-tags.json` next to the file): works for every file type with no Win32 interop or property-handler risk (Office / RAW / HEIC).
+// 2. IPropertyStore: writes PKEY_Keywords through the system property handler; silently skipped when the file type has none (.swift / .md / unknown).
+// Multi-tag PKEY_Keywords is canonically VT_VECTOR
+// VT_LPWSTR, but windows-rs 0.58 lacks `InitPropVariantFromStringVector`, so one VT_LPWSTR of tags joined by "; " is written (the shape Explorer's Details pane writes); it roundtrips cleanly.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -66,7 +49,6 @@ fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
     }
     let payload = SidecarTags { tags: tags.to_vec() };
     let json = serde_json::to_vec_pretty(&payload).context("serializing sidecar tags")?;
-    // Atomic write: temp file + rename. Avoids partial files on crash.
     let tmp = sidecar.with_extension("json.tmp");
     std::fs::write(&tmp, &json)
         .with_context(|| format!("writing temp sidecar {}", tmp.display()))?;
@@ -75,11 +57,7 @@ fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Move the tags sidecar to follow a renamed/moved file. Best-effort: a missing
-/// sidecar (the common case — most files carry none) is a no-op, and any rename
-/// error is swallowed so it can never turn a successful move into a reported
-/// failure. Closes the on-disk-tag-loss + cross-attribution gap on rename /
-/// restructure (#27).
+/// Moves the tags sidecar to follow a renamed/moved file. Best-effort: a missing sidecar is a no-op and rename errors are swallowed so they never turn a successful move into a failure.
 pub fn move_sidecar(old: &Path, new: &Path) {
     if crate::util::read_only::require_source_mutation(old).is_err() || crate::util::read_only::require_source_mutation(new).is_err() { return; }
     let from = sidecar_path(old);
@@ -123,10 +101,6 @@ fn read_sidecar(path: &Path) -> Result<Vec<String>> {
     Ok(payload.tags)
 }
 
-// ────────────────────────────────────────────────────────────────────
-// IPropertyStore (Windows only).
-// ────────────────────────────────────────────────────────────────────
-
 #[cfg(target_os = "windows")]
 mod windows_ipropertystore {
     use anyhow::{Context, Result};
@@ -145,15 +119,12 @@ mod windows_ipropertystore {
     #[cfg(test)]
     use windows::Win32::UI::Shell::PropertiesSystem::GPS_DEFAULT;
 
-    /// PKEY_Keywords (System.Keywords): {F29F85E0-4FF9-1068-AB91-08002B27B3D9} pid 5.
     const PKEY_KEYWORDS: PROPERTYKEY = PROPERTYKEY {
         fmtid: windows::core::GUID::from_u128(0xF29F85E0_4FF9_1068_AB91_08002B27B3D9),
         pid: 5,
     };
 
-    /// Open IPropertyStore in the requested mode. Returns Err for any
-    /// failure — callers treat it as "this file type has no property
-    /// handler" and fall through to sidecar-only behavior.
+    /// Any failure means "this file type has no property handler"; callers fall back to sidecar-only.
     unsafe fn open_store(path: &Path, flags: GETPROPERTYSTOREFLAGS) -> Result<IPropertyStore> {
         let wide: Vec<u16> = path
             .as_os_str()
@@ -167,10 +138,6 @@ mod windows_ipropertystore {
         Ok(store)
     }
 
-    /// Run `body` inside a transient APARTMENTTHREADED COM context.
-    /// Matches shell/trash.rs's pattern (per-call init + uninit on the
-    /// engine's tag-writer thread). If COM is already initialized on
-    /// this thread (S_FALSE), we skip the matching CoUninitialize.
     fn with_com<R>(body: impl FnOnce() -> R) -> R {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -186,12 +153,6 @@ mod windows_ipropertystore {
     pub fn write_keywords(path: &Path, tags: &[String]) -> Result<()> {
         with_com(|| unsafe {
             let store = open_store(path, GPS_READWRITE)?;
-            // windows-rs 0.58 doesn't expose InitPropVariantFromStringVector.
-            // Fall back to a single VT_LPWSTR with "; "-joined tags — the
-            // Explorer Details pane writes the same shape when a user
-            // types multiple keywords, and downstream readers (search
-            // index, Photos app, FileID itself) parse the separator.
-            // Empty tags → VT_EMPTY via PROPVARIANT::default().
             let pv: PROPVARIANT = if tags.is_empty() {
                 PROPVARIANT::default()
             } else {
@@ -212,17 +173,12 @@ mod windows_ipropertystore {
             let pv = store
                 .GetValue(&PKEY_KEYWORDS)
                 .context("IPropertyStore::GetValue(PKEY_Keywords)")?;
-            // PROPVARIANT::to_string() handles VT_LPWSTR, VT_BSTR and a
-            // few sibling string variants. For VT_VECTOR | VT_LPWSTR
-            // (which we never write but a third-party tool might),
-            // windows-rs 0.58 returns the empty string — degrading
-            // gracefully so the sidecar tier still owns those tags.
+            // PROPVARIANT::to_string() handles VT_LPWSTR/VT_BSTR; for VT_VECTOR
+            // VT_LPWSTR (never written by us) windows-rs 0.58 returns an empty string, so the sidecar tier still owns those tags.
             let joined = pv.to_string();
             if joined.is_empty() {
                 return Ok(Vec::new());
             }
-            // Accept both "; " and ";" as separators since different
-            // writers produce different spacings.
             let tags: Vec<String> = joined
                 .split(';')
                 .map(|t| t.trim().to_string())
