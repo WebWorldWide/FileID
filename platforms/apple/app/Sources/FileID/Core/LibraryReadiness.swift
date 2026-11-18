@@ -1,9 +1,7 @@
 import Foundation
 import FileIDShared
 
-/// What pages that answer from the catalog (Chat, Search & Moments) can do given how much of the library FileID has read; they need
-/// at least one scanned file. Both engines answer chat requests while a scan runs, from the files read so far, and the app's file counter
-/// refreshes during a scan (see `ScanCounterThrottle`), so a first scan opens Chat as soon as the first files are read.
+/// What catalog-backed pages (Chat, Search & Moments) need: at least one scanned file. Both engines answer during a scan, so Chat opens on the first files read.
 enum LibraryReadiness: Equatable {
     case needsScan
     case reading

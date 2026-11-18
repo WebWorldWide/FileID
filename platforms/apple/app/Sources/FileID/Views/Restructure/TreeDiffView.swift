@@ -33,8 +33,6 @@ struct TreeDiffView: View {
     @State private var sourceRows: [SourceRow] = []
     @State private var destRows: [DestRow] = []
 
-    // MARK: - Data
-
     private struct SourceRow: Identifiable {
         var id: String { folder }
         let folder: String
@@ -82,8 +80,6 @@ struct TreeDiffView: View {
         destRows = countByBucket.map { DestRow(bucket: $0.key, count: $0.value) }
             .sorted { $0.bucket.localizedCaseInsensitiveCompare($1.bucket) == .orderedAscending }
     }
-
-    // MARK: - Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -133,11 +129,7 @@ struct TreeDiffView: View {
         }
     }
 
-    // Rows are passed as DATA + a @ViewBuilder, not a pre-materialized
-    // [AnyView]. The old version eagerly built every row into an AnyView on
-    // each render, defeating LazyVStack virtualization (and erasing row
-    // identity) — fatal at 100k+ proposals. Now ForEach over Identifiable
-    // data lets the LazyVStack build only the visible rows.
+    // Rows are passed as data plus @ViewBuilder, not as [AnyView]: an eager AnyView per row defeats LazyVStack virtualization at 100k+ proposals.
     @ViewBuilder
     private func paneCard<Row: Identifiable, RowContent: View>(
         title: String, subtitle: String,
@@ -164,8 +156,6 @@ struct TreeDiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
-
-    // MARK: - Row views
 
     @ViewBuilder
     private func sourceRowView(_ row: SourceRow) -> some View {

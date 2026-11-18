@@ -331,12 +331,10 @@ struct DeepAnalyzeView: View {
     @State private var namePreviewOpen = false
     @State private var namePreviewIDs: [Int64] = []
 
-    // Item 4: lay-person explainer distinguishing automatic in-scan Tagging
-    // from the opt-in Deep Analyze pass. Dismissible; stays hidden once read.
+    // Dismissible explainer separating automatic in-scan tagging from the opt-in Deep Analyze pass.
     @AppStorage("hideDeepAnalyzeExplainer") private var hideExplainer = false
 
-    // Item 5: "Apply to your files" — write tags / people / smart names onto the
-    // actual files. Single in-flight gate + a short result line.
+    // Single in-flight gate for "Apply to your files".
     @State private var applyInFlight = false
     @State private var applyStatus: String? = nil
     @State private var applyConfirm: ApplyConfirm?
@@ -389,10 +387,7 @@ struct DeepAnalyzeView: View {
                 if let runFailure, !engine.deepAnalyzeInFlight {
                     failureCard(runFailure)
                 }
-                // Smart names produced by Deep Analyze stack up here for
-                // bulk apply. Lives in this tab (not Library) because
-                // smart names ARE Deep Analyze's output — putting the
-                // bulk-rename trigger anywhere else split the workflow.
+                // Smart names stack up here for bulk apply. They are Deep Analyze output, so the trigger stays in this tab.
                 if pendingRenameCount > 0 || !ChatHandoff.shared.selectedFileIDs.isEmpty {
                     smartNamesCard
                 }
@@ -457,13 +452,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
-    /// most one refresh per second so the 3 status COUNT(*) queries
-    /// (countFilesWithProposedNames / deepAnalyzePending / namedPersonCount)
-    /// don't fire 1000×. Leading
-    /// edge refreshes at once when the last was ≥1s ago; otherwise a trailing
-    /// debounce guarantees a final refresh after the burst settles. Mirrors
-    /// LibraryView's batch throttle + search debounce.
+    /// Coalesces a live scan's ~1/sec `store.version` bumps to one refresh per second: leading edge, plus a trailing debounce so the last burst still lands. Mirrors LibraryView's batch throttle.
     private func throttledRefresh() {
         let now = Date()
         if now.timeIntervalSince(lastReloadAt) >= 1.0 {
@@ -496,9 +485,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    // Item 4: plain-language explanation of the two AI passes so non-technical
-    // users don't conflate automatic in-scan tagging with the heavier, opt-in
-    // Deep Analyze step. Dismissible.
+    // Lay-person explainer of the two AI passes; dismissible.
     private var explainerCard: some View {
         Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
@@ -521,11 +508,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    // Item 5: write Deep Analyze + tagging output onto the actual files —
-    // separate actions for keyword tags and named people, plus Apply all (which
-    // also renames to the smart names). Smart-name review lives in
-    // smartNamesCard above. Tag writes are additive (never clobber the user's
-    // own Finder tags) and reversible by removing the tag.
+    // Writes Deep Analyze and tagging output to the files: keyword tags and named people, or Apply all (also renames). Tag writes are additive and reversible.
     private var applyActionsCard: some View {
         Panel {
             PanelHeader("Save to your files") {
@@ -930,12 +913,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    /// Soft-block banner shown when no person has been named yet.
-    /// Two paths out: the recommended one (name people, get good
-    /// captions) and the escape hatch (skip and run with generic
-    /// captions). The escape hatch lives RIGHT NEXT to the recommended
-    /// path so the user knows it's an option they're explicitly
-    /// choosing, not a hidden default.
+    /// Soft-block banner shown when no person has been named yet. The escape hatch sits next to the recommended path so skipping is an explicit choice.
     @ViewBuilder
     private var namingRequiredBanner: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -960,14 +938,7 @@ struct DeepAnalyzeView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
     }
 
-    /// Shown the moment Deep Analyze is kicked off but before the
-    /// first per-file progress event arrives. The Qwen / Gemma VLM
-    /// container takes ~10s to load on first call; without this card
-    /// the user sees an empty page after hitting Skip and assumes
-    /// nothing happened. The subtitle is driven by the engine's
-    /// `deepAnalyzeStarting` event so it advances "Queued" → "Loading
-    /// <model>…" → "Finding files to analyze…" as the runner moves
-    /// through each phase.
+    /// Shown from the moment Deep Analyze starts until the first progress event: the VLM takes ~10 s to load, and without this card the page looks idle. The subtitle follows the `deepAnalyzeStarting` phases.
     @ViewBuilder
     private var startingCard: some View {
         let download = engine.modelDownloadProgress.flatMap { progress in

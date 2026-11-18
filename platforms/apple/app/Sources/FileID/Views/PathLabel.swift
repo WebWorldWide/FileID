@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// A folder path that gives up whole folders when the room runs out ("…/Eckerts 10-4-26/Photos")
-/// instead of cutting a name in half. The full path stays in the tooltip.
+/// Drops whole folders to fit rather than cutting a name in half.
 struct PathLabel: View {
     let path: String
     var font: Font

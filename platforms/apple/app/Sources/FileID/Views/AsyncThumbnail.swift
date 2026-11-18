@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// A cached Quick Look thumbnail with a placeholder while it loads. The image
-/// is dropped when the view leaves the screen; ThumbnailService keeps it cached.
+/// Drops the image when the view leaves the screen; ThumbnailService keeps the cache.
 struct AsyncThumbnail<Placeholder: View>: View {
     let url: URL
     let size: CGFloat

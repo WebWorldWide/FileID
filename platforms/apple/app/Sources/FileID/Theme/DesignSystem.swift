@@ -1,9 +1,6 @@
 import SwiftUI
 
-// FileID design primitives (Prototype v3, softened after cosmic-studio):
-// frosted panels with subtle corners, Archivo for every label, Instrument
-// Serif for titles, monospace only for numbers and shortcuts, one gold accent
-// for selection and primary actions, and quick well-damped motion.
+// FileID design primitives: frosted panels, Archivo labels, Instrument Serif titles, monospace only for numbers and shortcuts, gold as the one accent.
 
 private func rounded(_ radius: CGFloat) -> RoundedRectangle {
     RoundedRectangle(cornerRadius: radius, style: .continuous)

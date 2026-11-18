@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import CoreText
 
-// MARK: - Theme (Prototype v3)
 // Rounded continuous corners, 1 px hairlines, Archivo text, serif page titles.
 // Gold is the only action/selection accent; lavender means a model is
 // running, cyan is information, pink is "done". Text and hairline tokens
@@ -27,7 +26,6 @@ enum Theme {
     static let text2 = adaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
     static let text3 = adaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let label = Color(hex: 0xAEB4BB)
-    static let textOnPanel = Color(hex: 0xE2E5E8)
 
     /// Neutral surfaces behind pages, sheets and popovers.
     static let surfaceBase    = Color(red: 15/255, green: 15/255, blue: 17/255)
@@ -73,7 +71,7 @@ enum Theme {
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
 
-    /// Subtle corners (cosmic-studio): 6 controls, 8 cards and rows, 10 panels.
+    /// Corner radii: 6 for controls, 8 for cards and rows, 10 for panels.
     enum Radius {
         static let xs: CGFloat = 4
         static let s:  CGFloat = 6
@@ -177,8 +175,6 @@ extension Color {
     }
 }
 
-// MARK: - BadgePill → square mono chip
-
 struct BadgePill: View {
     let label:  String
     var color:  Color = Theme.gold
@@ -200,8 +196,6 @@ struct BadgePill: View {
             .overlay { if onImage { shape.stroke(color.opacity(0.6), lineWidth: 1) } }
     }
 }
-
-// MARK: - SettingToggleRow
 
 struct SettingToggleRow: View {
     let title: String

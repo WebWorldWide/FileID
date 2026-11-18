@@ -36,20 +36,9 @@ struct LibraryView: View {
     /// In-flight off-main reload. Cancelled before each new reload so a
     /// slow query can't land its rows after a newer one (latest-wins).
     @State private var reloadTask: Task<Void, Never>?
-    /// Tile-refresh epoch. `store.version` bumps on every change including
-    /// the per-second counter refresh during a live scan; keying each
-    /// visible tile's xattr/thumbnail `.task` on it re-reads Finder tags
-    /// for unchanged files every tick. Freeze the epoch during a scan —
-    /// Finder xattrs can't change while the engine only writes DB rows —
-    /// so tiles don't re-task; the terminal reload bumps `store.version`
-    /// once at the end to refresh them. Kept in sync with `store.version`
-    /// whenever no scan is active.
+    /// Tile-refresh epoch. Frozen during a scan (Finder xattrs can't change while the engine only writes DB rows) so tiles don't re-read tags every tick; the terminal reload bumps `store.version` to refresh them.
     @State private var frozenTileVersion: Int = 0
-    /// Edit-only epoch, bumped by in-app tag / undo writes. Unlike
-    /// `frozenTileVersion` it is NOT frozen during a scan, so a Finder-tag
-    /// edit, bulk-tag, or undo performed while the engine is scanning still
-    /// refreshes the affected tiles' dots instead of going stale until the
-    /// scan ends. Combined with the counter epoch in `tileRefreshToken`.
+    /// Edit-only epoch, bumped by in-app tag writes. Not frozen during a scan, so an edit mid-scan still refreshes the affected dots.
     @State private var editEpoch: Int = 0
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
@@ -104,7 +93,6 @@ struct LibraryView: View {
     @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
 
-    // Multi-select tag mode.
     @State private var selectMode: Bool = false
     // id→FileRow (not a Set) so a selected file survives a `rows` reload
     // (live-scan throttle / filter change re-fetches only the top-200 window);
@@ -120,11 +108,7 @@ struct LibraryView: View {
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
     }
 
-    /// The composite id each tile's `.task` keys on. The counter epoch is
-    /// frozen during a scan (see `frozenTileVersion`) so the per-second batch
-    /// bump doesn't re-task every visible tile; the edit epoch is never frozen
-    /// so an in-app tag / undo write still refreshes the dots mid-scan. Either
-    /// component changing re-tasks the affected tiles.
+    /// The composite id each tile's `.task` keys on: the counter epoch (frozen mid-scan) plus the edit epoch.
     private var tileRefreshToken: String {
         "\(scanActive ? frozenTileVersion : store.version)·\(editEpoch)"
     }
@@ -160,9 +144,7 @@ struct LibraryView: View {
             .onChange(of: tileRefreshToken, initial: true) { _, token in
                 if pageActive { shownTileToken = token }
             }
-            // Surface the undo outcome (renames or tags, incl. partial/total
-            // failures) — it was written to `undoStatus` but never shown, so
-            // failures were silent.
+        // Surface the undo outcome, including partial and total failures, so they aren't silent.
             .alert("Undo", isPresented: Binding(
                 get: { undoStatus != nil },
                 set: { if !$0 { undoStatus = nil } }
@@ -325,9 +307,7 @@ struct LibraryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Hidden ⌘F button focuses the search field. SwiftUI doesn't
-        // attach keyboardShortcut directly to TextField focus, so this
-        // is the standard idiom.
+        // Standard idiom: a hidden ⌘F button, since keyboardShortcut doesn't attach to TextField focus.
         .background(
             Button("") { searchFocused = true }
                 .keyboardShortcut(pageActive ? KeyboardShortcut("f", modifiers: .command) : nil)
@@ -1009,13 +989,7 @@ struct LibraryView: View {
     }
 
     private func reload(firstPageOnly: Bool = false) {
-        // Off the MainActor: similarity + semantic search cosine-scan the full
-        // clip_embeddings table (O(N·512)) and the keyword query hits multiple
-        // tables plus a face join — multi-second on a 50k library, and the live
-        // scan re-fires this on every throttled batch. Run them on a background
-        // task via ReadStore's *Async twins and assign only the results on main.
-        // Latest-wins: cancel any in-flight reload so a slow query can never
-        // overwrite a newer one's results.
+        // Off the MainActor: similarity and semantic search scan clip_embeddings (O(N·512)) and keyword queries join several tables, which is multi-second on a 50k library. Latest-wins: cancel any in-flight reload.
         let seed = similarSeed
         let query = searchText
         if query.trimmingCharacters(in: .whitespacesAndNewlines) != shownQuery { showWeaker = false }
@@ -1084,8 +1058,7 @@ struct LibraryView: View {
                 }
             }
             guard !Task.isCancelled else { return }
-            // Batch chip tags for every visible tile in one SQL query — was
-            // N+1 across the grid before. Off-main too (same read-store scan).
+            // One chip-tag query for every visible tile, off-main.
             let ids = newRows.map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
@@ -1520,11 +1493,7 @@ private struct FileDetailRows: View {
 
 // MARK: - Finder tags editor
 
-/// Inline tag editor — reads the file's current macOS Finder tags
-/// (URLResourceKey.tagNamesKey), shows them as pills, lets the user
-/// add new tags via a text field. Writes go straight to the file via
-/// TagWriter so they show up everywhere macOS exposes Finder tags
-/// (Finder sidebar, Spotlight, Smart Folders).
+/// Inline tag editor: reads and writes the file's Finder tags via TagWriter, so changes show everywhere macOS exposes them.
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
@@ -1611,11 +1580,7 @@ private struct FinderTagsEditor: View {
         runTagEdit { try TagWriter.removeTags([tag], at: $0) }
     }
 
-    /// Run a non-atomic xattr read-modify-write OFF the main
-    /// thread (slow/network volumes can stall the sheet) while SERIALIZING edits
-    /// through `tagEditChain` so two quick taps can't interleave their RMW and
-    /// lose one. Each edit awaits the previous, then does its write on a detached
-    /// task, then assigns on the main actor.
+    /// Runs the non-atomic xattr read-modify-write off the main thread, serialised through `tagEditChain` so two quick taps can't lose an edit.
     private func runTagEdit(_ write: @escaping @Sendable (URL) throws -> [String]) {
         let url = file.url
         let targetID = file.id
