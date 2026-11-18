@@ -2,8 +2,6 @@
 
 use serde::Deserialize;
 
-/// One recognised word or phrase; `timestamp` is relative to the chunk's
-/// extract start.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Segment {
     pub text: String,
@@ -123,7 +121,6 @@ pub fn passages(segments: &[Segment], chunk: &Chunk, media_duration: f64) -> Vec
     passages
 }
 
-/// Swift's `Character.isPunctuation` for the characters recognisers emit.
 fn is_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
         || matches!(c, '\u{2010}'..='\u{2027}' | '\u{3001}' | '\u{3002}' | '\u{FF01}' | '\u{FF0C}' | '\u{FF1F}' | '\u{00A1}' | '\u{00BF}')

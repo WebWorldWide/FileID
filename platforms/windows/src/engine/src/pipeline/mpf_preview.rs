@@ -4,8 +4,6 @@
 const LARGE_THUMBNAIL_TYPES: [u32; 2] = [0x0001_0001, 0x0001_0002];
 pub const MAX_PREVIEW_BYTES: usize = 8 << 20;
 
-/// The largest MPF large-thumbnail JPEG inside a JPEG file, as a slice of
-/// `bytes`. Walks the marker segments before the first scan only.
 pub fn largest_preview(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None;
@@ -42,8 +40,7 @@ pub fn largest_preview(bytes: &[u8]) -> Option<&[u8]> {
     None
 }
 
-/// `(absolute offset, size)` of each large-thumbnail entry in an APP2 payload
-/// that starts with "MPF\0". MPF offsets count from its TIFF header.
+/// `(absolute offset, size)` of each large-thumbnail entry in an APP2 payload starting with "MPF\0"; MPF offsets count from its TIFF header.
 fn mpf_entries(payload: &[u8], payload_offset: usize) -> Option<Vec<(usize, usize)>> {
     if payload.len() < 16 || &payload[..4] != b"MPF\0" {
         return None;
@@ -96,8 +93,6 @@ fn mpf_entries(payload: &[u8], payload_offset: usize) -> Option<Vec<(usize, usiz
     Some(entries)
 }
 
-/// The preview shows the whole frame: its aspect matches the full image
-/// within one percent.
 pub fn same_shape(width: u32, height: u32, primary_width: u32, primary_height: u32) -> bool {
     if width == 0 || height == 0 || primary_width == 0 || primary_height == 0 {
         return false;
@@ -109,13 +104,10 @@ pub fn same_shape(width: u32, height: u32, primary_width: u32, primary_height: u
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// A JPEG file whose APP2 MPF index points at `preview` (appended after
-    /// the primary's EOI as cameras do) and whose EXIF marks it sRGB.
     pub fn jpeg_with_mpf_preview(primary: &[u8], preview: &[u8], srgb: bool) -> Vec<u8> {
         assert!(primary.starts_with(&[0xFF, 0xD8]));
         let mut out = Vec::with_capacity(primary.len() + preview.len() + 256);
         out.extend_from_slice(&primary[..2]);
-        // EXIF APP1: IFD0 -> ExifIFD -> ColorSpace.
         let mut exif = b"Exif\0\0".to_vec();
         let mut tiff: Vec<u8> = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0];
         tiff.extend_from_slice(&1u16.to_le_bytes());
@@ -134,7 +126,6 @@ pub(crate) mod test_support {
         out.extend_from_slice(&[0xFF, 0xE1]);
         out.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
         out.extend_from_slice(&exif);
-        // MPF APP2: version, count, entry list (primary then large thumbnail).
         let mut mpf = b"MPF\0".to_vec();
         let mut t: Vec<u8> = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0];
         t.extend_from_slice(&3u16.to_le_bytes());

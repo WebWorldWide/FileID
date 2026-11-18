@@ -33,7 +33,6 @@ pub(crate) fn catalog_has_rows(conn: &Connection, root: &Path) -> bool {
     .unwrap_or(true)
 }
 
-/// Marks `root` done without a pass: the scan just read every photo's EXIF.
 pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     let mark = marker(state_dir, root);
     let written = mark.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&mark, b""));

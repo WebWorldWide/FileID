@@ -9,11 +9,9 @@ pub const POOL_INTERVAL: f64 = 0.5;
 /// than this to the running mean of the current scene. 0.85 rather than 0.80: edited
 /// clips that keep one subject and grade cut between shots at 0.80-0.85.
 pub const CUT_COSINE: f32 = 0.85;
-/// A slow pan or walk that drifts this far from the scene's first frame also cuts.
 pub const DRIFT_COSINE: f32 = 0.70;
 pub const CONFIRM_FRAMES: usize = 2;
 pub const MIN_SCENE_SECONDS: f64 = 2.0;
-/// Long static shots still get a fresh caption this often, for search coverage.
 pub const MAX_SCENE_SECONDS: f64 = 20.0;
 pub const ACTIVITY_CHANGE: f64 = 0.02;
 pub const ACTIVITY_PAD_SECONDS: f64 = 0.5;
@@ -28,7 +26,6 @@ pub const MAX_WINDOW_FRAMES: usize = 6;
 pub struct Frame {
     pub seconds: f64,
     pub embedding: Vec<f32>,
-    /// Mean absolute luma change from the previous pool frame, 0..=1.
     pub change: f64,
 }
 
@@ -169,8 +166,6 @@ pub fn activity_windows(frames: &[Frame], duration: f64) -> Vec<Window> {
     windows
 }
 
-/// Pool frames from luma signatures alone, for callers without CLIP vectors;
-/// activity windows read only `change`.
 pub fn activity_frames(signatures: &[(f64, Vec<u8>)]) -> Vec<Frame> {
     signatures
         .iter()

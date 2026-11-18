@@ -52,8 +52,6 @@ struct MomentResponse {
     moments: Vec<RawMoment>,
 }
 
-/// Mean absolute luma difference between two equally sized grayscale
-/// signatures, normalized to 0…1.
 pub fn change_score(lhs: &[u8], rhs: &[u8]) -> f64 {
     if lhs.len() != rhs.len() || lhs.is_empty() {
         return 0.0;
@@ -62,9 +60,6 @@ pub fn change_score(lhs: &[u8], rhs: &[u8]) -> f64 {
     total as f64 / (lhs.len() as f64 * 255.0)
 }
 
-/// Turns consecutive 1 fps grayscale signatures into change signals. The
-/// first frame of a chunk compares against `previous`, the last signature of
-/// the preceding chunk, so chunk boundaries do not hide a cut.
 pub fn signals_from_frames(frames: &[(f64, Vec<u8>)], previous: Option<&[u8]>) -> Vec<Signal> {
     let mut result = Vec::with_capacity(frames.len());
     let mut last = previous;
@@ -94,8 +89,6 @@ fn valid_signals(signals: &[Signal], duration: f64, minimum: f64) -> Vec<Signal>
     valid
 }
 
-/// One representative sample per interval: the strongest change peak when it
-/// is far enough from the previous sample, otherwise the interval boundary.
 pub fn sample_times(duration: f64, interval_seconds: f64, signals: &[Signal]) -> Vec<f64> {
     if !duration.is_finite() || duration <= 0.0 || !interval_seconds.is_finite() || interval_seconds <= 0.0 {
         return vec![];
@@ -129,8 +122,6 @@ pub fn sample_times(duration: f64, interval_seconds: f64, signals: &[Signal]) ->
     result
 }
 
-/// Overlapping four-second windows of eight frames; the strongest change peak
-/// in each window replaces its nearest non-initial frame.
 pub fn windows(duration: f64, signals: &[Signal]) -> Vec<Window> {
     if !duration.is_finite() || duration <= 0.0 || duration > MAX_DURATION_SECONDS {
         return vec![];
@@ -241,7 +232,6 @@ fn frame_range(start: f64, end: f64, times: &[f64]) -> Option<(i64, i64)> {
     indices.then_some((start as i64, end as i64))
 }
 
-/// Nearest frame to a timestamp the model quoted, within half a second of the sampled range.
 pub fn frame_index(seconds: f64, times: &[f64]) -> Option<usize> {
     let (first, last) = (*times.first()?, *times.last()?);
     if !seconds.is_finite() || seconds < first - 0.5 || seconds > last + 0.5 {
@@ -250,8 +240,7 @@ pub fn frame_index(seconds: f64, times: &[f64]) -> Option<usize> {
     (0..times.len()).min_by(|&a, &b| (times[a] - seconds).abs().total_cmp(&(times[b] - seconds).abs()))
 }
 
-/// Indices of frames with strictly increasing timestamps. Low-fps sources
-/// decode the same frame for neighbouring requests; the model sees each once.
+/// Low-fps sources decode the same frame for neighbouring requests; the model sees each once.
 pub fn distinct_frame_indices(times: &[f64], window: &Window) -> Result<Vec<usize>> {
     let ordered = times.windows(2).all(|pair| pair[0] <= pair[1]);
     let bounded = times.iter().all(|t| t.is_finite() && *t >= window.start && *t <= window.end);
@@ -371,8 +360,6 @@ fn concise_title(text: &str) -> String {
 
 pub const CHAPTER_SUGGESTION_PREFIX: &str = "timeline-chapter-suggestion-v1/";
 
-/// Draft chapters at confirmed caption transitions: a caption unlike its
-/// predecessor and like its successor starts a new chapter.
 pub fn chapter_suggestions(
     file_id: i64,
     source_revision: &str,
@@ -440,7 +427,6 @@ pub fn speech_chunks(duration: f64, chunk_seconds: f64) -> Vec<(f64, f64)> {
     let mut start = 0.0;
     while start < duration {
         let end = duration.min(start + chunk_seconds);
-        // Fold a sliver shorter than a second into the previous chunk.
         if end - start < 1.0 && !chunks.is_empty() {
             if let Some(last) = chunks.last_mut() {
                 *last = (last.0, end);

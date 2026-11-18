@@ -1,7 +1,5 @@
 //! Stage 5 convergence path: the scan's per-file work when the Mac app hosts the engine. Each stored result follows the Swift engine's `Tagging.processFile`, so either engine reads the other's library.
-//! quality and the clustering hold, no vectors yet) and get their vectors in the
-//! Mac face space later; this path never writes `rust-align112-v1` faces.
-//! `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
+//! Vision faces are stored without vectors (box, quality, clustering hold) and get their vectors in the Mac face space later; this path never writes `rust-align112-v1` faces. `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
@@ -40,8 +38,6 @@ pub(crate) struct Frame {
 static CLIP_READY: AtomicBool = AtomicBool::new(false);
 static RAM_PLUS_READY: AtomicBool = AtomicBool::new(false);
 
-/// Runs under `ADAPTER_MODELS`' lock once no stack, catch-up pass or timeline
-/// encoder holds the adapter models.
 pub(crate) fn unload_adapters() {
     CLIP_READY.store(false, Ordering::Release);
     RAM_PLUS_READY.store(false, Ordering::Release);
@@ -115,25 +111,19 @@ fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Optio
     (None, hash, legacy)
 }
 
-/// `DocText.extract` trimming and cap over any extractor's output.
 fn stored_text(text: Option<String>) -> Option<String> {
     let trimmed = text?.trim().to_string();
     (!trimmed.is_empty()).then(|| trimmed.chars().take(STORED_TEXT_CHARS).collect())
 }
 
-/// Reads, hashes and decodes one file on a decoder thread. A byte-identical
-/// copy of an image that is already analyzed, or being analyzed, is hashed
-/// only: the writer copies the twin's rows (pipeline/twin_reuse.rs).
 pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>, from_decoder: bool) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
-    // `bytes` is present only for a full SHA-256, the one identity worth sharing.
     let twin = match (content_hash, file.kind, twins, bytes.as_deref()) {
         (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => claim_twin(twins, hash, from_decoder),
         _ => TwinClaim::None,
     };
     let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
-    // The copy keeps its own capture time for its date and Year tag.
     let exif = match bytes.as_deref() {
         Some(bytes) if awaits_twin => Some(parse_exif_fields(bytes).unwrap_or((None, None, None, None))),
         _ => None,
@@ -186,7 +176,6 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
     }
 }
 
-/// `Tagging.lightweightAesthetic` over the working image's size.
 fn aesthetic(width: u32, height: u32, size_bytes: u64) -> f64 {
     let megapixels = f64::from(width) * f64::from(height) / 1_000_000.0;
     let size_score = (size_bytes as f64 / 1_048_576.0 / 5.0).min(1.0);
@@ -242,14 +231,11 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
     model.embed(&resized).map_err(|error| tracing::warn!(?error, "MobileCLIP embed failed")).ok()
 }
 
-/// `Tagging.processFile` for one file.
 pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) -> TaggedFile {
     let started = Instant::now();
     let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, exif, twin, mac, .. } = predecoded;
     let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
     let mut row = TaggedFile::bare(&file);
-    // A cloud placeholder is catalogued from its metadata only (reading it
-    // would download it), as the portable pipeline does.
     if file.online_only {
         row.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return row;
@@ -330,7 +316,6 @@ fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields
     row.reuse_twin = true;
 }
 
-/// Document keywords and the BGE embedding, as `Tagging.processDoc` stores them.
 async fn document_text(row: &mut TaggedFile, text: Option<String>, models: &Arc<ModelStack>) {
     let Some(text) = text else { return };
     for (label, score) in crate::util::keywords::extract(&text) {
@@ -566,7 +551,6 @@ mod tests {
 
     #[test]
     fn extra_tags_follow_tagging_swift() {
-        // 2024-06-01T12:00:00Z
         let tags = extra_tags(Some(1_717_243_200.0), Some("ILCE-7M3 Sony"));
         assert_eq!(tags, vec!["Year_2024".to_string(), "Sony".to_string()]);
         assert!(extra_tags(Some(100.0), Some("Mystery Cam")).is_empty());
@@ -580,14 +564,12 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 10,
             modified_unix: 5.0,
-            // 2019-07-01T12:00:00Z
             created_unix: Some(1_561_982_400.0),
             online_only: false,
             file_ref: None,
             moved_from_known_row: false,
         };
         let mut row = TaggedFile::bare(&file);
-        // 2024-06-01T12:00:00Z
         twin_row(&mut row, &file, Some((Some("iPhone 15".into()), Some(1.0), Some(2.0), Some(1_717_243_200.0))));
         assert!(row.reuse_twin && row.captured_from_exif);
         assert_eq!(row.created_unix, Some(1_717_243_200.0));

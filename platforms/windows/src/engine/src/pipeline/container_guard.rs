@@ -3,7 +3,6 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Mirrors `symphonia_core::probe::Probe::PROBE_SEARCH_LIMIT`.
 const PROBE_LIMIT: u64 = 1 << 20;
 const MAX_ELEMENTS: u32 = 200_000;
 const MAX_DEPTH: u32 = 16;
@@ -27,7 +26,6 @@ impl Source<'_> {
         }
     }
 
-    /// `n` bytes at `offset`, or fewer at the end of the source.
     fn read(&mut self, offset: u64, n: usize) -> Option<Vec<u8>> {
         let len = self.len();
         if offset >= len {
@@ -76,9 +74,6 @@ fn marker(window: &[u8]) -> Option<Container> {
     }
 }
 
-/// Where symphonia's probe would start a format reader, and which one. Like the
-/// probe it needs a full 16-byte window, skips ID3v2 tags, and gives up after
-/// 1 MiB without a marker.
 fn locate(src: &mut Source) -> Option<(Container, u64)> {
     let mut base = 0u64;
     loop {
@@ -111,7 +106,6 @@ fn locate(src: &mut Source) -> Option<(Container, u64)> {
     }
 }
 
-/// True when symphonia can probe `src` without trusting an impossible length.
 pub(crate) fn symphonia_safe(mut src: Source) -> bool {
     let Some((container, at)) = locate(&mut src) else {
         return true;
@@ -198,7 +192,6 @@ fn bmff(src: &mut Source, start: u64, end: u64, parent: Parent, depth: u32, budg
     true
 }
 
-/// A full box whose u32 entry count (after version/flags) must fit its payload.
 fn table(src: &mut Source, payload: u64, len: u64, fixed: u64, entry: u64) -> bool {
     match src.exact::<8>(payload) {
         Some(fields) if len >= fixed => be_u32(&fields[4..8]) * entry <= len - fixed,
@@ -227,7 +220,6 @@ fn riff(src: &mut Source, start: u64, end: u64) -> bool {
     true
 }
 
-/// CAF: `caff` + version + flags, then chunks of type, i64 size and body.
 fn caf(src: &mut Source, start: u64, end: u64) -> bool {
     let mut at = start + 8;
     while at < end {
@@ -241,7 +233,6 @@ fn caf(src: &mut Source, start: u64, end: u64) -> bool {
             return false;
         }
         if &header[..4] == b"pakt" {
-            // Every packet has at least one byte of audio, so the count is bounded by the file.
             match src.exact::<8>(at + 12) {
                 Some(count) if size >= 24 => {
                     if u64::try_from(i64::from_be_bytes(count)).is_ok_and(|count| count > end) {
@@ -264,7 +255,6 @@ const EBML_MASTERS: &[u64] = &[
 const EBML_CLUSTER: u64 = 0x1F43B675;
 const EBML_SEGMENT: u64 = 0x18538067;
 
-/// One EBML variable-length integer: (value, encoded length, all value bits set).
 fn vint(src: &mut Source, at: u64, max_len: u32, keep_marker: bool) -> Option<(u64, u64, bool)> {
     let first = src.exact::<1>(at)?[0];
     let len = first.leading_zeros() + 1;
