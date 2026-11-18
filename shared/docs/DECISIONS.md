@@ -5045,3 +5045,23 @@ The 2026-11-10 entry kept one difference: the Rust engine refuses an Organize Fo
 The plain Rust engine tagged audio with artist, album, title, genre and year, and put a file-date Year tag on every kind of file; the Swift engine and the Mac-hosted Rust engine store the kind tag and, for audio, artist, album and title. A catalog must read the same whichever engine wrote it, and plans differ when tags differ, so the plain engine now stores what the other two do. The cost is visible on Windows and Linux: genre and year chips on audio are gone. Genre is worth having; it should come back as a feature in every engine at once, not as a difference between them. A Year tag means the year a picture was taken, so it stays on images only.
 
 Not adopted from the same change: counting a video as analysed when no tagger ran. That would store the `Video` tag on a scan without models, at the price of replacing a video's stored scene tags on such a rescan; keeping tags a person already has outweighs one kind tag.
+
+## 2026-11-17 — Trash put back is authorized by the catalog's roots plus the root signed into the journal item
+
+`wipeLibrary` (Start over) deletes the catalog's roots, so a put back after it was refused as "outside every authorized library root" and files FileID had trashed could only come back through Finder (PT-9). Each Trash journal item now records the innermost library root that contained the file, inside the HMAC-signed line. A put back is allowed if the target is inside a current catalog root or inside that recorded root (which must still exist); nothing wider. Unsigned lines are dropped as before, an edited root fails the HMAC, an imported Swift `trash-journal.json` gets no root. Older items without a root keep the old rule, so after a wipe they stay refused. The Swift engine previously did not check put-back targets for batches found only in the signed log; it now applies the same rule (a stricter behaviour for that path).
+
+## 2026-11-17 — Trash snapshots carry the file's faces
+
+Put back used to lose a file's faces for good (the snapshot held `files`, CLIP, tags and take quality; the cascade dropped `face_prints`). Both engines now snapshot `face_prints` in the same JSON shape with no version marker (old engines ignore an unknown table). A restored face whose person no longer exists comes back unassigned; persons touched are recounted. A journal from before this clears `has_faces` and `modified_at` so the next scan re-detects faces.
+
+## 2026-11-17 — A careful text reader that stops answering is backed off
+
+On the owner's drive an unchanged rescan waited the full 180 s for a wedged reader on every scan. The catch-up now remembers a failure for 60 s, doubling to 15 min, probes with a 5 s wait after a failure, skips the pass (and its model load) when only careful reads are owed and the reader is backed off, and resets on an explicit rescan or a model install. Owed reads are never dropped; they stay owed in the catalog.
+
+## 2026-11-17 — Photo export cap 100 megapixels
+
+The Rust tools refused photos above 32 MP; the owner's camera writes 32.7 MP. 100 MP keeps the decoded RGB frame (~300 MB) under the decoder's 512 MiB allocation limit; the video cap is unchanged. Memory near 100 MP is not measured.
+
+## 2026-11-17 — The Linux app is not reformatted
+
+`cargo fmt` on `platforms/linux` restyles 59 files and changes two digest-locked network sources; no gate requires it and the engine turns formatting off on purpose. Not adopted until the owner approves a digest refresh.

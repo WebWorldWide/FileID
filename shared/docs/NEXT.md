@@ -2,6 +2,27 @@
 
 Short, current priorities only: open work, nothing else. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`. When an item is finished and verified, delete it here.
 
+## Open from the 2026-11-17 production push
+
+Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDDev/scratch/prod-test/REPORT.md` (PT-1…PT-19).
+
+- [ ] **Owner decisions:**
+  - **PT-12:** Organize Folders plans 0 moves on the whole `Camera` folder (all 37 event folders are anchors); `RESTRUCTURE.md` once measured 2,966. Intended?
+  - **PT-13:** search counts differ between engines ("pumpkins": Rust 72 good + 25 weaker, Swift 48; "Kyle Baseball Game" 283 vs 184). Which ranking is canonical?
+  - **PT-3:** the Rust engine catalogues files inside dot-folders (`.vscode/`); Swift skips them. Keep?
+  - **PT-18:** the real `~/.Trash` went from 2 items to 0 at 12:54 on 2026-11-17. No FileID code empties the Trash and every test used a test Trash root. Did the owner empty it?
+- [ ] **ONNX Runtime Swift package unreachable:** from this Mac on 2026-11-17 ~19:15, `github.com/microsoft/onnxruntime-swift-package-manager` and `github.com/microsoft/onnxruntime` return 404 (`git ls-remote`, `gh api`, `curl`). CI fetched the package at 08:53 UTC the same day. Builds work from the SwiftPM cache (`--skip-update`). Check from another network. If it stays gone, mirror the pinned revision (`b7fb7f7d`, 1.24.2) somewhere the owner controls, or drop the package (`SWIFT_ENGINE_RETIREMENT.md` §6.2 step 7).
+- [ ] **Chat:** "show me photos of Kyle" with no named people still runs a keyword search; it should say people are not named yet.
+- [ ] **Swift "Nothing changed" notice counts iCloud-only files** (`Discovery.swift`, `presentUnchanged`); count current files separately.
+- [ ] **Photo export near 100 MP:** memory not measured (decoded RGB ~300 MB plus an RGBA copy).
+- [ ] **PT-9 limits:** Trash batches from builds before 2026-11-17 carry no library root, so after Start over they still cannot be put back from FileID (Finder works).
+- [ ] **PT-6:** the reader backoff is tested with stub readers only; confirm on the real hosted reader with owed careful reads (the first scan in a process can still wait up to 180 s while the reader warms).
+- [ ] **PT-16/PT-19 (not reproduced):** a hosted clean shutdown after a kill -9 restart needed a kill; one Swift Organize plan returned 0 moves once, then 3 every time.
+- [ ] **GTK Chat scan-first state:** unit-tested only; look at it on a Linux desktop (group D).
+- [ ] **Windows "Staying put"** still counts the whole library (`RestructureView.xaml.cs:455-456`; the Mac fix is in `a4804838`). Needs a Windows build. The Windows Chat scan-first state is not ported either.
+- [ ] **Release-build checks not run on this pass:** the macos.yml release/App Store/smoke builds, `check_catalog_index_jobs.py`, `check_binary_privacy.py` on release binaries. CI runs them.
+- [ ] **On screen (group B):** the new Chat states were seen in captures (`~/FileIDDev/scratch/prod-mac/captures-final/`), not clicked; sheets, hover, playback and drag-drop still need the owner.
+
 ## Production to-do (2026-11-14)
 
 Everything between the current tree and a release, in one list, grouped by who or what it needs. "Owner" means the item needs the owner's account, signature, screen or hardware; an agent session cannot do it (on 2026-11-14 the session could not take a screenshot, send input or merge a PR). Detail for the release gates is in `SHIP.md`. The Mac app has been seen once, on 2026-11-14, through its debug self-capture (`FILEID_SELF_SHOT_DIR=<dir>`, `Core/SelfCapture.swift`; Swift engine only, no sheets, hover states, scrolled-off content or playback); everything else is still unseen. The GTK app runs on the Mac through Homebrew GTK with the same capture (`FILEID_SELF_SHOT`); that is not a Linux desktop.
