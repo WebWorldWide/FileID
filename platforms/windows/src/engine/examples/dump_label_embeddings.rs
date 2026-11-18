@@ -1,6 +1,6 @@
 //! Prompt-ensembled CLIP text embeddings for a label list (one label per
 //! line) as raw little-endian f32 rows: the matrix behind the RAM++ x CLIP
-//! agreement experiment (DECISIONS 2026-11-12, not adopted) and the
+//! agreement experiment and the
 //! `--matrix` option of `shared/scripts/eval/tag_eval.py`. Reads the CLIP
 //! text model from `FILEID_MODELS_DIR`.
 //!   cargo run --example dump_label_embeddings -- <labels.txt> <out.f32>

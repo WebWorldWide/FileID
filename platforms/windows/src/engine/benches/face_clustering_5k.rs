@@ -1,7 +1,6 @@
 //! Bench face clustering on a synthetic 5K-face corpus.
 //!
-//! The brute-force O(n²) similarity pass is the hot loop; this bench tracks
-//! its scaling as we move from the current implementation to (eventually) HNSW.
+//! The brute-force O(n²) similarity pass is the hot loop; this bench tracks its scaling.
 //! Use `cargo bench -p fileid-engine --bench face_clustering_5k`.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
