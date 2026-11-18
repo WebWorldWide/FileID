@@ -96,38 +96,38 @@ struct WelcomeSheet: View {
                 action: { bge.install() },
                 cancel: { bge.cancel() }
             )
-            Menu {
-                ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
-                    Button {
-                        selectedVLM = kind
-                    } label: {
-                        HStack {
-                            Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
-                            if kind == selectedVLM {
-                                Image(systemName: "checkmark").accessibilityHidden(true)
+            HStack(spacing: 10) {
+                Text("Description model").font(Theme.Font.body(13.5))
+                Spacer(minLength: 8)
+                Menu {
+                    ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
+                        Button {
+                            selectedVLM = kind
+                        } label: {
+                            HStack {
+                                Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
+                                if kind == selectedVLM {
+                                    Image(systemName: "checkmark").accessibilityHidden(true)
+                                }
                             }
                         }
+                        .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
+                        .disabled(!vlmChoiceAvailable(kind))
+                        .help("\(kind.displayName) · \(kind.licenseName)")
                     }
-                    .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
-                    .disabled(!vlmChoiceAvailable(kind))
-                    .help("\(kind.displayName) · \(kind.licenseName)")
+                } label: {
+                    DSMenuLabel(title: Self.shortName(selectedVLM))
                 }
-            } label: {
-                HStack {
-                    Text("Description model")
-                    Spacer()
-                    Text(Self.shortName(selectedVLM))
-                    Image(systemName: "chevron.up.chevron.down")
-                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .disabled(vlmInProgress)
+                .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
+                .accessibilityLabel("Description model")
+                .accessibilityValue(Self.shortName(selectedVLM))
             }
-            .disabled(vlmInProgress)
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .font(Theme.Font.body(13.5))
             .padding(.horizontal, 22).padding(.top, 12)
-            .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
-            .accessibilityLabel("Description model")
-            .accessibilityValue(Self.shortName(selectedVLM))
             Text(selectedVLM == hardwareRecommendedVLM
                  ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
                  : "Your choice. FileID uses it to describe files and answer Chat.")

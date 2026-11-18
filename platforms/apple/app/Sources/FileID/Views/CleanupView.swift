@@ -702,16 +702,7 @@ private struct GroupCard: View {
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle")
-                            Text("Choose…")
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(Theme.Font.body(12, .medium))
-                        .foregroundStyle(Theme.text1)
-                        .padding(.horizontal, 9).frame(height: 26)
-                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: 26)
                     }
                     .menuStyle(.button)
                     .buttonStyle(.plain)

@@ -33,7 +33,7 @@ struct MetaText: View {
     @Environment(\.fixedTextSize) private var fixed
     init(_ text: String, color: Color = Theme.text3, size: CGFloat = 12) { self.text = text; self.color = color; self.size = max(size, 11.5) }
     var body: some View {
-        Text(text).font(Theme.Font.body(size, fixed: fixed)).foregroundStyle(color)
+        Text(text).font(Theme.Font.body(size, fixed: fixed)).monospacedDigit().foregroundStyle(color)
     }
 }
 
@@ -344,6 +344,28 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
                 .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
         }
+    }
+}
+
+/// Face of a pop-up menu button, drawn like a secondary button: use inside a `Menu` label with
+/// `.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)`.
+struct DSMenuLabel: View {
+    let title: String
+    var systemImage: String? = nil
+    var height: CGFloat = Theme.Metrics.controlSmall
+    @Environment(\.fixedTextSize) private var fixed
+    var body: some View {
+        HStack(spacing: 6) {
+            if let systemImage { Image(systemName: systemImage) }
+            Text(title)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+        }
+        .font(Theme.Font.body(12, .medium, fixed: fixed))
+        .foregroundStyle(Theme.text1)
+        .padding(.horizontal, 9).frame(height: height)
+        .background(Color.white.opacity(0.05), in: rounded(Theme.Radius.s))
+        .overlay(rounded(Theme.Radius.s).strokeBorder(Theme.hairlineStrong, lineWidth: 1))
+        .contentShape(rounded(Theme.Radius.s))
     }
 }
 

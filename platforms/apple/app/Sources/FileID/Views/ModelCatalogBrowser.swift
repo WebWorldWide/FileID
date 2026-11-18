@@ -17,6 +17,13 @@ struct ModelCatalogBrowser: View {
     @State private var confirmDownload: AIModelKind?
     private var ramGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
     private var selected: AIModelKind? { selection.flatMap(AIModelKind.init(rawValue:)) }
+    private func moveSelection(by delta: Int) {
+        let ids = filtered.map(\.rawValue)
+        guard !ids.isEmpty else { return }
+        let current = selection.flatMap(ids.firstIndex(of:)) ?? (delta > 0 ? -1 : ids.count)
+        selection = ids[min(max(current + delta, 0), ids.count - 1)]
+    }
+
     private var filtered: [AIModelKind] {
         AIModelKind.allCases.filter { kind in
             (!visionOnly || kind.supportsVision) &&
@@ -40,12 +47,9 @@ struct ModelCatalogBrowser: View {
                 Spacer()
                 DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .offset(y: -2)
             }
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)
-                TextField("Search model, publisher or license", text: $query).textFieldStyle(.plain)
-                    .accessibilityLabel("Search models")
-            }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+            DSTextField(placeholder: "Search model, publisher or license", text: $query, icon: "magnifyingglass")
             HStack {
                 if !visionOnly {
                     SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")], height: 26)
@@ -53,10 +57,14 @@ struct ModelCatalogBrowser: View {
                 Spacer()
                 Toggle("Fits this Mac", isOn: $fitsOnly)
                 Toggle("Downloaded", isOn: $installedOnly)
-            }.font(Theme.Font.body(12))
+            }
+            .toggleStyle(DSCheckboxToggleStyle())
+            .font(Theme.Font.body(12))
             ScrollViewReader { proxy in
-            List(selection: $selection) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
                 ForEach(filtered, id: \.rawValue) { kind in
+                    Button { selection = kind.rawValue } label: {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: kind.supportsVision ? "photo.on.rectangle" : "text.bubble")
                             .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
@@ -70,15 +78,30 @@ struct ModelCatalogBrowser: View {
                         VStack(alignment: .trailing, spacing: 4) {
                             Text(ByteCountFormatter.string(fromByteCount: kind.approxBytes, countStyle: .file)).monospacedDigit()
                             Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
-                                .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : .secondary)
+                                .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : Theme.text3)
                             if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
                             if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
                                 Text("\(Int(decode.rounded())) words per second (approx.)").foregroundStyle(Theme.gold).monospacedDigit()
                             }
                         }.font(Theme.Font.body(11))
-                    }.padding(.vertical, 6).tag(kind.rawValue)
+                    }
+                    .padding(.vertical, 8).padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(selection == kind.rawValue ? Theme.goldWash : Color.clear)
+                    .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                    }
+                    .buttonStyle(DSRowButtonStyle(radius: 0))
+                    .id(kind.rawValue)
+                    .accessibilityAddTraits(selection == kind.rawValue ? .isSelected : [])
                 }
-            }.dsList().listStyle(.inset).overlay {
+                }
+            }
+            .dsList()
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
+            .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
+            .overlay {
                 if filtered.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
