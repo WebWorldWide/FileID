@@ -1,5 +1,4 @@
 ﻿// LibraryView code-behind. Routes search-box + kind-filter input into the
-// LibraryViewModel + drives the footer's loading/empty/error states.
 
 using System;
 using System.Collections.Generic;
@@ -24,38 +23,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private FileTile? _lastClickedTile;
     private int _trashInFlight;
     private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
-    // Live-tile streaming during a scan. Mirrors macOS LibraryView's
-    // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
-    // whenever a new BatchSummary lands, but throttled so a fast scan
-    // doesn't issue 30+ DB reads per second.
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
     private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(1);
     private bool _unloaded;
-    // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
-    // LoadThumbAsync's finally-block .Remove can resume on a worker thread
-    // after ConfigureAwait(true) without a SyncContext. ConcurrentDictionary
-    // makes the Add/Remove pair safe regardless.
+    // ElementPrepared/ElementClearing fire on the UI thread, but LoadThumbAsync's finally-block .Remove can resume on a worker thread after ConfigureAwait(true) without a SyncContext.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<FileTile, CancellationTokenSource> _inflight = new();
     private readonly ClipSearchService _clip;
-    // Owned so OnUnloaded can dispose its SQLite connection + SemaphoreSlim.
-    // Neither ClipSearchService.Dispose nor LibraryViewModel.Dispose releases it,
-    // so without this it leaked one connection per tab navigation.
+    // Neither ClipSearchService.Dispose nor LibraryViewModel.Dispose releases it, so without this it leaked one connection per tab navigation.
     private readonly ReadStore _store;
-    // One-shot tile-entrance gate. ItemsRepeater reuses element instances and
-    // re-realizes them on every collection Reset — the throttled mid-scan
-    // refresh raises a Reset ~1 Hz, so replaying the entrance on each
-    // ElementPrepared made the whole grid pulse every second during a scan.
-    // Track which element instances have already played their entrance so each
-    // plays it at most once per element lifetime. Keyed on the element (not the
-    // FileTile, which is recreated every Reset) so the mark survives rebinds.
+    // Keyed on the element (not the FileTile, which is recreated every Reset) so the mark survives rebinds.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object> _enteredTiles = new();
     private static readonly object _enteredMarker = new();
 
-    // Keyboard-navigation cursor into ViewModel.Items. -1 until the first
-    // arrow key or tile click establishes it. Drives single-select movement
-    // (arrows), range-extend (Shift+arrows), Enter (open preview), Space
-    // (toggle select). The selection highlight doubles as the focus cue.
     private int _focusedIndex = -1;
     private Microsoft.UI.Xaml.Input.KeyEventHandler? _gridKeyHandler;
 
@@ -68,20 +48,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         InitializeComponent();
         Unloaded += OnUnloaded;
-        // Named handlers (not inline lambdas) so OnUnloaded can detach
-        // them. Inline lambdas leak the view + VM graph (~500 KB) every
-        // time the tab is navigated away from and back to.
+        // Inline lambdas leak the view + VM graph (~500 KB) every time the tab is navigated away from and back to.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.LibraryQueryRequested += OnLibraryQueryRequested;
 
-        // Arrow-key navigation for the tile grid. ItemsRepeater has NO built-in
-        // keyboard nav (unlike GridView), so we drive it ourselves. Wire on the
-        // tunneling Preview pass with handledEventsToo — same reason the preview
-        // sheet does (9dd7785): the ScrollViewer's own OnKeyDown would otherwise
-        // eat arrows as scroll before our bubbling handler sees them.
+        // ItemsRepeater has NO built-in keyboard nav (unlike GridView), so we drive it ourselves.
         _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
         GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
         GridScroller.ViewChanged += OnGridScrolled;
@@ -99,11 +73,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             catch
             {
-                // ReadStore.OpenAsync sets LastOpenError on a real open failure,
-                // which LibraryViewModel surfaces into ErrorMessage (StatusText) via
-                // its service-PropertyChanged subscription — so the error shows even
-                // though this throw skips RefreshAsync. An initial open before the
-                // first scan (DB not yet created) sets nothing and no-ops silently.
+                // ReadStore.OpenAsync sets LastOpenError on a real open failure, which LibraryViewModel surfaces into ErrorMessage (StatusText) via its service-PropertyChanged subscription — so the error shows even though this throw skips RefreshAsync.
             }
             SyncUndoPill();
             SyncBanners();
@@ -167,14 +137,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
         });
 
-    // Refreshes the inline banner visibility based on EngineClient
-    // observables + the user's current search query. Cheap; called
-    // whenever a relevant property fires.
     private void SyncBanners()
     {
         if (_unloaded) return;
-        // CLIP powers free-text semantic search; prompt to install it when the
-        // user types a query (≥3 chars) and the MobileCLIP slot isn't installed.
         bool clipMissingShow = false;
         try
         {
@@ -188,10 +153,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         catch { /* defensive */ }
         ClipMissingBanner.Visibility = clipMissingShow ? Visibility.Visible : Visibility.Collapsed;
 
-        // Deep Analyze banner: visible whenever the engine is mid-caption.
-        // Engine throttles Progress events to 4 Hz; once Processed == Total
-        // (or DeepAnalyzeComplete arrives, clearing DeepAnalyzeProgress in
-        // EngineClient.Apply), the banner collapses.
         var dap = EngineClient.Instance.DeepAnalyzeProgress;
         if (dap is not null && dap.Processed < dap.Total)
         {
@@ -208,11 +169,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             DeepAnalyzeBanner.Visibility = Visibility.Collapsed;
         }
 
-        // Face clustering banner: simple — currently we don't get a
-        // progress event during clustering, so just show it briefly when
-        // the engine kicks off and clear it when LastFaceClustering lands.
-        // The auto-trigger after a scan completes runs in <2s on typical
-        // libraries so a short banner is enough.
+        // The auto-trigger after a scan completes runs in <2s on typical libraries so a short banner is enough.
         FaceClusteringBanner.Visibility = Visibility.Collapsed;
     }
 
@@ -260,8 +217,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>select-all visible toggle. If anything is
-    /// currently selected, clear; otherwise select every visible tile.</summary>
+    /// <summary>If anything is currently selected, clear; otherwise select every visible tile.</summary>
     private void OnSelectAllClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnSelectAllClicked), () =>
         {
@@ -281,8 +237,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             UpdateSelectionBar();
         });
 
-    /// <summary>pop the top undo entry. The label update
-    /// follows automatically via the UndoStack PropertyChanged handler.</summary>
     private async void OnUndoLastClicked(object sender, RoutedEventArgs e)
     {
         try
@@ -302,22 +256,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>
-    /// CRITICAL DISPOSAL ORDER — do not reorder without re-reading this:
-    ///
-    ///   1. Cancel in-flight CTSes (thumb loads).
-    ///   2. Dispose ViewModel FIRST. Its Dispose cancels `_disposalCts`,
-    ///      which propagates through every linked token into in-flight
-    ///      RefreshAsync / SemanticSearch awaits.
-    ///   3. THEN dispose `_clip` and `_thumbnails`. If those go first, a
-    ///      resumed task touches a disposed service and the process dies
-    ///      hard ("click sidebar mid-scan → app dies" crash class). On
-    ///      Windows there's no SwiftUI lifecycle to bail us out of an
-    ///      inverted order.
-    ///
-    /// This is one of three lifecycle-order invariants Windows has to
-    /// hand-orchestrate. Do not touch.
-    /// </summary>
+    /// <summary>This is one of three lifecycle-order invariants Windows has to hand-orchestrate.</summary>
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
@@ -330,8 +269,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { AppViewModel.Instance.LibraryQueryRequested -= OnLibraryQueryRequested; } catch { /* swallow */ }
         try { StopOfflineRoots(); } catch (Exception ex) { DebugLog.Warn("LibraryView: stop offline roots failed: " + ex.Message); }
         try { AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged; } catch { /* swallow */ }
-        // Step 1: cancel + dispose every in-flight thumb load so closing
-        // the tab doesn't leave background tasks holding BitmapImage refs.
+        // Step 1: cancel + dispose every in-flight thumb load so closing the tab doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
         {
             try { cts.Cancel(); } catch { /* swallow */ }
@@ -344,15 +282,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _gridKeyHandler = null;
         }
         try { GridScroller.ViewChanged -= OnGridScrolled; } catch { /* swallow */ }
-        // Step 2: dispose ViewModel FIRST. See the method-level remark
-        // above for why the order is load-bearing.
+        // See the method-level remark above for why the order is load-bearing.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
-        // Step 3: only AFTER ViewModel has cancelled its disposal CTS,
-        // tear down the services its in-flight tasks may still touch.
+        // Step 3: only AFTER ViewModel has cancelled its disposal CTS, tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
-        // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
-        // in-flight reads use its connection — so the SQLite connection +
-        // SemaphoreSlim are released instead of leaking per tab nav.
+        // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose in-flight reads use its connection — so the SQLite connection + SemaphoreSlim are released instead of leaking per tab nav.
         try { _store.Dispose(); } catch { /* swallow */ }
     }
 
@@ -368,11 +302,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(FooterVisibility));
         }
-        // A background refresh (mid-scan batch / scan-complete / undo) can prune
-        // selected tiles; the VM drops them from its selection set and raises
-        // SelectedCount, but the selection toolbar otherwise only re-reads the
-        // count on direct user input — so it would keep showing the stale,
-        // pre-prune number. Re-sync the bar here too.
+        // A background refresh (mid-scan batch / scan-complete / undo) can prune selected tiles; the VM drops them from its selection set and raises SelectedCount, but the selection toolbar otherwise only re-reads the count on direct user input — so it would keep showing the stale, pre-prune number.
         if (e.PropertyName is nameof(LibraryViewModel.SelectedCount))
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
@@ -394,8 +324,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
         SyncShownCount();
-        // A reorder is Remove+Insert of the same instance, so check after the
-        // merge settles rather than closing on the Remove.
         if (SelectedPane.Tile is { } paneTile
             && (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset
                 || e.OldItems?.Contains(paneTile) == true))
@@ -407,8 +335,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>macOS filter bar: "N of M shown" for the paged listing, the hit
-    /// count while searching.</summary>
     internal static string ShownCount(int shown, int? total) =>
         total is { } all
             ? $"{shown:N0} of {all:N0} shown"
@@ -471,7 +397,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             SyncBanners();
         });
 
-    // Ctrl+F → focus the search box. Mirrors macOS Cmd+F on LibraryView.swift.
     private void OnFocusSearchAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnFocusSearchAccelerator), () =>
         {
@@ -480,9 +405,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             args.Handled = true;
         });
 
-    // Esc → if a selection is active, clear it; else if the search box has
-    // text, clear it and refocus the grid. Matches macOS Library's chained
-    // .keyboardShortcut(.escape).
     private void OnEscapeAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnEscapeAccelerator), () =>
         {
@@ -506,8 +428,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
         });
 
-    // Ctrl+A → select-all-visible. Identical to the toolbar "Select" button
-    // so users who default to keyboard shortcuts get the same behavior.
     private void OnSelectAllAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnSelectAllAccelerator), () =>
         {
@@ -516,8 +436,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             args.Handled = true;
         });
 
-    // Ctrl+Z → undo the last destructive op (rename / trash / tag apply /
-    // restructure apply). No-op when the UndoStack is empty.
     private void OnUndoAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
@@ -536,31 +454,17 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
         });
 
-    // Right-tap on a tile lets the keyboard accelerate to the same flyout
-    // (Shift+F10 / Menu key). The MenuFlyout is wired in XAML; this just
-    // makes sure the right-tap event bubbles cleanly without selection
-    // weirdness.
     private void OnTileRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
     {
         e.Handled = false;
     }
 
-    // ItemsRepeater calls ElementPrepared when a tile scrolls into view +
-    // ElementClearing when it scrolls out. We fire off a thumbnail load on
-    // prepare; cancel + null on clear so the LRU keeps the cache hot but
-    // off-screen tiles don't hold visible BitmapImage refs that block GC.
+    // We fire off a thumbnail load on prepare; cancel + null on clear so the LRU keeps the cache hot but off-screen tiles don't hold visible BitmapImage refs that block GC.
     private void OnRepeaterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
         if (args.Element is not FrameworkElement el) return;
-        // x:Bind in the ItemsRepeater ItemTemplate does NOT populate the
-        // realized element's DataContext (compiled bindings bypass it), so
-        // the old `el.DataContext is not FileTile` guard returned on every
-        // tile — LoadThumbAsync never ran and not one thumbnail rendered
-        // (the L2 disk cache stayed empty across every session). Resolve the
-        // tile from the authoritative repeater index, then set DataContext
-        // so the sibling code-behind handlers (Clearing / Tapped / Drag)
-        // that read el.DataContext resolve the same tile.
+        // Resolve the tile from the authoritative repeater index, then set DataContext so the sibling code-behind handlers (Clearing / Tapped / Drag) that read el.DataContext resolve the same tile.
         var tile = (args.Index >= 0 && args.Index < ViewModel.Items.Count)
             ? ViewModel.Items[args.Index]
             : el.DataContext as FileTile;
@@ -569,70 +473,34 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (tile is null) return;
         el.DataContext = tile;
 
-        // tile is back in the virtualization window — undo the
-        // ElementClearing detach so a fresh thumbnail load can bind.
+        // tile is back in the virtualization window — undo the ElementClearing detach so a fresh thumbnail load can bind.
         tile.IsDetached = false;
-        // Clear any prior failed-thumbnail state from the last attachment
-        // so a retry on re-prepare gets to fall through to the shimmer
-        // (and either land or surface the placeholder again).
         tile.ThumbnailFailed = false;
 
-        // tile entry animation — scale-in pop (0.96 → 1), the scale half of
-        // macOS LibraryView.swift:566-575's
-        // .transition(.opacity.combined(with: .scale(scale: 0.96))). The
-        // opacity half is deliberately NOT ported as a composition animation:
-        // see AnimateTileEntry's remarks — an interrupted opacity spring under
-        // mid-scan churn stranded whole tiles invisible. The pop plays once per
-        // element; reduced-motion users get a hard snap (no animation).
         AnimateTileEntry(el);
 
         if (tile.Thumbnail != null)
         {
-            // Already-loaded thumbnail (LRU cache hit, or a surviving tile from
-            // the identity-stable merge). The Image binds Source directly at
-            // Opacity 1, so it's already on screen — nothing to do.
+            // The Image binds Source directly at Opacity 1, so it's already on screen — nothing to do.
             return;
         }
 
         var cts = new CancellationTokenSource();
-        // BUG-12: TryAdd in case of a re-entrant prepare (rare but cheap to defend).
+        // TryAdd in case of a re-entrant prepare (rare but cheap to defend).
         if (!_inflight.TryAdd(tile, cts))
         {
-            // Already loading — let the existing one finish.
             cts.Dispose();
             return;
         }
         _ = LoadThumbAsync(tile, cts);
     }
 
-    /// <summary>macOS-parity tile-entry animation — a scale-in "pop"
-    /// (0.96 → 1, Tight tokens 0.35/0.78). Runs at most once per element
-    /// instance (see <see cref="_enteredTiles"/>).
-    ///
-    /// CRITICAL — opacity is NOT animated here, and the tile root's opacity is
-    /// pinned to 1 on every call. The previous version drove the root
-    /// composition Opacity 0 → 1 via a spring. Under mid-scan churn the
-    /// ItemsRepeater re-realizes elements ~1 Hz (each throttled refresh raises a
-    /// Reset), and an interrupted opacity spring stranded the ENTIRE tile — its
-    /// thumbnail, filename, and tag chips all live under this root — at
-    /// Opacity 0. That single defect read to users as both "thumbnails not
-    /// loading" and "tags not showing" (8611 TILE_THUMBNAIL_ASSIGNED but zero
-    /// IMAGE_OPENED in app.log: bitmaps bound, tiles invisible). A scale-only
-    /// entrance can never hide content, and a stranded scale at 0.96 is still
-    /// fully legible.
-    ///
-    /// Defensive: every Composition call wrapped in try/catch because
-    /// StartAnimation on a detached / mid-recycle element can throw, and a
-    /// throw from a fire-and-forget animation callback is one of the
-    /// fast-fail vectors. Worst case here: the tile snaps in without
-    /// animation — never crashes the app, never invisible.</summary>
+    /// <summary>A scale-only entrance can never hide content, and a stranded scale at 0.96 is still fully legible. Worst case here: the tile snaps in without animation — never crashes the app, never invisible.</summary>
     private static void AnimateTileEntry(FrameworkElement el)
     {
         try
         {
             var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
-            // Opacity is owned by the steady state and is ALWAYS 1. Stop any
-            // leftover opacity spring from an older build and force-reveal.
             visual.StopAnimation("Opacity");
             visual.Opacity = 1f;
 
@@ -650,9 +518,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var size = visual.Size;
             if (size.X <= 0 || size.Y <= 0)
             {
-                // Pre-layout: a corner-anchored scale would look wrong. Ensure
-                // the tile is visible at full scale and let a later prepare
-                // (post-arrange) carry the pop. Do NOT mark entered.
+                // Ensure the tile is visible at full scale and let a later prepare (post-arrange) carry the pop.
                 visual.StopAnimation("Scale.X");
                 visual.StopAnimation("Scale.Y");
                 visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
@@ -661,9 +527,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
             if (!firstEntry)
             {
-                // Already played its entrance (recycled / re-realized on a
-                // Reset) — snap to rest instead of replaying the pop every
-                // refresh, which looked like the grid pulsing during a scan.
+                // Already played its entrance (recycled / re-realized on a Reset) — snap to rest instead of replaying the pop every refresh, which looked like the grid pulsing during a scan.
                 visual.StopAnimation("Scale.X");
                 visual.StopAnimation("Scale.Y");
                 visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
@@ -688,54 +552,31 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
-        // Release the bound bitmap BEFORE detaching. The Image binds
-        // Source="{x:Bind Thumbnail}", so a recycled element otherwise keeps
-        // the PREVIOUS file's bitmap on Source and flashes it on the next
-        // reveal — the "thumbnails rendering from anything" symptom. Nulling
-        // here clears Source → shimmer, and frees the BitmapImage so
-        // off-screen tiles don't pin every bitmap they ever loaded (memory
-        // bloat on large libraries). Must run while still attached — the
-        // Thumbnail setter no-ops once IsDetached is set just below.
+        // The Image binds Source="{x:Bind Thumbnail}", so a recycled element otherwise keeps the PREVIOUS file's bitmap on Source and flashes it on the next reveal — the "thumbnails rendering from anything" symptom.
         tile.ClearThumbnailForRecycle();
         Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={Services.PathRedactor.Redact(tile.Path)}");
-        // mark detached so a late-arriving thumbnail render
-        // doesn't bind into a stale tile.
+        // mark detached so a late-arriving thumbnail render doesn't bind into a stale tile.
         tile.IsDetached = true;
         if (_inflight.TryRemove(tile, out var cts))
         {
             try { cts.Cancel(); } catch { /* swallow */ }
             cts.Dispose();
         }
-        // No opacity manipulation anywhere: the Image keeps its XAML default
-        // Opacity (1) and just renders its bound Source. ClearThumbnailForRecycle
-        // above already nulled the Source, so a recycled tile shows the shimmer
-        // (not a stale bitmap) until its own thumbnail reloads. With the
-        // identity-stable merge, on-screen tiles are no longer recycled on every
-        // refresh — only on real scroll — so this fires far less often now.
+        // ClearThumbnailForRecycle above already nulled the Source, so a recycled tile shows the shimmer (not a stale bitmap) until its own thumbnail reloads.
     }
 
     private async Task LoadThumbAsync(FileTile tile, CancellationTokenSource cts)
     {
-        // Read the token synchronously here — this runs on the UI thread inside
-        // ElementPrepared before the first await, so ElementClearing / OnUnloaded
-        // cannot have disposed cts yet.
+        // Read the token synchronously here — this runs on the UI thread inside ElementPrepared before the first await, so ElementClearing / OnUnloaded cannot have disposed cts yet.
         var ct = cts.Token;
         try
         {
-            // explicit UI dispatcher post for the bind. The previous
-            // ConfigureAwait(true) relied on the captured SynchronizationContext
-            // (DispatcherQueueSynchronizationContext on UI thread), which the
-            // thumbnail service's TCS may or may not honor depending on how
-            // the result is published. Using TryEnqueue makes the
-            // UI-thread assignment unambiguous.
+            // explicit UI dispatcher post for the bind.
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null)
             {
                 Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={Services.PathRedactor.Redact(tile.Path)}");
-                // Hand off from shimmer to a broken-image placeholder so the
-                // tile doesn't shimmer forever. Setter is UI-thread-affined
-                // because it raises PropertyChanged; route through the
-                // DispatcherQueue same as the bmp-assignment path below.
+                // Hand off from shimmer to a broken-image placeholder so the tile doesn't shimmer forever.
                 if (!tile.IsDetached)
                 {
                     DispatcherQueue.TryEnqueue(() =>
@@ -753,17 +594,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             var enqueued = DispatcherQueue.TryEnqueue(() =>
             {
-                // _unloaded guard: this continuation is queued from a worker
-                // thread (ConfigureAwait(false) above) and can run AFTER a tab
-                // switch tore down the view. Bail before touching the tile.
+                // _unloaded guard: this continuation is queued from a worker thread (ConfigureAwait(false) above) and can run AFTER a tab switch tore down the view.
                 if (_unloaded || tile.IsDetached) return;
-                // Assign the bitmap; the x:Bind Source updates and the Image
-                // (Opacity 1) renders it. No opacity dance — the Image is never
-                // hidden, so there's nothing to "reveal".
+                // No opacity dance — the Image is never hidden, so there's nothing to "reveal".
                 tile.Thumbnail = bmp;
-                // Pixel dims confirm the bitmap actually carries content. If a
-                // tile is still blank after this, px>0 here means the problem is
-                // layout (image row collapsed), not a 0-pixel decode.
                 Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={Services.PathRedactor.Redact(tile.Path)} px={bmp.PixelWidth}x{bmp.PixelHeight}");
             });
             if (!enqueued)
@@ -777,16 +611,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
         finally
         {
-            // Compare-and-remove: a re-prepare can replace our entry with a fresh
-            // CTS for the same tile while this finally is queued to the pool (the
-            // RequestAsync await uses ConfigureAwait(false)). A key-only remove
-            // would evict that newer source, orphaning its load (uncancellable +
-            // undisposed). The KeyValuePair overload removes only when the mapped
-            // value is still ours. Dispose ONLY when we won the removal so the CTS
-            // has a single owner: ElementClearing/OnUnloaded run Cancel()+Dispose()
-            // on the UI thread while this finally resumed on the pool, and
-            // CancellationTokenSource forbids concurrent Dispose(). (matches the
-            // CleanupView thumbnail twin.)
+            // Compare-and-remove: a re-prepare can replace our entry with a fresh CTS for the same tile while this finally is queued to the pool (the RequestAsync await uses ConfigureAwait(false)).
             if (_inflight.TryRemove(new KeyValuePair<FileTile, CancellationTokenSource>(tile, cts)))
             {
                 cts.Dispose();
@@ -794,15 +619,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Tile height = width + 68 (square image area + fixed 68px caption row).
-    // Set here, not via a Height self-binding to ActualWidth: ActualWidth is
-    // not an observable DP, so a OneWay bind reads 0 before layout (→ height
-    // 68, image row collapses to ~0) and never re-fires after arrange. This
-    // was the long-standing "thumbnails decode but render blank" bug — the
-    // bitmap was assigned to a zero-height image row. SizeChanged runs
-    // post-arrange with the real width and again on column resize. The >0.5
-    // guard breaks the height-set → SizeChanged feedback loop (width is
-    // column-driven, so it doesn't change when we set Height).
     private void OnTileSizeChanged(object sender, SizeChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnTileSizeChanged), () =>
         {
@@ -837,8 +653,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         ApplyTileStrokeOpacity(el, hovering: scale > 1.0f);
     }
 
-    // A brush colour is not a Composition visual property, so the hover stroke keeps the
-    // Mac's quick ease-out (Theme.quick) rather than a spring. Each tile owns its brush.
+    // A brush colour is not a Composition visual property, so the hover stroke keeps the Mac's quick ease-out (Theme.quick) rather than a spring.
     private static void ApplyTileStrokeOpacity(FrameworkElement el, bool hovering)
     {
         if (el is not Grid grid) return;
@@ -864,8 +679,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             if (sender is not FrameworkElement el || el.DataContext is not FileTile tile) return;
 
-            // Keep the keyboard cursor in sync with the click and route focus to
-            // the grid so arrow keys continue from here without an extra Tab.
             _focusedIndex = ViewModel.Items.IndexOf(tile);
             try { GridScroller.Focus(FocusState.Programmatic); } catch { /* swallow */ }
 
@@ -898,8 +711,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             else
             {
-                // Plain click (macOS parity): select just this tile and open the
-                // Selected pane; double-click still opens the full preview.
                 using (ViewModel.BulkSelectionScope())
                 {
                     foreach (var t in ViewModel.Items) t.IsSelected = false;
@@ -969,8 +780,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         SyncAskChat(count);
     }
 
-    // Loads the next page of the library when the viewport is within three
-    // screens of the end (macOS/Linux parity; the grid used to stop at 200).
     private void OnGridScrolled(object? sender, ScrollViewerViewChangedEventArgs e)
     {
         if (GridScroller.VerticalOffset + GridScroller.ViewportHeight * 3 >= GridScroller.ExtentHeight)
@@ -979,9 +788,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Arrow-key navigation over the ItemsRepeater grid. Wired on GridScroller's
-    // tunneling PreviewKeyDown (handledEventsToo) so it preempts the
-    // ScrollViewer's built-in arrow-scroll.
+    // Wired on GridScroller's tunneling PreviewKeyDown (handledEventsToo) so it preempts the ScrollViewer's built-in arrow-scroll.
     private void OnGridPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnGridPreviewKeyDown), () =>
         {
@@ -1024,7 +831,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     return;
             }
 
-            // First navigation key just lands the cursor on the first tile.
             if (_focusedIndex < 0 &&
                 e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up
                     or VirtualKey.Down or VirtualKey.Home or VirtualKey.End
@@ -1055,9 +861,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             e.Handled = true;
         });
 
-    // Columns the UniformGridLayout currently shows. MinItemWidth=180 +
-    // MinColumnSpacing=12 (LibraryView.xaml); ItemsStretch=Fill widens cells
-    // but the column COUNT is governed by the minimum width.
     private int ColumnsPerRow()
     {
         double avail = GridScroller.ViewportWidth;
@@ -1067,8 +870,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         return Math.Max(1, cols);
     }
 
-    // Rows visible in the viewport, for PageUp/PageDown. MinItemHeight=248 +
-    // MinRowSpacing=12.
     private int VisibleRows()
     {
         const double rowHeight = 248 + 12;
@@ -1104,7 +905,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 foreach (var t in ViewModel.Items) t.IsSelected = false;
                 tile.IsSelected = true;
             }
-            // The anchor follows a plain move (matches click); Shift+move keeps it.
             _lastClickedTile = tile;
             ShowPane(tile);
         }
@@ -1114,8 +914,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         UpdateSelectionBar();
     }
 
-    // Realize + scroll the target tile into view. Realization can race a
-    // mid-scan Reset, so it's defensive.
+    // Realization can race a mid-scan Reset, so it's defensive.
     private void BringIndexIntoView(int index)
     {
         try
@@ -1176,9 +975,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             deferral.Complete();
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
-        // The grid still shows the pre-commit tag chips until we re-query the
-        // engine's now-updated rows; the identity-stable merge folds the new
-        // tags onto the surviving tiles via MergeMutableFrom.
         if (committed) RequestLibraryRefresh(force: true);
     }
 
@@ -1217,11 +1013,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         if (committed)
         {
-            // FileTile.Path/FileName are identity-stable (init-only) and the
-            // refresh merge keeps the OLD instance for a surviving id — so it
-            // would keep the OLD name. Evict the renamed tiles first so the
-            // re-query rebuilds them as fresh tiles carrying the new on-disk
-            // name (a failed per-file rename just re-lands unchanged).
+            // FileTile.Path/FileName are identity-stable (init-only) and the refresh merge keeps the OLD instance for a surviving id — so it would keep the OLD name.
             foreach (var t in selected) ViewModel.Items.Remove(t);
             RequestLibraryRefresh(force: true);
         }
@@ -1251,10 +1043,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var choice = await confirm.ShowAsync();
             if (choice != ContentDialogResult.Primary) return;
 
-            // Listen for the engine's BulkActionResult — it tags the
-            // action with "trashFiles:<batch_id>" so we can plumb undo. The
-            // Register undo capture inside the owning waiter before its result
-            // handler, so a terminal event cannot release the waiter first.
+            // Listen for the engine's BulkActionResult — it tags the action with "trashFiles:<batch_id>" so we can plumb undo.
             Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
                 "trashFiles:",
                 $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
@@ -1272,10 +1061,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             FileID.IpcSchema.BulkActionResult? result = null;
             try
             {
-                // Await the engine's BulkActionResult instead of fire-and-forget:
-                // the dbwriter may fail to trash a file (open handle / permission),
-                // and unconditionally removing every selected tile told the user
-                // files were recycled when they're still on disk (silent-failure).
                 result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                     "trashFiles",
                     () => EngineClient.Instance.TrashFilesAsync(ids),
@@ -1297,9 +1082,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 return;
             }
 
-            // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
-            // result. Files it couldn't recycle stay on the grid so the user sees
-            // they're still there.
+            // Remove ONLY tiles the engine actually trashed — a per-file Ok in the result.
             var trashedIds = new HashSet<long>(
                 result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
                     ?? Enumerable.Empty<long>());
@@ -1310,11 +1093,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             UpdateSelectionBar();
 
-            // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
-            // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
-            // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
-            // that path silent. ids is non-empty here, so Succeeded==0 only happens on
-            // a real total failure — surface it + refresh, matching the sibling flows.
+            // Guarding on Failed>0 alone would leave that path silent. ids is non-empty here, so Succeeded==0 only happens on a real total failure — surface it + refresh, matching the sibling flows.
             if (result.Failed > 0 || result.Succeeded == 0)
             {
                 var why = Services.TrashFailureText.Summary(result);
@@ -1331,9 +1110,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Dismissible alert mirroring CleanupView.ShowAlertAsync — surfaces a
-    // partial/failed bulk op so the user is never left thinking a trash
-    // succeeded when some (or all) of it didn't.
+    // Dismissible alert mirroring CleanupView.ShowAlertAsync — surfaces a partial/failed bulk op so the user is never left thinking a trash succeeded when some (or all) of it didn't.
     private async Task ShowAlertAsync(string title, string body)
     {
         try
@@ -1366,9 +1143,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             UpdateSelectionBar();
         });
 
-    // Lets the user drag a tile out of FileID into Explorer / email /
-    // Slack as a real file. If multiple tiles are selected, the whole
-    // selection comes along.
     private async void OnTileDragStarting(UIElement sender, DragStartingEventArgs args)
     {
         var deferral = args.GetDeferral();
@@ -1384,11 +1158,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 var items = new List<Windows.Storage.IStorageItem>(paths.Count);
                 foreach (var p in paths)
                 {
-                    // No synchronous File.Exists pre-check: on a slow/disconnected
-                    // SMB share or USB stick it can stall the UI thread for
-                    // seconds (the same hazard ReadStore.OpenAsync wraps in a
-                    // timeout). GetFileFromPathAsync's catch below already skips
-                    // missing/inaccessible paths, so the stat was redundant.
+                    // No synchronous File.Exists pre-check: on a slow/disconnected SMB share or USB stick it can stall the UI thread for seconds (the same hazard ReadStore.OpenAsync wraps in a timeout).
                     try
                     {
                         items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
@@ -1410,15 +1180,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
 
-    // Double-click any tile → open the FilePreviewSheet modal. The Tag
-    // on the tile carries the absolute path; we look up the FileTile in
-    // ViewModel.Items to get kind + size + modified for the metadata strip.
-    //
-    // pass the sibling list (frozen at open time so a fresh-batch
-    // refresh mid-preview can't shift indices under the user) and wire
-    // the sheet's own RequestClose to hide the dialog. The sheet's
-    // toolbar X button + Esc key handle close inline, matching macOS's
-    // self-contained preview chrome — no separate dialog CloseButton.
+    // The Tag on the tile carries the absolute path; we look up the FileTile in ViewModel.Items to get kind + size + modified for the metadata strip. pass the sibling list (frozen at open time so a fresh-batch refresh mid-preview can't shift indices under the user) and wire the sheet's own RequestClose to hide the dialog.
     private async void OnTileDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.Tag is not string path) return;
@@ -1432,13 +1194,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         await OpenPreview(tile, tileIndex);
     }
 
-    // Shared preview-open path — used by double-tap and by keyboard Enter
-    // (OnGridPreviewKeyDown). Opens the FilePreviewSheet modal for the given
-    // tile, freezing the sibling list at open time.
+    // Opens the FilePreviewSheet modal for the given tile, freezing the sibling list at open time.
     private async System.Threading.Tasks.Task OpenPreview(FileTile tile, int tileIndex)
     {
-        // Snapshot siblings so a live BatchSummary refresh mid-preview
-        // can't reorder under our feet (matches macOS frozen previewSiblings).
+        // Snapshot siblings so a live BatchSummary refresh mid-preview can't reorder under our feet (matches macOS frozen previewSiblings).
         var siblings = ViewModel.Items.ToList();
 
         var sheet = new FilePreviewSheet();
@@ -1448,25 +1207,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             XamlRoot = XamlRoot,
             Content = sheet,
-            // no dialog CloseButton — the sheet's own toolbar X
-            // button (with media-stop + RequestClose) is the canonical
-            // dismissal path. A separate ContentDialog CloseButton would
-            // double-render below the preview.
         };
-        // override the default ContentDialog max bounds so the
-        // preview sheet actually gets the 1080×720 minimum it declares.
-        // WinUI 3's default caps at ~640×480 which would crop our sidebar.
+        // override the default ContentDialog max bounds so the preview sheet actually gets the 1080×720 minimum it declares.
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
         dialog.Opened += (_, _) => sheet.SetFile(
             tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasText);
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
-        // The ContentDialog — not the sheet — owns keyboard focus once shown, so
-        // the sheet's own PreviewKeyDown never fires (arrow keys + Space were
-        // dead). Intercept on the dialog's tunneling Preview pass: handledEventsToo
-        // so the XY-focus engine can't swallow the arrows first, and tunneling
-        // reaches the dialog (an ancestor) BEFORE a focused Button consumes Space.
+        // Intercept on the dialog's tunneling Preview pass: handledEventsToo so the XY-focus engine can't swallow the arrows first, and tunneling reaches the dialog (an ancestor) BEFORE a focused Button consumes Space.
         dialog.AddHandler(
             Microsoft.UI.Xaml.UIElement.PreviewKeyDownEvent,
             new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
@@ -1478,8 +1227,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         FollowPreviewedFile(sheet.FileId);
     }
 
-    /// <summary>macOS: closing the preview leaves the open Selected pane (and the
-    /// grid selection) on the file the preview ended on.</summary>
     private void FollowPreviewedFile(long fileId)
     {
         if (_unloaded || !IsPaneOpen || fileId == 0 || SelectedPane.Tile?.Id == fileId) return;
@@ -1504,8 +1251,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnContextOpen(object sender, RoutedEventArgs e)
     {
-        // SEC-9: Open is gated by SafeOpen's extension allowlist — falls
-        // back to Reveal for anything that could be executable.
         if (sender is MenuFlyoutItem item && item.Tag is string path)
         {
             if (!Services.SafeOpen.TryOpenFile(path))
@@ -1523,12 +1268,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Find similar — pulls the seed file's stored CLIP embedding from the
-    // engine + runs the same dot-product the text-search path uses. The
-    // engine emits a clipTextEmbedding event; ClipSearchService routes it
-    // back to whichever EmbedQueryAsync future is awaiting on the same
-    // queryId. We bypass the search-bar UI and surface results directly
-    // via the existing ViewModel.Items list.
     private async void OnContextFindSimilar(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;

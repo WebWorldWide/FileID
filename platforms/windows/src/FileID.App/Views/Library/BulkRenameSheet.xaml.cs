@@ -1,6 +1,4 @@
 ﻿// BulkRenameSheet code-behind. Uses a virtualized XAML ItemTemplate for rows.
-// Apply emits engine `renameFiles` IPC with the entries for which the
-// "include" checkbox is on.
 
 using System;
 using System.Collections.Generic;
@@ -114,9 +112,7 @@ public sealed partial class BulkRenameSheet : UserControl
             if (result.Failed > 0 || !Services.BulkActionResultTruth.ConfirmsExactSuccess(
                     result, entries.Select(entry => entry.FileId).ToArray()))
             {
-                // Surface per-file engine failures (in use, permission, name
-                // collision). Keep the sheet open so the user can fix + retry;
-                // do NOT report success.
+                // Keep the sheet open so the user can fix + retry; do NOT report success.
                 var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message
                             ?? "see logs for details";
                 var body = result.Failed == 0
@@ -173,8 +169,7 @@ public sealed partial class BulkRenameSheet : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown,
-        // tab re-host). Catch + log so a failed alert never escalates.
+        // Catch + log so a failed alert never escalates.
         try
         {
             if (XamlRoot is null) return;
@@ -190,7 +185,6 @@ public sealed partial class BulkRenameSheet : UserControl
         }
         catch
         {
-            // Best-effort surfacing; the in-sheet StatusText still carries the message.
         }
     }
 }
