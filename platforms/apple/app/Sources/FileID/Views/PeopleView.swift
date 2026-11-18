@@ -560,7 +560,7 @@ struct PeopleView: View {
             Image(systemName: "forward.circle")
                 .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(13.5))
-            Text("Don't want to name anyone? Descriptions will say \"a person\" instead of a name.")
+            Text("Don't want to name anyone? Descriptions will say “a person” instead of a name.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -864,6 +864,7 @@ private struct PersonCard: View {
     var selectionTint: Color = Theme.gold
 
     @State private var thumbnail: NSImage?
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -880,6 +881,8 @@ private struct PersonCard: View {
                         RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
                     }
                 }
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .stroke(Theme.gold.opacity(hovering && !selectionMode ? 0.7 : 0), lineWidth: 1.5))
             Text(displayName)
                 .font(Theme.Font.body(14, .semibold))
                 .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
@@ -888,6 +891,9 @@ private struct PersonCard: View {
             MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")", size: 11)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(Theme.quick, value: hovering)
         .task(id: thumbnailIdentity) {
             await loadThumb()
         }

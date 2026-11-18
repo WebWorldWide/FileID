@@ -156,6 +156,7 @@ enum SelfShot {
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: plan.dir, withIntermediateDirectories: true)
             if let size = plan.windowSize { window()?.setContentSize(size) }
+            noteMenuShortcuts()
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
             if let folder = plan.folder {
                 await waitUntil(timeout: 3) { store.totalFiles > 0 }
@@ -232,6 +233,22 @@ enum SelfShot {
             try? await Task.sleep(for: .seconds(3))
             exit(0)
         }
+    }
+
+    /// Writes every main-menu item that carries a key equivalent, so the menu bar's shortcut list is on record.
+    private static func noteMenuShortcuts() {
+        func visit(_ menu: NSMenu, path: String) {
+            for item in menu.items where !item.isSeparatorItem {
+                let name = path.isEmpty ? item.title : path + " > " + item.title
+                if let submenu = item.submenu { visit(submenu, path: name); continue }
+                guard !item.keyEquivalent.isEmpty else { continue }
+                let flags = item.keyEquivalentModifierMask
+                let keys = (flags.contains(.control) ? "⌃" : "") + (flags.contains(.option) ? "⌥" : "")
+                    + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "") + item.keyEquivalent.uppercased()
+                note("menu: \(name) \(keys)")
+            }
+        }
+        if let main = NSApp.mainMenu { visit(main, path: "") }
     }
 
     private static func env(_ key: String) -> String? {

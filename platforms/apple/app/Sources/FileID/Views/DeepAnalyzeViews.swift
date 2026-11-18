@@ -945,7 +945,7 @@ struct DeepAnalyzeView: View {
                 .foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tip: name people first").font(Theme.Font.body(13.5, .semibold))
-                Text("With names, descriptions read \"Mia playing piano\" instead of \"a person playing piano\". You can also describe now and again later.")
+                Text("With names, descriptions read “Mia playing piano” instead of “a person playing piano”. You can also describe now and again later.")
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)

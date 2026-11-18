@@ -5,6 +5,13 @@ enum FileKindLabel {
     static func title(_ kind: String) -> String {
         kind.lowercased() == "pdf" ? "PDF" : kind.capitalized
     }
+
+    /// Kind and extension for a details row ("Image · JPG"); a PDF is not shown as "PDF · PDF".
+    static func detail(kind: String, fileExtension: String) -> String {
+        let title = title(kind)
+        let ext = fileExtension.uppercased()
+        return ext.isEmpty || ext == title.uppercased() ? title : title + " · " + ext
+    }
 }
 
 enum TagLabel {

@@ -16,6 +16,12 @@ struct DisplayLabelTests {
         #expect(TagLabel.unique(["grass", "Grass", "Year_2026", "land"]) == ["Grass", "2026", "Land"])
     }
 
+    @Test func detailRowDoesNotRepeatTheKind() {
+        #expect(FileKindLabel.detail(kind: "image", fileExtension: "jpg") == "Image · JPG")
+        #expect(FileKindLabel.detail(kind: "pdf", fileExtension: "pdf") == "PDF")
+        #expect(FileKindLabel.detail(kind: "audio", fileExtension: "") == "Audio")
+    }
+
     @Test func pdfIsUppercase() {
         #expect(FileKindLabel.title("pdf") == "PDF")
         #expect(FileKindLabel.title("image") == "Image")

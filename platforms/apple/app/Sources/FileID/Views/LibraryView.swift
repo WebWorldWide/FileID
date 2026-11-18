@@ -1511,7 +1511,7 @@ private struct FileDetailRows: View {
     let file: FileRow
     let people: [String]
     var body: some View {
-        DetailRow("Kind", FileKindLabel.title(file.kind) + " · " + file.extension.uppercased())
+        DetailRow("Kind", FileKindLabel.detail(kind: file.kind, fileExtension: file.extension))
         if file.failed { DetailRow("Status", "Couldn't be read, so it has no tags, faces or text. It may be damaged.") }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
