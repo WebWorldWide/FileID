@@ -1,13 +1,3 @@
-// ScanSession — top-level scan orchestrator. Drives Discovery → Tagging
-// → DBWriter end-to-end with phase + progress + per-batch summary
-// emission. Acquires a process-priority boost and a sleep-prevention
-// guard for the duration of the scan.
-//
-// One session = one "scan a folder" run. Holds the coordinator + child
-// pipeline tasks, calls into the IPC sink for `phaseChanged`, `progress`,
-// `batchSummary`, `scanComplete` events. Follow-on phases (face clustering,
-// deep analyze, restructure plan) each live in their own handler.
-
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,11 +62,10 @@ pub struct ScanSession {
     sink: Sink,
     models: Arc<ModelSource>,
     /// When true, skip the incremental-rescan skip set and reprocess
-    /// every file. Plumbed from `StartScanPayload::rescan`.
+    /// every file.
     rescan: bool,
     /// User-excluded folders, raw as received from the app. Resolved
-    /// against the root at run() time. Plumbed from
-    /// `StartScanPayload::excluded_paths`.
+    /// against the root at run() time.
     excluded_paths: Vec<String>,
     /// False for the follow-up pass, so a folder that keeps changing cannot loop.
     allow_follow_up: bool,
@@ -170,7 +159,6 @@ impl ScanSession {
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
 
-        // Guaranteed (blocking/backpressuring) terminal-phase emit.
         // Awaits channel capacity rather than dropping, so a cancelled/failed
         // terminal state can never be silently lost under sink backpressure.
         let emit_phase_guaranteed = |sink: &Sink, phase: SessionPhase| {
@@ -244,14 +232,11 @@ impl ScanSession {
             let mut set =
                 std::collections::HashMap::<SkipFingerprint, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
-            // Diagnostic counts so we can tell at a glance whether (a) the
-            // DB is empty, (b) the LIKE prefix is wrong, or (c) the
-            // scanned_at >= modified_at filter excludes everything.
             let total_files: i64 = conn
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
             let lo = root_descendant_prefix(root);
-            // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
+            // A BINARY range seek (`>= lo AND < hi`) is sargable on the
             // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
             // non-sargable because LIKE defaults to case-insensitive and forces
             // a full table scan). Stored paths derive from THIS root so they
@@ -284,7 +269,7 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
-            // R-14 (lockstep with macOS Discovery): when BGE is installed, keep
+            // Lockstep with macOS Discovery: when BGE is installed, keep
             // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
             // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
             // isn't on disk (no doc could embed → don't force a perpetual re-walk).
@@ -297,10 +282,8 @@ impl ScanSession {
             // which run in the same pass) — lockstep with macOS Discovery.
             let image_clip_gate = if clip_can_embed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             let video_clip_gate = video_clip_gate();
-            // R4-01: drop the tautological `scanned_at >= modified_at` predicate
-            // (both are stored at scan time, so it's true for every scanned file
-            // and STAYS true after an edit). Fetch size+mtime instead and let
-            // discovery compare them against the live file.
+    // Both columns are stored at scan time, so `scanned_at >= modified_at` holds for every
+    // scanned file, even after an edit. Compare size+mtime against the live file in discovery.
             let select_sql = if hi.is_some() {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
@@ -370,10 +353,9 @@ impl ScanSession {
             std::sync::Arc::new(set)
         };
 
-        // Wire the three pipeline stages with bounded mpsc channels.
         // Capture the skip-set size before it moves into Discovery: a count==0
         // result with a non-empty skip set means "incremental rescan, all files
-        // already current" — NOT an empty/unsupported folder (#21).
+        // already current" — NOT an empty/unsupported folder.
         let skip_count = skip_paths.len();
         let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
         // Windows catalogs a cloud placeholder from its metadata; the content-hash
@@ -460,9 +442,6 @@ impl ScanSession {
         let root_for_tick = root.to_string_lossy().into_owned();
         let errors_for_tick = discovered_errors.clone();
         let cloud_only_for_tick = discovered_cloud_only.clone();
-        // Clone the discovery counter for the ticker; the original stays
-        // in scope so the tagging callback can also read it for Progress
-        // event totals.
         let discovered_count_for_tick = discovered_count.clone();
         // Single-shot guard shared with the post-drain fallback below: the tick
         // sleeps 250 ms before its first wake-up, so a folder that discovers and
@@ -477,12 +456,10 @@ impl ScanSession {
         // The tick emits it on the normal path; the post-drain backstop below
         // covers the paths where the tick is aborted mid-sleep or returns early
         // on cancel. This shared single-shot flag keeps the two from double-
-        // emitting. (006)
+        // emitting.
         let discovery_complete_emitted =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_complete_emitted_for_tick = discovery_complete_emitted.clone();
-        // The tick takes `discovered_done` by move (async move); keep a clone for
-        // the post-drain fallback's done-check below.
         let discovered_done_post = discovered_done.clone();
         let tick = tokio::spawn(async move {
             loop {
@@ -511,7 +488,7 @@ impl ScanSession {
                     // announce the discovery total once the walk ends —
                     // macOS emits it even for a cancel-truncated walk. Swap the
                     // shared flag first so the post-drain backstop never re-emits
-                    // what the tick already sent. (006)
+                    // what the tick already sent.
                     if !discovery_complete_emitted_for_tick
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
@@ -528,7 +505,7 @@ impl ScanSession {
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
-                    // when a notice is actually delivered. (audit R3-21)
+                    // when a notice is actually delivered.
                     let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     let reachable = count != 0 || scan_root_reachable(Path::new(&root_for_tick));
                     let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick, reachable);
@@ -707,7 +684,7 @@ impl ScanSession {
             .await;
         }
 
-        // discoveryComplete backstop (006): the 250 ms tick emits this
+        // discoveryComplete backstop: the 250 ms tick emits this
         // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
         // rescan) aborts the tick mid-first-sleep, and a cancel-during-discovery
         // returns the tick early — both BEFORE it emits. The walk has ended by
@@ -1206,7 +1183,7 @@ impl ProgressState {
 
 /// Single source for the empty/rescan/partial discovery notice: the 250 ms
 /// tick and the post-drain backstop must emit byte-identical IPC, so the kind
-/// codes + messages live here once. (audit R3-21 / E3)
+/// codes + messages live here once.
 fn discovery_notice(
     count: u64,
     skip_count: usize,
@@ -1478,7 +1455,7 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
-/// R-14 (lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`): keep any
+/// Lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`: keep any
 /// doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set, so an
 /// install-then-rescan re-emits it and the tagger backfills its BGE embedding. BGE is
 /// opt-in, so the first scan usually predates it — without this, those docs would be
@@ -1487,13 +1464,13 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
 /// `bge_installed`); leading space because it concatenates after the content gate.
 /// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
 /// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
-/// doc, never able to get a `text_embeddings` row, would re-walk forever (v19).
+/// doc, never able to get a `text_embeddings` row, would re-walk forever.
 pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
     " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM text_embeddings \
                       WHERE text_embeddings.file_id = files.id))";
 
-/// R-14 (lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`): keep a `.obj`
+/// Lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`: keep a `.obj`
 /// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
 /// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
 /// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
@@ -1909,7 +1886,6 @@ fn maybe_emit_progress(
     if !should_emit {
         return;
     }
-    // Fold the new sample into the rolling wall-clock throughput under one lock.
     let (fps, eta_kind_aware) = {
         let mut st = state.lock();
         st.last_emit = now;
@@ -2166,9 +2142,7 @@ mod tests {
         let mut st = ProgressState::new();
         let t0 = Instant::now();
         st.rate_anchor = t0;
-        // Window 1: 10 heavy in 1s → heavy rate ~10/s.
         let _ = st.observe_rate(10, 10, t0 + Duration::from_secs(1));
-        // Window 2: 400 light in 1s → light rate ~400/s, heavy rate HELD.
         let _ = st.observe_rate(410, 10, t0 + Duration::from_secs(2));
         assert!((st.rolling_heavy_fps - 10.0).abs() < 1.0, "heavy rate held: {}", st.rolling_heavy_fps);
         assert!(st.rolling_light_fps > 100.0, "light rate: {}", st.rolling_light_fps);
@@ -2176,7 +2150,6 @@ mod tests {
         // few seconds of light files — NOT (2000 / blended≈210) ≈ 9.5s.
         let eta = st.eta_seconds(1000, 1000).unwrap();
         assert!(eta > 90.0 && eta < 130.0, "eta: {eta}");
-        // No remaining work → no ETA.
         assert!(st.eta_seconds(0, 0).is_none());
     }
 
@@ -2196,12 +2169,10 @@ mod tests {
         let fps1 = st.observe_rate(5, 0, t0 + Duration::from_secs(1));
         assert!((fps1 - 5.0).abs() < 0.01, "first-interval rate should be 5/s, got {fps1}");
 
-        // Sustained 5/s → EMA stays ~5.
         let fps2 = st.observe_rate(10, 0, t0 + Duration::from_secs(2));
         assert!((fps2 - 5.0).abs() < 0.01, "sustained rate ~5/s, got {fps2}");
 
         // An ETA built on this rate is hours for tens of thousands remaining,
-        // not 13 seconds — proving the bug is gone.
         let eta = 18_000.0_f64 / fps2;
         assert!(eta > 3000.0, "eta should be ~hours ({eta}s)");
     }
@@ -2214,15 +2185,11 @@ mod tests {
         let lo = r"C:\Users\a\Photos";
         let hi = prefix_upper_bound(lo).unwrap();
         assert!(lo < hi.as_str(), "lo must sort before hi");
-        // A child path is inside [lo, hi).
         let child = r"C:\Users\a\Photos\2024\img.jpg";
         assert!(lo <= child && child < hi.as_str());
-        // A sibling that merely shares a shorter prefix is outside.
         let sibling = r"C:\Users\a\Pictures\x.jpg";
         assert!(!(lo <= sibling && sibling < hi.as_str()));
-        // Empty prefix → no finite bound.
         assert_eq!(prefix_upper_bound(""), None);
-        // Simple increment.
         assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
     }
 
@@ -2643,7 +2610,7 @@ mod tests {
         assert!(set.contains_key(&path_fingerprint_text("C:\\Lib\\b.jpg")), "b.jpg stays skipped");
     }
 
-    /// C1-013: the incremental skip-set must NOT skip a file whose
+    /// The incremental skip-set must NOT skip a file whose
     /// reparse/placeholder state changed (dehydrated→hydrated). A OneDrive
     /// online-only placeholder is recorded with `content_hash = NULL` and
     /// `scanned_at >= modified_at`; after the user hydrates it, the modified
@@ -2717,7 +2684,7 @@ mod tests {
         );
     }
 
-    /// R-14 (lockstep with macOS `skipSetTextBackfillExclusionSQL`): the BGE-text gate
+    /// Lockstep with macOS `skipSetTextBackfillExclusionSQL`: the BGE-text gate
     /// must keep a doc/pdf still lacking a `text_embeddings` row OUT of the skip set
     /// (so an install-then-rescan backfills it), while leaving docs that already have
     /// one — and non-doc kinds entirely — in the skip set.
@@ -2798,7 +2765,7 @@ mod tests {
         );
     }
 
-    /// R-14 (lockstep with macOS `skipSetModelClipBackfillExclusionSQL`): the model-CLIP
+    /// Lockstep with macOS `skipSetModelClipBackfillExclusionSQL`: the model-CLIP
     /// gate must keep a `.obj` still lacking a `clip_embeddings` row OUT of the skip set
     /// (so a rescan backfills its rendered-shape vector), while leaving an embedded `.obj`,
     /// a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.

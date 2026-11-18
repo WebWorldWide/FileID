@@ -274,7 +274,7 @@ mod tests {
         }
     }
 
-    /// Regression: a set-but-EMPTY `%LOCALAPPDATA%` must not collapse to the
+    /// A set-but-EMPTY `%LOCALAPPDATA%` must not collapse to the
     /// CWD-relative path `FileID`; it must fall through to `%USERPROFILE%`,
     /// matching the non-Windows empty-`$XDG_DATA_HOME` guard. (An UNSET var is a
     /// distinct, already-correct case: `var()` returns `Err` and falls through.)
