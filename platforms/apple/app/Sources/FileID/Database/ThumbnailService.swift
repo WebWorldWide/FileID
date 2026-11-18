@@ -107,7 +107,6 @@ public final class ThumbnailService {
         return nil
     }
 
-    /// The bucket's pixel size on this display, within what the engine renders.
     nonisolated static func enginePixelSize(size: CGFloat, scale: CGFloat) -> Int {
         min(max(Int((size * scale).rounded()), 64), 2048)
     }
@@ -116,7 +115,6 @@ public final class ThumbnailService {
         FileTypes.videos.contains(url.pathExtension.lowercased())
     }
 
-    /// Requests round up to a few shared sizes so views reuse one cache entry.
     nonisolated static func bucket(_ size: CGFloat) -> CGFloat {
         [256, 512, 1024].first { size <= $0 } ?? 2048
     }
@@ -234,7 +232,6 @@ public final class ThumbnailService {
         return jpegData
     }
 
-    /// The engine's frame when it answers for a video, else Quick Look.
     nonisolated static func render(
         url: URL, size: CGFloat, scale: CGFloat, modifiedAt: Double?,
         videoSource: VideoThumbnailSource?,
@@ -362,7 +359,6 @@ private enum ThumbnailDiskCache {
         DispatchQueue.global(qos: .utility).async { trim() }
     }
 
-    /// Deletes the oldest thumbnails until the folder is back under the cap.
     private static func trim() {
         guard (try? ReadOnlyLocations.requireWritable(dir)) != nil,
               let files = try? FileManager.default.contentsOfDirectory(

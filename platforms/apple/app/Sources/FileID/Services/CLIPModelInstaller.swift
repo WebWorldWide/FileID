@@ -39,8 +39,6 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Required files
 
-    /// Files the installer must produce on disk for both the image
-    /// embedder and the text encoder (both run in the engine) to be usable.
     static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
@@ -238,8 +236,6 @@ final class CLIPModelInstaller: ModelInstalling {
         refreshStatus()
     }
 
-    /// Under the Rust engine the engine downloads the same four files to the
-    /// same places (`prewarmModel` for the image and text encoders).
     private func runEngineInstall() async {
         installing = true
         defer { installing = false }
