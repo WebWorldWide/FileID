@@ -147,10 +147,20 @@ Mirror the **same artifact** on huggingface.co and set
 `FILEID_ORT_DYLIB_URL` to it. A bare-`.dylib` mirror also works when its SHA is
 provided explicitly. To reproduce or update the pinned hashes:
 
+`github.com/microsoft/onnxruntime` stopped resolving on 2026-11-17, and no
+surviving host serves this exact archive. NuGet's `Microsoft.ML.OnnxRuntime`
+1.22.0 carries the same osx-arm64 code (it differs from the pinned dylib in six
+header bytes plus the code signature: Microsoft Developer ID, SHA-256
+`6c2f8af5…1dd3`), so it is a different hash and would need its own pin. PyPI's
+macOS wheel is a universal2 build and is not equivalent. The only copy with the
+pinned hashes is the archive already downloaded to
+`~/FileIDDev/Downloads/ort-1.22.0/`; mirror it on huggingface.co before relying
+on anything else. The commands below work on any copy of the archive:
+
 ```sh
 ORT=1.22.0
-curl -fL -o ort.tgz \
-  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT}/onnxruntime-osx-arm64-${ORT}.tgz"
+ort_tgz=~/FileIDDev/Downloads/ort-1.22.0/onnxruntime-osx-arm64-${ORT}.tgz
+cp "$ort_tgz" ort.tgz
 shasum -a 256 ort.tgz                      # → PINNED_DYLIB_SHA256 (also the script's EXPECTED_SHA256)
 tar -xzf ort.tgz
 DY=$(find . -path '*/lib/libonnxruntime*.dylib' -not -path '*.dSYM/*' | head -1)
