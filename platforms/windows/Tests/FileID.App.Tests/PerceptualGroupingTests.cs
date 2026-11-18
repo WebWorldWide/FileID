@@ -21,8 +21,6 @@ public class PerceptualGroupingTests
     private static List<(long Id, long Phash)> Items(params (long Id, long Phash)[] xs)
         => new(xs);
 
-    // ─── Hamming distance ───────────────────────────────────────────────────
-
     [Fact]
     public void HammingDistance_IsPopcountOfXorOverRaw64Bits()
     {
@@ -33,8 +31,6 @@ public class PerceptualGroupingTests
         Assert.Equal(64, PerceptualGrouping.HammingDistance(I(0x0), I(ulong.MaxValue)));
         Assert.Equal(0, PerceptualGrouping.HammingDistance(I(ulong.MaxValue), I(ulong.MaxValue)));
     }
-
-    // ─── Grouping ───────────────────────────────────────────────────────────
 
     [Fact]
     public void ExactMatch_GroupsAtThresholdZero()

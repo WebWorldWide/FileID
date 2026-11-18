@@ -194,7 +194,6 @@ public class SchemaConformanceTests
         Assert.False(legacyDocument.RootElement.GetProperty("payload").GetProperty("toolRequest").GetProperty("request").GetProperty("recipe").TryGetProperty("videoStabilization", out _));
     }
 
-    // ── Exemplars ────────────────────────────────────────────────────────
     // One fully-populated instance per variant, constructed exactly as the
     // app constructs them. Optional fields are set so the serialized keys
     // exercise the variant's full schema property surface.
@@ -334,8 +333,6 @@ public class SchemaConformanceTests
         OpenvinoPackPresent: false,
         QnnPackPresent: false,
         Recommendation: "");
-
-    // ── Schema plumbing ──────────────────────────────────────────────────
 
     private static void AssertExemplarsCoverUnion(Type unionBase, IEnumerable<Type> exemplarTypes)
     {
