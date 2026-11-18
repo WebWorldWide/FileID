@@ -856,7 +856,7 @@ private struct PersonCard: View {
                 .overlay(selectionOverlay)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
-                    .strokeBorder(Theme.hairlineStrong, lineWidth: 1))
+                    .strokeBorder(person.hasAnyName ? Theme.hairlineStrong : Theme.ai.opacity(0.4), lineWidth: 1))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                     .strokeBorder(Theme.gold.opacity(hovering && !selectionMode ? 0.7 : 0), lineWidth: 1.5))
             Text(displayName)
