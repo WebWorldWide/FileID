@@ -1,6 +1,4 @@
-//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per
-//! group. Mirror of the macOS `NearDuplicateGrouping.swift` with the same
-//! thresholds; change both together.
+//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per group. Mirror of macOS `NearDuplicateGrouping.swift`; thresholds must change together.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -50,11 +48,6 @@ pub const CLIPS: Thresholds = Thresholds {
 };
 
 pub const MAX_GAP_SECONDS: f64 = NEAR_DUPLICATE.max_gap_seconds;
-pub const MAX_SPAN_SECONDS: f64 = NEAR_DUPLICATE.max_span_seconds;
-pub const MIN_COSINE: f32 = NEAR_DUPLICATE.min_cosine;
-pub const MIN_SEED_COSINE: f32 = NEAR_DUPLICATE.min_seed_cosine;
-pub const MAX_HAMMING: u32 = NEAR_DUPLICATE.max_hamming;
-pub const MAX_GROUP_SIZE: usize = NEAR_DUPLICATE.max_group_size;
 /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this
 /// similar counts as the same shot even when its file dates differ.
 pub const SIDECAR_COSINE: f32 = 0.90;
@@ -75,7 +68,6 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub representative: i64,
-    /// Every file in the group, representative included, in capture order.
     pub members: Vec<i64>,
 }
 
@@ -109,8 +101,6 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Same-stem twins that look alike share the earlier capture time, so a JPEG
-/// exported hours after the RAW still sorts beside it.
 pub fn align_sidecar_times(items: &[Item]) -> Vec<Item> {
     let mut by_stem: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
@@ -258,8 +248,6 @@ pub fn decode_embedding(blob: &[u8]) -> Option<Vec<f32>> {
     Some(blob.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
-/// Image metadata for `ids`; CLIP vectors only for files within `MAX_GAP_SECONDS`
-/// of another, so a large library never loads every embedding.
 pub fn load_items(conn: &rusqlite::Connection, ids: &[i64]) -> rusqlite::Result<Vec<Item>> {
     let mut meta: Vec<(i64, String, Option<f64>, Option<u64>)> = Vec::new();
     let mut stmt = conn.prepare_cached(
@@ -317,7 +305,6 @@ pub fn grouping_enabled() -> bool {
     std::env::var("FILEID_DEEP_GROUPING").map(|v| v != "0").unwrap_or(true)
 }
 
-/// Orders `ids` so each group's representative runs first and its members follow.
 pub fn plan(conn: &rusqlite::Connection, ids: &[i64]) -> Plan {
     let mut plan = Plan { ordered: ids.to_vec(), ..Plan::default() };
     if ids.len() < 2 || !grouping_enabled() {
@@ -444,7 +431,7 @@ mod tests {
         for g in found {
             let angles: Vec<f32> = g.members.iter().map(|m| *m as f32 * 0.2).collect();
             let spread = angles.iter().copied().fold(f32::MIN, f32::max) - angles.iter().copied().fold(f32::MAX, f32::min);
-            assert!(spread.cos() >= MIN_SEED_COSINE);
+            assert!(spread.cos() >= NEAR_DUPLICATE.min_seed_cosine);
         }
     }
 

@@ -1,28 +1,19 @@
-//! What a scan still owes a file after its main pass, and what it remembers
-//! about files it could not read. Both live in `scan_catchup` (catalog v34),
-//! shared with the Swift engine's `ScanCatchUp`, so either engine can finish
-//! the other's work.
+//! What a scan still owes a file after its main pass, and what it remembers about files it could not read. Both live in `scan_catchup` (catalog v34), shared with the Swift engine's `ScanCatchUp`, so either engine can finish the other's work.
 
 use parking_lot::Mutex;
 
-/// RAM++ tags are owed (`ScanCatchUp.tagsOwed`).
 pub const TAGS_OWED: i64 = 1;
-/// The careful text read is owed (`ScanCatchUp.carefulTextOwed`).
 pub const CAREFUL_TEXT_OWED: i64 = 2;
-/// The fast text read ran during the scan (`ScanCatchUp.textReadAtScan`).
 pub const TEXT_READ_AT_SCAN: i64 = 4;
 pub const OWED_MASK: i64 = TAGS_OWED | CAREFUL_TEXT_OWED;
 
-/// What the writer stores in `scan_catchup` next to a file's scan results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
     pub stages: i64,
-    /// The classifier context JSON (`ScanCatchUp.VisionContext`).
     pub vision: Option<String>,
     pub face_count: i64,
 }
 
-// MARK: - Files that keep failing
 
 /// A file that could not be analysed is retried on this many scans, then left
 /// alone until its size or date changes, the engine is updated, or the user
@@ -40,8 +31,6 @@ pub fn failure_context() -> &'static str {
     })
 }
 
-/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now. The count
-/// continues only while the file and the engine build are the ones that failed.
 pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
      (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) \
      VALUES (?1, ?2, ?3, ?4, 1, ?5) \
@@ -55,8 +44,6 @@ pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
 
 pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_failures WHERE file_id = ?1";
 
-/// Failed rows that have used up their retries and still describe the file
-/// on record. ?1 `failure_context()`; callers append a path-range clause.
 pub const GIVEN_UP_SQL: &str = "SELECT f.path_text, f.size_bytes, f.modified_at \
      FROM scan_failures c JOIN files f ON f.id = c.file_id \
      WHERE c.attempts >= 3 AND f.failed = 1 \
@@ -73,7 +60,6 @@ pub fn failure_is_about_the_file(path: &std::path::Path) -> bool {
     std::fs::File::open(long).and_then(|mut file| file.read(&mut [0u8; 1])).is_ok()
 }
 
-// MARK: - RAM++ after the scan
 
 /// A file's catch-up is given up after this many failed attempts
 /// (`ScanCatchUp.maxAttempts`); it keeps the tags the scan stored.
@@ -112,20 +98,14 @@ pub struct Context {
     /// The tags the scan stored in place of RAM++'s: the Vision classifier's
     /// on the Mac, the CLIP scene labels elsewhere.
     pub k: Vec<String>,
-    /// Classifier confidences the tag agreement reads, as `f32` bit patterns.
     pub c: Vec<Label>,
-    /// The classifier answered at all.
     pub u: bool,
-    /// Classifier plus RAM++ tags, once known; the careful read needs them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<Vec<String>>,
-    /// Face detection ran (the portable people-word rule needs to know).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub f: Option<bool>,
-    /// The photo names a camera (the portable text-read rule).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m: Option<bool>,
-    /// The Year and camera tags the scan appended, so the pass appends the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<Vec<String>>,
 }
@@ -136,16 +116,11 @@ pub struct Label {
     pub b: u32,
 }
 
-/// `TagAgreement.vetoable`, as classifier keys.
 const VETO_KEYS: [&str; 3] = ["canoe", "skateboard", "frisbee"];
-/// `TagAgreement.vetoBelow`.
 const VETO_BELOW: f32 = 0.01;
-/// The confidence from which the agreement raises a RAM++ score.
 const AGREEMENT_FROM: f32 = 0.30;
 
 impl Context {
-    /// Exactly the classifier output `TagAgreement.combine` reads: every label
-    /// at 0.30 or above and the vetoable labels at 0.01 or above.
     pub fn from_classifier(tags: &[String], confidences: impl IntoIterator<Item = (String, f32)>) -> Self {
         let mut answered = false;
         let mut c: Vec<Label> = confidences
@@ -206,7 +181,6 @@ pub fn unicode_fold(tag: &str) -> String {
     tag.to_lowercase()
 }
 
-/// What a text read returned (the Mac adapter's reply).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextRead {
     pub ran: bool,
@@ -283,7 +257,6 @@ pub fn careful_update(file: &Pending, context: &Context, read_text: impl FnOnce(
     Outcome::Done(Update { tags: None, text, stages: file.stages & !CAREFUL_TEXT_OWED, vision: file.vision.clone() })
 }
 
-/// One file the pass has to visit.
 #[derive(Debug, Clone)]
 pub struct Pending {
     pub file_id: i64,
@@ -323,23 +296,17 @@ pub struct TextUpdate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
-    /// The complete stored tag list; `None` leaves the scan's tags in place.
     pub tags: Option<Vec<(String, Option<f32>)>>,
-    /// The text read again with the final tags; `None` leaves the text as it is.
     pub text: Option<TextUpdate>,
-    /// What the row still says afterwards; nothing owed removes the row.
     pub stages: i64,
     pub vision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// Changed, missing or unreachable: the next scan deals with it.
     Leave,
-    /// The row no longer describes the analysis the marker was written for.
     Stale,
     Failed,
-    /// The reader went away; stop the pass and keep what is owed.
     Blocked,
     Done(Update),
 }
@@ -347,9 +314,7 @@ pub enum Outcome {
 /// Decodes and analyses one owed file. The scan's own decoder and models
 /// stand behind it (`tagging::catch_up_analyzer`); tests use a stub.
 pub trait Analyzer: Sync {
-    /// Whether this phase can run now (RAM++ loaded, careful reader ready).
     fn ready(&self, phase: Phase) -> bool;
-    /// Files analysed at once.
     fn parallelism(&self) -> usize;
     fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome;
     /// How long to wait for a phase's reader to become ready before giving up
@@ -447,7 +412,6 @@ fn next_chunk(
     }
 }
 
-/// The checks every analyzer shares, then the analyzer itself.
 fn process(file: &Pending, phase: Phase, analyzer: &dyn Analyzer) -> Outcome {
     if file.mark_size != file.size_bytes || !same_time(file.mark_modified, file.modified_at) {
         return Outcome::Stale;
@@ -532,10 +496,7 @@ fn apply(tx: &rusqlite::Connection, file: &Pending, outcome: &Outcome, summary: 
     Ok(())
 }
 
-/// Runs the tag pass, then the careful-read pass, over what files under
-/// `root` (everything when `None`) are owed. The `scan_catchup` row is the
-/// cursor: a cancel or a crash leaves the rest for the next scan. Safe to call
-/// with nothing owed.
+/// Runs the tag pass, then the careful-read pass, over what files under `root` (everything when `None`) are owed. The `scan_catchup` row is the cursor, so a cancel or crash leaves the rest for the next scan.
 pub fn run(
     conn: &Mutex<rusqlite::Connection>,
     root: Option<&std::path::Path>,
@@ -567,7 +528,6 @@ impl ReaderHealth {
         Self { failures: 0, retry_at: None }
     }
 
-    /// The time left before the reader is asked again, or `None` when it may be asked now.
     pub fn deferred_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
         self.retry_at.and_then(|at| at.checked_duration_since(now)).filter(|left| !left.is_zero())
     }
@@ -589,12 +549,10 @@ impl ReaderHealth {
 
 static CAREFUL_READER: Mutex<ReaderHealth> = Mutex::new(ReaderHealth::new());
 
-/// True while a scan should not wait for the careful text reader because it stopped answering recently.
 pub fn careful_reader_deferred() -> bool {
     CAREFUL_READER.lock().deferred_for(std::time::Instant::now()).is_some()
 }
 
-/// A user who asked for a rescan, or installed a model, wants the careful reader asked again now.
 pub fn forget_careful_reader_failures() {
     CAREFUL_READER.lock().recovered();
 }
@@ -717,8 +675,6 @@ fn pass(
                         if is_cancelled() {
                             return Outcome::Leave;
                         }
-                        // The same background admission as a scan file: a
-                        // search or a resident model goes first.
                         let lease = scheduler.reserve_patient(
                             crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
                             crate::resource_scheduler::Priority::Background,
@@ -778,9 +734,7 @@ fn pass(
 
 struct PassEnd {
     visited: u64,
-    /// The reader stopped answering and the pass gave up on it.
     blocked: bool,
-    /// Cancelled, or the catalog could not be read or written: says nothing about the reader.
     stopped_early: bool,
 }
 
@@ -812,7 +766,6 @@ mod tests {
 
     #[test]
     fn the_context_reads_and_writes_the_swift_engines_json() {
-        // As `ScanCatchUp.VisionContext` encodes it (any key order, no `t` yet).
         let swift = r#"{"u":true,"c":[{"n":"dog","b":1063675494},{"n":"frisbee","b":1017370378}],"k":["dog","outdoor"]}"#;
         let context = Context::decode(Some(swift)).expect("Swift-written context");
         assert_eq!(context.k, ["dog", "outdoor"]);
@@ -846,7 +799,6 @@ mod tests {
         assert_eq!(context.c[1].b, 0.02f32.to_bits(), "confidences round-trip bit for bit");
         assert!(context.u);
 
-        // The classifier answered but nothing was kept: still "answered".
         let quiet = Context::from_classifier(&tags, [("park".to_string(), 0.1f32)]);
         assert!(quiet.u && quiet.c.is_empty());
         assert_eq!(quiet.confidences().len(), 1);
@@ -868,7 +820,6 @@ mod tests {
         assert_eq!(unicode_fold("ÉCOLE"), "école");
     }
 
-    // MARK: the pass over a real catalog, with a stub in place of the models
 
     struct Library {
         dir: PathBuf,
@@ -883,7 +834,6 @@ mod tests {
             Self { dir, conn: Arc::new(Mutex::new(crate::db::test_support::memory_db())) }
         }
 
-        /// A scanned image row for a real file, before any tags.
         fn image(&self, name: &str) -> TaggedFile {
             let path = self.dir.join(name);
             std::fs::write(&path, name.as_bytes()).unwrap();
@@ -919,7 +869,6 @@ mod tests {
             run_with_health(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {}, reader)
         }
 
-        /// (tags with scores, text, handwritten, has_text, owed stages)
         #[allow(clippy::type_complexity)]
         fn stored(&self, name: &str) -> (Vec<(String, Option<f64>)>, Option<String>, bool, bool, Option<i64>) {
             let conn = self.conn.lock();
@@ -1008,7 +957,6 @@ mod tests {
         }
     }
 
-    /// The row as the inline scan writes it: RAM++ in the scan, then the text read.
     fn portable_inline(library: &Library, name: &str, scene: &[(&str, f32)], extras: &[&str]) -> TaggedFile {
         let mut row = library.image(name);
         row.faces_evaluated = true;
@@ -1028,7 +976,6 @@ mod tests {
         row
     }
 
-    /// The row as the deferred scan writes it: scene labels, no text read, a marker.
     fn portable_deferred(library: &Library, name: &str, scene: &[(&str, f32)], extras: &[&str]) -> TaggedFile {
         let mut row = library.image(name);
         row.faces_evaluated = true;
@@ -1060,7 +1007,6 @@ mod tests {
         inline.write(cases.iter().map(|(name, scene, extras)| portable_inline(&inline, name, scene, extras)).collect()).await;
         deferred.write(cases.iter().map(|(name, scene, extras)| portable_deferred(&deferred, name, scene, extras)).collect()).await;
 
-        // Before the pass the deferred library holds the scene labels and owes the rest.
         let (tags, text, _, _, owed) = deferred.stored("dog.png");
         assert_eq!(tags.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["Canon", "Year_2019", "park"]);
         assert_eq!((text, owed), (None, Some(TAGS_OWED)));
@@ -1152,13 +1098,9 @@ mod tests {
     #[tokio::test]
     async fn mac_tags_and_text_after_the_pass_equal_the_inline_scan() {
         let cases: [(&str, &[&str], &[&str]); 4] = [
-            // RAM++ adds a text hint the classifier lacked: the text is read in the pass.
             ("note.heic", &["outdoor"], &["Year_2024", "iPhone"]),
-            // No text either way.
             ("hike.heic", &["outdoor", "sky"], &["Year_2023"]),
-            // Read at scan time; RAM++'s tags change what the read is told.
             ("scan.heic", &["document"], &[]),
-            // RAM++ has nothing to add: the classifier's tags stand.
             ("blank.heic", &["document", "white"], &["Year_2020"]),
         ];
         let (inline, deferred) = (Library::new("mac-inline"), Library::new("mac-deferred"));
@@ -1187,7 +1129,6 @@ mod tests {
         row.ocr_stage_ran = true;
         row.ocr_text = Some("fast read".to_string());
         row.has_text = true;
-        // As the Swift scan writes it once RAM++ ran inline: the text tags are known.
         let swift = r#"{"k":["document"],"c":[],"u":true,"t":["document","handwriting"]}"#;
         row.catch_up = Some(Marker { stages: CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, vision: Some(swift.to_string()), face_count: 0 });
         library.write(vec![row]).await;
@@ -1201,7 +1142,6 @@ mod tests {
         assert_eq!(owed, None);
     }
 
-    /// A Mac reader whose careful tier is still compiling until `warm` is set.
     struct ColdReader {
         warm: std::sync::atomic::AtomicBool,
     }
@@ -1361,7 +1301,6 @@ mod tests {
         library.write((0..7).map(|i| owing(&library, &format!("photo{i}.png"))).collect()).await;
         let analyzer = Counting { calls: AtomicUsize::new(0), fail: false };
         let progress = Mutex::new(Vec::new());
-        // Cancelled once the first two files have been analysed.
         let summary = run(
             &library.conn,
             Some(&library.dir),
@@ -1404,7 +1343,6 @@ mod tests {
         let scene = vec![("scene".to_string(), Some(0.5))];
         // The row was rewritten since the marker (a different size on record).
         library.conn.lock().execute("UPDATE scan_catchup SET size_bytes = size_bytes + 1 WHERE file_id = (SELECT id FROM files WHERE path_text LIKE '%stale.png')", []).unwrap();
-        // The file changed on disk after the scan.
         std::fs::write(library.dir.join("edited.png"), b"a longer file than before").unwrap();
 
         let good = Counting { calls: AtomicUsize::new(0), fail: false };

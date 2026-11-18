@@ -1,11 +1,4 @@
-//! Audio metadata extraction (artist / album / title)
-//! via `symphonia`. Pure-Rust, no Java/ffmpeg system dependency, supports
-//! mp3 (ID3v1/v2), flac (Vorbis comments), ogg/vorbis, wav, m4a/aac (iso-mp4),
-//! and plain PCM containers.
-//!
-//! Returns `(label, score)` pairs ready to push onto `TaggedFile.tags`. Each
-//! tag's score is `None` — these are metadata-derived facts, not model
-//! probabilities.
+//! Audio artist/album/title tags via symphonia (pure Rust, no ffmpeg). Returns `(label, score)` pairs for `TaggedFile.tags`; the score is `None` since these are metadata facts, not model probabilities.
 
 use std::path::Path;
 
@@ -14,8 +7,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, Value};
 use symphonia::core::probe::Hint;
 
-/// Cap tags per audio file. Most files yield 2-4 useful tags; the cap stops
-/// a pathological ID3 dump from drowning the Library chip row.
+/// Cap on tags per audio file so a pathological ID3 dump can't drown the Library chip row.
 const MAX_TAGS: usize = 6;
 
 /// The probe, with a panic from a malformed header (symphonia's WAV reader
@@ -29,13 +21,7 @@ fn probe(hint: &Hint, mss: MediaSourceStream) -> Option<symphonia::core::probe::
     .ok()
 }
 
-/// Extract artist / album / title tags from `path`. Returns
-/// an empty Vec on any decode/probe failure — audio metadata is best-effort.
-///
-/// `bytes` is an optional pre-read buffer (decoder thread reads the file once
-/// for hashing + extraction on files ≤ FULL_HASH_MAX_BYTES). When supplied,
-/// symphonia probes the in-memory bytes via a tiny MediaSource adapter and
-/// skips a second file open. When `None`, the existing path-based open runs.
+/// Returns an empty Vec on any decode/probe failure (best-effort). `bytes` is the decoder thread's pre-read buffer (files ≤ FULL_HASH_MAX_BYTES); when supplied symphonia probes it via a MediaSource adapter instead of opening the file again.
 pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<f32>)> {
     let source = match bytes {
         Some(b) => Some(super::container_guard::Source::Bytes(b)),
@@ -45,9 +31,6 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
         return Vec::new();
     }
     let mss = if let Some(b) = bytes {
-        // symphonia owns the source for the stream's lifetime; copy once into
-        // the adapter. Cost is bounded by FULL_HASH_MAX_BYTES (16 MB) per file
-        // and amortizes against the file open + read it replaces.
         MediaSourceStream::new(
             Box::new(BytesMediaSource::new(b.to_vec())),
             MediaSourceStreamOptions::default(),
@@ -70,16 +53,9 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     let mut format = probed.format;
     let mut out: Vec<(String, Option<f32>)> = Vec::new();
 
-    // NOTE: duration is intentionally NOT emitted as a tag. A length like
-    // "3 sec" / "1 min" describes a capability, not content, and on a real
-    // library it dominated the chip row as pure noise (top tag-report run:
-    // thousands of "N sec" tags at score 0.000). This mirrors the earlier
-    // refinement that dropped "Has Faces"/"Has Text"/aspect tags for the same
-    // reason — metadata facts belong in columns/facets, not the tag stream.
+    // Duration is deliberately not emitted as a tag: it describes a capability, not content, and floods the chip row with 'N sec' noise.
 
-    // Some formats (FLAC, Vorbis, M4A) carry metadata on the FormatReader;
-    // others (MP3 with ID3v2) carry it on the probe's MetadataLog. Read
-    // both, dedup at the end.
+    // Metadata lives on the FormatReader (FLAC, Vorbis, M4A) or the probe's MetadataLog (ID3v2).
     if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
         push_metadata(&mut out, rev);
     }
@@ -92,10 +68,7 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     out
 }
 
-/// Structured title / artist / album for Deep Analyze smart-renaming. Reuses the same
-/// `symphonia` probe as [`extract`] but keeps the fields SEPARATE so a descriptive
-/// filename can be built ("Artist - Title"). Path-based open only (the rename pass has
-/// no pre-read buffer). Best-effort — any field symphonia can't expose stays None.
+/// Structured title / artist / album for Deep Analyze smart-renaming, kept SEPARATE so a name can be built ("Artist - Title"). Path-based open only; fields symphonia can't expose stay None.
 #[derive(Default, Debug, Clone)]
 pub(crate) struct AudioTags {
     pub title: Option<String>,
@@ -131,13 +104,11 @@ pub(crate) fn extract_structured(path: &Path) -> AudioTags {
     tags
 }
 
-/// RIFF INFO and ID3v1 values are NUL-padded fixed-width fields.
 fn tag_text(raw: &str) -> String {
     raw.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()
 }
 
-/// First-non-empty per field, matching `push_metadata`'s standard-key set. Artist
-/// prefers the track Artist over AlbumArtist (both map to `artist`).
+/// First-non-empty per field; Artist prefers the track Artist over AlbumArtist.
 fn collect_structured(tags: &mut AudioTags, rev: &symphonia::core::meta::MetadataRevision) {
     for tag in rev.tags() {
         let value = match &tag.value {
@@ -183,10 +154,6 @@ fn dedup_preserve_order(v: &mut Vec<(String, Option<f32>)>) {
     v.retain(|(label, _)| seen.insert(label.to_lowercase()));
 }
 
-/// MediaSource over an owned `Vec<u8>` so symphonia can probe a pre-read
-/// buffer without a file handle. `Cursor<Vec<u8>>` already gives us
-/// `Read + Seek + Send + Sync`; symphonia just needs us to declare seekability
-/// and the byte length.
 struct BytesMediaSource(std::io::Cursor<Vec<u8>>);
 
 impl BytesMediaSource {
