@@ -1,10 +1,5 @@
-//! SQLite database — owns the single writer connection; reads fan out via
-//! fresh read-only connections (`open_read`). Drop-in for GRDB.swift on macOS.
-//!
-//! The writer is single-threaded by design (matches the macOS
-//! `Database.swift` invariant): SQLite WAL allows concurrent readers but
-//! only one writer at a time. We serialize writes through one connection;
-//! reads use ephemeral read-only connections opened on demand.
+//! SQLite database: one single-threaded writer connection (WAL allows only one writer); reads use ephemeral read-only
+//! connections (`open_read`).
 
 pub mod migrations;
 pub mod person_counts;
@@ -22,8 +17,6 @@ pub(crate) mod test_support {
         conn
     }
 
-    /// A `files` row with `path_hash = id`, 100 bytes, modified at 10,
-    /// scanned at 0 and the extension taken from `path`.
     pub(crate) fn insert_file(conn: &Connection, id: i64, path: &str, kind: &str) {
         let extension = path.rsplit_once('.').map_or("", |(_, ext)| ext).to_ascii_lowercase();
         conn.execute(
@@ -40,28 +33,21 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-/// PRAGMAs applied at every connection open.
-/// WAL + NORMAL sync + 256 MB mmap + 64 MB cache.
 pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = NORMAL",
     "PRAGMA temp_store = MEMORY",
-    "PRAGMA mmap_size = 268435456",     // 256 MB
-    "PRAGMA cache_size = -65536",        // 64 MB (negative = KB)
-    "PRAGMA wal_autocheckpoint = 10000", // ~40 MB before checkpoint
-    // Pin the 64 MB page cache in memory instead of spilling to a temp
-    // file mid-transaction. Our worst transaction is a 100-row tagged-file
-    // batch (well under cache); spill never wins.
+    "PRAGMA mmap_size = 268435456",
+    "PRAGMA cache_size = -65536", // (negative = KB)
+    "PRAGMA wal_autocheckpoint = 10000",
+    // Pin the page cache in memory instead of spilling to a temp file mid-transaction; the worst transaction (a 100-row
+    // tagged-file batch) fits well under it.
     "PRAGMA cache_spill = 0",
     "PRAGMA foreign_keys = ON",
 ];
 
-/// How long any connection waits on another connection's lock before
-/// returning SQLITE_BUSY. Matches the macOS engine's `busyMode = .timeout(5)`.
 pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The database file (or its folder) can't be written, so SQLite opened it
-/// read-only. The engine refuses to run on it rather than fail every write.
 #[derive(Debug)]
 pub struct ReadOnlyDatabase;
 
@@ -73,8 +59,6 @@ impl std::fmt::Display for ReadOnlyDatabase {
 
 impl std::error::Error for ReadOnlyDatabase {}
 
-/// Open the engine's writer connection. Creates the file + schema if absent.
-/// Applies every migration up to v20 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
     crate::util::read_only::require_writable(db_path)?;
     if let Some(parent) = db_path.parent() {
@@ -84,7 +68,6 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("opening db at {}", db_path.display()))?;
     conn.busy_timeout(BUSY_TIMEOUT).context("setting busy timeout")?;
-    // SQLite silently falls back to read-only when the file isn't writable.
     if conn.is_readonly(rusqlite::MAIN_DB).unwrap_or(false) {
         return Err(ReadOnlyDatabase.into());
     }
@@ -92,26 +75,20 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         conn.execute_batch(pragma)
             .with_context(|| format!("applying {pragma}"))?;
     }
-    // rusqlite's default cache holds 16 statements; one dbwriter flush keeps ~18
-    // prepare_cached alive at once, so the default evicts+re-prepares 1-2 hot
-    // statements every batch. 32 keeps them all resident across flushes.
+    // The default 16-statement cache evicts and re-prepares 1-2 hot statements on every dbwriter flush (~18 live at
+    // once).
     conn.set_prepared_statement_cache_capacity(32);
     migrations::apply(&conn).context("applying migrations")?;
     #[cfg(target_os = "linux")]
     rehash_case_sensitive_paths(&conn).context("rehashing Linux path hashes")?;
 
-// A 'running' row left by a crashed engine would otherwise show as an active scan forever.
     match conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
         [],
     ) {
-        // A swept 'running' row means the previous engine died mid-scan, so
-        // the last committed batch may have durable face_prints rows whose
-        // crop JPEGs (written post-commit, outside the tx) never landed. Flag
-        // it so the next incremental scan reconciles missing crops instead of
-        // skipping those now-unchanged files forever. Clean shutdowns sweep 0
-        // rows and pay nothing.
+        // The previous engine died mid-scan, so the last committed batch may hold face_prints whose crop JPEGs (written
+        // post-commit) never landed; flag it so the next incremental scan reconciles them.
         Ok(swept) if swept > 0 => {
             UNCLEAN_PRIOR_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(swept, "open_writer: swept orphaned 'running' scan_sessions (unclean prior shutdown)");
@@ -129,10 +106,9 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Linux catalogs written before path hashes became case-sensitive hold
-/// lowercased hashes; the missing-file sweep compares hashes, so unchanged
-/// files would be hidden after the first rescan. Runs once and records itself
-/// in `user_version` because `grdb_migrations` rejects unknown identifiers.
+/// Linux catalogs written before path hashes became case-sensitive hold lowercased hashes, which would hide unchanged
+/// files after the first rescan. Runs once, recorded in `user_version` because `grdb_migrations` rejects unknown
+/// identifiers.
 #[cfg(target_os = "linux")]
 fn rehash_case_sensitive_paths(conn: &Connection) -> Result<()> {
     const DONE: i64 = 1;
@@ -163,18 +139,13 @@ fn rehash_case_sensitive_paths(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Set true when `open_writer` sweeps a stale `running` scan_sessions row —
-/// i.e. the previous engine process died mid-scan. Read once by the next
-/// incremental scan to decide whether to reconcile face crops that a
-/// post-commit write may have missed (see scan_session skip-set preload).
+/// Set when `open_writer` sweeps a stale `running` scan_sessions row; read once by the next incremental scan (see
+/// scan_session skip-set preload).
 pub static UNCLEAN_PRIOR_SHUTDOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Open an ephemeral READ-ONLY connection. Query handlers use these so they
-/// never contend on the single writer mutex — WAL lets readers run concurrent
-/// with the one writer. `NO_MUTEX` is safe because each connection stays on the
-/// task that opened it. `journal_mode`/`synchronous` are writer concerns and
-/// can't be set on a RO conn, so only the read-relevant pragmas are applied.
+/// Ephemeral READ-ONLY connection so query handlers never contend on the writer mutex. `NO_MUTEX` is safe because each
+/// connection stays on the task that opened it; `journal_mode`/`synchronous` can't be set on a RO conn.
 pub fn open_read(db_path: &Path) -> Result<Connection> {
     use rusqlite::OpenFlags;
     let conn = Connection::open_with_flags(
@@ -195,15 +166,11 @@ pub fn open_read(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// A few read-only connections kept open between requests, so a read handler
-/// neither waits on the writer nor pays to open the catalog and parse its
-/// schema on every call. Holds connections to one database at a time.
 pub struct ReaderPool {
     capacity: usize,
     idle: parking_lot::Mutex<Vec<(std::path::PathBuf, Connection)>>,
 }
 
-/// A pooled read-only connection, returned to its pool on drop.
 pub struct Reader<'a> {
     pool: &'a ReaderPool,
     path: std::path::PathBuf,
@@ -267,12 +234,10 @@ impl ReaderPool {
     }
 }
 
-// Tests delete their temporary catalogs; an idle handle would block that on
-// Windows, so the shared pool keeps nothing there.
+// Tests delete their temporary catalogs, which an idle handle would block on Windows.
 static READERS: ReaderPool = ReaderPool::new(if cfg!(test) { 0 } else { 4 });
 
-/// A pooled read-only connection to the writer's database, or `None` for an
-/// in-memory database (which only its own connection can see).
+/// `None` for an in-memory database (only its own connection can see it).
 pub fn reader_for(writer: &parking_lot::Mutex<Connection>) -> Result<Option<Reader<'static>>> {
     let path = writer.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
     path.map(|path| READERS.get(&path)).transpose()
@@ -282,7 +247,6 @@ pub fn close_readers() {
     READERS.clear();
 }
 
-/// Run `PRAGMA quick_check(1)` on the writer connection. Cheap enough for every startup; catches a torn page or truncated file before the app reads garbage.
 pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
     match conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
         Ok(s) if s.eq_ignore_ascii_case("ok") => Ok(()),
@@ -291,10 +255,8 @@ pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
     }
 }
 
-/// The startup structural check, run on its own read-only connection after
-/// `ready` so a large library does not hold up launch. `cancel` interrupts a
-/// running check: its read transaction would otherwise make the shutdown WAL
-/// checkpoint report busy.
+/// Runs on its own read-only connection after `ready` so a large library does not delay launch. `cancel` interrupts it:
+/// its read transaction would otherwise make the shutdown WAL checkpoint report busy.
 #[derive(Default)]
 pub struct IntegrityCheck {
     state: parking_lot::Mutex<IntegrityCheckState>,
@@ -308,8 +270,6 @@ struct IntegrityCheckState {
 }
 
 impl IntegrityCheck {
-    /// `Some(detail)` when the database is damaged or the check could not
-    /// run; `None` when it is sound or the check was cancelled.
     pub fn run(&self, db_path: &Path) -> Option<String> {
         let verdict = self.check(db_path);
         let mut state = self.state.lock();
@@ -335,10 +295,8 @@ impl IntegrityCheck {
         verdict
     }
 
-    /// Stop a running check and wait (bounded) until its connection is closed.
     pub fn cancel(&self) {
-        // An interrupt that lands before the statement starts is dropped by
-        // SQLite, so repeat it until the check reports back.
+        // An interrupt that lands before the statement starts is dropped by SQLite, so repeat it.
         for _ in 0..100 {
             {
                 let mut state = self.state.lock();
@@ -353,22 +311,19 @@ impl IntegrityCheck {
         }
     }
 
-    /// Marks a check that will never run as finished so `cancel` returns at once.
     pub fn skip(&self) {
         self.state.lock().finished = true;
     }
 }
 
-/// Drain WAL into the main DB file (`wal_checkpoint(TRUNCATE)`) at shutdown. Retries on SQLITE_BUSY up to 5 times, 50 ms apart; on exhaustion the caller logs and the WAL is replayed on the next open.
+/// Retries on SQLITE_BUSY up to 5 times, 50 ms apart; on exhaustion the caller logs and the WAL is replayed on next
+/// open.
 pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     const RETRY_DELAY_MS: u64 = 50;
     for attempt in 1..=MAX_ATTEMPTS {
-        // wal_checkpoint(TRUNCATE) returns a row `(busy, log, checkpointed)`. A
-        // blocked truncate surfaces as `busy != 0` in that row, NOT as a
-        // SQLITE_BUSY error — `execute_batch` discards the row, so it would
-        // report Ok() even when nothing was truncated (and the SQLITE_BUSY retry
-        // arm was dead). Read the busy flag and retry on it.
+        // `wal_checkpoint(TRUNCATE)` reports a blocked truncate as `busy != 0` in its result row, not as an error;
+        // `execute_batch` would discard it.
         let busy = match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)) {
             Ok(busy) => busy,
             Err(rusqlite::Error::SqliteFailure(err, _))
@@ -391,7 +346,8 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Wipe every row of user data, keeping the schema and migration ledger. Runs on the writer connection so it never races the file lock an app-side delete would hit. Tables are discovered from sqlite_master; FTS5 tables are emptied with 'delete-all' and their shadow tables are skipped (deleting them directly corrupts the index).
+/// Wipe all user data, keeping schema and migration ledger. FTS5 shadow tables are skipped (deleting them directly
+/// corrupts the index).
 pub fn wipe_all(conn: &Connection) -> Result<()> {
     let virtual_tables: Vec<(String, bool)> = {
         let mut stmt = conn.prepare(
@@ -401,7 +357,6 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
-    // A plain table is an FTS5 shadow table when its name is `<vtab>_<suffix>`.
     let is_shadow = |name: &str| virtual_tables.iter().any(|(v, _)| name.starts_with(&format!("{v}_")));
     let data_tables: Vec<String> = {
         let mut stmt = conn.prepare(
@@ -414,8 +369,7 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         rows.filter_map(|r| r.ok()).filter(|n| !is_shadow(n)).collect()
     };
 
-// FK off so DELETE order across tables is irrelevant; it must be toggled outside a transaction.
-// foreign_keys is per-connection, not transaction-scoped: re-enable it on every exit path, or the single long-lived writer keeps FK enforcement off after an error.
+// foreign_keys is per-connection and must be toggled outside a transaction: re-enable on every exit path.
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     let wipe = (|| -> Result<()> {
         let tx = conn.unchecked_transaction()?;
@@ -423,8 +377,7 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
             tx.execute_batch(&format!("DELETE FROM \"{t}\""))
                 .with_context(|| format!("wiping table {t}"))?;
         }
-        // 'delete-all' only exists for contentless/external-content FTS5; a
-        // table that stores its own content is emptied with a plain DELETE.
+        // 'delete-all' only exists for contentless/external-content FTS5.
         for (v, external_content) in &virtual_tables {
             let sql = if *external_content {
                 format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')")
@@ -433,16 +386,13 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
             };
             tx.execute_batch(&sql).with_context(|| format!("resetting FTS table {v}"))?;
         }
-        // The vector triggers UPDATE this row on every embedding change, so deleting it would stop
-        // the visual-search index from ever seeing a new embedding. Keep it, drop the old index's
-        // identity (a new instance id invalidates any cached graph) and restart its generation.
+        // The vector triggers UPDATE this row on every embedding change, so deleting it would stop the visual-search
+        // index seeing new embeddings. Keep it, reset its identity (invalidates cached graphs) and generation.
         tx.execute_batch(
             "UPDATE catalog_vector_state SET instance_id=hex(randomblob(16)),generation=0; \
              UPDATE catalog_vector_state SET nonce=instance_id;",
         )
         .context("resetting vector state")?;
-        // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
-        // when an AUTOINCREMENT table exists (it does); guard anyway.
         let _ = tx.execute_batch("DELETE FROM sqlite_sequence");
         tx.commit().context("committing wipe")?;
         Ok(())
@@ -466,9 +416,7 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
     }
     wipe?;
 
-    // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.
-    // Both best-effort — an ephemeral reader holding a lock makes VACUUM
-    // SQLITE_BUSY, which is harmless (space reclaims on a later run).
+    // Best-effort: an ephemeral reader holding a lock makes VACUUM SQLITE_BUSY; space reclaims on a later run.
     let _ = checkpoint_truncate(conn);
     let _ = conn.execute_batch("VACUUM");
     Ok(())
@@ -771,7 +719,6 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        // Permission bits don't bind root (some CI containers); nothing to test there.
         let enforced = std::fs::OpenOptions::new().write(true).open(&path).is_err();
         let result = open_writer(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();

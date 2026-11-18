@@ -62,9 +62,7 @@ pub fn validate_zero_byte_files(observations: &[ZeroByteObservation]) -> ZeroByt
         validation.observations.push(ValidatedZeroByteObservation {
             path: observation.path.clone(),
             created_unix: metadata.created().ok().and_then(system_time_to_unix),
-            // None (→ SQL NULL → COALESCE preserves the stored value) when the
-            // FS modified-time is unreadable, rather than fabricating `now` and
-            // silently discarding the true timestamp (pre-1970 / FAT media).
+            // None → SQL NULL → COALESCE keeps the stored value; never fabricate `now` (pre-1970 / FAT media).
             modified_unix: metadata.modified().ok().and_then(system_time_to_unix),
             file_ref: current_ref,
         });

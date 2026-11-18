@@ -1,20 +1,8 @@
-//! SQLite migration stack.
+//! SQLite migration stack, tracked in `grdb_migrations` (same table + identifier format as GRDB) so a database built by
+//! either engine opens in the other.
 //!
-//! Tracks applied migrations in `grdb_migrations` (same table name + format
-//! as GRDB) so a database built by either engine can be opened by the
-//! other. Identifiers MUST match the canonical strings byte-for-byte:
-//!
-//!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
-//!   v4_face_verifications, v5_person_naming_structured,
-//!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
-//!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
-//!   v13_face_verification_anchors, v14_files_kind_scanned_index,
-//!   v15_fts_sync_triggers, v16_path_search,
-//!   v17_face_verification_stable_keys, v18_restructure_feedback,
-//!   v19_files_text_stage_done
-//!
-//! Migrations are append-only. NEVER edit a registered migration once
-//! committed; add a new vN+1 migration instead.
+//! Registered identifiers MUST match macOS byte-for-byte, and migrations are append-only: never edit one once
+//! committed, add vN+1.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -25,8 +13,6 @@ const MIGRATION_TABLE_DDL: &str = r#"
     )
 "#;
 
-/// (identifier, sql) pairs in registration order. Identifiers must match
-/// the Swift `m.registerMigration(...)` strings exactly.
 fn registry() -> Vec<(&'static str, &'static str)> {
     vec![
         ("v1_core_tables",              V1_CORE_TABLES),
@@ -68,29 +54,28 @@ fn registry() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// v12: face-model swap (ArcFace 512-d → SFace 128-d). Embeddings from the two models are incompatible, so the face graph is wiped (children before parents); file and image rows are untouched.
-/// NOTE: macOS must register an identical `v12_face_model_reset` identifier with equivalent SQL for cross-platform DB parity.
+/// v12: face-model swap (ArcFace 512-d → SFace 128-d). The two models' embeddings are incompatible, so the face graph
+/// is wiped (children before parents); file and image rows are untouched.
 const V12_FACE_MODEL_RESET: &str = "
 DELETE FROM face_verifications;
 DELETE FROM face_prints;
 DELETE FROM persons;
 ";
 
-/// v13: face_a/face_b hold stable face_print ids for "different people" verdicts; person rowids churn on every re-cluster.
-/// NOTE: macOS must register an identical `v13_face_verification_anchors` identifier with equivalent SQL for cross-platform DB parity.
+/// v13: face_a/face_b hold stable face_print ids for "different people" verdicts; person rowids churn on every
+/// re-cluster.
 const V13_FACE_VERIFICATION_ANCHORS: &str = "
 ALTER TABLE face_verifications ADD COLUMN face_a INTEGER;
 ALTER TABLE face_verifications ADD COLUMN face_b INTEGER;
 ";
 
 /// v14: composite (kind, scanned_at) index so kind-filtered Library queries avoid a TEMP B-TREE sort.
-/// NOTE: macOS must register an identical `v14_files_kind_scanned_index` identifier with equivalent SQL for cross-platform DB parity.
 const V14_FILES_KIND_SCANNED_INDEX: &str = "
 CREATE INDEX IF NOT EXISTS idx_files_kind_scanned ON files(kind, scanned_at);
 ";
 
-/// v15: keep the external-content FTS5 indexes in sync via triggers, byte-faithful with macOS v15_fts_sync_triggers.
-/// Writers use explicit DELETE + INSERT on content tables: REPLACE's implicit delete skips AFTER DELETE triggers unless recursive_triggers is on.
+/// v15: external-content FTS5 sync triggers. Writers use explicit DELETE + INSERT: REPLACE's implicit delete skips
+/// AFTER DELETE triggers unless recursive_triggers is on.
 const V15_FTS_SYNC_TRIGGERS: &str = "
 INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild');
 INSERT INTO doc_fts(doc_fts) VALUES('rebuild');
@@ -116,15 +101,15 @@ CREATE TRIGGER IF NOT EXISTS doc_text_au AFTER UPDATE ON doc_text BEGIN
 END;
 ";
 
-/// v16: normalization-insensitive filename search. LIKE compares bytes, so NFD-stored names never match an NFC query; `path_search` holds the NFC form of `path_text`.
-/// NOTE: macOS must register an identical `v16_path_search` identifier for cross-platform DB parity.
+/// v16: LIKE compares bytes, so NFD-stored names never match an NFC query; `path_search` holds the NFC form of
+/// `path_text`.
 const V16_PATH_SEARCH: &str = "
 ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
 ";
 
-/// v17: (file_id, bbox) face-verification keys. face_print ids are re-inserted with fresh ids on every faces_evaluated re-scan; (file, bbox) identifies the same physical face.
-/// NOTE: macOS must register an identical `v17_face_verification_stable_keys` identifier with equivalent SQL for cross-platform DB parity.
+/// v17: face_print ids are re-inserted on every faces_evaluated re-scan; (file_id, bbox) identifies the same physical
+/// face.
 const V17_FACE_VERIFICATION_STABLE_KEYS: &str = "
 ALTER TABLE face_verifications ADD COLUMN file_a INTEGER;
 ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT;
@@ -138,8 +123,8 @@ UPDATE face_verifications SET
 WHERE face_a IS NOT NULL AND face_b IS NOT NULL;
 ";
 
-/// v18: token→folder co-occurrence memory for restructure learning. Applied moves credit each filename token toward the destination folder; additive routing hint, no model retraining.
-/// Identifier + SQL must match the Swift `v18_restructure_feedback` migration exactly.
+/// v18: token→folder co-occurrence memory for restructure learning; applied moves credit each filename token toward the
+/// destination folder.
 const V18_RESTRUCTURE_FEEDBACK: &str = "
 CREATE TABLE IF NOT EXISTS restructure_feedback (
     token      TEXT    NOT NULL,
@@ -151,7 +136,7 @@ CREATE TABLE IF NOT EXISTS restructure_feedback (
 CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token);
 ";
 
-// v19: marks a doc/pdf text-extraction stage as run, so the BGE backfill stops re-walking docs with no embeddable text. Byte-faithful with macOS v19_files_text_stage_done.
+// v19: marks a doc/pdf text-extraction stage as run, so the BGE backfill stops re-walking docs with no embeddable text.
 const V19_FILES_TEXT_STAGE_DONE: &str = "
 ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;
 ";
@@ -160,8 +145,6 @@ const V20_VLM_FULL_MODEL: &str = "
 ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
 ";
 
-/// The database carries migration identifiers this engine does not know: a
-/// newer FileID wrote it. Opening refuses before any migration runs.
 #[derive(Debug)]
 pub struct NewerThanEngine {
     pub unknown: Vec<String>,
@@ -180,15 +163,11 @@ impl std::fmt::Display for NewerThanEngine {
 
 impl std::error::Error for NewerThanEngine {}
 
-/// Apply every registered migration that hasn't been applied yet, in
-/// registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 
-    // A DB stamped by a NEWER engine carries identifiers this
-    // registry doesn't know; writing to it could silently break the
-    // newer schema's invariants. Refuse to open instead. macOS mirror:
-    // Database.swift DatabaseOpenError.newerThanEngine.
+    // A DB stamped by a NEWER engine carries unknown identifiers; writing could silently break its schema invariants.
+    // Refuse to open.
     let known: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
     let applied: Vec<String> = conn
         .prepare("SELECT identifier FROM grdb_migrations")?
