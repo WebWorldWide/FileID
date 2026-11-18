@@ -298,7 +298,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "platforms/apple/scripts/build_dmg.sh": "f94530031b064c8619eba0ee19bfaf5435876ed0913fe0b5fedb63022fa73a7d",
             "platforms/apple/scripts/ensure_mlx_metallib.sh": "814daff5af2738d7720d0612f5df25a865d83a3c3e3811c8c0090a5b2e9d2700",
             "platforms/apple/scripts/install_clip_models.sh": "e51653268af8a3975f9f1ec3ba85b3aba55b2c7cf52d9c6e59c1d46cf9792913",
-            "platforms/apple/scripts/iterate.sh": "d974f6b56c86e04a0cdcd4d57eb7fb726bd43da26c72458d12e43d3d33dc6e3f",
+            "platforms/apple/scripts/iterate.sh": "d1a8b267f80e4ef1f1ecaa52c32ad9f4a1d906998edfa323cc2c306a68bfa3dc",
             "platforms/apple/scripts/testflight.sh": "521d55b490a7364a17d54356e2380fa14adbead023df45823f0b446e6d11c464",
             "platforms/apple/scripts/release.sh": "357d4c47e7336da93b055255bf943b9c14de51a398b8d65cfc38c56a300c46bf",
             "platforms/apple/scripts/wipe_local_state.sh": "2e5cc7bc43084c64c53bc8e415fd0ccf9beab6207e93126d55fdf6689aada6df",

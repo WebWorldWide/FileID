@@ -37,10 +37,9 @@ class FakeEngine:
     response = VALID_RESPONSE
     mutate_binary = False
 
-    def __init__(self, binary, directory, swift):
+    def __init__(self, binary, directory):
         self.binary = binary
         self.directory = directory
-        self.swift = swift
         self.closed = False
         self.calls = []
         self.seen_queries = set()
@@ -178,13 +177,12 @@ class BenchmarkCatalogSearchTests(unittest.TestCase):
         self.assertEqual((result["median_ms"], result["p95_ms"], result["maximum_ms"]), (171.25, 231.6, 241.7))
         self.assert_stopped_and_removed()
 
-    def test_swift_zero_warmups_caller_metadata_and_optional_output(self):
+    def test_zero_warmups_caller_metadata_and_optional_output(self):
         output = self.root / "result.json"
-        result = self.run_main("--runtime", "swift", "--trials", "1", "--warmups", "0",
+        result = self.run_main("--trials", "1", "--warmups", "0",
                                "--build-profile", "release", "--source-revision", "fixture-rev",
                                "--conditions", "isolated fake test", "--output", str(output))
         self.assertEqual(json.loads(output.read_text()), result)
-        self.assertTrue(all(engine.swift for engine in FakeEngine.instances))
         self.assertEqual(result["engine"]["build_profile"], "release")
         self.assertEqual(result["conditions"]["caller_supplied"], "isolated fake test")
         self.assertEqual(result["engine"]["source_revision"], "fixture-rev")
@@ -204,7 +202,7 @@ class BenchmarkCatalogSearchTests(unittest.TestCase):
         self.assertEqual(first, benchmark.fixture_manifest(100))
         self.assertNotEqual(first["rows_sha256"], benchmark.fixture_manifest(101)["rows_sha256"])
         self.assertEqual(first["row_counts"], {"files": 100, "catalog_chapters": 1, "catalog_passages": 1})
-        engine = FakeEngine(self.binary, self.root, False)
+        engine = FakeEngine(self.binary, self.root)
         engine.close()
         benchmark.seed_fixture(self.root, 100)
         database = self.root / "FileID/fileid.sqlite"
@@ -269,7 +267,7 @@ class BenchmarkCatalogSearchTests(unittest.TestCase):
         self.assert_stopped_and_removed()
 
     def test_seed_exception_closes_sqlite_and_rolls_back(self):
-        engine = FakeEngine(self.binary, self.root, False)
+        engine = FakeEngine(self.binary, self.root)
         engine.close()
         database = self.root / "FileID/fileid.sqlite"
         with closing(sqlite3.connect(database)) as db, db:

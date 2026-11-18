@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Stage 7 acceptance runs for the MLX vision-language models, on either engine.
+"""Stage 7 acceptance runs for the MLX vision-language models on the Rust engine the Mac app hosts.
 
 Each run starts the engine on a fresh disposable state folder with the model
 read from a scratch copy (`--hf-root`, the folder that holds `models/<repo>`),
 never from ~/Documents/huggingface.
 
-    bench_vlm.py --engine <bin> --flavor swift|rust --scratch <dir> --hf-root <copy>
+    bench_vlm.py --engine <bin> [--flavor rust] --scratch <dir> --hf-root <copy>
         --photos <folder> [--model qwen3_vl_4b] [--describe] [--idle 20] [--chat]
         [--cycles 50] [--json out.json]
-    bench_vlm.py --compare swift.json rust.json
+    bench_vlm.py --compare before.json after.json
 
 --describe scans the photos and runs Describe Files (caption, tags, name) on
 all of them: load time, seconds per photo after the load, the engine's peak
@@ -159,7 +159,7 @@ def compare(left, right):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", type=Path)
-    parser.add_argument("--flavor", choices=["swift", "rust"], default="swift")
+    parser.add_argument("--flavor", choices=["rust"], default="rust")
     parser.add_argument("--scratch", type=Path)
     parser.add_argument("--hf-root", type=Path)
     parser.add_argument("--photos", type=Path)
