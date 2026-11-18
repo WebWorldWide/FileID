@@ -33,7 +33,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_model_license_policy import (  # noqa: E402
     CONVERSION_SUFFIX,
-    VARIANT_WORDS,
     catalog_errors,
     gemma_terms_error,
     identity_mismatch,

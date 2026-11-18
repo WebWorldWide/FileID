@@ -17,7 +17,7 @@ disk (less a fixed, explained set of files the engine never catalogues); PRAGMA 
 are clean; no unexpected error event kind arrived; the engine log has no panic, fatal or 'database is locked' line;
 the engine still answers healthCheck with the same pid. It records footprint, descriptors, threads, database and WAL
 size per round and flags growth. Exit status 0 only when every invariant held in every round."""
-import argparse, hashlib, json, os, queue, random, re, shutil, signal, sqlite3, statistics, subprocess, sys, threading, time, uuid
+import argparse, hashlib, json, os, queue, random, re, shutil, sqlite3, statistics, subprocess, sys, threading, time, uuid
 
 NOTICE_KINDS = {"rescan_no_changes", "empty_folder", "discovery_partial"}
 BAD_LOG = re.compile(r"panicked at|\bpanic\b|\bfatal\b|database is locked|SQLITE_BUSY|stack overflow|SIGSEGV|abort", re.I)

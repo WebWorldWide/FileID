@@ -21,7 +21,7 @@ The app-hosted Rust engine built with the `test-trash-root` feature (test builds
 touches the real Trash: set FILEID_RUST_ENGINE to it and FILEID_CRASH_TRASH to a scratch folder,
 which the engine then uses as its Trash (FILEID_TEST_TRASH_ROOT) and this harness inspects.
 """
-import glob, hashlib, json, os, random, signal, sqlite3, subprocess, sys, threading, time, uuid
+import glob, hashlib, json, os, signal, sqlite3, subprocess, sys, time, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive import Engine, kind
 
