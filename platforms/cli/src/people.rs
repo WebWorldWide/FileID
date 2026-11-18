@@ -1,6 +1,4 @@
-//! `fileid people` — list person clusters (id, display name, face count).
-//! Read-only. People are produced by the engine's face detection + clustering,
-//! so this is empty until a full engine scan (with face models) has run.
+//! People come from the engine's face clustering, so this is empty until a full scan with face models has run.
 
 use anyhow::Result;
 use fileid_engine::read::people::active_people;

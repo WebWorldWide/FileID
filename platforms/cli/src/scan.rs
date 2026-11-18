@@ -1,16 +1,4 @@
-//! `fileid scan` — model-free library indexer.
-//!
-//! Walks a directory, writes a `files` row per regular file, and extracts
-//! plain-text content (`.txt`/`.md`/source code/…) into `doc_text` so FTS
-//! search works with no ML models loaded. The `doc_fts` index is maintained
-//! automatically by the engine's v15 AFTER-INSERT triggers.
-//!
-//! What this DOESN'T do (documented follow-on, routes through the engine's
-//! `startScan` once models are installed): image tags (RAM++), CLIP
-//! embeddings, face detection/clustering, perceptual hashes, content hashes,
-//! and binary-document text extraction (.docx/.pdf). The CLI is intentionally
-//! non-destructive to those columns — it UPSERTs and preserves any ML data a
-//! prior full engine scan wrote.
+//! Model-free library indexer: writes `files` rows and plain-text `doc_text` so FTS works with no ML models. ML columns (tags, CLIP, faces, hashes) are never cleared, so a prior full engine scan's data survives.
 
 use std::io::{IsTerminal, Write as _};
 use std::path::Path;
@@ -250,13 +238,7 @@ fn commit_batch(
                         invalidate_file
                             .execute(params![file_id, i64::from(text.is_some())])
                             .context("invalidate stale derived file metadata")?;
-                        // Only automatic tags are cleared on re-index — never
-                        // user-authored ones — even when the file's identity
-                        // (inode) changed at the same path (a replacement). This
-                        // mirrors the engine reference (dbwriter deletes only
-                        // source='auto'); an atomic-save editor that rewrites a
-                        // file to a new inode must not silently wipe the user's
-                        // manual tags.
+                        // Only automatic tags are cleared on re-index, never user tags, even when the inode changes at the same path (atomic-save editors); mirrors the engine's source='auto' delete.
                         delete_auto_tags
                             .execute(params![file_id])
                             .context("clear stale automatic tags")?;
@@ -604,12 +586,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     Ok(())
 }
 
-/// A scan whose results committed successfully but which skipped unreadable
-/// files or directories. Surfaced as its own error type so `main` can exit
-/// with the dedicated partial code (3, rsync-style) instead of hard failure —
-/// on a real corpus a locked file or ACL-restricted folder is routine, and a
-/// wrapper keying on the exit code must be able to tell "index is usable,
-/// some files were missed" apart from "the scan itself failed".
+/// Committed scan that skipped unreadable files or directories. `main` maps it to exit code 3 (rsync-style) so scripts can tell a usable partial index from a failed scan.
 #[derive(Debug)]
 pub struct PartialScan {
     pub failed: u64,
@@ -659,7 +636,6 @@ fn extract_plaintext(ext: &str, size: u64, path: &Path) -> Result<Option<String>
 fn is_plaintext_ext(ext: &str) -> bool {
     matches!(
         ext,
-        // prose / markup
         "txt" | "md" | "markdown" | "rst" | "org" | "adoc" | "tex" | "bib"
             | "log" | "csv" | "tsv" | "json" | "yaml" | "yml" | "toml" | "ini"
             | "cfg" | "conf" | "xml" | "html" | "htm" | "css" | "svg"

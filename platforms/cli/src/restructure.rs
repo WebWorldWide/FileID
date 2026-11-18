@@ -1,14 +1,4 @@
-//! `fileid restructure --plan [root]` — compute the proposed reorg; with
-//! `--apply`, execute it.
-//!
-//! `--plan` is READ-ONLY: it reuses the engine's exact rule-cascade classifier
-//! (`pipeline::restructure::classify`, a pure model-free function), so the
-//! plan matches what the desktop apps' Restructure tab would propose when no
-//! CLIP embeddings are present (the semantic "butler" boost degrades to the
-//! same cascade). `--apply` executes that plan in-process via the engine's
-//! `RestructureApply` (the same code path the `applyRestructure` IPC command
-//! runs: collision-uniquify, stale-plan + path-traversal guards, undo journal);
-//! it prompts unless `--yes`, and `--apply --dry-run` previews without moving.
+//! `fileid restructure`. `--plan` is read-only and uses the engine's rule-cascade classifier, so it matches the desktop Restructure tab when no CLIP embeddings exist. `--apply` runs the engine's `RestructureApply` in-process.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -165,8 +155,7 @@ pub fn run(
     if plan && apply {
         anyhow::bail!("--plan and --apply are mutually exclusive; choose one");
     }
-    // Neither flag → the read-only plan (as `--help` documents): every branch
-    // below keys off `apply`, so an absent `--apply` already means "plan only".
+    // Neither flag is the read-only plan; every branch keys off `apply`.
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
@@ -386,14 +375,7 @@ fn rel_to(root: &Path, dest: &Path) -> String {
         .unwrap_or_else(|_| dest.to_string_lossy().into_owned())
 }
 
-// ---- apply -------------------------------------------------------------------
-
-/// Execute (or, with `dry_run`, preview) the proposed moves via the engine's
-/// exact `RestructureApply` — the same code path the `applyRestructure` IPC
-/// command runs (collision-uniquify, stale-plan + path-traversal guards, undo
-/// journal). In-process and cross-platform (MoveFileExW on Windows;
-/// `std::fs::rename` elsewhere). `--symlinks` previews the layout without
-/// relocating originals.
+/// Executes, or with `dry_run` previews, the moves via the engine's `RestructureApply` (the `applyRestructure` IPC path). `--symlinks` previews without relocating originals.
 fn apply_spooled(
     ctx: &Ctx,
     library_root: &Path,
@@ -436,10 +418,7 @@ fn apply_spooled(
         return Ok(());
     }
 
-    // Human preview only. In --json mode stdout must carry nothing but the
-    // final result object (the confirm prompt + progress lines already go to
-    // stderr); printing this header/loop there corrupts the JSON for the real
-    // `--apply --json` path, which falls through to the result print below.
+    // Human preview only: under `--json` stdout must carry just the result object.
     if !ctx.json {
         println!(
             "{} {} file(s) into {}:",
@@ -550,13 +529,7 @@ fn apply_spooled(
     Ok(())
 }
 
-/// Turn an apply result into a process exit status.
-///
-/// A privilege refusal abandons the remaining moves without counting them in
-/// `failed`, so gating on `failed` alone reported success for a run that
-/// relocated nothing — `fileid restructure --apply --symlinks --json && next`
-/// would march straight on. Mirrors `dedupe`, which already treats its
-/// `unsupported` count as a failure.
+/// Maps an apply result to an exit status. Privilege refusals are not counted in `failed`, so `failed` alone would report success for a run that moved nothing.
 fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
     if let Some(pe) = &result.privilege_error {
         anyhow::bail!(

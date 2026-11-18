@@ -137,7 +137,6 @@ fn scan_then_search_then_info_model_free() {
     .unwrap();
     std::fs::write(corpus.join("hello.txt"), "hello world greetings everyone").unwrap();
 
-    // --- first scan (--json): indexes all three text files ---
     let out = run(&[
         "--db",
         db_s,
@@ -169,7 +168,6 @@ fn scan_then_search_then_info_model_free() {
         "expected text-indexed files"
     );
 
-    // --- second scan: unchanged files are skipped ---
     let out = run(&["--db", db_s, "--json", "scan", corpus.to_str().unwrap()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("rescan json");
@@ -185,7 +183,6 @@ fn scan_then_search_then_info_model_free() {
         "re-scan should index nothing"
     );
 
-    // --- search for a content word ---
     let out = run(&["--db", db_s, "--json", "search", "aardvark"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("search json");
@@ -200,7 +197,6 @@ fn scan_then_search_then_info_model_free() {
         .any(|r| ends_with(r["path"].as_str().unwrap_or(""), "alpha.txt"));
     assert!(hit_alpha, "search for 'aardvark' did not return alpha.txt");
 
-    // --- search for a word in a second file ---
     let out = run(&["--db", db_s, "--json", "search", "revenue"]);
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert!(
@@ -212,13 +208,11 @@ fn scan_then_search_then_info_model_free() {
         "search for 'revenue' did not return notes.md"
     );
 
-    // --- search miss returns cleanly with zero results ---
     let out = run(&["--db", db_s, "--json", "search", "zzzznotpresent"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["count"].as_u64(), Some(0), "miss should return 0 results");
 
-    // --- info by path ---
     let alpha = corpus.join("alpha.txt");
     let out = run(&["--db", db_s, "--json", "info", alpha.to_str().unwrap()]);
     assert!(out.status.success());
@@ -228,13 +222,11 @@ fn scan_then_search_then_info_model_free() {
     assert!(v["sizeBytes"].as_i64().unwrap_or(0) > 0);
     let id = v["id"].as_i64().expect("info id");
 
-    // --- info by id ---
     let out = run(&["--db", db_s, "--json", "info", &id.to_string()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert!(ends_with(v["path"].as_str().unwrap_or(""), "alpha.txt"));
 
-    // --- a same-path replacement with a future scanned_at must not be skipped ---
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute(
@@ -268,14 +260,12 @@ fn scan_then_search_then_info_model_free() {
         );
     }
 
-    // --- restructure --plan over the indexed files ---
     let out = run(&["--db", db_s, "--json", "restructure", "--plan"]);
     assert!(out.status.success(), "restructure --plan failed");
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("plan json");
     assert_eq!(v["fileCount"].as_u64(), Some(3));
     assert!(v["moveCount"].as_u64().unwrap_or(0) >= 1);
 
-    // cleanup (best-effort)
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
 }
@@ -296,7 +286,6 @@ fn models_list_and_dry_run_need_no_network() {
     let models = unique_dir("models");
     let md = models.to_str().unwrap();
 
-    // ── list (--json): the engine model set, nothing installed in an empty dir ──
     let out = run_env(
         &["--no-color", "--json", "models", "list"],
         &[("FILEID_MODELS_DIR", md)],
@@ -363,7 +352,6 @@ fn models_list_and_dry_run_need_no_network() {
         );
     }
 
-    // ── download --all --dry-run: lists repos + total, downloads NOTHING ──
     let out = run_env(
         &[
             "--no-color",
@@ -404,7 +392,6 @@ fn models_list_and_dry_run_need_no_network() {
         "dry-run must not write install sentinels"
     );
 
-    // ── unknown model name is a clean, actionable error (still no network) ──
     let out = run_env(
         &["--no-color", "models", "download", "definitely-not-a-model"],
         &[("FILEID_MODELS_DIR", md)],
@@ -433,15 +420,14 @@ fn models_download_json_abort_emits_json_not_human_text() {
         &[("FILEID_MODELS_DIR", md)],
     );
 
-    // A non-interactive large-set abort stays a clean exit (exit 0), as before.
+    // A non-interactive large-set abort is a clean exit (exit 0).
     assert!(
         out.status.success(),
         "non-interactive --all abort must exit 0: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The contract: under --json, stdout is a JSON object — not "Aborted. (…)".
-    // Before the fix, `json()` (serde parse of stdout) panicked on the human line.
+    // Under --json, stdout must be a JSON object, never the human "Aborted." line.
     let v = json(&out);
     assert_eq!(
         v["command"].as_str(),
@@ -519,7 +505,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // ── search --similar with no CLIP embeddings → clear, non-fatal message ──
     let dup1 = corpus.join("dup1.txt");
     let out = run(&[
         "--db",
@@ -541,7 +526,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "model-free library has no CLIP embeddings"
     );
 
-    // ── exact dedupe re-hashes same-size files, so it needs no stored hash ──
     let out = run(&[
         "--db",
         db_s,
@@ -571,7 +555,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "expected one exact-duplicate group"
     );
 
-    // ── dedupe --apply --dry-run lists exactly one victim, removes NOTHING ──
     let out = run(&[
         "--db",
         db_s,
@@ -595,7 +578,6 @@ fn apply_dryrun_models_and_similar_model_free() {
     );
     assert_eq!(file_count(&db), 3, "dry-run must not drop DB rows");
 
-    // ── restructure --apply --dry-run prints a plan, moves NOTHING ──
     let out = run(&[
         "--db",
         db_s,
@@ -622,7 +604,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "dry-run must not move files"
     );
 
-    // ── restructure --apply with no --yes on a non-interactive stdin → SAFE abort ──
     let out = run(&["--db", db_s, "--no-color", "restructure", "--apply"]);
     assert!(out.status.success());
     assert!(
@@ -634,7 +615,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "an aborted apply must not move files"
     );
 
-    // ── scan --models with no models installed → actionable message, no writes ──
     let state = unique_dir("state"); // empty FileID data root → no model sentinels
     let out = run_env(
         &[
@@ -684,11 +664,7 @@ fn apply_dryrun_models_and_similar_model_free() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// Regression: a REAL `restructure --apply --json --yes` must print a single
-/// JSON object and nothing else. Before the fix the `Will move N file(s) into
-/// …:` header and per-move lines were written to stdout ahead of the result
-/// object, so the combined stdout was not parseable as one JSON value. `json()`
-/// parses the whole of stdout, so it panics here if any human preview line leaks.
+/// Regression: a REAL `restructure --apply --json --yes` must print a single JSON object and nothing else. `json()` parses all of stdout, so any leaked human preview line panics.
 #[test]
 fn restructure_apply_json_real_emits_pure_json() {
     let corpus = unique_dir("corpus-rapj");
@@ -736,8 +712,7 @@ fn restructure_apply_json_real_emits_pure_json() {
         "expected ≥1 proposed move so the real apply has work to do"
     );
 
-    // REAL apply in --json mode. stdout MUST be one parseable JSON object;
-    // pre-fix it was `Will move … into …:\n  …\n{json}`, so json() panics.
+    // REAL apply in --json mode: stdout must be one parseable JSON object.
     let out = run(&[
         "--db",
         db_s,
@@ -765,14 +740,7 @@ fn restructure_apply_json_real_emits_pure_json() {
     let _ = std::fs::remove_dir_all(&dbdir);
 }
 
-/// REGRESSION — a REAL `dedupe --apply` (no `--dry-run`) in `--json` mode must
-/// emit exactly ONE JSON value on stdout. Pre-fix the human "Will N file(s)
-/// would …" preview was printed unconditionally before the JSON result, so
-/// stdout was `Will …:\n  victim\n{json}` and `json()` panics. (The `--json`
-/// dry-run already early-returned clean JSON, so only the real-apply path was
-/// unguarded and untested.) `--delete` gives a deterministic, cross-platform
-/// removal; the corrupting preview block is shared by the trash and delete
-/// paths, so this exercises the exact regression with CI-stable post-conditions.
+/// Regression: a REAL `dedupe --apply` (no `--dry-run`) in `--json` mode must emit exactly one JSON value on stdout; the human preview must not leak. `--delete` gives a deterministic, cross-platform removal.
 #[test]
 fn dedupe_apply_json_real_emits_pure_json() {
     let corpus = unique_dir("corpus-dapj");
@@ -828,7 +796,7 @@ fn dedupe_apply_json_real_emits_pure_json() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // THE LOCK: the entire stdout must parse as one JSON value (pre-fix: panic).
+    // The entire stdout must parse as one JSON value.
     let v = json(&out);
     assert_eq!(v["command"].as_str(), Some("dedupe"));
     assert_eq!(v["mode"].as_str(), Some("apply"));
