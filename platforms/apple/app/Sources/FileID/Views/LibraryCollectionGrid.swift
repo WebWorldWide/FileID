@@ -198,7 +198,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             guard let model else { return }
             tile.configure(
                 row: row,
-                tags: LibraryTileItem.displayTags(model.tagsByFile[row.id] ?? []),
+                tags: LibraryTileItem.displayTags(model.tagsByFile[row.id] ?? [], kind: row.kind),
                 selected: model.selectMode ? cursorID == row.id : model.selectedID == row.id,
                 selectMode: model.selectMode,
                 checked: model.checkedIDs.contains(row.id),
@@ -478,7 +478,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.commit()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let metrics = TileTextMetrics(textSize)
-        badge.frame = CGRect(x: 6, y: topLeftText ? b.height - thumbHeight + 6 : b.height - 6 - metrics.badge, width: badge.textWidth + 12, height: metrics.badge)
+        badge.frame = CGRect(x: 6, y: b.height - thumbHeight + 6, width: badge.textWidth + 12, height: metrics.badge)
         offlineBadge.frame = CGRect(x: badge.frame.maxX + 4, y: badge.frame.minY, width: offlineBadge.textWidth + 12, height: metrics.badge)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
@@ -488,10 +488,21 @@ final class LibraryTileItem: NSCollectionViewItem {
         name.frame = CGRect(x: 0, y: y, width: b.width, height: metrics.name)
         y -= TileTextMetrics.lineGap + metrics.chip
         var x: CGFloat = 0
-        for chip in chips where !chip.isHidden {
-            let w = min(chip.textWidth + 14, (b.width - 4) / 2)
+        var showsSecond = !chips[1].isHidden
+        let first = chips[0].textWidth + 14, second = chips[1].textWidth + 14
+        let chipGap: CGFloat = 4, minimumChip: CGFloat = 44
+        for (index, chip) in chips.enumerated() where !chip.isHidden {
+            var w = min(chip.textWidth + 14, b.width - x)
+            if index == 0, showsSecond, first + chipGap + second > b.width {
+                w = min(first, b.width)
+                if b.width - w - chipGap < minimumChip { showsSecond = false }
+            }
+            if index == 1 {
+                guard showsSecond else { chip.frame = .zero; continue }
+                w = min(second, b.width - x)
+            }
             chip.frame = CGRect(x: x, y: y, width: w, height: metrics.chip)
-            x += w + 4
+            x += w + chipGap
         }
         y -= TileTextMetrics.lineGap + metrics.meta
         size.frame = CGRect(x: 0, y: y, width: b.width / 2, height: metrics.meta)
@@ -648,9 +659,10 @@ final class LibraryTileItem: NSCollectionViewItem {
     }
 
     /// Chip text: last segment of hierarchical labels,
-    /// capitalised, de-duplicated, two at most.
-    static func displayTags(_ raw: [String]) -> [String] {
-        Array(TagLabel.unique(raw).prefix(2))
+    /// capitalised, de-duplicated, two at most. A tag that only repeats the tile's kind badge is dropped.
+    static func displayTags(_ raw: [String], kind: String) -> [String] {
+        let kindName = FileKindLabel.title(kind).lowercased()
+        return Array(TagLabel.unique(raw).filter { $0.lowercased() != kindName }.prefix(2))
     }
 }
 

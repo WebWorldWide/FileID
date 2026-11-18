@@ -352,9 +352,8 @@ struct LibraryView: View {
             ProgressView().controlSize(.small).tint(Theme.ai)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.08), stroke: Theme.ai.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -426,9 +425,8 @@ struct LibraryView: View {
             DSIconButton("Dismiss", systemImage: "xmark", tint: Theme.text3) { searchProblem = nil }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.warning.opacity(0.08), stroke: Theme.warning.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -456,9 +454,8 @@ struct LibraryView: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.08), stroke: Theme.ai.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -480,9 +477,8 @@ struct LibraryView: View {
                 .buttonStyle(.dsSecondary)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.10)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.10), stroke: Theme.ai.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -492,7 +488,7 @@ struct LibraryView: View {
     private func inFlightHeadline(_ p: ScanProgress) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Image(systemName: "brain.head.profile")
+                Image(systemName: "doc.text.magnifyingglass")
                     .foregroundStyle(Theme.gold)
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
@@ -538,15 +534,8 @@ struct LibraryView: View {
             .help("Memory and resource details are in Settings → Advanced.")
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.panel, stroke: Theme.gold.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 16)
     }
 
@@ -620,15 +609,8 @@ struct LibraryView: View {
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.panel, stroke: Theme.gold.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 16)
     }
 
@@ -693,14 +675,14 @@ struct LibraryView: View {
         .frame(height: Theme.Metrics.controlLarge)
         .frame(minWidth: 140, maxWidth: 320)
         .layoutPriority(1)
-        .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
+        .background(Theme.well, ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
         kindPicker
 
         if !(rows.isEmpty && shownTotal == 0) {
             ViewThatFits(in: .horizontal) {
-                if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
+                if let visualSummary { MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize() }
                 MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
                 MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
                 Color.clear.frame(width: 0, height: 0)
@@ -857,6 +839,18 @@ struct LibraryView: View {
         return [(label: "Unreadable \(store.scopedUnreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
     }
 
+    private var kindFilterLabel: String? {
+        switch kindFilter {
+        case "image": "Images"
+        case "video": "Videos"
+        case "doc": "Docs"
+        case "pdf": "PDFs"
+        case "audio": "Audio"
+        case "other": "Other"
+        default: nil
+        }
+    }
+
     @ViewBuilder
     private var kindPicker: some View {
         let kinds: [(label: String, value: String?)] = [
@@ -980,7 +974,8 @@ struct LibraryView: View {
                 EmptyStateView(
                     icon: "magnifyingglass",
                     title: "No matches for \u{201C}\(shownQuery)\u{201D}",
-                    message: "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
+                    message: kindFilterLabel.map { "Nothing in \($0) has that in its name, tags or text, and no picture matches it. Try other words, or choose All." }
+                        ?? "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
                 )
             } else {
                 EmptyStateView(
@@ -1272,7 +1267,7 @@ private struct FilePreviewSheet: View {
             .animation(Theme.spring, value: showInfo)
         }
         .frame(minWidth: 1040, idealWidth: 1280, minHeight: 680, idealHeight: 820)
-        .background(Color(hex: 0x0C0C0E), ignoresSafeAreaEdges: [])
+        .background(Theme.canvas, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
         .focusable()
         .focusEffectDisabled()
@@ -1569,7 +1564,7 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                         .font(Theme.Font.body(12))
                         .focused(isFocused)
                     Button("Add", action: addDraft)
@@ -1663,8 +1658,7 @@ private struct FinderTagsEditor: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.15)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .dsBannerSurface(fill: Theme.gold.opacity(0.15), stroke: Theme.gold.opacity(0.3))
         .foregroundStyle(Theme.gold)
     }
 }
@@ -1741,7 +1735,7 @@ private struct PDFPreview: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            Theme.well
             if let pageImage {
                 Image(nsImage: pageImage)
                     .resizable()
@@ -1786,7 +1780,7 @@ private struct UniversalPreview: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            Theme.well
             AsyncThumbnail(url: url, size: 1024, contentMode: .fit) {
                 VStack(spacing: 10) {
                     Image(systemName: FileTypes.symbolName(forExtension: url.pathExtension))
