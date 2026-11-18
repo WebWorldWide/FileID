@@ -37,7 +37,8 @@ $DefaultOrtRepository = 'https://github.com/intel/onnxruntime.git'
 if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $env:FILEID_ORT_REPOSITORY }
 if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $DefaultOrtRepository }
 if ($OrtRepository -notmatch '^https://' -and -not (Test-Path -LiteralPath $OrtRepository)) {
-    throw "OrtRepository must be an https:// URL or an existing local path: $OrtRepository"
+    $ortRepositoryHost = if ($OrtRepository -match '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@]*@)?([^/:?#]+)') { $Matches[1] } else { 'no host' }
+    throw "OrtRepository must be an https:// URL or an existing local path (host given: $ortRepositoryHost)."
 }
 $NugetExeSha256 = '96a1dc5ad572716b2ab345a6830365cf0103661ec906b0e78fd04a064a7bb730'
 $DirectMlNupkgSha256 = '4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9'

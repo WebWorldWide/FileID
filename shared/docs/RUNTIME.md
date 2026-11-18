@@ -153,13 +153,14 @@ surviving host serves this exact archive. NuGet's `Microsoft.ML.OnnxRuntime`
 header bytes plus the code signature: Microsoft Developer ID, SHA-256
 `6c2f8af5…1dd3`), so it is a different hash and would need its own pin. PyPI's
 macOS wheel is a universal2 build and is not equivalent. The only copy with the
-pinned hashes is the archive already downloaded to
-`~/FileIDDev/Downloads/ort-1.22.0/`; mirror it on huggingface.co before relying
-on anything else. The commands below work on any copy of the archive:
+pinned hashes is the archive `onnxruntime-osx-arm64-1.22.0.tgz`
+(SHA-256 `cab6dcbd…1cc07`), which the owner keeps as an offline backup; mirror
+it on huggingface.co before relying on anything else. The commands below work
+on any copy of the archive:
 
 ```sh
 ORT=1.22.0
-ort_tgz=~/FileIDDev/Downloads/ort-1.22.0/onnxruntime-osx-arm64-${ORT}.tgz
+ort_tgz=/path/to/onnxruntime-osx-arm64-${ORT}.tgz
 cp "$ort_tgz" ort.tgz
 shasum -a 256 ort.tgz                      # → PINNED_DYLIB_SHA256 (also the script's EXPECTED_SHA256)
 tar -xzf ort.tgz
