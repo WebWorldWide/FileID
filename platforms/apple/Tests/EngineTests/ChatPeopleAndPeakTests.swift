@@ -68,7 +68,7 @@ struct ChatPeopleAndPeakTests {
         let note = "People aren't named yet — name them in People to search by person."
         #expect(try await ask("show me photos of Kyle", database).message == "Found 2 matches for “Kyle” (photos). \(note)")
         #expect(try await ask("show me photos of Zorro", database).message == "No matches for “Zorro” (photos). Try names or a few descriptive words; files that haven't been analyzed may still contain it. \(note)")
-        #expect(try await ask("how many photos of Kyle?", database).message.hasSuffix(note))
+        #expect(try await ask("how many photos of Kyle?", database).message == "Found 2 photos matching “Kyle”, using 2 bytes. \(note)")
         for text in ["show me photos of kyle", "photos from Kyle Senior Pics", "show me photos of Kyle Senior Pics"] {
             #expect(!(try await ask(text, database).message.contains(note)), Comment(rawValue: text))
         }

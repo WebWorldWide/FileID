@@ -1400,7 +1400,7 @@ mod tests {
         let found = ask(&mut conn, "show me photos of Kyle");
         assert_eq!(found.message, format!("Found 2 matches for “Kyle” (photos). {note}"));
         assert_eq!(ask(&mut conn, "show me photos of Zorro").message, format!("No matches for “Zorro” (photos). Try names or a few descriptive words; files that haven't been analyzed may still contain it. {note}"));
-        assert!(ask(&mut conn, "how many photos of Kyle?").message.ends_with(note));
+        assert_eq!(ask(&mut conn, "how many photos of Kyle?").message, format!("Found 2 photos matching “Kyle”, using 2 bytes. {note}"));
         for text in ["show me photos of kyle", "photos from Kyle Senior Pics", "show me photos of Kyle Senior Pics"] {
             assert!(!ask(&mut conn, text).message.contains(note), "{text}");
         }

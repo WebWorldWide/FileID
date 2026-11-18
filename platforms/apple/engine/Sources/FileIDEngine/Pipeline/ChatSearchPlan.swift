@@ -75,7 +75,8 @@ struct ChatSearchPlan: Sendable, Equatable {
                     && !fillers.contains($0.1.1)
                     && !excluded.indices.contains($0.0)
             }
-            .map { $0.1.0 }
+            .map { $0.1.0.replacingOccurrences(of: "[?!.,;:]+$", with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty }
             .joined(separator: " ")
         if let previous, refinement, !normalized.contains("all") {
             if query.isEmpty {
