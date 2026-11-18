@@ -178,7 +178,12 @@ public final class EngineClient {
     )
 
     // MARK: - Restructure butler (engine-routed plan + apply)
-    // Each `*Signal` counter bumps on every fresh payload so views can react via `.onChange`; the DTOs are not Equatable.
+    //
+    // The macOS Restructure tab drives its plan + apply through
+    // the engine butler instead of the app-side classifier. These mirror the
+    // published-state pattern above; the `*Signal` counters bump on every fresh
+    // payload so views can react via `.onChange` even though the DTOs aren't
+    // Equatable (same idiom as `engineResetSignal`).
     public private(set) var restructurePlan: RestructurePlan?
     public private(set) var restructureApplyResult: RestructureApplyResult?
     public private(set) var restructurePlanSignal: Int = 0
@@ -200,7 +205,17 @@ public final class EngineClient {
     private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
 
     // MARK: - App Nap protection
-    // Operation-scoped App Nap tokens, begun when the operation starts and ended on every terminal path (completion, cancel, failure, engine exit). begin/end are idempotent, so a pair can't leak or double-release.
+    //
+    // The old app-lifetime beginActivity token (removed in AppDelegate) kept
+    // the UI process from being App-Napped — throttled timers / coalesced
+    // updates — during a long scan or Deep Analyze run. Replaced with
+    // operation-scoped tokens so the app isn't held un-nappable while idle.
+    // (System idle-sleep during scans is handled separately by the engine's
+    // SleepGuard; this is purely App Nap for the UI process.) Each token is
+    // begun when its operation starts and ended on EVERY terminal path —
+    // completion, cancel, failure, and engine crash/exit — through the guarded
+    // helpers below (begin no-ops if already held, end no-ops if already
+    // cleared), so the pair can never leak or double-release.
     private var scanActivityToken: NSObjectProtocol?
     private var deepAnalyzeActivityToken: NSObjectProtocol?
 
@@ -326,7 +341,14 @@ public final class EngineClient {
         state = .crashed(reason: failure.summary)
     }
 
-    /// Stop half of a restart: cancels any pending respawn and reaps the running engine synchronously, so two engines never write one SQLite DB. Idempotent.
+    /// Stop half of a restart: cancel any pending respawn and
+    /// synchronously terminate + reap the running engine, so a restart
+    /// never overlaps two live engines against the single-writer SQLite
+    /// DB. The bounded reap releases the WAL lock before the next spawn;
+    /// the old process's pipe handlers are left armed (so it keeps
+    /// draining and can't deadlock on a full pipe during shutdown) — its
+    /// late EOF is harmless because `handleEngineExit(for:)` rejects any
+    /// process that is no longer `self.process`. Idempotent.
     private func terminateRunningEngine() {
         pendingRespawn?.cancel()
         pendingRespawn = nil
@@ -483,7 +505,15 @@ public final class EngineClient {
         // of re-scanning the whole buffer every readability tick (the old O(n²)
         // when a large frame accumulates across ticks).
         let stderrBuffer = MutexBox((data: Data(), scanned: 0))
-        // 64 MiB inbound frame cap, matching Windows and the engine's command-read cap: a whole-library restructurePlan is far above the old 1 MiB guard, and a silently dropped frame wedges the UI. Still bounded, so a newline-less engine can't OOM the app.
+        // 64 MiB inbound frame cap — matches the Windows app's inbound cap and the
+        // engine's command-read cap. The engine emits whole event lines (IPCSink
+        // caps OUTBOUND too and substitutes ipc_frame_too_large), and a butler
+        // restructurePlan (~3.5k+ moves) blows past the old 1 MiB guard, which
+        // silently dropped the frame and left the UI wedged with no plan and no
+        // error. Bumped 32→64 MiB for a whole-library plan. Still
+        // bounded so a wedged engine that never emits a newline can't grow this
+        // buffer without limit and OOM the app — an oversize frame surfaces a
+        // visible error instead of vanishing.
         let maxFrameBytes = 64 * 1024 * 1024
         // Hand decoded events to the serial pump (Sendable continuation
         // captured as a local) instead of spawning an unordered Task per event.
@@ -807,7 +837,9 @@ public final class EngineClient {
             modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
-        // handleEvent already runs on the main actor, so these assignments are isolation-safe.
+        // ── Restructure butler replies. handleEvent already
+        //    runs on the main actor (see spawn()'s dispatch), so these
+        //    assignments are isolation-safe. ──
         case .restructurePlan(let plan):
             restructurePlan = plan
             restructurePlanSignal &+= 1
@@ -818,7 +850,16 @@ public final class EngineClient {
             // makes the run undoable; the undo's own reply clears it.
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
-                // A cancelled or partially failed undo must keep the affordance: Restructure.undoLast clears the on-disk journal only on a complete, failure-free undo, so the remaining files are still reversible.
+                // A cancelled or partially-failed undo must KEEP the
+                // affordance: Restructure.undoLast only clears the on-disk
+                // journal when the undo both completed and had zero failures
+                // (Pipeline/Restructure.swift), so the remaining files are
+                // still relocated and still reversible. Clearing this
+                // unconditionally stranded a half-reverted library with no UI
+                // path back — permanently, since this flag is only ever set
+                // true by a forward apply and is never re-seeded from disk.
+                // Mirrors Windows NextCanUndoRestructure and Linux
+                // undo_fully_completed.
                 canUndoRestructure = result.cancelled || result.failed > 0
             } else {
                 canUndoRestructure = result.applied > 0
@@ -827,7 +868,10 @@ public final class EngineClient {
             bulkActionResult = result
             bulkActionResultSignal &+= 1
             resumeBulkResultWaiters(with: result)
-        // Decoded but not consumed on macOS: the app's equivalent flows are synchronous, and decoding keeps a shared engine from wedging the wire.
+        // ── Remaining Windows-originated reply events. The mac app's
+        //    equivalent flows are synchronous (per-tab actions), so these
+        //    aren't consumed here yet; they're decoded so a shared/
+        //    cross-platform engine doesn't wedge the wire. ──
         case .rootsList(let list):
             guard list.requestID.hasPrefix("roots-") else { break }
             libraryRoots = list.roots
@@ -862,7 +906,12 @@ public final class EngineClient {
         }
     }
 
-    /// Clears UI state whose only other clearer is an engine terminal event, which a dead engine can never emit.
+    /// Clear the UI state whose only other clearer is an engine terminal event.
+    ///
+    /// A dead engine can never emit those events, so one mid-job crash would
+    /// wedge Deep Analyze / People across the respawn (the respawned engine
+    /// starts jobless, so nothing else un-sticks them). Both the crash leg and
+    /// a deliberate restart run this — see the call in `terminateRunningEngine`.
     private func resetStateOnlyADeadEngineCouldClear() {
         benchmarkRequestID = nil
         benchmarkModelKind = nil
@@ -1180,7 +1229,13 @@ public final class EngineClient {
         #endif
     }
 
-    /// Wipes the SQLite library and logs, then scans `rootURL` once the engine restarts. The engine must exit first because it holds the WAL lock.
+    /// Wipes the SQLite library + scan logs and triggers a fresh
+    /// scan against `rootURL` once the engine has restarted. Cancels
+    /// any in-flight scan first. The engine has to exit before we
+    /// can delete the SQLite files (it holds the WAL lock), so the
+    /// flow is: shutdown → engine exit → handleEngineExit deletes
+    /// the files → engine respawn → on `.ready` event we trigger
+    /// the new scan.
     public func wipeAndRescan(rootURL: URL) {
         if let p = lastProgress, p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
             send(.cancelScan)
