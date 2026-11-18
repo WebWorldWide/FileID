@@ -197,8 +197,6 @@ public sealed partial class TitleBar : UserControl
         glyph.Foreground = selected ? _gold : _text2;
     }
 
-    // ─── Activity ────────────────────────────────────────────────────────
-
     private void SyncActivity()
     {
         var engine = EngineClient.Instance;
@@ -399,8 +397,6 @@ public sealed partial class TitleBar : UserControl
             ActivityFlyout.Hide();
             AppViewModel.Instance.ActiveTab = tab;
         });
-
-    // ─── Search or ask ───────────────────────────────────────────────────
 
     private void OnSearchGotFocus(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnSearchGotFocus), () =>
