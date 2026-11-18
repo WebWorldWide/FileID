@@ -1,11 +1,6 @@
-// Reads newline-delimited JSON from a FileHandle. Yields one decoded
-// value per line via an AsyncThrowingStream.
-//
-// Uses GCD's `readabilityHandler` rather than a sync read loop because
-// the latter doesn't reliably wake on parent writes when the process
-// runs as the child of a SwiftUI .app launched via LaunchServices.
-//
-// Single-reader contract: only one task should consume from a handle.
+// Reads newline-delimited JSON from a FileHandle, yielding one decoded value per line via an AsyncThrowingStream.
+// Uses GCD's readabilityHandler: a sync read loop doesn't reliably wake on parent writes when the app is launched via LaunchServices.
+// Single reader only: one task should consume from a handle.
 import Foundation
 
 public struct LineOverflowError: Error, CustomStringConvertible {
@@ -15,8 +10,7 @@ public struct LineOverflowError: Error, CustomStringConvertible {
 }
 
 public enum LineReader {
-    /// Yields decoded `T` values, one per newline-terminated JSON line, until
-    /// the handle reports EOF or an error.
+    /// Yields decoded values until EOF or error.
     public static func read<T: Decodable & Sendable>(
         from handle: FileHandle,
         as type: T.Type
@@ -26,7 +20,6 @@ public enum LineReader {
             handle.readabilityHandler = { handle in
                 let chunk = handle.availableData
                 if chunk.isEmpty {
-                    // EOF — flush any trailing line without newline.
                     if let trailing = buffer.flushAll(),
                        let value = try? IPCCoder.decoder.decode(T.self, from: trailing) {
                         continuation.yield(value)
@@ -48,7 +41,6 @@ public enum LineReader {
                         let value = try IPCCoder.decoder.decode(T.self, from: lineData)
                         continuation.yield(value)
                     } catch {
-                        // Malformed line — surface as a stream error and stop.
                         handle.readabilityHandler = nil
                         continuation.finish(throwing: error)
                         return
@@ -61,11 +53,8 @@ public enum LineReader {
         }
     }
 
-    /// Like `read`, but surfaces per-line decode errors as `.failure`
-    /// instead of tearing the stream down — lets the engine survive
-    /// a version-skewed app sending unknown IPCCommand cases. An
-    /// overflow on the line buffer itself still finishes the stream
-    /// (unrecoverable; parent should respawn).
+    /// Like `read`, but per-line decode errors surface as `.failure`, so the engine survives a version-skewed app sending unknown IPCCommand cases.
+    /// A line-buffer overflow still finishes the stream: the parent should respawn.
     public static func readResults<T: Decodable & Sendable>(
         from handle: FileHandle,
         as type: T.Type
@@ -112,32 +101,20 @@ public enum LineReader {
     }
 }
 
-/// Lock-protected line buffer (readabilityHandler can fire on any thread).
-/// `internal` (not `private`) only so SharedTests can exercise the framing /
-/// resume-offset logic directly via `@testable import`.
+/// Lock-protected line buffer; readabilityHandler can fire on any thread. `internal` only so SharedTests can reach the framing logic.
 final class LineBuffer: @unchecked Sendable {
-    /// Cap a single in-flight line to 64 MiB. A peer that fails to send
-    /// '\n' would otherwise grow the buffer without bound and OOM us. 64 MiB
-    /// is symmetric with the IPC frame caps elsewhere so a
-    /// whole-library applyRestructure command (~200k moves) isn't rejected
-    /// here on the engine's stdin command-read path (FileIDEngineMain).
+    /// Caps a single in-flight line at 64 MiB: a peer that never sends a newline would otherwise grow the buffer without bound.
+    /// Symmetric with the IPC frame caps, so a whole-library applyRestructure (~200k moves) fits.
     static let maxLineBytes = 64 * 1024 * 1024
 
     private let lock = NSLock()
     private var buffer = Data()
-    /// Count of leading buffer bytes already known to contain no newline.
-    /// Lets `append` resume the newline search from where it left off so a
-    /// large un-terminated frame arriving across many reads is scanned once
-    /// (O(total)) instead of re-scanned from the front every read (the old
-    /// O(n²)).
+    /// Count of leading bytes known to contain no newline, so `append` resumes the search instead of rescanning (O(total), not O(n²)).
     private var scannedPrefix = 0
 
     init() { buffer.reserveCapacity(64 * 1024) }
 
-    /// Append a chunk, return whole lines (newline-terminated, '\n' stripped).
-    /// Throws `LineOverflowError` if a single un-terminated line exceeds
-    /// `maxLineBytes`; the caller is expected to finish the stream with
-    /// that error so the parent process can decide to respawn.
+    /// Appends a chunk and returns whole lines. Throws `LineOverflowError` if one un-terminated line exceeds `maxLineBytes`; the caller finishes the stream with it so the parent can respawn.
     func append(_ chunk: Data) throws -> [Data] {
         lock.lock()
         defer { lock.unlock() }
@@ -147,8 +124,7 @@ final class LineBuffer: @unchecked Sendable {
             let searchStart = buffer.startIndex + scannedPrefix
             guard searchStart < buffer.endIndex else { break }
             guard let nl = buffer[searchStart...].firstIndex(of: 0x0A) else {
-                // No newline in the unscanned tail: the whole current buffer is
-                // newline-free, so the next chunk resumes the search from the end.
+                // No newline in the tail: the next chunk resumes the search from the end.
                 scannedPrefix = buffer.count
                 break
             }

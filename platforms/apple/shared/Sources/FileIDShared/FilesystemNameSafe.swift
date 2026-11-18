@@ -1,7 +1,4 @@
-// Maps arbitrary strings to filename components that are safe on
-// Windows NTFS, Linux ext4/btrfs, and BSD UFS. Used wherever FileID
-// generates a filename or folder path that may end up synced to a
-// non-macOS filesystem (iCloud → Windows, NAS, Dropbox, etc.).
+// Maps arbitrary strings to filename components safe on Windows NTFS, Linux and BSD, for names that may sync to a non-macOS filesystem.
 import Foundation
 
 public enum FilesystemNameSafe {
