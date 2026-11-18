@@ -109,18 +109,6 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
-    /// <summary>Cached per-launch (NOT persisted) so the pre-scan
-    /// performance warning isn't shown twice in a single session. Reset
-    /// every app relaunch — gives the user a fresh chance to install
-    /// the recommended Performance Pack.</summary>
-    private bool _userAcceptedSuboptimalScan;
-
-    /// <summary>Re-entrancy guard for the pre-scan ContentDialog.
-    /// WinUI 3's ContentDialog throws if a second is shown while the
-    /// first is open — spam-clicking Start scan would crash. Set on
-    /// dialog open, cleared in finally.</summary>
-    private bool _prescanDialogShowing;
-
     /// <summary>Click-to-engine-ack gate. Without this, spam-clicking
     /// Start Scan was issuing N IPC `startScan` commands in parallel and
     /// N optimistic `Phase = Discovering` flips, racing each other through
@@ -183,33 +171,6 @@ public sealed partial class SidebarProcessingControl : UserControl
                 }
             }
 
-            // Pre-scan EP gate: warn only when the engine will fall back to
-            // CPU. DirectML on every D3D12-capable GPU is now the canonical
-            // path; no Performance Pack prompts.
-            if (!_userAcceptedSuboptimalScan)
-            {
-                var hw = EngineClient.Instance.Info?.Hardware;
-                if (hw is not null)
-                {
-                    var prompt = BuildPerformancePrompt(hw);
-                    if (prompt is not null)
-                    {
-                        var result = await ShowPerformancePromptAsync(prompt);
-                        switch (result)
-                        {
-                            case PerformancePromptResult.OpenSettings:
-                                AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
-                                return;
-                            case PerformancePromptResult.Cancel:
-                                return;
-                            case PerformancePromptResult.Continue:
-                                _userAcceptedSuboptimalScan = true;
-                                break;
-                        }
-                    }
-                }
-            }
-
             try
             {
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
@@ -237,81 +198,6 @@ public sealed partial class SidebarProcessingControl : UserControl
             try { Sync(); } catch { /* swallow */ }
         }
     }
-
-    private enum PerformancePromptResult { Continue, OpenSettings, Cancel }
-
-    private sealed record PerformancePrompt(string Title, string Body, bool ShowOpenSettings);
-
-    /// <summary>Decide whether to warn the user before scanning. Returns
-    /// null when the active EP is already optimal for this hardware.</summary>
-    private static PerformancePrompt? BuildPerformancePrompt(HardwareInfo hw)
-    {
-        var ep = (hw.ExecutionProvider ?? string.Empty).ToLowerInvariant();
-        var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
-
-        // Optimal — best EP already active, scan freely.
-        if (ep is "cuda" or "qnn" or "openvino" or "directml") return null;
-
-        // CPU branch — the only state we still warn about. DirectML is the
-        // universal GPU path; non-CPU EPs are always acceptable.
-        if (ep == "cpu")
-        {
-            if (vendor is "" or "none")
-            {
-                return new PerformancePrompt(
-                    "Scan will run on CPU",
-                    "No GPU was detected on this PC. Scanning on CPU is roughly 10× slower than on GPU.\n\nContinue anyway?",
-                    ShowOpenSettings: false);
-            }
-            return new PerformancePrompt(
-                "GPU detected but inactive",
-                $"FileID detected a {hw.AdapterName ?? hw.GpuVendor} GPU but is currently running on CPU. Check Settings → Performance for the GPU execution-provider override.\n\nScanning now will use CPU (roughly 10× slower).",
-                ShowOpenSettings: true);
-        }
-
-        return null;
-    }
-
-    private async Task<PerformancePromptResult> ShowPerformancePromptAsync(PerformancePrompt p)
-    {
-        if (_prescanDialogShowing) return PerformancePromptResult.Cancel;
-        _prescanDialogShowing = true;
-        ContentDialogResult result;
-        try
-        {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = XamlRoot,
-                Title = p.Title,
-                Content = p.Body,
-                PrimaryButtonText = p.ShowOpenSettings ? "Open Settings" : "Continue scan",
-                SecondaryButtonText = p.ShowOpenSettings ? "Continue scan" : "Cancel",
-                CloseButtonText = p.ShowOpenSettings ? "Cancel" : null,
-                DefaultButton = ContentDialogButton.Primary,
-            };
-            result = await dialog.ShowAsync();
-        }
-        finally
-        {
-            _prescanDialogShowing = false;
-        }
-        if (p.ShowOpenSettings)
-        {
-            return result switch
-            {
-                ContentDialogResult.Primary => PerformancePromptResult.OpenSettings,
-                ContentDialogResult.Secondary => PerformancePromptResult.Continue,
-                _ => PerformancePromptResult.Cancel,
-            };
-        }
-        // No "Open Settings" affordance: Primary == Continue, Secondary == Cancel.
-        return result switch
-        {
-            ContentDialogResult.Primary => PerformancePromptResult.Continue,
-            _ => PerformancePromptResult.Cancel,
-        };
-    }
-
 
     private async void OnPauseResumeClicked(object sender, RoutedEventArgs e)
     {
