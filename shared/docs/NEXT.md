@@ -6,6 +6,8 @@ Short, current priorities only: open work, nothing else. History lives in `STATE
 
 Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDDev/scratch/prod-test/REPORT.md` (PT-1…PT-19).
 
+- [ ] **Wave 5 (2026-11-17 evening, running):** Lane R makes the Mac app run only on the Rust engine: no Swift engine binary in Developer ID bundles, no fallback or engine choice, a designed card when `fileidd` cannot start, and the App Store variant on `fileidd`. Lane P drills the UI polish (owner: "no odd edges, no weird spacing, no glitches") with a separate design reviewer. Lane Q handles Chat follow-ups and a 30-question battery.
+- [ ] **Windows ONNX Runtime source build:** `build-ort-runtime.ps1` clones `github.com/microsoft/onnxruntime`, which returns 404 since 2026-11-17. The x64 cache has expired, so those jobs fail until the owner provides a source mirror of 1.22.0.
 - [ ] **Owner decisions:**
   - **PT-12:** Organize Folders plans 0 moves on the whole `Camera` folder (all 37 event folders are anchors); `RESTRUCTURE.md` once measured 2,966. Intended?
   - **PT-13:** search counts differ between engines ("pumpkins": Rust 72 good + 25 weaker, Swift 48; "Kyle Baseball Game" 283 vs 184). Which ranking is canonical?
