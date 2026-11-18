@@ -35,6 +35,16 @@ struct LavaLampBackground: View {
 
     private static let waxDownscale: CGFloat = 3
 
+    /// The glows are cut off by their frames while still strongly opaque; easing the frame's
+    /// top edge to clear keeps that cut from reading as a horizontal seam across the window.
+    private static let glowTopFade = LinearGradient(stops: [
+        .init(color: .clear, location: 0),
+        .init(color: .black.opacity(0.06), location: 0.05),
+        .init(color: .black.opacity(0.25), location: 0.1),
+        .init(color: .black.opacity(0.6), location: 0.15),
+        .init(color: .black, location: 0.2)
+    ], startPoint: .top, endPoint: .bottom)
+
     var body: some View {
         if reduceTransparency {
             Theme.bg1
@@ -62,6 +72,7 @@ struct LavaLampBackground: View {
                         .init(color: .clear, location: 1)
                     ], center: .center, startRadius: 0, endRadius: max(w, h) * 0.7)
                     .frame(width: w * 1.4, height: h * 0.9)
+                    .mask(Self.glowTopFade)
                     .position(x: w / 2, y: h * 1.0)
                     .opacity(mode == .off ? 0.4 : 1)
 
@@ -71,6 +82,7 @@ struct LavaLampBackground: View {
                         .init(color: .clear, location: 1)
                     ], center: .center, startRadius: 0, endRadius: max(w, h) * 0.6)
                     .frame(width: w, height: h * 0.8)
+                    .mask(Self.glowTopFade)
                     .position(x: w / 2, y: h * 1.0)
                     .opacity(aiActive && mode != .off ? 1 : 0)
                     .animation(.easeInOut(duration: 2.4), value: aiActive)
