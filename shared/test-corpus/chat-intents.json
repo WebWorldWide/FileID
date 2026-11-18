@@ -142,7 +142,11 @@
     {"text": "what was my busiest month?", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "", "breakdown": "month", "peak": "most"}},
     {"text": "which day has the most photos?", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "the photos?", "breakdown": "day", "peak": "most"}},
     {"text": "which year uses the most space?", "question": {"measure": "size", "order": "largest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "the", "breakdown": "year", "peak": "most"}},
-    {"text": "what year was the most recent photo taken?", "question": {"measure": "list", "order": "newest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "year the photo"}},
+    {"text": "what year was the most recent photo taken?", "question": {"measure": "list", "order": "newest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "year the photo", "limit": 1}},
+    {"text": "what's the largest video?", "question": {"measure": "list", "order": "largest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "the video?", "limit": 1}},
+    {"text": "what's my oldest video?", "question": {"measure": "list", "order": "oldest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "video?", "limit": 1}},
+    {"text": "what's the newest photo?", "question": {"measure": "list", "order": "newest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "the photo?", "limit": 1}},
+    {"text": "how many JPEGs do I have?", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "formats": ["jpg", "jpeg"], "duplicates": false, "undescribed": false, "reduced": ""}},
     {"text": "which files use the most space this year?", "question": {"measure": "size", "order": "largest", "explicitOrder": true, "date": {"from": ["now", "localtime", "start of year"], "to": ["now", "localtime", "start of year", "+1 year"], "phrase": "from this year"}, "duplicates": false, "undescribed": false, "reduced": "the"}}
   ],
   "labels": [
@@ -169,5 +173,31 @@
     {"text": "photos of October", "name": null},
     {"text": "photos of PDF files", "name": null},
     {"text": "photos from Saturday", "name": null}
+  ],
+  "placeAsks": [
+    {"text": "where were my photos taken?", "kinds": ["image"]},
+    {"text": "where was this video shot", "kinds": ["video"]},
+    {"text": "where were my files taken", "kinds": []},
+    {"text": "do my photos have GPS?", "kinds": ["image"]},
+    {"text": "how many photos are geotagged", "kinds": ["image"]},
+    {"text": "how many photos have a location?", "kinds": ["image"]},
+    {"text": "show me photos taken in October", "kinds": null},
+    {"text": "where is my Downloads folder", "kinds": null},
+    {"text": "where did I put the taxes", "kinds": null},
+    {"text": "which photos were taken last month", "kinds": null},
+    {"text": "what's the location of Kyle's house", "kinds": null}
+  ],
+  "insideAsks": [
+    {"text": "what's in Kyle Senior Pics", "name": "Kyle Senior Pics"},
+    {"text": "What is in the Kyle Senior Pics folder?", "name": "Kyle Senior Pics"},
+    {"text": "what's inside Vacation", "name": "Vacation"},
+    {"text": "whats in RAWs", "name": "RAWs"},
+    {"text": "what’s all in the Kyle Baseball Game 9-19-26 folder", "name": "Kyle Baseball Game 9-19-26"},
+    {"text": "what's in this photo?", "name": null},
+    {"text": "what's in my library", "name": null},
+    {"text": "what's in my Downloads", "name": null},
+    {"text": "what's the largest video", "name": null},
+    {"text": "show me what's in Vacation", "name": null},
+    {"text": "what is in", "name": null}
   ]
 }

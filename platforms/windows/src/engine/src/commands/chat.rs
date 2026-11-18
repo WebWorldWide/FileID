@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{parse_intent, parse_question, spoken_name};
+use super::chat_intent::{asked_inside, parse_intent, parse_question, place_ask, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -943,6 +943,7 @@ fn plan_for(
         && question.structured()
         && !["overview", "folders", "formats"].contains(&question.measure.as_str())
         && (!question.duplicates || points_back)
+        && (question.formats.is_none() || points_back)
         && !words.iter().any(|word| library_wide.contains(word))
     {
         return (question.clone(), SearchPlan::resolve_known(&question.reduced, previous, people, events, true));
@@ -967,6 +968,16 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let question = parse_question(&text);
     if question.people.is_some() {
         let (message, hits) = chat_facts::people_answer(conn, &question, root.as_ref())?;
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+    }
+    if let Some(kinds) = place_ask(&text) {
+        let message = chat_facts::places_answer(conn, &kinds, root.as_ref())?;
+        return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false });
+    }
+    if question.folder.is_none()
+        && let Some(name) = asked_inside(&text)
+        && let Some((message, hits)) = chat_facts::folder_answer(conn, &name, root.as_ref())?
+    {
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
     let previous = {
@@ -1399,6 +1410,42 @@ mod tests {
         assert!(!ask(&mut conn, "show me photos of Zorro").message.contains(note));
         conn.execute("DELETE FROM face_prints", []).unwrap();
         assert!(!ask(&mut conn, "show me photos of Kyle").message.contains(note));
+    }
+
+    fn ask_in(conn: &mut Connection, conversation: &str, text: &str) -> ChatResponse {
+        let request = ChatRequest {
+            request_id: format!("{conversation}-{text}"),
+            conversation_id: conversation.into(),
+            action: "send".into(),
+            text: Some(text.into()),
+            use_model: Some(false),
+            ..Default::default()
+        };
+        execute(conn, &request).unwrap()
+    }
+
+    #[test]
+    fn everyday_questions_about_one_file_a_folder_places_and_formats() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at,location_lat,location_lon) VALUES \
+             (1,'/lib/Trip/a.jpg',1,100,0,'image','jpg',1700000000,NULL,NULL),(2,'/lib/Trip/b.jpg',2,200,0,'image','jpg',1700100000,48.1,11.5),\
+             (3,'/lib/Trip/c.mp4',3,5000,0,'video','mp4',1700200000,NULL,NULL),(4,'/lib/Other/d.mov',4,9000,0,'video','mov',1700300000,NULL,NULL),(5,'/lib/Other/e.arw',5,300,0,'image','arw',1700400000,NULL,NULL);",
+        )
+        .unwrap();
+        let largest = ask(&mut conn, "what's the largest video?");
+        assert_eq!((largest.message.as_str(), largest.hits.len()), ("The largest video: d.mov (9.0 KB · 2023-11-18).", 1), "{}", largest.message);
+        assert!(ask(&mut conn, "what's my oldest video?").message.starts_with("The oldest video: c.mp4"));
+        assert_eq!(ask(&mut conn, "show me my largest videos").message, "Found 2 videos. Largest first.");
+        assert_eq!(ask(&mut conn, "where were my photos taken?").message, "1 of your 3 photos have a location recorded, but I can't name the places yet.");
+        assert_eq!(ask(&mut conn, "do my videos have GPS?").message, "None of your 2 videos have a location recorded, so I can't say where they were taken.");
+        let folder = ask(&mut conn, "what's in Trip");
+        assert_eq!(folder.message, "“Trip” holds 3 files (5.3 KB): 2 photos, 1 video.");
+        assert_eq!(folder.hits.len(), 3);
+        assert_eq!(ask(&mut conn, "what's in the Trip folder?").message, "Found 3 files in Trip.");
+        assert!(ask(&mut conn, "what's in Nowhere").message.starts_with("No matches"));
+        ask_in(&mut conn, "talk", "show me my newest videos");
+        assert_eq!(ask_in(&mut conn, "talk", "how many JPEGs do I have?").message, "Found 2 files in JPG format, using 300 bytes.");
     }
 
     #[test]

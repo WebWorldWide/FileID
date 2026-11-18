@@ -554,6 +554,51 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     }
 }
 
+/// "What's in Kyle Senior Pics": the files of the folders with that name, by kind. None when the
+/// catalog has no such folder, so the question is searched as words instead. Mirrors Swift
+/// `ChatFacts.folderAnswer`.
+pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
+    let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
+    let (count, bytes) = totals(conn, &filter)?;
+    if count == 0 {
+        return Ok(None);
+    }
+    let mut args = Vec::new();
+    let clause = filter.clause(&mut args);
+    let mut statement = conn.prepare(&format!("SELECT f.kind,COUNT(*) AS c FROM files f WHERE {clause} GROUP BY f.kind ORDER BY c DESC,f.kind ASC"))?;
+    let kinds = statement
+        .query_map(rusqlite::params_from_iter(args), |row| {
+            let (kind, n): (String, i64) = (row.get(0)?, row.get(1)?);
+            Ok(format!("{} {}", count_label(n), noun(&[kind], n)))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let hits = listed(conn, &filter, "newest", SHOWN, count)?;
+    let files = if count == 1 { "file" } else { "files" };
+    Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
+}
+
+/// "Where were my photos taken?": the library records positions, not place names, so say how many
+/// files carry one. Mirrors Swift `ChatFacts.placesAnswer`.
+pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
+    let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };
+    let (total, _) = totals(conn, &filter)?;
+    let mut args = Vec::new();
+    let clause = filter.clause(&mut args);
+    let located: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM files f WHERE {clause} AND f.location_lat IS NOT NULL AND f.location_lon IS NOT NULL"),
+        rusqlite::params_from_iter(args),
+        |row| row.get(0),
+    )?;
+    let things = noun(kinds, 2);
+    Ok(if total == 0 {
+        format!("No {things} in the library yet.")
+    } else if located == 0 {
+        format!("None of your {} {things} have a location recorded, so I can't say where they were taken.", count_label(total))
+    } else {
+        format!("{} of your {} {things} have a location recorded, but I can't name the places yet.", count_label(located), count_label(total))
+    })
+}
+
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
     if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {

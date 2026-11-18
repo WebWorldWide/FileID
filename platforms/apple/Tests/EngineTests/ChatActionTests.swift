@@ -13,6 +13,9 @@ import FileIDShared
         let labels: [[Label]]
         struct SpokenNameCase: Decodable { let text: String; let name: String? }
         let spokenNames: [SpokenNameCase]
+        struct PlaceAskCase: Decodable { let text: String; let kinds: [String]? }
+        let placeAsks: [PlaceAskCase]
+        let insideAsks: [SpokenNameCase]
         enum Label: Decodable {
             case number(Int64), text(String)
             init(from decoder: Decoder) throws {
@@ -44,6 +47,22 @@ import FileIDShared
     @Test func sharedSpokenNames() throws {
         let failures = try fixtures().spokenNames.compactMap { item -> String? in
             let actual = ChatIntent.spokenName(item.text)
+            return actual == item.name ? nil : "\(item.text) → \(actual ?? "nil")"
+        }
+        #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+    }
+
+    @Test func sharedPlaceAsks() throws {
+        let failures = try fixtures().placeAsks.compactMap { item -> String? in
+            let actual = ChatIntent.placeAsk(item.text)
+            return actual == item.kinds ? nil : "\(item.text) → \(String(describing: actual))"
+        }
+        #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+    }
+
+    @Test func sharedInsideAsks() throws {
+        let failures = try fixtures().insideAsks.compactMap { item -> String? in
+            let actual = ChatIntent.askedInside(item.text)
             return actual == item.name ? nil : "\(item.text) → \(actual ?? "nil")"
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")

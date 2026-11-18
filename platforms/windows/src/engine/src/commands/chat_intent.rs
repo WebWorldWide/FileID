@@ -590,6 +590,12 @@ pub fn parse_question(text: &str) -> Question {
             break;
         }
     }
+    if question.limit.is_none()
+        && let Some(index) = words.iter().position(|word| order_words.contains(&word.as_str()))
+        && words.get(index + 1).is_some_and(|next| SINGULAR_FILE_WORDS.contains(&next.as_str()))
+    {
+        question.limit = Some(1);
+    }
     for index in 0..words.len().saturating_sub(1) {
         if !["per", "by", "each", "every"].contains(&words[index].as_str()) {
             continue;
@@ -668,6 +674,9 @@ pub fn parse_question(text: &str) -> Question {
     }
     question
 }
+
+/// "the largest video", "my newest photo": a singular noun after an order word asks for one file.
+const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording"];
 
 const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "collection", "files"];
 const COUNT_PEOPLE_TAIL: &[&str] = &[
@@ -1258,6 +1267,62 @@ pub fn spoken_name(text: &str) -> Option<String> {
     ((1..=2).contains(&run.len()) && !NOT_NAMES.contains(&first.as_str())).then(|| run.join(" "))
 }
 
+const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
+const GEOTAG_WORDS: [&str; 5] = ["gps", "geotagged", "geotag", "geotags", "geolocated"];
+
+/// "where were my photos taken?", "do my photos have GPS?": a question about places. Returns the kinds it
+/// names (empty for every file). Mirrors Swift `ChatIntent.placeAsk`; the shared cases are the corpus `placeAsks`.
+pub fn place_ask(text: &str) -> Option<Vec<String>> {
+    let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).collect();
+    let asks = (has(&words, &["where"]) && has(&words, &TAKEN_WORDS))
+        || has(&words, &GEOTAG_WORDS)
+        || (has(&words, &["location", "locations"]) && has(&words, &["have", "has", "recorded", "saved", "stored", "with", "many"]));
+    if !asks {
+        return None;
+    }
+    let mut kinds = Vec::new();
+    for word in &words {
+        let kind = match word.as_str() {
+            "photo" | "photos" | "picture" | "pictures" | "image" | "images" | "pics" => "image",
+            "video" | "videos" | "clip" | "clips" => "video",
+            _ => continue,
+        };
+        if !kinds.iter().any(|known| known == kind) {
+            kinds.push(kind.to_owned());
+        }
+    }
+    kinds.sort();
+    Some(kinds)
+}
+
+/// "what's in Kyle Senior Pics": the name a question asks the contents of, left for the catalog to say
+/// whether it is a folder. Mirrors Swift `ChatIntent.askedInside`; the shared cases are the corpus `insideAsks`.
+pub fn asked_inside(text: &str) -> Option<String> {
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
+    let mut at = match words.first().map(String::as_str)? {
+        "whats" => 1,
+        "what" if words.get(1).is_some_and(|word| word == "is" || word == "are") => 2,
+        _ => return None,
+    };
+    while words.get(at).is_some_and(|word| word == "all" || word == "everything") {
+        at += 1;
+    }
+    if !words.get(at).is_some_and(|word| word == "in" || word == "inside") {
+        return None;
+    }
+    at += 1;
+    if words.get(at).is_some_and(|word| word == "the") {
+        at += 1;
+    }
+    let mut name: Vec<String> = raw[at.min(raw.len())..].iter().map(|word| original(word)).filter(|word| !word.is_empty()).collect();
+    if name.last().is_some_and(|word| ["folder", "directory"].contains(&word.to_lowercase().as_str())) {
+        name.pop();
+    }
+    let first = name.first()?.to_lowercase();
+    (!["this", "that", "these", "those", "my", "our", "it", "here", "there", "library", "collection"].contains(&first.as_str())).then(|| name.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,6 +1334,16 @@ mod tests {
         labels: Vec<(i64, String)>,
         #[serde(rename = "spokenNames")]
         spoken_names: Vec<SpokenNameCase>,
+        #[serde(rename = "placeAsks")]
+        place_asks: Vec<PlaceAskCase>,
+        #[serde(rename = "insideAsks")]
+        inside_asks: Vec<SpokenNameCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct PlaceAskCase {
+        text: String,
+        kinds: Option<Vec<String>>,
     }
 
     #[derive(Deserialize)]
@@ -1324,6 +1399,32 @@ mod tests {
             .into_iter()
             .filter_map(|case| {
                 let actual = spoken_name(&case.text);
+                (actual != case.name).then(|| format!("{} → {actual:?}", case.text))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn shared_place_asks() {
+        let failures: Vec<String> = fixtures()
+            .place_asks
+            .into_iter()
+            .filter_map(|case| {
+                let actual = place_ask(&case.text);
+                (actual != case.kinds).then(|| format!("{} → {actual:?}", case.text))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn shared_inside_asks() {
+        let failures: Vec<String> = fixtures()
+            .inside_asks
+            .into_iter()
+            .filter_map(|case| {
+                let actual = asked_inside(&case.text);
                 (actual != case.name).then(|| format!("{} → {actual:?}", case.text))
             })
             .collect();
