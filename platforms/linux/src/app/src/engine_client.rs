@@ -1,9 +1,23 @@
-// Engine client: spawns the shared Rust engine and sends NDJSON IpcCommands from one ordered writer
-// thread (never the GTK thread). IpcEvents fan out to subscribers, each with its own queue so a slow
-// listener never stalls the pump. Readiness needs a per-spawn health nonce; respawns use capped backoff.
-// File listing is not IPC: the engine is the only DB writer, and the app reads rows from the same SQLite
-// WAL DB on one latest-request-wins worker. Thumbnails decode on a bounded pool; only pixel buffers cross
-// back to the main thread.
+// Engine client — the app side of the two-binary IPC design
+// (`shared/docs/ARCHITECTURE.md`). Mirrors macOS `EngineClient` + Windows
+// `EngineClient.cs`:
+//
+//   * spawns the shared Rust engine as a child process,
+//   * sends `IpcCommand`s as newline-delimited JSON on its stdin — reusing the
+//     engine crate's own serde types so the wire contract can never drift,
+//   * parses bounded `IpcEvent` frames off a reader thread and fans them out to
+//     every UI subscriber on the GTK main context; each subscriber has its own
+//     queue (`event_queue`), so the pump never waits on a listener,
+//   * writes commands on one ordered writer thread, never on the GTK thread,
+//   * proves readiness with a per-spawn health-check nonce, and respawns the
+//     engine with capped backoff if it dies.
+//
+// File listing is NOT an IPC command — the engine is the single DB *writer*;
+// the app reads file rows directly from the same SQLite WAL DB on one
+// latest-request-wins worker, exactly like macOS / Windows `ReadStore`.
+//
+// Thumbnails are decoded by a bounded fixed-size worker pool; only pixel
+// buffers cross back to the main thread, where textures are built.
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
@@ -419,6 +433,7 @@ impl EngineClient {
         Some((request_id, self.generation))
     }
 
+    /// Returns true when this answer made the client ready.
     fn settle_health_probe(&mut self, request_id: &str, pid: i32) -> bool {
         let matches = self
             .pending_health
@@ -665,6 +680,7 @@ impl EngineClient {
         rx
     }
 
+    /// First-in-first-out decode on the shared bounded workers.
     pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
         self.background_plain(ThumbWork::Image { path, dim })
     }
@@ -697,6 +713,7 @@ impl EngineClient {
         rx
     }
 
+    /// Any bounded decode (face crops) on the shared workers, in order.
     pub fn request_decode(
         &self,
         decode: impl FnOnce() -> Option<DecodedImage> + Send + 'static,
@@ -1001,6 +1018,7 @@ where
     rx
 }
 
+/// One file's current row (the preview refreshes what it shows after a scan).
 pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
     read_db(move |conn| file_row_on(conn, id).ok().flatten())
 }
