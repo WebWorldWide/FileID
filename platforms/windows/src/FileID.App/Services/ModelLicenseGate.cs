@@ -88,8 +88,6 @@ internal static class ModelLicenseGate
         return declined;
     }
 
-    /// <summary>Show a catalog model's separately accepted terms (Gemma) before it downloads.
-    /// Permissive weights pass; anything else that claims to need terms is refused.</summary>
     internal static async Task<bool> EnsureCatalogTermsAcceptedAsync(IpcSchema.ModelCatalogItem model)
     {
         if (!ViewModels.ModelCatalogPresentation.IsOfferable(model)) return false;
@@ -134,10 +132,7 @@ internal static class ModelLicenseGate
     private static string AcceptanceKey(Policy policy)
         => $"ModelLicenseAccepted:{policy.Key}:{policy.ReviewedAt}";
 
-    // The app is UNPACKAGED (WiX MSI / Burn bundle — no MSIX, no package
-    // identity), so Windows.Storage.ApplicationData.Current is unavailable and
-    // throws. Persist acceptance to a small JSON file beside app-settings.json,
-    // the same file-based store every other setting uses.
+    // The app is UNPACKAGED (WiX MSI / Burn bundle — no MSIX, no package identity), so Windows.Storage.ApplicationData.Current is unavailable and throws.
     private static string AcceptancePath =>
         System.IO.Path.Combine(AppPaths.Root, "model-licenses.json");
 
@@ -164,9 +159,6 @@ internal static class ModelLicenseGate
     private static bool RememberAcceptance(Policy policy)
     {
         var key = AcceptanceKey(policy);
-        // The user explicitly accepted, so honor it for this session first — a
-        // failed durable write (read-only profile, disk full) must NOT block the
-        // download they just asked for; it only means a re-prompt next launch.
         SessionAcceptances.Add(key);
         try
         {

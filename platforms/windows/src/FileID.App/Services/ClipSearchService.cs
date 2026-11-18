@@ -1,7 +1,5 @@
 ﻿// ClipSearchService — orchestrates CLIP semantic search.
-// FTS5 fallback returns matching results when the CLIP embedding path
-// isn't available; otherwise the engine reply lights up real semantic
-// search via the IPC round-trip.
+// FTS5 fallback returns matching results when the CLIP embedding path isn't available; otherwise the engine reply lights up real semantic search via the IPC round-trip.
 
 using System;
 using System.Collections.Concurrent;
@@ -21,19 +19,8 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
     private bool _disposed;
 
-    // Bounded LRU of query-string → embedding. The CLIP text encoder is
-    // deterministic (same string ⇒ same vector, even across engine respawns),
-    // so repeated searches for the same term — kind-filter toggle, clear+retype,
-    // nav-back — can skip the IPC round-trip + encode entirely. No
-    // generation-based invalidation needed; only a model swap would change the
-    // mapping, which is not a supported in-session operation.
     private readonly QueryEmbeddingCache _queryCache = new(capacity: 24);
 
-    // generation counter, bumped each time the engine's lifecycle
-    // transitions away from Ready (respawn or crash). Each in-flight TCS
-    // captures the generation it was created in; an embedding that arrives
-    // from a stale generation completes the wrong caller's TCS, which we
-    // detect via the prefix and discard.
     private int _generation;
 
     private string? _lastSearchError;
@@ -71,20 +58,11 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ClipSearchService.OnEngineClientChanged", () =>
         {
-            // This handler can fire after Dispose() — Dispose() detaches the
-            // subscription, but a notification already in flight on another
-            // thread (tab-nav disposal racing an engine state change) can land
-            // here with _disposed already true. Bail before touching _inflight
-            // (drained + cleared in Dispose) or the now-stale generation so we
-            // don't complete a disposed caller's TCS with stale/null results.
+            // This handler can fire after Dispose() — Dispose() detaches the subscription, but a notification already in flight on another thread (tab-nav disposal racing an engine state change) can land here with _disposed already true.
             if (_disposed) return;
             if (e.PropertyName == nameof(EngineClient.State))
             {
                 DebugLog.Info($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
-                // any State transition (respawn / crash / shutdown)
-                // invalidates pending embeddings — the engine that received
-                // the embedTextQuery is now gone. Bump the generation +
-                // fault all in-flight TCSes so callers don't hang.
                 var newState = EngineClient.Instance.State;
                 if (newState != EngineClient.LifecycleState.Ready)
                 {
@@ -112,12 +90,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             }
         });
 
-    /// <summary>
-    /// Sends an `embedTextQuery` IPC command and awaits the engine's
-    /// `clipTextEmbedding` reply (correlated by query_id). Returns null
-    /// if the engine times out or CLIP isn't installed (the caller falls
-    /// back to FTS5 search transparently).
-    /// </summary>
     public async Task<float[]?> EmbedQueryAsync(string query, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -144,16 +116,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            // Engine I/O / serialization failure. Surface to UI via
-            // LastSearchError instead of silently returning empty results.
             _inflight.TryRemove(queryId, out _);
             DebugLog.Warn($"[CLIP] EmbedTextQueryAsync threw: {ex.Message}");
             LastSearchError = "Search unavailable: " + ex.Message;
             return null;
         }
 
-        // 5-second timeout: a healthy CLIP encode is sub-100ms, so 5s is
-        // generous slack for the first query compiling the model.
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
         await using var reg = cts.Token.Register(() =>
@@ -166,8 +134,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         try
         {
             var result = await tcs.Task.ConfigureAwait(false);
-            // Empty embedding = CLIP disabled engine-side —
-            // treat as null so SearchAsync falls back to FTS5, no error banner.
             if (result is { Length: 0 }) { LastSearchError = null; return null; }
             if (result is not null)
             {
@@ -182,9 +148,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("respawned", StringComparison.Ordinal))
         {
-            // engine died mid-query. Surface a clear banner; the
-            // caller (LibraryView search) treats null as "fall through to
-            // FTS5" so the user still gets results.
+            // Surface a clear banner; the caller (LibraryView search) treats null as "fall through to FTS5" so the user still gets results.
             DebugLog.Warn("[CLIP] embed-await: engine respawned; returning null.");
             LastSearchError = "Search paused while FileID restarts. Try again in a moment.";
             return null;
@@ -199,16 +163,10 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
 
     private long _engineRankRetryAtTick;
 
-    /// <summary>Asks the helper to rank files for a search or a look-alike
-    /// request. Null means "rank in the app instead": the helper is not
-    /// ready, its index is still being built, it did not answer in time, or
-    /// it had nothing. After a miss the helper is left alone for a few
-    /// seconds so a busy scan never adds a wait to every keystroke.</summary>
+    /// <summary>After a miss the helper is left alone for a few seconds so a busy scan never adds a wait to every keystroke.</summary>
     public async Task<IReadOnlyList<long>?> EngineRankedIdsAsync(CatalogRequest request, CancellationToken ct) =>
         (await EngineRankedAsync(request, ct).ConfigureAwait(false))?.Ids;
 
-    /// <summary>The same ranking plus the helper's own note on the reply, which
-    /// for a typed search is the strength summary.</summary>
     public async Task<(IReadOnlyList<long> Ids, string? Message)?> EngineRankedAsync(CatalogRequest request, CancellationToken ct)
     {
         var engine = EngineClient.Instance;
@@ -256,14 +214,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
         {
-            // The helper ranks from its own index. It has no kind filter, so a
-            // kind-filtered search still ranks here to keep the grid full.
+            // It has no kind filter, so a kind-filtered search still ranks here to keep the grid full.
             if (kind is null
                 && EngineSimilarity.QueryRequest(query, embed, _store.Scope?.Root.Id, limit) is { } request
                 && await EngineRankedAsync(request, ct).ConfigureAwait(false) is { } ranking)
             {
-                // No good match: only the name, tag and text matches show, and
-                // the helper's weaker look-alikes wait behind a button.
+                // No good match: only the name, tag and text matches show, and the helper's weaker look-alikes wait behind a button.
                 IReadOnlyList<FileRow>? keyword = null;
                 if (!showWeaker && SearchStrengthPolicy.Counts(ranking.Message) is { Good: 0 })
                 {
@@ -277,8 +233,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
                     }
                 }
                 var engineRows = await _store.RowsByIdsAsync(ranking.Ids, ct).ConfigureAwait(false);
-                // The helper's rows keep their order; the keyword page (the same
-                // query the keyword-only case runs) adds the matches it lacks.
                 // The result is not pageable, so "load more" never fetches a copy.
                 keyword ??= await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
                 var combined = SearchStrengthPolicy.AppendKeywordRows(engineRows, keyword, row => row.Id);
@@ -294,18 +248,13 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             {
                 rows.Add(r.Row);
             }
-            // If the store never opened (DB locked/permission/corrupt — see
-            // ReadStore.LastOpenError) the query above returns empty with no
-            // signal. Surface the store's open error so search shows a clear,
-            // dismissible message instead of an indistinguishable empty grid.
+            // If the store never opened (DB locked/permission/corrupt — see ReadStore.LastOpenError) the query above returns empty with no signal.
             if (rows.Count == 0 && _store.LastOpenError is { Length: > 0 } storeErr)
             {
                 LastSearchError = storeErr;
             }
             return rows;
         }
-        // FTS5 fallback (filename + OCR) — covers the case where CLIP
-        // models aren't installed yet OR the query embedded to all-zeros.
         var fts = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
         if (fts.Count == 0 && _store.LastOpenError is { Length: > 0 } openErr)
         {
@@ -315,11 +264,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     }
 }
 
-/// <summary>Thread-safe bounded LRU mapping a trimmed query string to its CLIP
-/// text embedding. A hit moves the entry to the front (most-recently-used); a
-/// store dedupes the key then evicts the oldest beyond <c>capacity</c>. Extracted
-/// from <see cref="ClipSearchService"/> so the hit/evict policy is unit-testable
-/// without the engine singleton.</summary>
+/// <summary>Thread-safe bounded LRU mapping a trimmed query string to its CLIP text embedding.</summary>
 internal sealed class QueryEmbeddingCache
 {
     private readonly int _capacity;

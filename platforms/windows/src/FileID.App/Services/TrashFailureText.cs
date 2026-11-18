@@ -9,8 +9,6 @@ internal static class TrashFailureText
     public const string Missing = "missing";
     public const string Failed = "failed";
 
-    /// <summary>The helper's reason for one file; an older helper that sends
-    /// none is read from its fixed wording, as the Mac app does.</summary>
     public static string Kind(BulkActionItem item)
     {
         if (item.Reason is Changed or Protected or Missing or Failed) return item.Reason;
@@ -46,9 +44,6 @@ internal static class TrashFailureText
         };
     }
 
-    /// <summary>One sentence per kind of failure, most useful first. A file
-    /// with no reason and unfamiliar wording keeps the helper's own message.
-    /// Empty when nothing failed.</summary>
     public static string Summary(BulkActionResult result)
     {
         var changed = 0;

@@ -1,8 +1,5 @@
 ﻿// SqliteErrorTranslator — turn raw SQLite / IO exceptions into actionable,
-// jargon-free user copy. Views must not surface internal messages like
-// "database disk image is malformed" with no guidance; this maps the common
-// failure codes to a sentence the user can act on. Shared by the views/VMs that
-// read the library (ReadStore, CleanupViewModel, etc.).
+// Views must not surface internal messages like "database disk image is malformed" with no guidance; this maps the common failure codes to a sentence the user can act on.
 
 using System;
 
@@ -10,11 +7,8 @@ namespace FileID.Services;
 
 public static class SqliteErrorTranslator
 {
-    /// <summary>Map an exception thrown while opening/reading the library DB to a
-    /// short, actionable, non-technical message. Never throws.</summary>
     public static string Humanize(Exception ex)
     {
-        // Microsoft.Data.Sqlite surfaces the primary result code on SqliteErrorCode.
         if (ex is Microsoft.Data.Sqlite.SqliteException se)
         {
             return se.SqliteErrorCode switch

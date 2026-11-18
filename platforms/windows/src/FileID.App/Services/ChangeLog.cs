@@ -1,13 +1,5 @@
 ﻿// ChangeLog — the session-wide record of every applied file mutation
-// (renames, trash, restructure applies, people merges, tag writes), each
-// with an inverse-action closure so the user can undo anything they didn't
-// mean before closing the app.
-//
-// Threading: Push arrives from EngineClient PropertyChanged handlers (the
-// untrusted engine-event path) while reads/undo run on the UI thread — all
-// list access is under _gate; reverse closures run OUTSIDE the lock
-// (mirrors UndoStack's APP-1 note). Session-only by design, matching the
-// macOS app's session-scoped Undo.
+// (renames, trash, restructure applies, people merges, tag writes), each with an inverse-action closure so the user can undo anything they didn't mean before closing the app.
 
 using System;
 using System.Collections.Generic;
@@ -27,8 +19,7 @@ internal enum ChangeKind
     Other,
 }
 
-/// <summary>The page a change was made on. Each page's own Undo acts only
-/// on its newest change; the Recent changes list still shows them all.</summary>
+/// <summary>Each page's own Undo acts only on its newest change; the Recent changes list still shows them all.</summary>
 internal enum ChangePage
 {
     Unspecified,
@@ -142,7 +133,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
 
     private const int ReverseCapacity = 500;
     private readonly object _gate = new();
-    // Newest first.
     private readonly LinkedList<ChangeLogEntry> _entries = new();
     private bool _undoInFlight;
 
@@ -162,9 +152,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Entries whose outcome is still pending at close time. A failed
-    /// undo remains pending because it can be retried, and an in-flight undo
-    /// remains pending until its terminal result is known.</summary>
+    /// <summary>A failed undo remains pending because it can be retried, and an in-flight undo remains pending until its terminal result is known.</summary>
     public int PendingCount
     {
         get
@@ -217,9 +205,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Stable copy for rendering, newest first. Entry Status may
-    /// still change after the snapshot (entries notify their own
-    /// PropertyChanged).</summary>
     public IReadOnlyList<ChangeLogEntry> Snapshot()
     {
         lock (_gate)
@@ -240,8 +225,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         {
             if (kind == ChangeKind.Restructure)
             {
-                // The engine's restructure_undo journal is truncated at each
-                // apply — only the latest batch can be replayed.
+                // The engine's restructure_undo journal is truncated at each apply — only the latest batch can be replayed.
                 foreach (var e in _entries)
                 {
                     if (e.Kind != ChangeKind.Restructure) continue;
@@ -278,15 +262,10 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         return entry;
     }
 
-    /// <summary>Run the entry's inverse action. Returns true on success.
-    /// Failure marks the entry UndoFailed with the reason and re-arms the
-    /// closure so the user can retry (e.g. after closing an Explorer window
-    /// that locked the file).</summary>
+    /// <summary>Failure marks the entry UndoFailed with the reason and re-arms the closure so the user can retry (e.g. after closing an Explorer window that locked the file).</summary>
     public Task<bool> UndoAsync(ChangeLogEntry entry)
         => UndoCoreAsync(entry, retryFailed: false);
 
-    /// <summary>Retry a failed undo without exposing a transient Undoable state
-    /// that another global undo could consume first.</summary>
     public Task<bool> RetryAsync(ChangeLogEntry entry)
         => UndoCoreAsync(entry, retryFailed: true);
 
@@ -370,8 +349,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
-    /// <summary>Coarse "something changed" signal for views; re-snapshot on
-    /// the dispatcher when it fires (it may arrive off the UI thread).</summary>
     public event EventHandler? Changed;
 
     private void OnChanged()

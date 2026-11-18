@@ -1,9 +1,5 @@
 ﻿// AppSettings — durable user preferences.
-//
-// Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
-// writes via temp-file + File.Move so a crash mid-save doesn't corrupt
-// the file. Every new property must default safely so older settings.json
-// files load cleanly.
+// Atomic writes via temp-file + File.Move so a crash mid-save doesn't corrupt the file.
 
 using System;
 using System.IO;
@@ -22,13 +18,10 @@ internal sealed class AppSettings
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = false, // strict casing — case-flips can't smuggle past Sanitize
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        // Unknown fields are intentionally ignored (forward-compatibility
-        // for the next schema version); Sanitize() validates every
-        // declared field individually so an unknown field can't pollute
-        // the in-memory state.
+        // Unknown fields are intentionally ignored (forward-compatibility for the next schema version); Sanitize() validates every declared field individually so an unknown field can't pollute the in-memory state.
     };
 
-    /// <summary>Last-picked folder root. Absolute path or null if never picked.</summary>
+    /// <summary>Absolute path or null if never picked.</summary>
     public string? LastFolderPath { get; set; }
 
     /// <summary>Friendly display label for LastFolderPath (the leaf folder name on Windows).</summary>
@@ -36,75 +29,36 @@ internal sealed class AppSettings
 
     public bool SidebarVisible { get; set; } = true;
 
-    /// <summary>Active tab id. Stored as the string identifier (matches macOS RawValue persistence).</summary>
     public string ActiveTab { get; set; } = "library";
 
-    /// <summary>Tag kept files after Cleanup auto-trash (macOS Settings.swift toggle).
-    /// default flipped to true to match macOS canonical default
-    /// (`cleanup.autoTagKeepers` defaults true). Without this, the same
-    /// user on different OSes saw different post-cleanup tagging behavior.</summary>
     public bool CleanupAutoTagKept { get; set; } = true;
 
-    /// <summary>Restructure view mode: false = cards, true = tree-diff.</summary>
     public bool RestructureTreeMode { get; set; } = false;
 
-    /// <summary>The library location (listRoots id) Library, Search &amp; Moments and Chat are scoped
-    /// to; null for "All locations".</summary>
     public long? LibraryScopeRootId { get; set; }
 
-    /// <summary>Library kind filter (image / video / pdf / document / audio / all).</summary>
     public string LibraryKindFilter { get; set; } = "all";
 
     public bool PeopleHideUnknown { get; set; } = false;
 
-    /// <summary>
-    /// Manual GPU override for Describe Files and Chat (llama.cpp). Null =
-    /// auto-detect. "cpu" keeps them off the GPU; scan models always run on
-    /// the CPU. Older values ("directml", "cuda", ...) are still accepted
-    /// and ignored. Persists across launches. Read by the engine in
-    /// runtime.rs::user_forced_cpu each time Describe Files starts.
-    /// </summary>
     public string? GpuExecutionProviderOverride { get; set; }
 
-    /// <summary>Has the user seen the first-launch Welcome sheet?
-    /// Mirrors macOS @AppStorage("welcomeSheetSeen"). True once the
-    /// user dismisses the sheet for any reason; the sheet still re-shows
-    /// on subsequent launches if any required model is missing.</summary>
     public bool WelcomeSheetSeen { get; set; } = false;
 
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
-    /// <summary>Legacy preference retained so existing settings files
-    /// continue to round-trip. CUDA runtime installs are explicit actions.</summary>
     public bool DisableAutoInstallCuda { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings compatibility.
-    /// Runtime downloads require a user action.</summary>
     public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings compatibility.
-    /// CUDA runtime downloads require a user action and NVIDIA terms acceptance.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready AND Intel
-    /// hardware, the ONNX Runtime OpenVINO pack (Apache-2.0) is fetched so the
-    /// scan pipeline runs on the OpenVINO EP instead of DirectML. True disables.
-    /// (Snapdragon's QNN is NOT auto-installed — the QNN SDK is proprietary and
-    /// can't be redistributed under the project's commercial-clean rule; QNN is
-    /// used only if the device already provides it.)</summary>
     public bool DisableAutoInstallOpenVino { get; set; } = false;
 
-    /// <summary>Persisted Deep Analyze VLM model — the model Deep Analyze
-    /// uses for captions, smart renames, and tags. Auto-tagging during scans
-    /// uses RAM++ (CLIP fallback). Accepted values mirror the engine registry;
-    /// the default remains Qwen2.5-VL-7B for existing and new installs.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
 
-    /// <summary>Describe Files ▸ Name style, the saved smart-name style sent with
-    /// proposeNames (macOS `naming.*` keys): short / descriptive / dateFirst.</summary>
     public string NamingStyle { get; set; } = ViewModels.NameStylePolicy.DefaultStyle;
 
-    /// <summary>Longest smart name in characters, 4–120.</summary>
     public int NamingMaxLength { get; set; } = ViewModels.NameStylePolicy.DefaultMaxLength;
 
     public bool NamingIncludePeople { get; set; } = ViewModels.NameStylePolicy.DefaultIncludePeople;
@@ -115,19 +69,15 @@ internal sealed class AppSettings
 
     public bool NamingLearn { get; set; } = ViewModels.NameStylePolicy.DefaultLearn;
 
-    /// <summary>Settings ▸ Appearance ▸ Lava lamp (macOS `lavaMode`): "full" or "off". The Mac's "calm" is not offered here and loads as "full".</summary>
     public string LavaMode { get; set; } = LavaModeFull;
 
-    /// <summary>Settings ▸ Appearance ▸ Text size (macOS `appearance.textSize`): small, standard, large or larger.</summary>
     public string TextSize { get; set; } = "standard";
 
-    /// <summary>Settings ▸ Organize Folders ▸ Folder granularity (macOS `restructure.granularity`): loose, normal or tight. Sent to the engine as FILEID_RESTRUCTURE_GRANULARITY when it starts.</summary>
     public string RestructureGranularity { get; set; } = RestructureGranularityDefault;
 
-    /// <summary>Absolute folders Describe Files skips on a whole-library run (macOS `deepAnalyzeExcludedFolders`). Sent as excludedFolders with every whole-library Describe request.</summary>
     public List<string> DeepAnalyzeExcludedFolders { get; set; } = [];
 
-    /// <summary>Chat "written answers from local AI" preference (macOS `chatUseModel`, default on); the Chat action `chatSummaries` flips it. Windows Chat answers from stored evidence only until a local chat model ships.</summary>
+    /// <summary>Windows Chat answers from stored evidence only until a local chat model ships.</summary>
     public bool ChatUseModel { get; set; } = true;
 
     public const string LavaModeFull = "full";
@@ -140,7 +90,6 @@ internal sealed class AppSettings
 
     public bool BackgroundMotionOn => LavaMode != LavaModeOff;
 
-    /// <summary>The granularity to export to the engine, or null for the engine's own default.</summary>
     public string? RestructureGranularityForEngine =>
         RestructureGranularity != RestructureGranularityDefault && RestructureGranularityValues.Contains(RestructureGranularity)
             ? RestructureGranularity
@@ -162,31 +111,20 @@ internal sealed class AppSettings
         return result;
     }
 
-    /// <summary>Schema version of this settings.json. Fresh installs start at
-    /// the current version so one-time Sanitize migrations only ever touch
-    /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
+    /// <summary>Fresh installs start at the current version so one-time Sanitize migrations only ever touch older files (and can't clobber a fresh user's first deliberate pick).</summary>
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
-    /// <summary>Whitelist of override tags. Only "cpu" changes engine
-    /// behaviour; the older provider names stay accepted so existing
-    /// settings files round-trip. Anything outside this set is silently
-    /// coerced to null (auto-detect).</summary>
+    /// <summary>Only "cpu" changes engine behaviour; the older provider names stay accepted so existing settings files round-trip.</summary>
     private static readonly HashSet<string> AllowedEpOverrides =
         new(StringComparer.OrdinalIgnoreCase)
         { "auto", "cuda", "tensorrt", "directml", "openvino", "qnn", "cpu" };
 
-    /// <summary>VLM model ids the engine's registry.rs knows how to
-    /// install. Sanitize() coerces any other value to the safe default
-    /// so a tampered settings.json can't smuggle an arbitrary
-    /// model_kind into the auto-chain deepAnalyzeAll call.</summary>
+    /// <summary>Sanitize() coerces any other value to the safe default so a tampered settings.json can't smuggle an arbitrary model_kind into the auto-chain deepAnalyzeAll call.</summary>
     private static readonly HashSet<string> AllowedVlmKinds =
         new(StringComparer.OrdinalIgnoreCase)
         { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
 
-    /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
-    /// can install: a curated kind, or a catalog GGUF id picked in the model
-    /// browser (the engine only resolves ids in its validated catalog). Removed
-    /// non-commercial kinds (e.g. the dropped qwen2_5_vl_3b) match neither.</summary>
+    /// <summary>True if kind is a VLM model_kind the engine can install: a curated kind, or a catalog GGUF id picked in the model browser (the engine only resolves ids in its validated catalog).</summary>
     public static bool IsAllowedVlmKind(string? kind) =>
         kind is { } k && (AllowedVlmKinds.Contains(k) || ViewModels.ModelCatalogPresentation.IsCatalogModelKind(k));
 
@@ -209,7 +147,7 @@ internal sealed class AppSettings
         }
         catch (Exception ex)
         {
-            // Corrupt settings file shouldn't brick the app. Log + start fresh.
+            // Corrupt settings file shouldn't brick the app.
             DebugLog.Warn("AppSettings.Load failed: " + ex.Message);
         }
         return new AppSettings();
@@ -217,10 +155,7 @@ internal sealed class AppSettings
 
     private const int CurrentSchemaVersion = 5;
 
-    /// <summary>Defensive cleanup of fields a malicious settings.json
-    /// could otherwise smuggle through. Currently scrubs the EP override
-    /// (rejects anything outside the canonical enum so DLL paths can't
-    /// be injected). Add new validations here as fields are added.</summary>
+    /// <summary>Defensive cleanup of fields a malicious settings.json could otherwise smuggle through.</summary>
     private static void Sanitize(AppSettings s)
     {
         if (s.LibraryScopeRootId is <= 0) s.LibraryScopeRootId = null;
@@ -243,17 +178,13 @@ internal sealed class AppSettings
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
 
-        // clamp SchemaVersion to a known range. A corrupt or
-        // malicious settings.json could otherwise set 999, and a future
-        // migration path that branches on version could behave unsafely.
+        // A corrupt or malicious settings.json could otherwise set 999, and a future migration path that branches on version could behave unsafely.
         if (s.SchemaVersion < 0 || s.SchemaVersion > CurrentSchemaVersion)
         {
             DebugLog.Warn($"AppSettings: SchemaVersion {s.SchemaVersion} out of supported range [0, {CurrentSchemaVersion}]; coercing to {CurrentSchemaVersion}.");
             s.SchemaVersion = CurrentSchemaVersion;
         }
-        // Advance any older-but-in-range schema to current so the one-time
-        // migrations above don't re-run (which could clobber a later
-        // deliberate re-pick once it's persisted).
+        // Advance any older-but-in-range schema to current so the one-time migrations above don't re-run (which could clobber a later deliberate re-pick once it's persisted).
         if (s.SchemaVersion < CurrentSchemaVersion)
         {
             s.SchemaVersion = CurrentSchemaVersion;
@@ -273,10 +204,6 @@ internal sealed class AppSettings
         s.NamingMaxLength = ViewModels.NameStylePolicy.ClampLength(s.NamingMaxLength);
     }
 
-    // Now: setters call Save() to bump a debounce timer; the actual
-    // write fires 200 ms after the LAST setter on a thread-pool thread
-    // and is serialized through a SemaphoreSlim so concurrent debounced
-    // saves and the synchronous SaveImmediately path can't race.
     private static readonly SemaphoreSlim s_writeGate = new(1, 1);
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
     private static CancellationTokenSource? s_pendingSaveCts;
@@ -302,8 +229,6 @@ internal sealed class AppSettings
         });
     }
 
-    /// <summary>Synchronous flush. Use at shutdown to make sure the
-    /// pending debounced save actually lands on disk before exit.</summary>
     public void SaveImmediately()
     {
         try
@@ -321,10 +246,6 @@ internal sealed class AppSettings
 
     private AppSettings CloneForWrite()
     {
-        // Settings is value-shaped (all primitive properties). A shallow
-        // copy is enough for serialization — and importantly, the snapshot
-        // captures the state at the moment Save() was called so a setter
-        // mutating the original mid-debounce doesn't corrupt the write.
         var clone = (AppSettings)MemberwiseClone();
         clone.DeepAnalyzeExcludedFolders = [.. DeepAnalyzeExcludedFolders];
         return clone;
@@ -338,7 +259,7 @@ internal sealed class AppSettings
             AppPaths.EnsureDirectories();
             var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, s_jsonOptions);
             var tmp = AppPaths.SettingsPath + ".tmp";
-            // Atomic write: temp file + File.Move. Avoids partial files on crash.
+            // Avoids partial files on crash.
             await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
             File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
         }

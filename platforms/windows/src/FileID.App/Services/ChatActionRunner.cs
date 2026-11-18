@@ -3,10 +3,7 @@ using FileID.ViewModels;
 
 namespace FileID.Services;
 
-/// <summary>Runs the actions Chat proposes, only through paths the pages already use: engine
-/// commands, Duplicates' byte-verified Recycle Bin path, People's edits and the suggested-name
-/// rename. Nothing runs until the user presses the card's button; kinds that change files or
-/// people only run from a card that showed what will happen (CHAT.md "Actions").</summary>
+/// <summary>Runs the actions Chat proposes, only through paths the pages already use: engine commands, Duplicates' byte-verified Recycle Bin path, People's edits and the suggested-name rename.</summary>
 internal sealed class ChatActionRunner
 {
     public static ChatActionRunner Instance { get; } = new();
@@ -16,7 +13,7 @@ internal sealed class ChatActionRunner
     private readonly Dictionary<string, (string Label, Func<Task<string>> Undo)> _undos = new(StringComparer.Ordinal);
     private EngineClient Engine => EngineClient.Instance;
 
-    /// <summary>Raised with the action id whenever its phase or Undo changes. May arrive off the UI thread.</summary>
+    /// <summary>May arrive off the UI thread.</summary>
     public event EventHandler<string>? Changed;
 
     public ChatActionPhase Phase(string id)
@@ -422,7 +419,6 @@ internal sealed class ChatActionRunner
         }
         Set(action.Id, ChatActionPhase.Done(merged == 1 ? "Merged 1 person into this one." : $"Merged {merged:N0} people into this one."));
         if (operations.Count != merged) return;
-        // Each merge is undone from the helper's own record, newest first.
         OfferUndo(action.Id, "Undo merge", async () =>
         {
             for (var index = operations.Count - 1; index >= 0; index--)
@@ -441,8 +437,6 @@ internal sealed class ChatActionRunner
         return await store.FilesByIdAsync(ids, CancellationToken.None);
     }
 
-    /// <summary>Updates progress until <paramref name="finished"/>, then records the result. Gives a
-    /// job up to 5 s to report that it started; an engine restart ends the wait.</summary>
     private async Task WatchAsync(string id, int generation, Func<bool> started, Func<bool> finished, Func<string> progress, Func<string> result)
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);
