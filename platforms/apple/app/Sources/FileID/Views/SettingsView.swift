@@ -86,7 +86,6 @@ struct SettingsTab: View {
                                 Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Status", connectionLabel)
                                 if case .ready(let info) = engine.state {
-                                    infoRow("Running", "Shared engine")
                                     infoRow("Version", info.version)
                                     infoRow("Process number", "\(info.pid)")
                                     infoRow("Files worked on at once", "\(info.workerCap)")
@@ -593,7 +592,7 @@ struct PrivacyCard: View {
                         MetaText("File names, tags and descriptions FileID wrote become searchable with ⌘Space by anyone using this Mac. Turning this off removes them from Spotlight.")
                     }
                     Spacer()
-                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(.switch)
+                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(DSToggleStyle())
                         .accessibilityLabel("Show results in Spotlight")
                 }
                 MetaText("Nothing is sent anywhere. The only network use is a model download you start yourself.")

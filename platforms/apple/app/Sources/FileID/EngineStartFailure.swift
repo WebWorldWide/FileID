@@ -22,11 +22,11 @@ public struct EngineStartFailure: Sendable, Equatable {
 
     public var summary: String {
         switch cause {
-        case .missing: "FileID's engine file is missing from this copy of FileID."
-        case .signatureMismatch: "FileID's engine doesn't match this copy of the app, so FileID won't run it."
-        case .couldNotLaunch: "macOS wouldn't let FileID start its engine."
-        case .exitsAtStart: "FileID's engine stopped as soon as it started."
-        case .keepsStopping: "FileID's engine keeps stopping."
+        case .missing: "FileID's helper file is missing from this copy of FileID."
+        case .signatureMismatch: "FileID's helper doesn't match this copy of the app, so FileID won't run it."
+        case .couldNotLaunch: "macOS wouldn't let FileID start its helper."
+        case .exitsAtStart: "FileID's helper stopped as soon as it started."
+        case .keepsStopping: "FileID's helper keeps stopping."
         }
     }
 

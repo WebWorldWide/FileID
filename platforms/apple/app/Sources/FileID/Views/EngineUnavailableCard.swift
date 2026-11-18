@@ -1,4 +1,4 @@
-// Shown over the pages when FileID's engine (Contents/MacOS/fileidd) can't start or keeps
+// Shown over the pages when FileID's helper (Contents/MacOS/fileidd) can't start or keeps
 // stopping. There is no second engine to fall back to, so the card says what happened and
 // offers the two things a person can do: look at the log, and try again.
 import SwiftUI
@@ -33,11 +33,11 @@ struct EngineUnavailableCard: View {
                 HStack(spacing: 10) {
                     Button("Show log", action: onShowLog)
                         .buttonStyle(DSSecondaryButtonStyle(height: 32))
-                        .help("Open FileID's log to see why the engine stopped.")
+                        .help("Open FileID's log to see why the helper stopped.")
                     Button("Try again", action: onTryAgain)
                         .buttonStyle(DSPrimaryButtonStyle(height: 32))
                         .keyboardShortcut(.defaultAction)
-                        .help("Start FileID's engine again.")
+                        .help("Start FileID's helper again.")
                 }
                 .padding(.top, 6)
             }
@@ -48,7 +48,7 @@ struct EngineUnavailableCard: View {
         .accessibilityLabel("\(Self.title). \(failure.summary)")
     }
 
-    static let title = "FileID's engine couldn't start"
+    static let title = "FileID's helper couldn't start"
 
     static func reinstallHint(for failure: EngineStartFailure) -> String {
         failure.suggestsReinstall
@@ -76,7 +76,7 @@ struct EngineUnavailableOverlay: ViewModifier {
         content.overlay {
             if let failure = engine.startFailure, activeTab != .settings {
                 ZStack {
-                    Rectangle().fill(Color(red: 15 / 255, green: 15 / 255, blue: 17 / 255))
+                    Rectangle().fill(Theme.surfaceBase)
                     EngineUnavailableCard(failure: failure, onTryAgain: { engine.restart() })
                         .padding(24)
                 }

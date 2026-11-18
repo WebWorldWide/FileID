@@ -7,10 +7,10 @@ import FileIDShared
 struct EngineStartFailureWordingTests {
     private static let causes: [EngineStartFailure.Cause] = [.missing, .signatureMismatch, .couldNotLaunch, .exitsAtStart, .keepsStopping]
 
-    @Test func everyCauseIsOneSentenceThatNamesTheEngine() {
+    @Test func everyCauseIsOneSentenceThatNamesTheHelper() {
         for cause in Self.causes {
             let summary = EngineStartFailure(cause).summary
-            #expect(summary.hasPrefix("FileID's engine") || summary.hasPrefix("macOS wouldn't"), "\(cause)")
+            #expect(summary.hasPrefix("FileID's helper") || summary.hasPrefix("macOS wouldn't"), "\(cause)")
             #expect(summary.hasSuffix("."), "\(cause)")
             #expect(summary.filter { $0 == "." }.count == 1, "\(cause)")
         }
@@ -25,7 +25,7 @@ struct EngineStartFailureWordingTests {
     }
 
     @Test func theCardNamesTheProblemAndTheWayOut() {
-        #expect(EngineUnavailableCard.title == "FileID's engine couldn't start")
+        #expect(EngineUnavailableCard.title == "FileID's helper couldn't start")
         let missing = EngineUnavailableCard.reinstallHint(for: EngineStartFailure(.missing))
         let stops = EngineUnavailableCard.reinstallHint(for: EngineStartFailure(.exitsAtStart))
         #expect(missing.contains("Reinstall FileID"))

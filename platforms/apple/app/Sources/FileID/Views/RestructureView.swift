@@ -382,7 +382,6 @@ struct RestructureView: View {
                 loading = false
                 status = "FileID couldn't work out a plan. Try again."
                 statusIsError = true
-            // The shared engine (engine.backend rust) names its plan failures.
             case "plan_restructure_root":
                 loading = false
                 status = "This folder isn't available. Reconnect it, then try again."
