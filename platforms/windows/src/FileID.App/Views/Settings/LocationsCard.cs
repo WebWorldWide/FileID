@@ -9,9 +9,7 @@ using Windows.UI;
 
 namespace FileID.Views.Settings;
 
-/// <summary>Settings ▸ Locations (macOS LocationsCard): every folder or drive the catalog has
-/// scanned, read with the engine's read-only listRoots. An unplugged drive reads OFFLINE and
-/// keeps its catalog rows.</summary>
+/// <summary>Settings ▸ Locations (macOS LocationsCard): every folder or drive the catalog has scanned, read with the engine's read-only listRoots.</summary>
 public sealed class LocationsCard : UserControl
 {
     private readonly EngineClient _engine = EngineClient.Instance;
