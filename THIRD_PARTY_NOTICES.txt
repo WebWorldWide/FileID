@@ -107,7 +107,7 @@ onnxruntime-swift-package-manager 1.24.2
   macOS Swift package; licence: MIT
   Copyright (c) Microsoft Corporation
   https://github.com/microsoft/onnxruntime-swift-package-manager
-  distribution: vendored at platforms/apple/vendor/onnxruntime-swift-package-manager (LICENSE kept); links the ONNX Runtime 1.24.2 pod archive statically
+  distribution: vendored at platforms/apple/vendor/onnxruntime-swift-package-manager (LICENSE kept); linked only by the retired Swift engine (conformance test peer, built in CI and never shipped); the Mac app and the shared engine do not link it
 
 ONNX Runtime 1.22.0
   Runtime / asset; licence: MIT

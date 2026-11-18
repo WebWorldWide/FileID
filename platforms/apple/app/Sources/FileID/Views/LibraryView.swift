@@ -152,7 +152,7 @@ struct LibraryView: View {
             .onChange(of: store.version) { _, v in
                 if !scanActive { frozenTileVersion = v }
             }
-            // The encoder's ORT session takes seconds to build after launch /
+            // The engine's text model takes seconds to load after launch /
             // install; without this the first search silently stays keyword-only.
             .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
                 if ready { reloadWhenShown() }
@@ -373,7 +373,7 @@ struct LibraryView: View {
     }
 
     private func refreshClipModelOnDisk() {
-        clipModelOnDisk = FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path)
+        clipModelOnDisk = FileManager.default.fileExists(atPath: CLIPEmbeddingSpace.textModelURL.path)
     }
 
     private func consumeQueryHandoff() {

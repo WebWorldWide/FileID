@@ -12,7 +12,6 @@ struct FileIDApp: App {
     @State private var toolsSession = ToolsSession()
 
     init() {
-        ORTPrivacy.disableTelemetryBeforeLoad()
         // After a forced quit AppKit can stop in window restoration and show no
         // window. The app keeps its own tab, folder and window frame.
         UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])

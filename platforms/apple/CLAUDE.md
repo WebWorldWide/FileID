@@ -1,6 +1,6 @@
 # FileID — Apple platform (macOS)
 
-macOS 15+ SwiftUI app + Swift engine that tag, dedupe, restructure, and rename local file libraries on-device (Apple Neural Engine, ONNX Runtime via the CoreML EP, and MLX VLMs). The visual + behavioral reference the Windows port mirrors.
+macOS 15+ SwiftUI app + Swift engine that tag, dedupe, restructure, and rename local file libraries on-device (Apple Neural Engine, the shared Rust engine's inference runtime, and MLX VLMs). The shipped app links no ONNX Runtime; only the retired Swift engine (conformance peer) does, through `shared/Sources/FileIDORTSupport`. The visual + behavioral reference the Windows port mirrors.
 
 Covers `platforms/apple/`. For the Windows build see `platforms/windows/CLAUDE.md`; for cross-platform contracts + principles see the root `CLAUDE.md` and `shared/`.
 
@@ -9,6 +9,7 @@ Covers `platforms/apple/`. For the Windows build see `platforms/windows/CLAUDE.m
 Two binaries, newline-delimited JSON over stdin/stdout (the engine's events arrive on its stderr):
 - `app/Sources/FileID/` — SwiftUI app. UI state in `EngineClient` (`@MainActor @Observable`); spawns the engine, auto-respawns with backoff on crash.
 - `engine/Sources/FileIDEngine/` — the Swift engine, retired from the app: built only as the conformance peer, not shipped. The shipped engine is `fileidd`, the shared Rust engine (`../windows/src/engine`, `--features apple-adapters`); it owns the DB, scan pipeline and model loading.
+- `shared/Sources/FileIDORTSupport/` — `ORTPrivacy` and `CLIPTextEncoder`, the only ONNX Runtime code outside the Swift engine; the `FileID` app and `FileIDShared` must never depend on it (`ShippedAppWithoutONNXRuntimeTests`).
 - `shared/Sources/FileIDShared/` — `IPCProtocol.swift` (`IPCCommand`/`IPCEvent`), DB row types, the AI model registry (`AIModels.swift`), mirrored against `../../shared/ipc-schema/ipc.schema.json`.
 - `shared/Sources/FileIDImaging/` — decode (ImageIO, HEIF, JPEG previews), Vision primary pass and text reads, and the MLX CLIP/RAM++ image graphs. The Swift engine and `FileIDAppleKit` both depend on it, so the two engines run the same code; declarations are `package`-visible.
 - `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`). `fileidd` is the only engine the app starts, in Developer ID and App Store (`-DFILEID_APP_STORE`, child of the sandboxed app via `FileIDEngineAppStore.entitlements`) builds alike; there is no Swift fallback, Settings engine choice or `engine.backend` switch. When `fileidd` is missing, refused by the signing check, or stops twice before `ready`, `EngineClient` sets `startFailure` and `EngineUnavailableCard` offers Show log / Try again. `scripts/assemble_app.sh` builds and bundles it. The Swift engine target stays built only as the conformance peer and is not shipped.

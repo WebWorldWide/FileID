@@ -9,6 +9,7 @@
 // zero-padded, truncated to 77 — or the text embedding lands in a different
 // space than the ViT-B/32 image embeddings and search breaks.
 import Foundation
+import FileIDShared
 import OnnxRuntimeBindings
 
 public final class CLIPTextEncoder: @unchecked Sendable {
@@ -43,18 +44,7 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     /// Model file present on disk even though the ORT session may still
     /// be compiling — lets the UI tell "install CLIP" from "wait for load".
     public var isInstalled: Bool {
-        FileManager.default.fileExists(atPath: Self.defaultModelURL.path)
-    }
-
-    /// Standard install location — beside the other AI models.
-    public static var defaultDirectory: URL {
-        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("FileID/Models/clip_text", isDirectory: true)
-    }
-
-    public static var defaultModelURL: URL {
-        defaultDirectory.appendingPathComponent("clip_text.onnx")
+        FileManager.default.fileExists(atPath: CLIPEmbeddingSpace.textModelURL.path)
     }
 
     /// Load the ViT-B/32 text ONNX + the BPE tokenizer's vocabulary. Returns
@@ -70,8 +60,8 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         lock.lock(); let nowLoaded = (session != nil); lock.unlock()
         if nowLoaded { return true }
 
-        let dir = Self.defaultDirectory
-        let modelURL = Self.defaultModelURL
+        let dir = CLIPEmbeddingSpace.textModelDirectory
+        let modelURL = CLIPEmbeddingSpace.textModelURL
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
             log("FileID CLIP text: clip_text.onnx not found at \(redactPathForLog(modelURL.path))")
             return false

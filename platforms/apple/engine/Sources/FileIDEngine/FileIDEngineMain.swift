@@ -13,6 +13,7 @@ import Foundation
 import CoreGraphics
 import Darwin
 import FileIDShared
+import FileIDORTSupport
 import FileIDImaging
 import AsyncAlgorithms
 import GRDB

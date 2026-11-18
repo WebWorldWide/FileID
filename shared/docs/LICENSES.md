@@ -59,7 +59,7 @@ which the engine-only `deny.toml` does not apply to, not a licence matter), and
 | swift-asn1, swift-crypto (incl. BoringSSL, Keccak) | 1.7.3 / 4.5.2 | Apache-2.0 (+ OpenSSL/ISC in BoringSSL) | static | LICENSE + `NOTICE` files (kept in notices) | OK |
 | yyjson | 0.12.0 | MIT | static | notice | OK |
 | swift-syntax | 603.0.2 | Apache-2.0 with Swift runtime exception | build-time macros only | none shipped | OK |
-| onnxruntime-swift-package-manager (vendored, `platforms/apple/vendor/`) + ORT 1.24.2 pod | 1.24.2 | MIT, Microsoft | vendored sources keep their MIT headers and `LICENSE`; pod binary linked statically | notice | OK (notices carry the Microsoft MIT text). ORT's own `ThirdPartyNotices.txt` is not in the bundle: OWNER item 4 |
+| onnxruntime-swift-package-manager (vendored, `platforms/apple/vendor/`) + ORT 1.24.2 pod | 1.24.2 | MIT, Microsoft | vendored sources keep their MIT headers and `LICENSE`; linked only by the retired Swift engine (conformance peer, built in CI, never shipped) | notice (kept while the package stays in `Package.resolved`) | OK; nothing from it is in the Mac bundle |
 | ONNX Runtime dylib | 1.22.0 | MIT | `Contents/Frameworks/libonnxruntime.dylib` (official archive, SHA-256 pinned) | notice; ORT ThirdPartyNotices | OK for MIT; OWNER item 4. Disappears from the Mac bundle with tract |
 | Archivo, Instrument Serif fonts | - | OFL-1.1 | bundled; OFL text next to each font in the app, website and Linux dist | keep copyright + OFL with the fonts | OK |
 | App icon, logos | - | project-owned | bundle | - | OK |
