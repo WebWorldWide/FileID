@@ -22,8 +22,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(inputs.include) }}
     runs-on: ${{ matrix.runner }}
-    # The hosted Intel Mac passes tests and clippy in ~40 min, then the LTO release builds overrun 60.
-    timeout-minutes: ${{ matrix.runner == 'macos-15-intel' && 100 || 60 }}
+    # Since the tract runtime replaced ONNX Runtime, a hosted Mac needs ~35 min for clippy and tests
+    # (~40 on Intel), then the fat-LTO release builds take over 25 more; both overran 60.
+    timeout-minutes: ${{ startsWith(matrix.runner, 'macos-') && 100 || 60 }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
