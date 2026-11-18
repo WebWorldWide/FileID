@@ -1022,8 +1022,6 @@ fn a_catalog_past_the_exact_limit_still_answers_with_keyword_rows_while_the_grap
     index.shutdown();
 }
 
-/// Index build and exact-scan times on a generated catalog:
-/// `cargo test --release exact_scan_and_build_times -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing run on generated vectors"]
 fn exact_scan_and_build_times() {

@@ -6,14 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How `reserve_internal` treats a request it can't admit right now.
 #[derive(Clone, Copy)]
 enum Wait {
-    /// Fail at once while an interactive lease is active or memory is tight.
     Immediate,
-    /// Wait behind interactive leases; still fail when nothing can release.
     Queued,
-    /// Wait through every transient condition until the deadline.
     Until(Instant),
 }
 
@@ -91,9 +87,8 @@ impl ResourceScheduler {
         static SHARED: OnceLock<Arc<ResourceScheduler>> = OnceLock::new();
         SHARED
             .get_or_init(|| {
-                // Installed memory never changes and free memory is probed at most
-                // every 100 ms: a scan asks twice per file, and each probe is a
-                // system call (or two) that would otherwise run for every ask.
+                // Installed memory never changes and free memory is probed at most every 100 ms: a scan asks twice per
+                // file and each probe is a system call.
                 static TOTAL_MB: OnceLock<u64> = OnceLock::new();
                 static AVAILABLE_MB: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
                 Self::new(
@@ -176,10 +171,9 @@ impl ResourceScheduler {
     ) -> Result<Lease> {
         self.reserve_internal(demand, accelerators, priority, cancelled, Wait::Immediate)
     }
-    /// Admission for work that must not fail just because the machine is busy
-    /// (a scan file): waits, cancellably and for at most `patience`, for
-    /// interactive leases, residents and low free memory to clear. Fails at
-    /// once only when the demand could never fit on this machine.
+    /// For work that must not fail just because the machine is busy (a scan file): waits cancellably, up to `patience`,
+    /// for interactive leases, residents and low free memory to clear; fails at once only when the demand could never
+    /// fit.
     pub fn reserve_patient(
         self: &Arc<Self>, demand: Demand, priority: Priority,
         cancelled: impl Fn() -> bool, patience: Duration,
@@ -213,8 +207,7 @@ impl ResourceScheduler {
             && let Some(reason) =
                 crate::util::model_memory::rejection(total, available, demand.memory_mb)
             {
-                // Free memory comes and goes; only a demand larger than the
-                // whole budget is permanent for a patient caller.
+                // Only a demand larger than the whole budget is permanent for a patient caller.
                 let reserve = (total / 4).clamp(2048, 8192);
                 let never_fits = total == 0 || total <= reserve || demand.memory_mb > total - reserve;
                 if !matches!(wait, Wait::Until(_)) || never_fits {
@@ -286,8 +279,8 @@ impl ResourceScheduler {
                         .values()
                         .any(|(_, p)| *p == Priority::Interactive));
             if stuck_on_residents || busy {
-                // Residents retire when idle and free memory recovers, so a
-                // patient caller keeps polling until its deadline.
+                // Residents retire when idle and free memory recovers, so a patient caller keeps polling until its
+                // deadline.
                 let reason = match wait {
                     Wait::Until(deadline) if Instant::now() < deadline => None,
                     Wait::Until(_) => Some("Resource admission timed out: the machine stayed too busy or low on memory"),
