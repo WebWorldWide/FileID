@@ -21,22 +21,17 @@ internal static class SafeOpen
     // .vbs / .msi / .scr / .com / .pif / .reg / .url / .website / .hta.
     private static readonly HashSet<string> AllowedExts = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Images
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
         ".heic", ".heif", ".raw", ".cr2", ".nef", ".arw", ".dng", ".orf",
         ".rw2", ".pef", ".srw", ".raf", ".x3f",
-        // Video
         ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".wmv", ".flv", ".webm",
         ".mpg", ".mpeg", ".3gp", ".3g2", ".mts", ".m2ts",
-        // Audio
         ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".wma",
         ".aiff", ".aif",
-        // Documents
         ".pdf", ".txt", ".md", ".rtf", ".doc", ".docx", ".odt",
         ".xls", ".xlsx", ".ods", ".csv", ".tsv",
         ".ppt", ".pptx", ".odp", ".key",
         ".epub", ".mobi", ".azw", ".azw3",
-        // Web / data (read-only viewers)
         ".html", ".htm", ".xml", ".json", ".yaml", ".yml",
     };
 
