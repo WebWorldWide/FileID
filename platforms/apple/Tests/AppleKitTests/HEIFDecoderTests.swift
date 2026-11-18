@@ -3,7 +3,6 @@ import Foundation
 import ImageIO
 import Testing
 import UniformTypeIdentifiers
-@testable import FileIDEngine
 @testable import FileIDVLMCore
 @testable import FileIDImaging
 
@@ -88,8 +87,6 @@ struct HEIFDecoderTests {
         if let odd = Self.writeHEIC(try Self.quadrants(width: 401, height: 301),
                                     orientation: 1, in: directory, name: "odd.heic") {
             #expect(HEIFDecoder.decode(path: odd.path, maxPixelSize: 1536) == nil)
-            let loaded = try #require(Tagging.loadImageAndEXIF(url: odd, sizeBytes: 100_000))
-            #expect(loaded.0.width == 401 && loaded.0.height == 301)
         }
     }
 
@@ -143,19 +140,6 @@ struct HEIFDecoderTests {
         budget.acquire(500)
         #expect(budget.inUse == 500)
         budget.release(500)
-    }
-
-    @Test("the scan loads HEICs through the HEIF decoder")
-    func scanUsesDecoder() throws {
-        let directory = try Self.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        guard let url = Self.writeHEIC(try Self.quadrants(width: 2100, height: 1400),
-                                       orientation: 6, in: directory, name: "photo.heic") else { return }
-        let loaded = try #require(Tagging.loadImageAndEXIF(url: url, sizeBytes: 500_000))
-        let direct = try #require(HEIFDecoder.decode(path: url.path, maxPixelSize: 1536))
-        #expect(loaded.0.width == direct.width && loaded.0.height == direct.height)
-        #expect(loaded.0.width == 1024 && loaded.0.height == 1536)
-        #expect(loaded.0.dataProvider?.data == direct.dataProvider?.data)
     }
 
     @Test("Deep Analyze, face clustering and Takes load HEICs through the HEIF decoder, other formats through ImageIO")

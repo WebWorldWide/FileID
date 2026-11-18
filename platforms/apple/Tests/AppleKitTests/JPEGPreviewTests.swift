@@ -3,7 +3,6 @@ import Foundation
 import ImageIO
 import Testing
 import UniformTypeIdentifiers
-@testable import FileIDEngine
 @testable import FileIDImaging
 
 @Suite("JPEG MPF preview")

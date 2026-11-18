@@ -3,7 +3,6 @@
 // hardware.
 import Testing
 import Foundation
-@testable import FileIDEngine
 @testable import FileIDImaging
 
 @Suite("Hardware — worker cap")

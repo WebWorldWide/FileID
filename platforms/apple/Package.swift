@@ -195,7 +195,11 @@ let package = Package(
 
         .testTarget(
             name: "AppleKitTests",
-            dependencies: ["FileIDAppleKit", "FileIDAppleVLM", "FileIDVLMCore", "FileIDModelInfo"],
+            dependencies: [
+                "FileIDAppleKit", "FileIDAppleVLM", "FileIDVLMCore", "FileIDImaging", "FileIDModelInfo", "FileIDShared",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "MLXVLM", package: "mlx-swift-lm")
+            ],
             path: "Tests/AppleKitTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
