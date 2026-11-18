@@ -1,5 +1,3 @@
-//! `fileid info <path-or-id>` — show a file's metadata, tags, people, and a
-//! text snippet. Read-only.
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};

@@ -1,19 +1,4 @@
-//! `fileid dedupe [--exact|--similar]` — list duplicate / near-duplicate
-//! groups. The default listing (and any `--dry-run`) is read-only; `--apply`
-//! removes the redundant copies — trashing via `shell::trash` (or unlinking
-//! with `--delete`) — behind a confirmation that requires `--yes` on a
-//! non-interactive stdin.
-//!
-//! - `--exact`   fully SHA-256 re-hashes same-size candidates (byte-identical files),
-//!   so it works on any indexed library and stored hash recipes never matter.
-//! - `--similar` groups by perceptual-hash Hamming distance (default ≤ 8,
-//!   mirroring the engine's near-dup threshold). `--threshold` overrides it.
-//!   Similar groups are transitively chained, so `--similar --apply` can
-//!   over-delete; it is gated behind an explicit `--yes` (see `apply_run`).
-//!
-//! Perceptual hashes are written by the full engine scan pipeline; the CLI's
-//! model-free `scan` does not compute them, so on a CLI-only-indexed library
-//! `--similar` reports "no … in DB" until a full engine scan has run.
+//! Perceptual hashes come only from the engine's full scan; the model-free CLI `scan` does not compute them, so `--similar` reports nothing until an engine scan has run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +27,6 @@ pub fn run(
 ) -> Result<()> {
     ctx.require_db_exists()?;
 
-    // Default to exact when neither flag is given.
     let (do_exact, do_similar) = if !exact && !similar {
         (true, false)
     } else {
@@ -54,7 +38,6 @@ pub fn run(
         );
     }
 
-    // `--apply` (and a bare `--dry-run` preview) take the destructive path.
     if apply || dry_run {
         return apply_run(ctx, do_exact, do_similar, threshold, dry_run, delete, yes);
     }
@@ -88,8 +71,6 @@ pub fn run(
     Ok(())
 }
 
-// ---- exact (content_hash) ----------------------------------------------------
-
 /// Files and bytes one pass may re-hash: the listing reports anything beyond as
 /// partial; `--apply` refuses to act on a partial set.
 const EXACT_CAPS: ExactCaps = ExactCaps {
@@ -99,7 +80,7 @@ const EXACT_CAPS: ExactCaps = ExactCaps {
 
 struct ExactGroup {
     hash: String,
-    files: Vec<(String, i64)>, // (path, size)
+    files: Vec<(String, i64)>,
 }
 
 /// How much of the candidate set a bounded listing pass left unverified.
@@ -217,10 +198,8 @@ fn exact_json(groups: &[ExactGroup], skipped: usize, partial: ListingPartial) ->
     })
 }
 
-// ---- near-duplicate (phash Hamming) -----------------------------------------
-
 struct SimilarGroup {
-    files: Vec<(i64, String, i64)>, // (id, path, size)
+    files: Vec<(i64, String, i64)>,
 }
 
 fn similar_groups(
@@ -319,8 +298,6 @@ fn similar_json(groups: &Option<Vec<SimilarGroup>>, threshold: u32) -> serde_jso
     }
 }
 
-// ---- apply (remove duplicates) ----------------------------------------------
-
 /// One file slated for removal (the non-kept members of a duplicate group).
 struct Victim {
     id: i64,
@@ -364,10 +341,7 @@ fn apply_run(
 ) -> Result<()> {
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
-    // Destructive apply acts on exactly one signal. Default exact (byte-
-    // identical) — the safest; `--similar` opts into perceptual near-dups.
-    // Reject an explicit both-flags apply rather than silently dropping
-    // --similar — they select different victim sets.
+    // Apply acts on one signal (exact by default); both flags are rejected because they select different victim sets.
     if do_exact && do_similar {
         anyhow::bail!(
             "dedupe --apply: choose one of --exact or --similar (they select different victim sets)"
@@ -438,14 +412,9 @@ fn apply_run(
         return Ok(());
     }
 
-    // Human preview only. In `--json` mode stdout must stay a single JSON value
-    // (the apply result is emitted below); the `--json` dry-run already returned
-    // its payload above, so reaching here under `--json` means a real apply —
-    // suppress the preview lines that would otherwise corrupt the JSON output.
+    // Human preview only: under `--json` stdout must stay one JSON value.
     if !ctx.json {
         println!(
-            // The template already carries the verb, so the old "Will" prefix
-            // produced "Will N file(s) would move to Trash".
             "{}{} file(s) {} {} ({} reclaimable):",
             if dry_run {
                 format!("{} ", ctx.bold("DRY RUN —"))
@@ -471,12 +440,7 @@ fn apply_run(
         return Ok(());
     }
 
-    // `--similar` groups are built by TRANSITIVE chaining of perceptual-hash
-    // neighbors: A~B and B~C put {A, B, C} in one group even when A and C are
-    // not alike, so a single component can grow large and `--apply` would mark
-    // all-but-one of it for removal — an over-delete hazard the byte-identical
-    // `--exact` path does not have. Require an explicit `--yes` here (never an
-    // interactive guess, never a non-TTY auto-proceed), after a loud warning.
+    // `--similar` groups chain transitively (A~B and B~C put A and C together), so apply can over-delete: require an explicit `--yes`, never a non-TTY auto-proceed.
     if use_similar {
         if !ctx.json {
             println!();
