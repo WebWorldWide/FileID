@@ -1368,8 +1368,10 @@ pub struct EngineError {
     /// `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't
     /// recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was
     /// renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial)
-    /// are emitted by the Windows engine; the macOS engine surfaces those conditions through its
-    /// scan-completion flow rather than as distinct error kinds.
+    /// are emitted by the Windows engine; the macOS engine emits rescan_no_changes too and surfaces
+    /// the other conditions through its scan-completion flow rather than as distinct error kinds.
+    /// `ocr_accurate_disabled` (Swift engine, macOS only) reports that accurate text recognition
+    /// failed repeatedly and the engine fell back to fast recognition.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

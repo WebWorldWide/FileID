@@ -160,7 +160,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/bulk.rs": "6277cb3af0309ef26da44df85dc7a43be5d43a93a91b09ed37e2d3968384f9b8",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "be8230cc2d031f4cafe5fedb5f9ef54a82a44559500d5d5ade58a86500608bb6",
   "platforms/windows/src/engine/src/commands/restructure.rs": "04a4cb4553be1b8216cefb0d031fbd7cbb0cac1c5a7c5986b66519cb3e45c523",
-  "platforms/windows/src/engine/src/commands/trash.rs": "7bcfc8022052ab80912ecfa6fd0f5f5b079129a8f130dac3f4e926c4ade9c0d9",
+  "platforms/windows/src/engine/src/commands/trash.rs": "f0abd39e72da9da6e80b3388c924b17d50fc0fd032cc48b67a99982b03f918b5",
   "platforms/windows/src/engine/src/downloader.rs": "9d8dbe7ec8abacc2679afcb5c255cfc2fdf65411827699d8681ffd05cf11da84",
   "platforms/windows/src/engine/src/server.rs": "bf59f25a52f43c902104468f1a858acad4e3a54c62fc5b512d541b3723e4ac06",
   "platforms/windows/src/engine/src/models/runtime.rs": "43727589ba0752588d3532adf357f64c5814597ee2f3bfb754a03f3fa3ab5306",
