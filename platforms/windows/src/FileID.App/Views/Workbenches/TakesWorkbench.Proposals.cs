@@ -13,9 +13,7 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Library-wide related tries (macOS RelatedTriesSection): Find related tries queues the
-/// takeGrouping job, its row shows progress with pause/resume/cancel, and the stored proposals open in
-/// the same review page as possible groups, with a relation chip, the evidence and Save as group.</summary>
+/// <summary>Library-wide related tries (macOS RelatedTriesSection): Find related tries queues the takeGrouping job, its row shows progress with pause/resume/cancel, and the stored proposals open in the same review page as possible groups, with a relation chip, the evidence and Save as group.</summary>
 internal sealed partial class TakesWorkbench
 {
     private const double ProposalResponse = 0.4;
@@ -154,8 +152,6 @@ internal sealed partial class TakesWorkbench
         }, ct);
     }
 
-    /// <summary>Reads the stored proposals. After <paramref name="resolved"/> is handled, opens the
-    /// proposal that followed it so review flows on.</summary>
     private async Task LoadProposalsAsync(string? resolved, CancellationToken ct)
     {
         var response = await Engine.CatalogAsync(TakeProposalPolicy.ProposalsRequest(Guid.NewGuid().ToString()), ct);
@@ -344,7 +340,6 @@ internal sealed partial class TakesWorkbench
         ShowToast("Name the group and describe the outcome, then save", null, PlainToastWindow);
     }
 
-    /// <summary>Header pieces that differ for a proposal: the relation chip, the evidence intro and Save as group.</summary>
     private void RenderProposalHeader(CatalogTakeAutoGroup group)
     {
         StyleRelation(_relationPill, _relationText, group.Relation);
@@ -353,8 +348,6 @@ internal sealed partial class TakesWorkbench
         AutomationProperties.SetName(_saveAsGroup, $"Save these {TakeReviewPolicy.Noun(group, 2)} as a group");
     }
 
-    /// <summary>After a group is kept, skipped, trashed or put back, reads both lists again; a resolved
-    /// proposal hands review on to the next proposal.</summary>
     private async Task AfterResolveAsync(string? key, CancellationToken ct)
     {
         if (_proposalKey is not null)

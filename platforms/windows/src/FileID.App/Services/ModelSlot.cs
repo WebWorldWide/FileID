@@ -1,8 +1,4 @@
 ﻿// ModelSlot — per-model install state row used by ModelInstallerService.
-// One of these for CLIP / ArcFace / VLM, observed by the Welcome sheet via
-// x:Bind. Split from ModelInstallerService.cs so the orchestrator file
-// focuses on cross-slot logic.
-//
 // PRIVACY: never makes a network call.
 
 using System.ComponentModel;
@@ -20,10 +16,6 @@ internal enum ModelInstallStatus
     Failed,
 }
 
-/// <summary>
-/// Per-model state. One of these for CLIP / ArcFace / VLM, observed by
-/// the Welcome sheet via x:Bind.
-/// </summary>
 internal sealed class ModelSlot : INotifyPropertyChanged
 {
     private string _displayLabel;
@@ -42,17 +34,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
 
     private readonly Func<Task> _installAction;
 
-    /// <summary> UI dispatcher captured at construction time on
-    /// the UI thread so PropertyChanged notifications can be safely
-    /// marshalled even when Apply/Fail/ResetForRetry run on a worker
-    /// thread (TryInstallAsync's continuations resume off the UI
-    /// SynchronizationContext after Task.WhenAll). Without this, a
-    /// failure path that wrote to LastError fired PropertyChanged from
-    /// a worker thread, the welcome sheet's x:Bind propagated it to
-    /// ErrorLabel.Text, and the TextBlock setter threw
-    /// RPC_E_WRONG_THREAD (COMException 0x8001010E). The instance is
-    /// constructed on the UI thread by ModelInstallerService.Instance's
-    /// static initializer (touched first from App.OnLaunched).</summary>
+    /// <summary>Without this, a failure path that wrote to LastError fired PropertyChanged from a worker thread, the welcome sheet's x:Bind propagated it to ErrorLabel.Text, and the TextBlock setter threw RPC_E_WRONG_THREAD (COMException 0x8001010E).</summary>
     private readonly DispatcherQueue? _ui;
 
     public ModelSlot(
@@ -82,16 +64,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     }
 
     private bool _hasStarted;
-    /// <summary>True once real progress (Fraction &gt; 0) has been observed
-    /// within the current Downloading session. Sticky for the life of one
-    /// install session; reset only when a fresh install begins
-    /// (<see cref="ResetForRetry"/>). The Welcome/Settings ProgressBar binds
-    /// IsIndeterminate to NOT-yet-started rather than to an instantaneous
-    /// Fraction&lt;=0 so a cross-pack fraction rewind (the GPU pack installs
-    /// two sub-packs into one slot, so Fraction drops 1.0→~0 between them)
-    /// can't re-flap the bar marquee↔fill. Likewise the rate/ETA row stays
-    /// visible once started, instead of collapsing on a single transient
-    /// sub-100 B/s stall sample.</summary>
     public bool HasStarted
     {
         get => _hasStarted;
@@ -116,55 +88,29 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     private string? _lastError;
     public string? LastError { get => _lastError; set => Set(ref _lastError, value); }
 
-    /// <summary>Model kind for this slot's current download or last failure.
-    /// Retain it on failure so per-model cards can show which install failed;
-    /// clear it after success or when retrying. Downloading rows also use it
-    /// to target cancellation.</summary>
+    /// <summary>Downloading rows also use it to target cancellation.</summary>
     public string? CurrentModelKind { get; set; }
 
-    /// <summary>Wall-clock UTC of the most recent progress event for this
-    /// slot. Used by the no-progress watchdog to fail slots that go
-    /// silent for 30+ s mid-download.</summary>
     public DateTime LastProgressAt { get; set; } = DateTime.MinValue;
 
-    // EMA bandwidth tracking — mirrors macOS's `updateVLMRate` in
-    // WelcomeSheet.swift. Sample every 500 ms; smooth with α=0.3.
     private DateTime _rateSampleAt;
     private double _rateSampleFrac;
     private double _lastFraction;
 
     public Task InstallAsync() => _installAction();
 
-    /// <summary>
-    /// Apply a fresh ModelDownloadProgress event. Status flips Downloading
-    /// (or Installed if fraction ≥ 1.0 AND a sentinel file exists on
-    /// disk). Updates EMA bandwidth.
-    /// </summary>
+    /// <summary>Status flips Downloading (or Installed if fraction ≥ 1.0 AND a sentinel file exists on disk).</summary>
     public void Apply(ModelDownloadProgress p, Func<bool> sentinelExists)
     {
-        // Clamp the displayed Fraction non-decreasing while Downloading. The
-        // GPU (multi-pack) bundle runs as TWO sequential installs into ONE
-        // slot (cuDNN pack, then the ORT-CUDA provider); the engine emits a
-        // monotonic aggregate fraction WITHIN one prewarm, so Fraction
-        // rewinds 1.0→~0 at the pack boundary. A bound ProgressBar.Value
-        // jumping backward reads as a glitch — keep it monotonic for the life
-        // of the session. ResetForRetry (fresh user-initiated start) is the
-        // only place Fraction is allowed back to 0.
+        // ResetForRetry (fresh user-initiated start) is the only place Fraction is allowed back to 0.
         Fraction = Status == ModelInstallStatus.Downloading
             ? Math.Max(Fraction, p.Fraction)
             : p.Fraction;
         if (Fraction > 0) HasStarted = true;
         BytesDone = p.BytesDone;
-        // don't let a per-file `total_bytes` from the engine
-        // downgrade the slot's bundle-cumulative total. MobileCLIP-S2
-        // ships 4 files; engine emits per-file `total_bytes` while the
-        // app's `BytesDone` is the bundle-cumulative byte count. Without
-        // this guard the Welcome row would render "578 MB of 201 MB"
-        // mid-bundle (the user's reported regression).
         var newTotal = p.TotalBytes ?? (ApproxBytes > 0 ? ApproxBytes : null);
         if (newTotal is { } nt && TotalBytes is { } existing && nt < existing && nt < (BytesDone ?? 0))
         {
-            // Per-file total < bundle progress → keep the existing total.
         }
         else
         {
@@ -183,20 +129,13 @@ internal sealed class ModelSlot : INotifyPropertyChanged
                 CurrentModelKind = null;
                 return;
             }
-            // 100 % event arrived but sentinel missing — engine wrote
-            // the sentinel before emitting this event in the happy path,
-            // so missing sentinel here means a write failure or a race.
-            // Stay Downloading; a follow-up sentinel check will resolve.
+            // 100 % event arrived but sentinel missing — engine wrote the sentinel before emitting this event in the happy path, so missing sentinel here means a write failure or a race.
             DebugLog.Warn($"[INSTALL] {DisplayLabel} reported 100% but sentinel not present yet — staying Downloading");
         }
         Status = ModelInstallStatus.Downloading;
         UpdateRate(p);
     }
 
-    /// <summary>
-    /// Mark this slot's install as failed. Surface the message so the row
-    /// can render "Failed: …" + show a Retry button.
-    /// </summary>
     public void Fail(string message)
     {
         Status = ModelInstallStatus.Failed;
@@ -205,7 +144,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         EtaSeconds = 0;
     }
 
-    /// <summary>Reset state (e.g. user clicked Retry).</summary>
     public void ResetForRetry()
     {
         Status = ModelInstallStatus.NotInstalled;
@@ -222,10 +160,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         _lastFraction = 0;
     }
 
-    /// <summary>number of consecutive stalled (sub-100 B/s) samples
-    /// observed. After 5 in a row (≈2.5 s of stall) the Message field flips
-    /// to "Stalled — check connection" so the user sees feedback well before
-    /// the 30 s no-progress watchdog declares failure.</summary>
+    /// <summary>After 5 in a row (≈2.5 s of stall) the Message field flips to "Stalled — check connection" so the user sees feedback well before the 30 s no-progress watchdog declares failure.</summary>
     private int _stallSampleCount;
     private const double StallThresholdBytesPerSecond = 100.0;
     private const double MaxEtaSeconds = 99.0 * 3600.0;
@@ -239,11 +174,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         var bytesNow = total * p.Fraction;
         if (_rateSampleAt == default || p.Fraction < _lastFraction)
         {
-            // First sample, or a multi-file-bundle fraction reset (file 2 starts
-            // at fraction ~0). Re-baseline the EMA window but CARRY the prior
-            // rate/ETA — zeroing them here made the rate blink to 0 / "Stalled"
-            // at every file boundary (the "freaking out at first" jitter). On the
-            // genuine first sample BytesPerSecond is already 0 from init.
             _rateSampleAt = now;
             _rateSampleFrac = p.Fraction;
             _stallSampleCount = 0;
@@ -259,14 +189,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         var bytesPrev = total * _rateSampleFrac;
         var instant = (bytesNow - bytesPrev) / dt;
 
-        // clean stall detection. The previous EMA decayed
-        // asymptotically toward zero when `instant == 0` (BytesPerSecond
-        // *= 0.7 each sample) but never actually hit zero. After enough
-        // stall samples BytesPerSecond became a tiny positive ε; the
-        // bytesLeft/ε ETA exploded into values like 7e18 hours.
-        // Treat any sub-100 B/s sample as "stalled": zero the rate +
-        // ETA cleanly, and after 5 consecutive stall samples surface a
-        // user-readable Message.
+        // The previous EMA decayed asymptotically toward zero when `instant == 0` (BytesPerSecond *= 0.7 each sample) but never actually hit zero.
         if (instant < StallThresholdBytesPerSecond)
         {
             BytesPerSecond = 0;
@@ -307,12 +230,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        // marshal PropertyChanged to UI thread. x:Bind forwards
-        // property writes into XAML DispatcherObjects (TextBlock.Text,
-        // VisibilityProperty, etc), which throw RPC_E_WRONG_THREAD if
-        // invoked from a worker thread. Without this guard,
-        // ModelSlot.Fail() called from a TryInstallAsync continuation
-        // crashed the welcome sheet with COMException 0x8001010E.
+        // marshal PropertyChanged to UI thread. x:Bind forwards property writes into XAML DispatcherObjects (TextBlock.Text, VisibilityProperty, etc), which throw RPC_E_WRONG_THREAD if invoked from a worker thread.
         var handler = PropertyChanged;
         if (handler is null) return;
         var args = new PropertyChangedEventArgs(propertyName);

@@ -1,6 +1,4 @@
 ﻿// SidebarTab -- the pages the shell exposes, grouped into the Prototype v3
-// areas (Browse / Analyze / Act) plus Settings. Each carries an id (persisted
-// in app-settings.json), a label (displayed), and a Segoe Fluent glyph.
 
 namespace FileID.ViewModels;
 
@@ -25,7 +23,6 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
         Library, People, Moments, DeepAnalyze, Chat, Takes, Cleanup, Restructure, Tools,
     };
 
-    /// <summary>The pages Ctrl+1..9 reach, numbered like macOS Cmd+1..9.</summary>
     public static IReadOnlyList<SidebarTab> ShortcutOrder { get; } = new[]
     {
         Library, People, Moments, DeepAnalyze, Chat, Takes, Cleanup, Restructure, Tools,

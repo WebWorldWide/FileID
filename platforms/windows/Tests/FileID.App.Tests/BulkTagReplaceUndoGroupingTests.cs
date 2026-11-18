@@ -1,10 +1,5 @@
 ﻿#pragma warning disable CA1861 // Fresh fixture arrays keep each test isolated.
-// Tests for the bulk-tag "Replace existing" undo grouping. A replace
-// wipes user tags, so BulkTagSheet snapshots each file's prior user tags and
-// journals an undo that restores them via one applyTags(replace) per distinct
-// tag-set. GroupByTagSet is the pure batching behind that undo — exercised here
-// headlessly (a static method on a XAML control type, same shape as the
-// TagChip.FormatTag tests; the rest of the flow is UI-runtime / CI-build only).
+// GroupByTagSet is the pure batching behind that undo — exercised here headlessly (a static method on a XAML control type, same shape as the TagChip.FormatTag tests; the rest of the flow is UI-runtime / CI-build only).
 
 using System.Collections.Generic;
 using System.Linq;
@@ -45,8 +40,6 @@ public class BulkTagReplaceUndoGroupingTests
     [Fact]
     public void GroupByTagSet_MissingFile_RestoresToEmptySet()
     {
-        // A file with no prior user tags is absent from the snapshot; its undo
-        // must replace-with-empty (clearing the tags the apply just added).
         var ids = new long[] { 1, 2 };
         var prior = Prior((1, new[] { "a" })); // id 2 has no prior user tags
         var groups = BulkTagSheet.GroupByTagSet(ids, prior);

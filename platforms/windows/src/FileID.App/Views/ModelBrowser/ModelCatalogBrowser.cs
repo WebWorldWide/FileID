@@ -9,9 +9,6 @@ using Microsoft.UI.Xaml.Media;
 
 namespace FileID.Views.ModelBrowser;
 
-/// <summary>Find a local model (macOS ModelCatalogBrowser): the curated defaults and the pinned
-/// catalog from listModels, filtered by what fits this PC's memory and graphics memory, with
-/// download (terms first where required), on-device benchmark and, for Describe Files, Use.</summary>
 internal sealed class ModelCatalogBrowser : UserControl
 {
     private readonly EngineClient _engine = EngineClient.Instance;

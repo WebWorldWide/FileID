@@ -42,8 +42,6 @@ internal abstract class WorkbenchPanel : UserControl
         };
     }
 
-    /// <summary>Prototype v3 split: a fixed-width pane (pane fill) beside the
-    /// scrolling page body, separated by a hairline (DESIGN_V3_PORT).</summary>
     protected void UseSidePane(UIElement pane, double width, bool paneOnLeft)
     {
         if (Content is ScrollViewer previous) previous.Content = null;
@@ -65,9 +63,6 @@ internal abstract class WorkbenchPanel : UserControl
         Content = grid;
     }
 
-    /// <summary>v3 panel: panel fill, radius 10, strong hairline; header row
-    /// with an uppercase section label, optional trailing controls and a
-    /// bottom hairline; content padded 14 / 12.</summary>
     protected static Border V3Panel(string header, UIElement? trailing, params UIElement[] content)
     {
         var headerGrid = new Grid
@@ -145,7 +140,6 @@ internal abstract class WorkbenchPanel : UserControl
         catch (Exception) { }
     }
 
-    /// <summary>One line of text in a theme face, trimmed with an ellipsis.</summary>
     protected static TextBlock TextLine(string text, double size, Brush foreground, string font = "BodyFontFamily")
     {
         var line = new TextBlock { Text = text, FontSize = size, Foreground = foreground, TextTrimming = TextTrimming.CharacterEllipsis };
@@ -153,8 +147,6 @@ internal abstract class WorkbenchPanel : UserControl
         return line;
     }
 
-    /// <summary>v3 dashed notice: radius 10, dash 5/4, a serif 28 title over a
-    /// centred subtitle (DESIGN_V3_PORT "No selection").</summary>
     protected static Grid DashedNoticeBox(string title, string subtitle, out TextBlock titleText, out TextBlock subtitleText)
     {
         titleText = new TextBlock

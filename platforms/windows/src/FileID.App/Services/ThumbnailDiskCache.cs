@@ -1,18 +1,5 @@
 ﻿// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
-// thumbnails. Survives app restarts so a rescan of a 50K-tile library
-// doesn't re-render every thumbnail from scratch.
-//
-// Layout: %LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<key>.bin
-//   - 2-hex fanout prevents the OS dir-entry limit at 100K+ thumbnails.
-//   - SHA256(path|mtime) keying invalidates on file edit.
-//   - Stored payload is raw bytes (shell thumbnail or original file);
-//     BitmapImage decodes JPEG/PNG/BMP/GIF transparently.
-//   - 500 MB cap. Eviction is by in-memory LRU; no recurring disk walk.
-//   - Files > 500 KB skip disk; in-memory LRU still serves them.
-//
-// Concurrency: writes go temp+rename; reads are bare File.Open. The
-// in-memory index keeps (path → size, lastAccessTicks) so eviction
-// doesn't need to re-walk the directory on every cap trip.
+// Survives app restarts so a rescan of a 50K-tile library doesn't re-render every thumbnail from scratch.
 
 using System;
 using System.Collections.Concurrent;
@@ -33,9 +20,7 @@ internal static class ThumbnailDiskCache
 {
     private const int MaxBytesToCache = 500 * 1024;
     private const long CacheCapBytes = 500L * 1024 * 1024;
-    // Above this the cache is far enough over the soft cap that we sweep
-    // immediately, bypassing the 30 s time throttle — otherwise a burst of
-    // writes between sweeps could overshoot the cap by hundreds of MB.
+    // Above this the cache is far enough over the soft cap that we sweep immediately, bypassing the 30 s time throttle — otherwise a burst of writes between sweeps could overshoot the cap by hundreds of MB.
     private const long HardCeilingBytes = (long)(CacheCapBytes * 1.2);
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(30);
 
@@ -46,9 +31,6 @@ internal static class ThumbnailDiskCache
     private static long _diskWrites;
     private static long _diskSweeps;
 
-    // path → (sizeBytes, lastAccessTicks). Populated by Prime(), kept
-    // current by reads/writes. Eviction iterates this dictionary instead
-    // of re-walking the filesystem.
     private static readonly ConcurrentDictionary<string, CacheEntry> _index =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -64,20 +46,11 @@ internal static class ThumbnailDiskCache
     public static long CachedBytes => Interlocked.Read(ref _cachedBytes);
     public static int IndexedEntries => _index.Count;
 
-    /// <summary>Image thumbnails cached before sizes were display-scaled
-    /// were all asked for at this size and carry no size in their key.</summary>
     internal const int LegacyImagePixelSize = 192;
 
     private static string CacheRoot { get; } = Path.Combine(AppPaths.ThumbsDir, "v1");
 
-    /// <summary>SHA256(path|mtime), truncated to 40 hex chars for a
-    /// compact filename. mtime null → key is just path (so files without
-    /// an mtime get a stable key, but won't naturally invalidate on edit
-    /// — these are the discovered-during-scan transient case). SHA256 over
-    /// SHA1 because the CA5350 analyzer flags SHA1; not a security
-    /// concern here (path keying, no secrets), but consistency wins.
-    /// A video keyframe also keys on the long side it was asked for, so a
-    /// restart (or a different display scale) never reuses a smaller one.</summary>
+    /// <summary>SHA256 over SHA1 because the CA5350 analyzer flags SHA1; not a security concern here (path keying, no secrets), but consistency wins.</summary>
     internal static string Key(string path, double? modifiedAt, int? videoPixelSize = null, int imagePixelSize = LegacyImagePixelSize)
     {
         var s = modifiedAt.HasValue
@@ -87,8 +60,6 @@ internal static class ThumbnailDiskCache
         else if (imagePixelSize != LegacyImagePixelSize) s += $"|image@{imagePixelSize}";
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(s), hash);
-        // Hex-encode first 20 bytes (40 hex chars) — plenty of distinct
-        // keys for ≤100K cached thumbnails.
         var sb = new StringBuilder(40);
         for (int i = 0; i < 20; i++) { sb.Append(hash[i].ToString("x2")); }
         return sb.ToString();
@@ -100,12 +71,7 @@ internal static class ThumbnailDiskCache
         return Path.Combine(CacheRoot, bucket, key + ".bin");
     }
 
-    /// <summary>If a cached file exists for (path, mtime), decode it on
-    /// the UI dispatcher and return the BitmapImage. Bumps the file's
-    /// last-access timestamp so the LRU sweep keeps it alive. Returns
-    /// null on miss OR on any decode error (treats the cached file as
-    /// poisoned and deletes it). A video keyframe (<paramref name="videoPixelSize"/>
-    /// set) decodes at its stored size, which is the size it was asked for.</summary>
+    /// <summary>If a cached file exists for (path, mtime), decode it on the UI dispatcher and return the BitmapImage.</summary>
     public static async Task<BitmapImage?> TryReadAsync(
         string path,
         double? modifiedAt,
@@ -134,9 +100,7 @@ internal static class ThumbnailDiskCache
         var bmp = await RenderFromBytesOnDispatcherAsync(bytes, videoPixelSize is null ? imagePixelSize : null, dispatcher, ct).ConfigureAwait(false);
         if (bmp != null)
         {
-            // Only a successful decode counts as an LRU hit — a poisoned file
-            // (decode null, below) is dropped, so refreshing its timestamp first
-            // would be moot and could keep a bad file alive on a transient null.
+            // Only a successful decode counts as an LRU hit — a poisoned file (decode null, below) is dropped, so refreshing its timestamp first would be moot and could keep a bad file alive on a transient null.
             if (_index.TryGetValue(cached, out var entry))
             {
                 Interlocked.Exchange(ref entry.LastAccessTicks, DateTime.UtcNow.Ticks);
@@ -145,7 +109,6 @@ internal static class ThumbnailDiskCache
         }
         else
         {
-            // Decoded to null — treat as poisoned, drop the file + index entry.
             try { File.Delete(cached); } catch { /* swallow */ }
             ForgetIndexEntry(cached);
         }
@@ -160,8 +123,7 @@ internal static class ThumbnailDiskCache
         }
     }
 
-    /// <summary>Fire-and-forget write. Validates size + writes via temp + rename
-    /// so a torn write never appears as a cache hit.</summary>
+    /// <summary>Validates size + writes via temp + rename so a torn write never appears as a cache hit.</summary>
     public static Task TryWriteAsync(string path, double? modifiedAt, byte[] bytes, int? videoPixelSize = null, int imagePixelSize = LegacyImagePixelSize)
     {
         if (bytes.Length == 0 || bytes.Length > MaxBytesToCache)
@@ -178,8 +140,7 @@ internal static class ThumbnailDiskCache
                 Directory.CreateDirectory(dir);
                 if (File.Exists(cached) && new FileInfo(cached).Length == bytes.Length)
                 {
-                    // Identical payload already on disk — count it as a touch so
-                    // the LRU sweep doesn't treat this live entry as stale.
+                    // Identical payload already on disk — count it as a touch so the LRU sweep doesn't treat this live entry as stale.
                     if (_index.TryGetValue(cached, out var existing))
                     {
                         Interlocked.Exchange(ref existing.LastAccessTicks, DateTime.UtcNow.Ticks);
@@ -194,8 +155,6 @@ internal static class ThumbnailDiskCache
                 }
                 catch
                 {
-                    // Don't leave an orphaned half-written .tmp behind on a
-                    // failed write/move; the outer catch logs the exception.
                     try { File.Delete(tmp); } catch { /* swallow */ }
                     throw;
                 }
@@ -225,9 +184,7 @@ internal static class ThumbnailDiskCache
     {
         var cached = Interlocked.Read(ref _cachedBytes);
         if (cached <= CacheCapBytes) { return; }
-        // The 30 s throttle bounds disk churn for the common soft-headroom trim.
-        // But once the cache has blown past a hard ceiling the cap is no longer a
-        // soft target, so we sweep regardless of how recently we last swept.
+        // But once the cache has blown past a hard ceiling the cap is no longer a soft target, so we sweep regardless of how recently we last swept.
         bool overHardCeiling = cached > HardCeilingBytes;
         var now = DateTime.UtcNow;
         if (!overHardCeiling && now - _lastSweep < SweepInterval) { return; }
@@ -245,8 +202,6 @@ internal static class ThumbnailDiskCache
             long freed = 0;
             foreach (var path in evicted)
             {
-                // Best-effort race guard: a read/write between the snapshot and
-                // here may have touched this entry — don't evict a now-hot file.
                 if (_index.TryGetValue(path, out var current) &&
                     Interlocked.Read(ref current.LastAccessTicks) > sweepStartTicks)
                 {
@@ -268,7 +223,6 @@ internal static class ThumbnailDiskCache
         }
     }
 
-    // Pure eviction policy — exposed internal for unit-test coverage.
     internal static IReadOnlyList<string> SelectEvictions(
         IEnumerable<KeyValuePair<string, CacheEntry>> entries,
         long currentBytes,
@@ -287,10 +241,7 @@ internal static class ThumbnailDiskCache
         return picks;
     }
 
-    /// <summary>Decode raw bytes into a BitmapImage on the UI dispatcher.
-    /// Eager decode (SetSourceAsync from an InMemoryRandomAccessStream)
-    /// avoids the lazy-UriSource bug where ImageOpened never
-    /// fired.</summary>
+    /// <summary>Eager decode (SetSourceAsync from an InMemoryRandomAccessStream) avoids the lazy-UriSource bug where ImageOpened never fired.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,
         int? decodePixelWidth,
@@ -301,10 +252,6 @@ internal static class ThumbnailDiskCache
             TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = dispatcher.TryEnqueue(async () =>
         {
-            // Stream lifetime — see ThumbnailService.RunBytesSetSource:
-            // the `using var stream` form disposes too early under some
-            // SetSourceAsync timings. Pull out, dispose in finally AFTER
-            // the await completes.
             InMemoryRandomAccessStream? stream = null;
             try
             {
@@ -317,9 +264,6 @@ internal static class ThumbnailDiskCache
                     writer.DetachStream();
                 }
                 stream.Seek(0);
-                // Image tiles decode at the size ThumbnailService asked the
-                // shell for; video keyframes are stored at the display-scaled
-                // size they were asked for and decode as stored.
                 var bmp = decodePixelWidth is { } width ? new BitmapImage { DecodePixelWidth = width } : new BitmapImage();
                 await bmp.SetSourceAsync(stream).AsTask(ct);
                 DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
@@ -342,20 +286,14 @@ internal static class ThumbnailDiskCache
         return await tcs.Task.ConfigureAwait(false);
     }
 
-    /// <summary>One-time startup walk that seeds the in-memory LRU index
-    /// (path → size, lastAccessTicks). After Prime returns, eviction never
-    /// re-walks the directory — all subsequent reads/writes update the
-    /// index in place. Called once from app init.</summary>
+    /// <summary>After Prime returns, eviction never re-walks the directory — all subsequent reads/writes update the index in place.</summary>
     public static void Prime()
     {
         try
         {
             if (!Directory.Exists(CacheRoot)) { return; }
             var dirInfo = new DirectoryInfo(CacheRoot);
-            // Prime runs off the UI thread, so a WriteAsync can land mid-walk.
-            // TryAdd (not the indexer) yields to a concurrent write's newer entry,
-            // and we Add only the bytes WE inserted (never Exchange) so a write's
-            // own Interlocked.Add isn't clobbered — no double-count, no lost total.
+            // TryAdd (not the indexer) yields to a concurrent write's newer entry, and we Add only the bytes WE inserted (never Exchange) so a write's own Interlocked.Add isn't clobbered — no double-count, no lost total.
             long added = 0;
             foreach (var fi in dirInfo.EnumerateFiles("*.bin", SearchOption.AllDirectories))
             {

@@ -1,18 +1,5 @@
 ﻿// ThemeHelper — crash-safe resource lookups from code-behind.
-//
-// WHY: `Application.Current.Resources[key]` (the ResourceDictionary INDEXER) does
-// the full merged-dictionary + active-theme-dictionary traversal, and throws
-// KeyNotFoundException when the key is genuinely absent. From code-behind that is
-// a NATIVE FAST-FAIL waiting to happen — it killed SuggestedMergesSheet on theme
-// brushes (TextFillColor*, SubtleFill*), which are resolved per-element via
-// {ThemeResource} and are NOT reliably present in Application.Current.Resources.
-// These helpers wrap the indexer so a present resource returns UNCHANGED (full
-// traversal — no visual regression) and a genuine miss yields a fallback plus a
-// one-time warning (so a real missing CUSTOM brush still surfaces in logs instead
-// of being silently masked). Do NOT use ResourceDictionary.TryGetValue here: it
-// does not traverse merged/theme dictionaries, so it would falsely miss resolvable
-// brushes and regress their color. Call on the UI thread (the fallback constructs
-// a DispatcherObject on a genuine miss).
+// Call on the UI thread (the fallback constructs a DispatcherObject on a genuine miss).
 
 using System;
 using System.Collections.Concurrent;
@@ -26,9 +13,6 @@ public static class ThemeHelper
 {
     private static readonly ConcurrentDictionary<string, byte> _warned = new();
 
-    /// <summary>Resolve a Brush resource without ever throwing. Returns the
-    /// resolved brush when present, else <paramref name="fallback"/> (or a
-    /// transparent brush) and warns once for the key.</summary>
     public static Brush GetBrushSafe(string key, Brush? fallback = null)
     {
         try
@@ -41,7 +25,6 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // KeyNotFound / unresolvable — fall through to the fallback.
         }
         if (FindInThemeDictionaries(key) is Brush themed)
         {
@@ -51,8 +34,6 @@ public static class ThemeHelper
         return fallback ?? new SolidColorBrush(Colors.Transparent);
     }
 
-    /// <summary>Resolve a Style resource without throwing. Returns null on a
-    /// miss (assigning null to a FrameworkElement.Style clears it to default).</summary>
     public static Style? GetStyleSafe(string key)
     {
         try
@@ -65,15 +46,12 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // missing — return null (default style), no crash.
         }
         WarnOnce(key);
         return null;
     }
 
-    /// <summary>Second chance for keys that live only in a merged dictionary's
-    /// ThemeDictionaries (Theme.xaml's contrast-sensitive tokens): the active
-    /// high-contrast entry when the OS is in high contrast, else Default.</summary>
+    /// <summary>Second chance for keys that live only in a merged dictionary's ThemeDictionaries (Theme.xaml's contrast-sensitive tokens): the active high-contrast entry when the OS is in high contrast, else Default.</summary>
     private static object? FindInThemeDictionaries(string key)
     {
         try
@@ -96,7 +74,6 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // Unresolvable — caller falls back.
         }
         return null;
     }

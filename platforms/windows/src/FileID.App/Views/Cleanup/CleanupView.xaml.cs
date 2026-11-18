@@ -1,6 +1,4 @@
 ﻿// CleanupView code-behind. Trash-non-keepers walks every group, gathers
-// the file_ids for members where IsKeeper == false, confirms with the
-// user, then sends one big trashFiles IPC.
 
 using System;
 using System.Collections.Generic;
@@ -19,15 +17,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     internal CleanupViewModel ViewModel { get; }
 
     private bool _unloaded;
-    // Live duplicate-group streaming during a scan. Mirrors macOS
-    // CleanupView's .onChange(of: engine.lastBatch?.batchIndex) — refresh
-    // the group list whenever a new BatchSummary lands, throttled at 1s
-    // so a fast scan doesn't issue 30+ DB reads per second.
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
     private static readonly TimeSpan CleanupReloadThrottle = TimeSpan.FromSeconds(1);
-    // Per-tile shell thumbnails (macOS CopyTile parity) — loaded lazily via the
-    // members repeater's ElementPrepared, cancelled on recycle, like LibraryView.
+    // Per-tile shell thumbnails (macOS CopyTile parity) — loaded lazily via the members repeater's ElementPrepared, cancelled on recycle, like LibraryView.
     private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<DuplicateMember, CancellationTokenSource> _inflightThumbs = new();
 
@@ -35,11 +28,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         ViewModel = new CleanupViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         InitializeComponent();
-        // Named handlers (not inline lambdas) so OnUnloaded can detach
-        // them. Inline lambdas leak the view + VM graph every tab swap
-        // and can fire after the view is detached, touching disposed
-        // XAML — a known cause of the "click sidebar mid-scan → app crash"
-        // symptom.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Groups.CollectionChanged += OnGroupsCollectionChanged;
         ViewModels.EngineClient.Instance.PropertyChanged += OnEngineChanged;
@@ -74,21 +62,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             }
         });
 
-    // debounce refresh requests. A fast scan emits dozens of
-    // BatchSummary events per second; the time throttle above limits us
-    // to one refresh per second, but rapid Phase transitions or a tab
-    // re-enter while the throttle window is hot can still enqueue
-    // multiple RefreshAsync tasks before any of them complete. The flag
-    // ensures only one refresh is ever pending at a time.
+    // The flag ensures only one refresh is ever pending at a time.
     private int _refreshPending; // 0 = idle, 1 = refresh queued
 
     // Re-entrancy guard shared by OnTrashNonKeepersClicked + OnGroupTrashNow.
-    // Both are async void and stay re-clickable during the multi-second engine
-    // BulkActionResult wait (the confirm dialog is dismissed before that await).
-    // WaitForBulkActionResultAsync and the UndoStack "once" handlers match only
-    // on the "trashFiles" prefix with no per-command correlation, so a second
-    // confirm makes both ops resolve on the FIRST reply (wrong counts) and both
-    // push an undo entry for the first batchId (second op gets none). 0 = idle.
     private int _trashInFlight;
 
     private void RequestCleanupRefresh()
@@ -182,12 +159,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(HeaderStats));
     }
 
-    // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
-    // explicitly so a CollectionChanged.Reset — which carries neither OldItems
-    // nor NewItems — can still unsubscribe the prior handlers instead of leaking
-    // them (and double-counting in HeaderStats). The identity-stable merge
-    // (CleanupViewModel.MergeByContentHash) normally emits granular Add/Remove,
-    // but any residual Clear()/Reset path must not leave dangling subscriptions.
+    // Tracked explicitly so a CollectionChanged.Reset — which carries neither OldItems nor NewItems — can still unsubscribe the prior handlers instead of leaking them (and double-counting in HeaderStats).
     private readonly System.Collections.Generic.HashSet<DuplicateGroup> _wiredGroups = new();
 
     private void OnGroupsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -197,8 +169,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(FooterVisibility));
         OnPropertyChanged(nameof(HeaderStats));
 
-        // Reset (Clear) surfaces no Old/NewItems — unsubscribe everything we've
-        // tracked, then re-wire whatever the collection now holds.
         if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
         {
             foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups))
@@ -211,10 +181,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return;
         }
 
-        // Wire HeaderStats live updates to every keeper-radio toggle.
-        // The DataTemplate's RadioButton TwoWay-binds IsKeeper which
-        // fires DuplicateMember.PropertyChanged; we listen once per
-        // member added to keep the header counter in sync.
         if (e.NewItems != null)
         {
             foreach (var added in e.NewItems)
@@ -264,10 +230,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
-        // Detach the per-group/member handlers tracked in _wiredGroups. The
-        // identity-stable merge keeps DuplicateGroup instances alive across
-        // refreshes, so a still-subscribed group would pin this view after unload.
-        // Snapshot first — UnwireGroup mutates _wiredGroups.
+        // The identity-stable merge keeps DuplicateGroup instances alive across refreshes, so a still-subscribed group would pin this view after unload.
         try
         {
             foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups)) UnwireGroup(g);
@@ -281,16 +244,11 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
-    // ─── Lazy thumbnail loading (macOS CopyTile parity) ───────────────────
-    // Same pattern as LibraryView: load on ElementPrepared, cancel + release on
-    // ElementClearing so off-screen tiles don't pin BitmapImages.
+    // Same pattern as LibraryView: load on ElementPrepared, cancel + release on ElementClearing so off-screen tiles don't pin BitmapImages.
     private void OnMemberPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                   Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
         if (args.Element is not FrameworkElement el) return;
-        // x:Bind doesn't populate a realized element's DataContext, so resolve
-        // the member from the repeater's bound Members by index, then set
-        // DataContext so OnMemberClearing can read it.
         DuplicateMember? member =
             (sender.ItemsSource is IReadOnlyList<DuplicateMember> list
                 && args.Index >= 0 && args.Index < list.Count)
@@ -316,8 +274,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationTokenSource ownCts)
     {
-        // Capture the token before the first await: OnMemberClearing can cancel +
-        // dispose ownCts while we're suspended, after which ownCts.Token throws.
+        // Capture the token before the first await: OnMemberClearing can cancel + dispose ownCts while we're suspended, after which ownCts.Token throws.
         var ct = ownCts.Token;
         try
         {
@@ -332,10 +289,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         catch { /* best-effort thumbnail */ }
         finally
         {
-            // Remove only OUR entry (key+value): a clear+re-prepare of the same
-            // member can replace ours with a newer live CTS, and a key-only remove
-            // would drop that one — orphaning the live load (uncancellable on
-            // recycle) and leaking its CTS. Dispose only the CTS we still own.
+            // Remove only OUR entry (key+value): a clear+re-prepare of the same member can replace ours with a newer live CTS, and a key-only remove would drop that one — orphaning the live load (uncancellable on recycle) and leaking its CTS.
             if (_inflightThumbs.TryRemove(
                     new System.Collections.Generic.KeyValuePair<DuplicateMember, CancellationTokenSource>(member, ownCts)))
             {
@@ -385,13 +339,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>macOS says "No extra copies found" once a check finishes empty;
-    /// nothing while it is still looking or when the footer shows an error.</summary>
     internal static string EmptyHeadline(bool loading, bool failed)
         => loading || failed ? string.Empty : FormatHeadline(0, 0, 0);
 
-    /// <summary>macOS CleanupView headline: verified groups, decimal size
-    /// reclaimable if one copy per group is kept, and skipped groups.</summary>
     internal static string FormatHeadline(int eligibleGroups, long bytes, int skipped)
     {
         var skippedText = skipped > 0 ? $" · {skipped:N0} skipped" : string.Empty;
@@ -403,9 +353,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
         => await ViewModel.RefreshAsync(CancellationToken.None);
 
-    // Resets every group's keeper back to the first member. Useful after
-    // the user has been clicking around and wants to start over without
-    // re-scanning. Matches macOS CleanupView "Reset" affordance.
     private void OnResetKeepersClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnResetKeepersClicked), () =>
         {
@@ -478,8 +425,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return;
         }
 
-        // Register undo capture with the waiter so its lifetime follows the
-        // engine terminal or generation transition.
         Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
@@ -494,10 +439,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             },
             Services.ChangePage.Cleanup);
 
-        // Await the engine's BulkActionResult so a partial/total failure is
-        // surfaced instead of fire-and-forgetting + unconditionally refreshing
-        // (the #1 silent failure: the user thinks files were trashed when some
-        // weren't). A partial run still refreshes so moved files leave the list.
         try
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
@@ -584,10 +525,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
-        // Within a byte-identical group every member is the same size, so "keep
-        // largest" was always a no-op (kept index 0). Keep the copy in the
-        // least-nested / most-canonical location instead: fewest path
-        // separators, then shortest path, then ordinal (#19).
         static int Depth(string p)
         {
             int n = 0;
@@ -619,8 +556,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             if (grp.Members[i].IsKeeper) { currentIdx = i; break; }
         }
-        // No keeper marked (currentIdx == -1): start the cycle deterministically
-        // at index 0 instead of relying on the (-1 + 1) % count wrap coincidence.
         if (currentIdx == -1) currentIdx = grp.Members.Count - 1;
         var nextIdx = (currentIdx + 1) % grp.Members.Count;
         for (int i = 0; i < grp.Members.Count; i++)
@@ -691,8 +626,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             await ShowAlertAsync("Files changed", "Some of the chosen files changed since the scan and no longer match the copy marked KEEP. Press Check again and look over the group before trying again.");
             return;
         }
-        // Register undo capture with the waiter so its lifetime follows the
-        // engine terminal or generation transition.
         Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
@@ -704,8 +637,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             },
             Services.ChangePage.Cleanup);
 
-        // Await the engine reply: surface partial/total failure and only
-        // refresh on a clean run, so a per-group trash can't falsely look done.
+        // Await the engine reply: surface partial/total failure and only refresh on a clean run, so a per-group trash can't falsely look done.
         try
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
@@ -740,9 +672,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
-    // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync —
-    // surfaces a partial/failed bulk op so the user is never left thinking a
-    // trash succeeded when some (or all) of it didn't.
+    // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync — surfaces a partial/failed bulk op so the user is never left thinking a trash succeeded when some (or all) of it didn't.
     private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
     {
         try
@@ -780,8 +710,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>macOS Cleanup delete button: "Delete selected" when nothing is
-    /// selected, else "Delete N selected · size" (extra copies in active groups).</summary>
     public string DeleteButtonText
     {
         get

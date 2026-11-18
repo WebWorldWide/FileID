@@ -1,14 +1,5 @@
 ﻿// Cross-view selection registry.
-//
-// macOS Library selects files in LibraryView and the DeepAnalyzeView reads
-// those same selected file IDs to expose "Analyze selected". The Windows
-// app builds a fresh LibraryViewModel per tab navigation, so a static
-// global registry is the simplest equivalent — LibraryView publishes its
-// selection here whenever the user changes it; DeepAnalyzeView (and any
-// other tab) reads.
-//
-// PreviewedFileId is the corollary for "Analyze current" — set when
-// FilePreviewSheet opens, cleared when it closes.
+// The Windows app builds a fresh LibraryViewModel per tab navigation, so a static global registry is the simplest equivalent — LibraryView publishes its selection here whenever the user changes it; DeepAnalyzeView (and any other tab) reads.
 
 using System;
 using System.Collections.Generic;
@@ -26,9 +17,6 @@ internal sealed class SelectionRegistry : INotifyPropertyChanged
         get => _librarySelection;
         set
         {
-            // ReferenceEquals + Count short-circuit lets the binding stay
-            // quiet on no-op publishes (the LibraryView's PropertyChanged
-            // listener fires on every IsSelected toggle).
             if (ReferenceEquals(_librarySelection, value)) return;
             _librarySelection = value ?? Array.Empty<long>();
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LibrarySelection)));

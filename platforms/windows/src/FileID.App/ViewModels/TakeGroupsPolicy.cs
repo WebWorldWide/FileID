@@ -2,10 +2,6 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Manual Best Takes groups without any UI: the clip pool, when a group
-/// can be saved or scored, take card wording and the feedback each card button
-/// sends. Mirrors the Linux takes_groups_model.rs and the macOS TakeWorkbench /
-/// TakeCard (DESIGN_V3_PORT "Best Takes", manual groups).</summary>
 internal static class TakeGroupsPolicy
 {
     public enum Tone { Gold, Ai, Muted, Done, Danger, Warning, Text2 }
@@ -24,7 +20,6 @@ internal static class TakeGroupsPolicy
         "flv", "ogv", "mpeg", "mpg", "vob", "f4v", "asf", "divx",
     };
 
-    /// <summary>Same extension list as the shared engine's FileKind::Video.</summary>
     public static bool IsVideoPath(string path)
     {
         var name = HitPresentation.FileName(path);
@@ -32,22 +27,18 @@ internal static class TakeGroupsPolicy
         return dot >= 0 && dot < name.Length - 1 && VideoExtensions.Contains(name[(dot + 1)..]);
     }
 
-    /// <summary>Search candidates first, then clips found here, each file once.</summary>
     public static IReadOnlyList<CatalogHit> Pool(IReadOnlyList<CatalogHit> candidates, IReadOnlyList<CatalogHit> found)
     {
         var seen = new HashSet<long>();
         return candidates.Concat(found).Where(hit => seen.Add(hit.FileID)).ToArray();
     }
 
-    /// <summary>Video hits from a clip search that are not already candidates.</summary>
     public static IReadOnlyList<CatalogHit> FoundVideos(IReadOnlyList<CatalogHit> hits, IReadOnlyList<CatalogHit> candidates)
     {
         var seen = candidates.Select(hit => hit.FileID).ToHashSet();
         return hits.Where(hit => IsVideoPath(hit.Path) && seen.Add(hit.FileID)).ToArray();
     }
 
-    /// <summary>Clips of the open group that are not in the pool yet, so its
-    /// checklist lists every file the group holds.</summary>
     public static IReadOnlyList<CatalogHit> MissingTakes(IReadOnlyList<CatalogTake> takes, IReadOnlyList<CatalogHit> pool)
     {
         var seen = pool.Select(hit => hit.FileID).ToHashSet();
@@ -56,7 +47,6 @@ internal static class TakeGroupsPolicy
             .ToArray();
     }
 
-    /// <summary>The Search &amp; Moments "Best takes" button needs two different files to compare.</summary>
     public static bool CanOpenFromSearch(IEnumerable<CatalogHit> hits) => hits.Select(hit => hit.FileID).Distinct().Take(2).Count() >= 2;
 
     public static string SearchTooltip(IEnumerable<CatalogHit> hits) =>
@@ -75,7 +65,6 @@ internal static class TakeGroupsPolicy
     public static string SaveTooltip(bool canSave) =>
         canSave ? "Save (Ctrl+S)" : "Needs a name, a goal and at least two clips";
 
-    /// <summary>The event to save: the open group's id, or a new one.</summary>
     public static CatalogEvent EventToSave(CatalogEvent? existing, string newID, string title, string goal, IEnumerable<long> chosen) =>
         new(existing?.Id ?? newID, title, goal, chosen.Distinct().Order().ToArray(), false);
 
@@ -97,8 +86,7 @@ internal static class TakeGroupsPolicy
 
     public static bool JobActive(CatalogJob? job) => job?.State is "queued" or "running" or "paused";
 
-    /// <summary>Score takes runs only on a saved, unchanged group of videos
-    /// with no scoring job already going.</summary>
+    /// <summary>Score takes runs only on a saved, unchanged group of videos with no scoring job already going.</summary>
     public static bool CanScore(CatalogEvent saved, string goalText, IReadOnlySet<long> chosen, IReadOnlyList<CatalogTake> takes, bool busy, CatalogJob? job) =>
         !busy
         && goalText.Trim() == saved.Goal
@@ -107,8 +95,6 @@ internal static class TakeGroupsPolicy
         && takes.All(take => IsVideoPath(take.Path))
         && !JobActive(job);
 
-    /// <summary>The timeline job a Score takes request just started: a new
-    /// sampling job over exactly the group's files.</summary>
     public static CatalogJob? NewGoalJob(IReadOnlyList<CatalogJob> jobs, IReadOnlySet<long> requested, IReadOnlySet<string> previous) =>
         jobs.FirstOrDefault(job => job.Kind == "timelineSample" && !previous.Contains(job.Id) && job.FileIDs.ToHashSet().SetEquals(requested));
 
@@ -158,7 +144,6 @@ internal static class TakeGroupsPolicy
     private static bool IsDraft(CatalogTake take) =>
         take.ModelVersion?.StartsWith("take-outcome-sequence-v1/", StringComparison.Ordinal) == true;
 
-    /// <summary>The card's headline and its tone.</summary>
     public static (string Text, Tone Tone) Headline(CatalogTake take)
     {
         if (take.Preferred) return ("Preferred by you", Tone.Gold);
@@ -172,7 +157,6 @@ internal static class TakeGroupsPolicy
         return score >= 0.5 ? (prefix + "Goal met", Tone.Done) : (prefix + "Goal missed", Tone.Danger);
     }
 
-    /// <summary>The 7 px dot: tone, tooltip, spoken label.</summary>
     public static (Tone Tone, string Tooltip, string Spoken) ReviewDot(CatalogTake take) =>
         ReviewedByUser(take) ? (Tone.Gold, "Reviewed by you", "Reviewed by you")
         : IsDraft(take) ? (Tone.Ai, "Suggested by FileID from a few frames", "Model draft")
@@ -217,15 +201,11 @@ internal static class TakeGroupsPolicy
 
     public static int Percent(double value) => (int)Math.Round(Math.Clamp(value, 0, 1) * 100, MidpointRounding.AwayFromZero);
 
-    /// <summary>Actions whose reply carries the one open group rather than the list.</summary>
     public static bool RepliesWithOpenGroup(string action) =>
         action is "takeGroup" or "saveEvent" or "setTakeFeedback" or "undoTakeFeedback";
 
-    /// <summary>Actions after which the YOUR GROUPS list is read again.</summary>
     public static bool Relists(string action) => action is "saveEvent" or "deleteEvent" or "undoEventEdit";
 
-    /// <summary>Adaptive card grid (macOS GridItem.adaptive(260...420), gap 12):
-    /// as many columns as fit at the minimum width, each at most 420 wide.</summary>
     public static (int Columns, double Width) CardColumns(double available)
     {
         if (!double.IsFinite(available) || available <= 0) return (1, CardMaxWidth);

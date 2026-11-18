@@ -8,8 +8,6 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views.DeepAnalyze;
 
-/// <summary>Describe Files ▸ Browse all models (macOS DeepAnalyze model browser): runnable vision
-/// models from the curated set and the pinned catalog, filtered to what fits this PC.</summary>
 public sealed partial class DeepAnalyzeView
 {
     private static readonly ConcurrentDictionary<string, string> s_catalogNames = new(StringComparer.Ordinal);

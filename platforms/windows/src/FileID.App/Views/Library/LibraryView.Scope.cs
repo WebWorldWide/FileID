@@ -4,8 +4,7 @@ using FileID.ViewModels;
 
 namespace FileID.Views.Library;
 
-/// <summary>The title-bar location scope: the grid, its counts and paging list only the chosen
-/// location (macOS ReadStore scope).</summary>
+/// <summary>The title-bar location scope: the grid, its counts and paging list only the chosen location (macOS ReadStore scope).</summary>
 public sealed partial class LibraryView
 {
     private void StartScope()

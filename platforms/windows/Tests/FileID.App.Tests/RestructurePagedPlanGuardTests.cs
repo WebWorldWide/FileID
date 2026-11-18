@@ -1,8 +1,5 @@
 ﻿// F9/F12 (paged plans): the engine's plan path emits plan_restructure_failed /
-// plan_restructure_db / plan_restructure_store and returns WITHOUT a plan event,
-// so every kind must unfreeze "Computing plan..."; and a fresh plan arriving
-// while an apply is still in flight must NOT release the apply single-flight
-// guard (a second concurrent apply truncates the first run's undo journal).
+// plan_restructure_db / plan_restructure_store and returns WITHOUT a plan event, so every kind must unfreeze "Computing plan..."; and a fresh plan arriving while an apply is still in flight must NOT release the apply single-flight guard (a second concurrent apply truncates the first run's undo journal).
 
 using FileID.IpcSchema;
 using FileID.ViewModels;
@@ -60,11 +57,6 @@ public class RestructurePagedPlanGuardTests
         Assert.False(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(false, applying, applying));
         Assert.False(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(true, applying, applying));
     }
-
-    // engine-lifecycle release rule — the engine process that owned the
-    // in-flight apply died (spawn generation moved), so its result/error can
-    // never arrive and the guard must release; a live engine (generation
-    // unchanged) or a disengaged guard must not.
 
     [Fact]
     public void EngineDiedMidApply_ReleasesGuard()

@@ -20,10 +20,7 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated clips by
-/// itself and scores each try without a model. The user checks the starred best try, keeps all, skips,
-/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs; the
-/// Goal (optional) ranking panel lives in TakesWorkbench.Goal.cs.</summary>
+/// <summary>The user checks the starred best try, keeps all, skips, or moves the rest to Trash with Undo.</summary>
 internal sealed partial class TakesWorkbench : WorkbenchPanel
 {
     private static readonly TimeSpan TrashUndoWindow = TimeSpan.FromSeconds(10);
@@ -373,8 +370,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     private long? BestId => TakeReviewPolicy.Best(_qualities)?.PrimaryFileID;
 
-    // ---- Loading ------------------------------------------------------------
-
     private async Task LoadGroupsAsync(bool keepCurrent, CancellationToken ct)
     {
         await UI(() =>
@@ -552,8 +547,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }, ct);
     }
 
-    // ---- States ---------------------------------------------------------------
-
     private void ShowNotice()
     {
         _current = null;
@@ -634,8 +627,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         UpdateAll();
         ScrollToFocused();
     }
-
-    // ---- Updates --------------------------------------------------------------
 
     private void UpdateAll()
     {
@@ -802,8 +793,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         StopPlayer(_right);
         _right.Root.Visibility = Visibility.Collapsed;
     }
-
-    // ---- Compare panes ----------------------------------------------------------
 
     private ComparePane BuildPane()
     {
@@ -1205,8 +1194,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         SpringEasing.AnimateScalar(pane.Picture, "Translation.Y", (float)y, spring.Response, spring.DampingFraction);
     }
 
-    // ---- Interaction ------------------------------------------------------------
-
     private void OnStripKeyDown(object sender, KeyRoutedEventArgs e)
         => DebugLog.SafeRun("TakesWorkbench.StripKey", () =>
         {
@@ -1299,8 +1286,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }
     }
 
-    // ---- Toast ----------------------------------------------------------------
-
     private void ShowToast(string text, Func<CancellationToken, Task>? undo, TimeSpan window)
     {
         _toastTimer.Stop();
@@ -1319,8 +1304,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _toast.Visibility = Visibility.Collapsed;
         _undoAction = null;
     }
-
-    // ---- Actions --------------------------------------------------------------
 
     private async Task ConfirmTrashAsync()
     {
@@ -1441,8 +1424,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         await AfterResolveAsync(null, ct);
     }
 
-    // ---- Pieces ---------------------------------------------------------------
-
     private Grid DashedNotice(TextBlock title, TextBlock subtitle)
     {
         var outline = new Microsoft.UI.Xaml.Shapes.Rectangle
@@ -1494,7 +1475,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }
         catch (Exception)
         {
-            // Missing font resource: keep the default face.
         }
     }
 

@@ -1,13 +1,5 @@
 ﻿// DebugLog Trace-gate tests.
-//
-// The Trace level exists to move the per-tile/per-frame [THUMB] firehose off
-// the synchronous locked-file-I/O hot path that runs on the UI thread during
-// scroll. It is gated OFF by default and must skip I/O entirely when disabled.
-// Debug is gated by FILEID_DEBUG_LOG; everything at Info and above stays
-// always-on so the [APPLY:N]/[ENGINE-SUB] forensic tail (CLAUDE.md:
-// load-bearing) is never suppressed. These tests lock
-// that contract so a future refactor can't silently un-gate the firehose or,
-// worse, gate the forensics.
+// The Trace level exists to move the per-tile/per-frame [THUMB] firehose off the synchronous locked-file-I/O hot path that runs on the UI thread during scroll. Debug is gated by FILEID_DEBUG_LOG; everything at Info and above stays always-on so the [APPLY:N]/[ENGINE-SUB] forensic tail (CLAUDE.md: load-bearing) is never suppressed. These tests lock that contract so a future refactor can't silently un-gate the firehose or, worse, gate the forensics.
 
 using System;
 using System.IO;
@@ -94,8 +86,7 @@ public class DebugLogTraceGateTests
         {
             DebugLog.TraceEnabled = enabled;
             DebugLog.DebugEnabled = enabled;
-            // The forensic tail ([APPLY:N]/[ENGINE-SUB] are Info; SafeRun logs
-            // at Error) must fire irrespective of either gate.
+            // The forensic tail ([APPLY:N]/[ENGINE-SUB] are Info; SafeRun logs at Error) must fire irrespective of either gate.
             var info = $"[APPLY:0] gate-test-info-{Guid.NewGuid():N}";
             var err = $"[ENGINE-SUB] gate-test-error-{Guid.NewGuid():N}";
             DebugLog.Info(info);

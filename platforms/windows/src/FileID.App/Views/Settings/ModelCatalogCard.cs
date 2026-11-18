@@ -6,9 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views.Settings;
 
-/// <summary>Settings ▸ Model catalog: every curated and pinned catalog model for this PC
-/// (vision, text, embedding and speech), filtered by memory and graphics memory, with download
-/// and on-device benchmarks. The list loads the first time the card is opened.</summary>
 public sealed class ModelCatalogCard : UserControl
 {
     private readonly Expander _expander;

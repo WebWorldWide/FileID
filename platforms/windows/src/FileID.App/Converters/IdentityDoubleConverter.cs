@@ -1,16 +1,5 @@
 ﻿// Double passthrough with optional additive offset (via ConverterParameter
-// as an invariant-culture double string). Lets the Library tile force its
-// own Height = ActualWidth + caption-row-height so the image area is a
-// perfect square and the tile is taller than wide by exactly the caption
-// row. Without the offset path, the image area would be Width × (Width −
-// caption), close-to-square but not exactly square — captions of slightly
-// different heights would still introduce tile-shape variance.
-//
-// Example:
-//   <Grid Height="{Binding ActualWidth, RelativeSource={RelativeSource Self},
-//                  Converter={StaticResource IdentityDouble},
-//                  ConverterParameter=68}"/>
-// computes Height = ActualWidth + 68.
+// as an invariant-culture double string).
 
 using System;
 using System.Globalization;

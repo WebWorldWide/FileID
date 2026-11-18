@@ -13,8 +13,7 @@ internal static class ChatFrontendPolicy
     public static bool ShouldReplaceCitations(string? action, ChatResponse response) =>
         response.Status != "error" && (action != "history" || response.Hits.Count > 0);
 
-    /// <summary>The line under the composer, or empty when the engine message
-    /// only repeats the latest answer already shown in the conversation.</summary>
+    /// <summary>The line under the composer, or empty when the engine message only repeats the latest answer already shown in the conversation.</summary>
     public static string StatusLine(ChatResponse response)
     {
         var lastAnswer = response.Messages.LastOrDefault(message => message.Role != "user")?.Text;
