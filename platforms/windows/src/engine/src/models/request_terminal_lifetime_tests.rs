@@ -1,8 +1,12 @@
 use super::*;
-use crate::models::test_support::listener;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
+fn listener() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    (listener, url)
+}
 
 const RESPONSE: &[u8] = br#"{"choices":[{"message":{"content":"generated terminal response, not inference"}}]}"#;
 
