@@ -1,9 +1,4 @@
 ﻿// SessionChangesSheet code-behind. Renders ChangeLog snapshots; each row
-// owns a per-entry Undo/Retry button. Rebuild-on-Changed is safe here:
-// the sheet is only visible inside a modal ContentDialog, Changed fires at
-// user-action cadence (not an event burst), and rows re-materialize from a
-// consistent snapshot on the dispatcher (CLAUDE.md: snapshot +
-// DispatcherQueue.TryEnqueue; brushes cached at ctor, never per-row).
 
 using System;
 using System.ComponentModel;
@@ -153,8 +148,6 @@ public sealed partial class SessionChangesSheet : UserControl
                     var ok = isRetry
                         ? await ChangeLog.Instance.RetryAsync(entry)
                         : await ChangeLog.Instance.UndoAsync(entry);
-                    // ContentDialog reparenting can miss the coarse Changed
-                    // subscription, so refresh the sheet that initiated the action.
                     if (DispatcherQueue.HasThreadAccess)
                     {
                         Rebuild();
