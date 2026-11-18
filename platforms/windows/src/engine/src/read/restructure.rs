@@ -73,12 +73,8 @@ pub const PLAN_FILES_PAGE_SQL: &str = "SELECT
 
 /// `(root, prefix, upper)` bind values scoping [`PLAN_FILES_SQL`] to `root`.
 pub fn plan_root_bounds(root: &str) -> (String, String, String) {
-    // Pick the separator from the ORIGINAL root, before trimming. A Windows
-    // drive-root like "C:\" trims to "C:" — which contains no backslash — so
-    // deriving the separator from the trimmed string chose '/', built the
-    // prefix "C:/", and produced a range that matched ZERO backslash-stored
-    // files (every real "C:\Users\..." path sorts past the '/'-based upper
-    // bound). Result: an empty/incorrect plan scope for a whole-drive library.
+    // Take the separator from the ORIGINAL root: a trimmed drive root like "C:" has no backslash left,
+    // so deriving it from the trimmed string would build a "/"-based prefix matching no stored path.
     let separator = if root.contains('\\') { '\\' } else { '/' };
     let root = root.trim_end_matches(['/', '\\']).to_string();
     let prefix = format!("{root}{separator}");
