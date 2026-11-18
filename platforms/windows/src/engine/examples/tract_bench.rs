@@ -1,12 +1,8 @@
-//! Per-model inference latency on tract, for tuning the matmul thread count.
+//! Per-model inference latency on tract, for tuning the matmul thread count:
+//!   FILEID_TRACT_THREADS=1 cargo run --release --example tract_bench -- <models-dir> [iterations] [sessions]
 //!
-//!     FILEID_TRACT_THREADS=1 cargo run --release --example tract_bench -- <models-dir> [iterations] [sessions]
-//!
-//! `<models-dir>` is a models directory (`clip_text/`, `mobileclip/`, `sface/`,
-//! `yunet/`, `ram_plus/`, `bge_text/`). Each model runs `iterations` times on
-//! `sessions` concurrent threads (one session per thread, sharing the compiled
-//! graph); one JSON line per model reports the mean milliseconds per run and the
-//! wall time for the whole batch of runs. Inputs are synthetic.
+//! Each model runs `iterations` times on `sessions` threads (one session per thread, sharing the compiled graph); one
+//! JSON line per model gives mean ms per run and total wall time. Inputs are synthetic.
 
 use std::path::PathBuf;
 use std::time::Instant;

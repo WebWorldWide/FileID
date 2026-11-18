@@ -1,11 +1,7 @@
-//! Headless on-device benchmark for installed models.
-//!
-//!     cargo run --release --example model_bench -- [--tune] <model_kind>...
-//!
-//! Prints one JSON line per model (`{"model":…,"benchmark":…}` or
-//! `{"model":…,"error":…}`) and stores results where `listModels` reads them.
-//! Uses the same runtime discovery as the app (`FILEID_LLAMA_SERVER`,
-//! `FILEID_MODELS_DIR`); it never downloads anything.
+//! Headless on-device benchmark for installed models: prints one JSON line per model (`{"model":…,"benchmark":…}` or
+//! `{"model":…,"error":…}`) and stores results where `listModels` reads them. Uses the app's runtime discovery
+//! (`FILEID_LLAMA_SERVER`, `FILEID_MODELS_DIR`) and never downloads.
+//!   cargo run --release --example model_bench -- [--tune] <model_kind>...
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
