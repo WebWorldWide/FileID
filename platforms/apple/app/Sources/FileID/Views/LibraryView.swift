@@ -520,8 +520,11 @@ struct LibraryView: View {
                     .tint(Theme.gold)
             }
             HStack(spacing: 16) {
-                Text(String(format: "%.0f files per second", p.filesPerSecond))
-                    .foregroundStyle(Theme.gold)
+                if p.filesPerSecond >= 0.5 {
+                    let rate = Int(p.filesPerSecond.rounded())
+                    Text("\(rate.formatted()) \(rate == 1 ? "file" : "files") per second")
+                        .foregroundStyle(Theme.gold)
+                }
                 if let eta = p.etaSeconds, eta > 0 {
                     Text("about \(DurationText.short(eta)) left")
                         .foregroundStyle(Theme.text3)
@@ -634,89 +637,25 @@ struct LibraryView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
-                    TextField("Filter files", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .help("Filter by name, tag, description or person")
-                        .accessibilityLabel("Filter by name, tag, description or person")
-                        .font(Theme.Font.body(13.5))
-                        .focused($searchFocused)
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
-                            .buttonStyle(.plain)
-                            .help("Clear search")
-                            .accessibilityLabel("Clear search")
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    filterControls
+                    Spacer(minLength: 8)
+                    modeControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterControls
+                        Spacer(minLength: 8)
+                        if !selectMode { modeControls }
+                    }
+                    if selectMode {
+                        HStack(alignment: .center, spacing: 10) {
+                            Spacer(minLength: 8)
+                            modeControls
+                        }
                     }
                 }
-                .padding(.horizontal, 10)
-                .frame(height: Theme.Metrics.controlLarge)
-                .frame(minWidth: 140, maxWidth: 320)
-                .layoutPriority(1)
-                .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
-
-                kindPicker
-
-                ViewThatFits(in: .horizontal) {
-                    if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
-                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
-                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
-                    Color.clear.frame(width: 0, height: 0)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-
-                if hiddenWeaker > 0, !rows.isEmpty {
-                    Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
-                        .buttonStyle(.plain)
-                        .font(Theme.Font.body(11.5, .semibold))
-                        .foregroundStyle(Theme.gold)
-                        .fixedSize()
-                }
-
-                Spacer(minLength: 8)
-
-            // multi-select mode toggle. Tiles render with check-
-            // boxes; "Tag selected" + "Done" appear in place of the
-            // normal action set.
-            if selectMode {
-                MetaText("\(checkedFiles.count) selected", size: 11)
-                selectionActions
-                Button {
-                    if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
-                } label: { Label("Tag selected", systemImage: "tag.fill") }
-                .buttonStyle(DSPrimaryButtonStyle(height: 28))
-                .disabled(checkedFiles.isEmpty)
-                .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
-                Button("Done") {
-                    selectMode = false
-                    checkedFiles.removeAll()
-                }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                .keyboardShortcut(pageActive ? KeyboardShortcut(.escape, modifiers: []) : nil)
-            } else {
-                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                .fixedSize()
-                .help("Choose several files, then tag them all at once")
-            }
-
-            // Bulk-rename trigger lives in the Deep Analyze tab now —
-            // that's where smart names come from in the workflow. Keep
-            // only the per-row "Undo last rename" affordance here.
-            if lastBatchAvailable {
-                Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
-                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
-                .help("Reverse the most recent rename batch")
-            }
-
-            if lastTagBatchAvailable {
-                Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
-                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
-                .help("Remove only the tags FileID added in the most recent bulk tag batch")
-            }
-
             }
         }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
@@ -733,6 +672,94 @@ struct LibraryView: View {
         }
     }
 
+    @ViewBuilder
+    private var filterControls: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
+            TextField("Filter files", text: $searchText)
+                .textFieldStyle(.plain)
+                .help("Filter by name, tag, description or person")
+                .accessibilityLabel("Filter by name, tag, description or person")
+                .font(Theme.Font.body(13.5))
+                .focused($searchFocused)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                    .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: Theme.Metrics.controlLarge)
+        .frame(minWidth: 140, maxWidth: 320)
+        .layoutPriority(1)
+        .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
+
+        kindPicker
+
+        if !(rows.isEmpty && shownTotal == 0) {
+            ViewThatFits(in: .horizontal) {
+                if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
+                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
+                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if hiddenWeaker > 0, !rows.isEmpty {
+            Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
+                .buttonStyle(.plain)
+                .font(Theme.Font.body(11.5, .semibold))
+                .foregroundStyle(Theme.gold)
+                .fixedSize()
+        }
+    }
+
+    /// Multi-select toggle. Tiles render with check-boxes; the selection actions and "Done"
+    /// appear in place of the normal action set.
+    @ViewBuilder
+    private var modeControls: some View {
+        if selectMode {
+            MetaText("\(checkedFiles.count) selected", size: 11).fixedSize()
+            selectionActions
+            Button {
+                if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
+            } label: { Label("Tag selected", systemImage: "tag.fill").fixedSize() }
+            .buttonStyle(DSPrimaryButtonStyle(height: 28))
+            .fixedSize()
+            .disabled(checkedFiles.isEmpty)
+            .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
+            Button("Done") {
+                selectMode = false
+                checkedFiles.removeAll()
+            }
+            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
+            .keyboardShortcut(pageActive ? KeyboardShortcut(.escape, modifiers: []) : nil)
+        } else {
+            Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
+            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
+            .help("Choose several files, then tag them all at once")
+        }
+
+        // Bulk-rename trigger lives in the Deep Analyze tab now: that's where smart
+        // names come from in the workflow. Only the per-row "Undo last rename" stays here.
+        if lastBatchAvailable {
+            Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
+            .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
+            .help("Reverse the most recent rename batch")
+        }
+
+        if lastTagBatchAvailable {
+            Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
+            .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
+            .help("Remove only the tags FileID added in the most recent bulk tag batch")
+        }
+    }
+
     /// Select all / Clear and the hand-off to Chat for the checked files.
     @ViewBuilder
     private var selectionActions: some View {
@@ -741,10 +768,12 @@ struct LibraryView: View {
             if allShown { checkedFiles.removeAll() } else { for row in rows { checkedFiles[row.id] = row } }
         }
         .buttonStyle(.dsGhost)
+        .fixedSize()
         .help(allShown ? "Unselect every file" : "Select every file shown (⇧-click selects a range, ⌘-click adds one)")
         .accessibilityLabel(allShown ? "Clear the selection" : "Select every file shown")
         Button { askAboutChecked() } label: { Label("Ask about \(checkedFiles.count)", systemImage: "bubble.left.and.text.bubble.right").fixedSize() }
             .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
             .disabled(checkedFiles.isEmpty)
             .help(checkedFiles.isEmpty ? "Select files first" : "Open Chat with only these files attached")
             .accessibilityLabel("Ask Chat about the \(checkedFiles.count) selected files")
@@ -1841,6 +1870,7 @@ private struct LibrarySelectedPane: View {
                     .buttonStyle(.dsRow)
                     .keyboardShortcut(pageActive ? .cancelAction : nil)
                     .help("Close details")
+                    .accessibilityLabel("Close details")
                 }
                 ZStack {
                     Color.black.opacity(0.35)
