@@ -246,7 +246,6 @@ public class ChangeLogTests
         Assert.True(UndoStack.Instance.CanUndo);
         Assert.Equal("op-b", UndoStack.Instance.TopLabel);
 
-        // Undo b directly through the log; the facade's "top" moves to a.
         Assert.True(await Log.UndoAsync(b));
         Assert.Equal("op-a", UndoStack.Instance.TopLabel);
 

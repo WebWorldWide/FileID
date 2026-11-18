@@ -47,7 +47,6 @@ public sealed class SuggestedMergesBusyStateTests
     {
         var code = File.ReadAllText(SheetCode());
 
-        // Entered exactly once, when the fetch starts.
         Assert.Equal(1, CountOf(code, "SetBusy(true"));
 
         // Cleared on success, timeout, and error — three awaited exit paths in the

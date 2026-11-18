@@ -296,7 +296,6 @@ public class HardwareInfoTests
         // converter emits the variant key with an empty object body.
         var cmd = new VerifyCudaPackCommand();
         Assert.NotNull(cmd);
-        // Type-shape assertion: VerifyCudaPackCommand inherits CommandPayload.
         Assert.IsType<VerifyCudaPackCommand>(cmd);
         Assert.IsAssignableFrom<CommandPayload>(cmd);
     }
@@ -768,7 +767,6 @@ public class LibraryMergeTests
         var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
         int events = 0;
         items.CollectionChanged += (_, _) => events++;
-        // Same Ids, same order, no field changes → nothing structural fires.
         LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
         Assert.Equal(0, events);
     }

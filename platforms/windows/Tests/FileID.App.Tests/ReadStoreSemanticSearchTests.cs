@@ -150,7 +150,6 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         var expected = NaiveTopK(rows, Query, limit, null);
         Assert.Equal(expected, actualIds);
 
-        // Scores carried through must be descending (best→worst).
         for (int i = 1; i < actual.Count; i++)
         {
             Assert.True(actual[i - 1].Score >= actual[i].Score);

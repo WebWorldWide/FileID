@@ -59,7 +59,6 @@ public class QueryEmbeddingCacheTests
         var cache = new QueryEmbeddingCache(2);
         cache.Store("a", VecA);
         cache.Store("b", VecB);
-        // Touch "a" so it's now most-recently-used; "b" becomes the oldest.
         Assert.True(cache.TryGet("a", out _));
         cache.Store("c", VecA); // should evict "b", not the just-touched "a"
         Assert.True(cache.TryGet("a", out _));

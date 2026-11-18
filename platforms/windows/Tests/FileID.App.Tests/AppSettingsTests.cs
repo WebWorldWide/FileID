@@ -24,7 +24,6 @@ public class AppSettingsTests
         Assert.Null(s.LastFolderDisplay);
         Assert.True(s.SidebarVisible);
         Assert.Equal("library", s.ActiveTab);
-        // V15.5b D7: default flipped false → true to match macOS canonical default.
         Assert.True(s.CleanupAutoTagKept);
         Assert.False(s.RestructureTreeMode);
         Assert.Equal("all", s.LibraryKindFilter);
@@ -162,7 +161,6 @@ public class AppSettingsTests
         var json = JsonSerializer.Serialize(s, s_options);
         Assert.Contains("\"activeTab\"", json);
         Assert.Contains("\"sidebarVisible\"", json);
-        // PascalCase property names must NOT appear in serialized output.
         Assert.DoesNotContain("\"ActiveTab\"", json);
         Assert.DoesNotContain("\"SidebarVisible\"", json);
     }
@@ -177,7 +175,6 @@ public class AppSettingsTests
         var pascalJson = "{\"ActiveTab\":\"people\"}";
         var decoded = JsonSerializer.Deserialize<AppSettings>(pascalJson, s_options);
         Assert.NotNull(decoded);
-        // PascalCase ignored → default "library" stays.
         Assert.Equal("library", decoded!.ActiveTab);
     }
 
