@@ -24,6 +24,12 @@ enum TagLabel {
         return first.uppercased() + last.dropFirst()
     }
 
+    /// The chips under a grid tile: distinct, two at most, without one that only repeats the tile's kind badge.
+    static func tileChips(_ tags: [String], kind: String) -> [String] {
+        let kindName = FileKindLabel.title(kind).lowercased()
+        return Array(unique(tags).filter { $0.lowercased() != kindName }.prefix(2))
+    }
+
     /// Distinct chip texts, first occurrence wins (case-insensitive).
     static func unique(_ tags: [String]) -> [String] {
         var seen = Set<String>()

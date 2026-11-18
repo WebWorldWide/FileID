@@ -658,12 +658,8 @@ final class LibraryTileItem: NSCollectionViewItem {
         return NSFont(descriptor: descriptor, size: size) ?? base
     }
 
-    /// Chip text: last segment of hierarchical labels,
-    /// capitalised, de-duplicated, two at most. A tag that only repeats the tile's kind badge is dropped.
-    static func displayTags(_ raw: [String], kind: String) -> [String] {
-        let kindName = FileKindLabel.title(kind).lowercased()
-        return Array(TagLabel.unique(raw).filter { $0.lowercased() != kindName }.prefix(2))
-    }
+    /// Chip text: last segment of hierarchical labels, capitalised, de-duplicated, two at most.
+    static func displayTags(_ raw: [String], kind: String) -> [String] { TagLabel.tileChips(raw, kind: kind) }
 }
 
 private final class TileView: NSView {

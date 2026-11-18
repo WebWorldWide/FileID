@@ -26,6 +26,14 @@ enum TakeProposals {
         }
     }
 
+    /// The chip marks exceptions: when most rows share one relation, repeating it on each adds nothing.
+    static func showsRelationChip(_ relation: String?, among relations: [String?]) -> Bool {
+        guard relations.count > 1 else { return true }
+        let counts = Dictionary(grouping: relations, by: { $0 }).mapValues(\.count)
+        guard let top = counts.max(by: { $0.value < $1.value }), top.value * 2 > relations.count else { return true }
+        return relation != top.key
+    }
+
     static func relationHelp(_ relation: String?) -> String? {
         switch relation {
         case "repeatedAttempts": "One camera took these one after another, so they are separate takes of the same shot."

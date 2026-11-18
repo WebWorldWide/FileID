@@ -42,12 +42,8 @@ struct RelatedTriesSection: View {
         .animation(Theme.springStandard, value: job?.state)
     }
 
-    /// The chip marks exceptions: when most rows share one relation, repeating it on each adds nothing.
     private func showsRelation(of group: CatalogTakeAutoGroup) -> Bool {
-        guard proposals.count > 1 else { return true }
-        let counts = Dictionary(grouping: proposals, by: \.relation).mapValues(\.count)
-        guard let majority = counts.max(by: { $0.value < $1.value })?.key else { return true }
-        return group.relation != majority
+        TakeProposals.showsRelationChip(group.relation, among: proposals.map(\.relation))
     }
 
     private var header: some View {
