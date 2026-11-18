@@ -1,6 +1,4 @@
 ﻿// SidebarEngineStatus code-behind. Subscribes to EngineClient lifecycle
-// and re-paints the pill — including the soft glow ring around the dot
-// for that "live status" feel.
 
 using System.ComponentModel;
 using FileID.Services;
@@ -14,13 +12,6 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarEngineStatus : UserControl
 {
-    // Pre-cached brush pairs. The prior code did `new SolidColorBrush(...)`
-    // inside ApplyStatus per call. `SolidColorBrush` is a `DispatcherObject`;
-    // naked construction on a teardown-race path (Unloaded firing while a
-    // PropertyChanged was already in-flight on the UI dispatcher) is a known
-    // native fast-fail shape — in CLAUDE.md.
-    // Allocating once at ctor time guarantees the brushes were constructed
-    // on the dispatcher this control owns.
     private readonly SolidColorBrush _goldDot;
     private readonly SolidColorBrush _goldGlow;
     private readonly SolidColorBrush _redDot;
@@ -54,9 +45,6 @@ public sealed partial class SidebarEngineStatus : UserControl
     private void Sync()
     {
         var ec = EngineClient.Instance;
-        // Hide the pill entirely when everything's healthy — matches macOS
-        // Sidebar.swift:103-111. The pill is meant to surface trouble; in
-        // the steady state it's just noise.
         var healthy = ec.State == EngineClient.LifecycleState.Ready && ec.LastError is null;
         Visibility = healthy ? Visibility.Collapsed : Visibility.Visible;
         if (healthy) return;
@@ -93,21 +81,14 @@ public sealed partial class SidebarEngineStatus : UserControl
                 ? "FileID's helper is off. Turn it back on in Settings."
                 : "FileID's helper stopped. Quit and reopen FileID. Details: " + reason;
 
-    /// <summary>
-    /// Sets the dot, glow ring, label, and tooltip in one shot. Glow ring
-    /// is the same RGB as the dot but at 22% alpha — gives a soft Fluent
-    /// "reveal-style" halo without using a real shadow primitive. Brushes
-    /// are pre-cached at ctor (see field declarations above) to avoid the
-    /// DispatcherObject construction race on view teardown.
-    /// </summary>
+    /// <summary>Brushes are pre-cached at ctor (see field declarations above) to avoid the DispatcherObject construction race on view teardown.</summary>
     private void ApplyStatus(StatusAccent accent, string text, string tip)
     {
         StatusDot.Fill = accent == StatusAccent.Gold ? _goldDot : _redDot;
         StatusGlow.Fill = accent == StatusAccent.Gold ? _goldGlow : _redGlow;
         StatusText.Text = text;
         ToolTipService.SetToolTip(this, tip);
-        // Screen-reader name for the status pill — the live engine state
-        // plus its detail line, so the dot+text reads as one announcement.
+        // Screen-reader name for the status pill — the live engine state plus its detail line, so the dot+text reads as one announcement.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"FileID status: {text}");
     }
 }
