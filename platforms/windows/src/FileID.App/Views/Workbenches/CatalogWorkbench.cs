@@ -355,8 +355,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private IEnumerable<CatalogHit> SelectedHits() =>
         _hits.SelectedItems.OfType<FrameworkElement>().Select(row => row.Tag).OfType<CatalogHit>();
 
-    // ---- Results ----------------------------------------------------------------
-
     private void RenderHits(IReadOnlyList<CatalogHit> hits, bool searched)
     {
         _lastHits = hits;
@@ -433,8 +431,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             });
         });
     }
-
-    // ---- Player -------------------------------------------------------------------
 
     private void SelectHit(CatalogHit? hit)
     {
@@ -539,8 +535,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             return MomentTimelinePolicy.Duration(null, _chapterList, _tracks.Examined, _tracks.Speech);
         }
     }
-
-    // ---- Requests -----------------------------------------------------------------
 
     private Task SearchAsync(CancellationToken ct) => SearchAsync((string)_mode.SelectedItem, ct);
     private async Task SearchAsync(string mode, CancellationToken ct)

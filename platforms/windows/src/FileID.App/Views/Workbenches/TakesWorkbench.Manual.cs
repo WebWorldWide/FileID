@@ -94,8 +94,6 @@ internal sealed partial class TakesWorkbench
 
     private bool ManualEngaged => _manualActive || _selectedEvent is not null;
 
-    // ---- Building -------------------------------------------------------------
-
     private ScrollViewer BuildManualPane()
     {
         var stack = new StackPanel { Spacing = 2, Padding = new Thickness(0, 0, 0, 10) };
@@ -333,8 +331,6 @@ internal sealed partial class TakesWorkbench
         _ => _text3,
     };
 
-    // ---- Requests ---------------------------------------------------------------
-
     private static CatalogRequest ManualRequest(string action, string? query = null, long? fileID = null, IReadOnlyList<long>? fileIDs = null,
         CatalogEvent? saved = null, string? eventID = null, CatalogTakeFeedback? feedback = null, string? timelineMode = null) =>
         new(Guid.NewGuid().ToString(), action, query, fileID, null, null, null, fileIDs,
@@ -553,8 +549,6 @@ internal sealed partial class TakesWorkbench
         }, ct);
     }
 
-    // ---- State ----------------------------------------------------------------
-
     private IReadOnlyList<CatalogHit> Pool() => TakeGroupsPolicy.Pool(_candidates, _found);
 
     private void OpenWithCandidates(IReadOnlyList<CatalogHit> candidates)
@@ -690,8 +684,6 @@ internal sealed partial class TakesWorkbench
         RenderEditor();
         ShowToast("Name the group and describe the outcome, then save", null, PlainToastWindow);
     }
-
-    // ---- Rendering --------------------------------------------------------------
 
     private void RenderEvents()
     {
@@ -1202,8 +1194,6 @@ internal sealed partial class TakesWorkbench
             Child = buttons,
         };
     }
-
-    // ---- Playback -------------------------------------------------------------
 
     private async Task PlayCardAsync(TakeCard card)
     {
