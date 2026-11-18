@@ -7,11 +7,9 @@ Short, current priorities only: open work, nothing else. History lives in `STATE
 Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDDev/scratch/prod-test/REPORT.md` (PT-1…PT-19).
 
 - [ ] **Wave 5 (2026-11-17 evening, running):** Lane R makes the Mac app run only on the Rust engine: no Swift engine binary in Developer ID bundles, no fallback or engine choice, a designed card when `fileidd` cannot start, and the App Store variant on `fileidd`. Lane P drills the UI polish (owner: "no odd edges, no weird spacing, no glitches") with a separate design reviewer. Lane Q handles Chat follow-ups and a 30-question battery.
-- [ ] **Owner direction 2026-11-18: one inference runtime on Windows, Mac and Linux (tract), unless there is a specific, measured reason.** In progress:
-  - Lane T3 (`agent/prod-tract`) removes the Windows `ort-accel` option, the ORT build/packaging and the DirectML/CUDA plumbing; makes the CPU path multithreaded on all three; fixes the tract review (Flatpak cargo sources, ORT-provenance goldens, stale docs).
-  - Lane S (`agent/prod-noort-swift`) takes ONNX Runtime out of the shipped SwiftUI app (`FileIDShared` `CLIPTextEncoder`/`ORTPrivacy`); text embeddings come from `fileidd`.
-  - GPU acceleration (tract-metal/tract-cuda/wgpu) becomes a later cross-platform decision with measurements.
-  - The tract migration review (Sonnet, 2026-11-18) said no-go until the Flatpak sources are regenerated; it also found the ORT-accel panic fallback and missing golden provenance.
+- [ ] **One inference runtime on Windows, Mac and Linux: tract (owner, 2026-11-18). Merged into `agent/prod-integrate` (650b2a95); final gates and review running.** ONNX Runtime is gone from the shared engine, CLI, TUI, Linux app, Windows packaging and workflows, and from the Mac app binary (CI asserts no ORT symbols). Only the retired Swift engine (conformance peer, never shipped) still links ORT 1.24.2.
+  - Measured on Adlon Eckerts (171 files, the path Windows and Linux use): ORT 259–281 s, peak 3.5–3.9 GB; tract default (8 threads, 2 sessions) 131–143 s, peak 6.2–6.4 GB. Outputs: 244 faces both (box IoU ≥ 0.999997), CLIP cosine ≥ 0.99999999994, tags identical on 168 of 171 files, 17 people both.
+  - Left: Windows build/MSI/Store/WinUI edits only compiled in hosted CI (no Windows target here); GPU acceleration (tract-metal/tract-cuda/wgpu) is a later cross-platform decision; peak memory +2.4 GB; a YuNet decoded-box golden needs a rights-cleared face image.
 - [ ] **ONNX Runtime replacement, decided 2026-11-18: tract.** Evaluation `~/FileIDDev/scratch/onnx-eval/REPORT.md`:
   - tract 0.23.10 (pure Rust, MIT/Apache-2.0) runs all 7 model families with parity to ORT (cosine ≥ 0.999999; RAM++ 1 of 91,700 tag decisions flipped).
   - Single-thread it is 3–5× faster than ORT on CLIP image and RAM++; tract-metal does RAM++ in 224 ms.
