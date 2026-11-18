@@ -151,8 +151,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex) { DebugLog.Warn("RestorePendingNamesCountAsync failed: " + ex.Message); }
     }
 
-    // Item 4: show the Tagging-vs-Deep-Analyze explainer unless the user has
-    // dismissed it (persisted in AppSettings, lockstep with macOS).
     private void SyncExplainerBanner()
     {
         bool hidden = false;
@@ -539,8 +537,6 @@ public sealed partial class DeepAnalyzeView : UserControl
 
             var pct = prog.Total == 0 ? 0 : (double)prog.Processed / prog.Total;
             OverallProgress.Value = pct;
-            // include ETA + processed/total + per-second rate
-            // when the engine reports it.
             var etaSuffix = prog.EtaSeconds is double eta && eta > 0
                 ? $" · about {FormatEta(eta)} left"
                 : string.Empty;
@@ -826,7 +822,6 @@ public sealed partial class DeepAnalyzeView : UserControl
                 deferral.Complete();
             };
             try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
-            // Refresh count after possible apply.
             var remaining = await store.PendingProposedRenameCountAsync(System.Threading.CancellationToken.None);
             _proposedNameCount = remaining;
             SyncProposedNamesPill();
@@ -1061,7 +1056,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    // ───── Item 5: "Apply to your files" ──────────────────────────────
     // Write keyword tags / named people / smart names onto the actual files.
     // Tags + people go through the engine's applyTags (sidecar + IPropertyStore),
     // grouped by tag/person so the call count is bounded. Smart names route
