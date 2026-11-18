@@ -16,7 +16,6 @@ pub mod zero_byte;
 pub(crate) mod test_support {
     use rusqlite::{params, Connection};
 
-    /// A migrated in-memory catalog.
     pub(crate) fn memory_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         super::migrations::apply(&conn).unwrap();
@@ -101,11 +100,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     #[cfg(target_os = "linux")]
     rehash_case_sensitive_paths(&conn).context("rehashing Linux path hashes")?;
 
-    // Sweep orphaned "running" scan_sessions left over from a previous
-    // crash. The engine writes status='running' at scan start; if it
-    // exits abnormally the row stays stale forever, polluting Settings →
-    // Recent scans. Mark them all as 'failed' on startup; new scans
-    // overwrite this when they finish cleanly.
+// A 'running' row left by a crashed engine would otherwise show as an active scan forever.
     match conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
@@ -262,7 +257,6 @@ impl ReaderPool {
         Ok(Reader { pool: self, path: db_path.to_path_buf(), conn: Some(conn) })
     }
 
-    /// Closes every idle connection.
     pub fn clear(&self) {
         self.idle.lock().clear();
     }
@@ -284,18 +278,11 @@ pub fn reader_for(writer: &parking_lot::Mutex<Connection>) -> Result<Option<Read
     path.map(|path| READERS.get(&path)).transpose()
 }
 
-/// Closes the shared pool's idle connections (shutdown).
 pub fn close_readers() {
     READERS.clear();
 }
 
-/// Run `PRAGMA quick_check` on the writer connection. Returns `Ok(())` when the
-/// database is structurally sound, or `Err(detail)` carrying the first problem
-/// SQLite reports. quick_check is the fast cousin of `integrity_check` — it
-/// skips the expensive index-content cross-check, so it's cheap enough to run
-/// at every startup yet still catches a torn page / truncated file before the
-/// app reads garbage. Bounded to the first error (`quick_check(1)`) so a badly
-/// corrupted large library can't hang startup enumerating every fault.
+/// Run `PRAGMA quick_check(1)` on the writer connection. Cheap enough for every startup; catches a torn page or truncated file before the app reads garbage.
 pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
     match conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
         Ok(s) if s.eq_ignore_ascii_case("ok") => Ok(()),
@@ -372,15 +359,7 @@ impl IntegrityCheck {
     }
 }
 
-/// Drain WAL into the main DB file. Called at shutdown to keep the on-disk
-/// state self-contained — `PRAGMA wal_checkpoint(TRUNCATE)`.
-///
-/// Retries up to 5 times on `SQLITE_BUSY` (a read connection holding an
-/// active txn at shutdown). 50 ms between attempts → ~250 ms worst case,
-/// well under any reasonable shutdown grace period. After exhaustion,
-/// returns the error so the caller can log + continue (the WAL persists
-/// to disk and gets reapplied on next open — same as today's failure
-/// mode without a retry, just less likely to hit it).
+/// Drain WAL into the main DB file (`wal_checkpoint(TRUNCATE)`) at shutdown. Retries on SQLITE_BUSY up to 5 times, 50 ms apart; on exhaustion the caller logs and the WAL is replayed on the next open.
 pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     const RETRY_DELAY_MS: u64 = 50;
@@ -412,18 +391,8 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Wipe every row of user data while keeping the schema + migration ledger
-/// intact. Runs on the engine's writer connection — the single owner of the
-/// DB handle — so "wipe library" never races the OS file-lock the way the app
-/// deleting `fileid.sqlite` right after the engine exits does.
-///
-/// Tables are discovered from `sqlite_master`, so a future migration that adds
-/// a table is wiped automatically (no hard-coded list to drift). FTS5 virtual
-/// tables are emptied with the `'delete-all'` command; their shadow tables are
-/// skipped (deleting from them directly corrupts the index). `grdb_migrations`
-/// is preserved so the schema version survives the wipe.
+/// Wipe every row of user data, keeping the schema and migration ledger. Runs on the writer connection so it never races the file lock an app-side delete would hit. Tables are discovered from sqlite_master; FTS5 tables are emptied with 'delete-all' and their shadow tables are skipped (deleting them directly corrupts the index).
 pub fn wipe_all(conn: &Connection) -> Result<()> {
-    // FTS5 virtual tables (emptied via the special command, never row-by-row).
     let virtual_tables: Vec<(String, bool)> = {
         let mut stmt = conn.prepare(
             "SELECT name, instr(lower(replace(sql, ' ', '')), 'content=') > 0 FROM sqlite_master \
@@ -434,8 +403,6 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
     };
     // A plain table is an FTS5 shadow table when its name is `<vtab>_<suffix>`.
     let is_shadow = |name: &str| virtual_tables.iter().any(|(v, _)| name.starts_with(&format!("{v}_")));
-    // Real data tables: CREATE TABLE, not sqlite internal, not the migration
-    // ledger, not an FTS shadow table.
     let data_tables: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT name FROM sqlite_master \
@@ -447,13 +414,8 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         rows.filter_map(|r| r.ok()).filter(|n| !is_shadow(n)).collect()
     };
 
-    // FK off so DELETE order across parent/child tables is irrelevant (must be
-    // toggled outside a transaction; it's a no-op inside one). `foreign_keys`
-    // is a PER-CONNECTION setting, NOT transaction-scoped — if the body below
-    // errors out via `?`, a naked early return would leave the engine's single
-    // long-lived writer with FK enforcement OFF for the rest of the session,
-    // letting orphaned child rows be inserted. Run the body in a closure and
-    // re-enable FK on EVERY exit path before propagating the original error.
+// FK off so DELETE order across tables is irrelevant; it must be toggled outside a transaction.
+// foreign_keys is per-connection, not transaction-scoped: re-enable it on every exit path, or the single long-lived writer keeps FK enforcement off after an error.
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     let wipe = (|| -> Result<()> {
         let tx = conn.unchecked_transaction()?;
@@ -534,7 +496,6 @@ mod tests {
         ));
         let _guard = TempDb(path.clone());
 
-        // Writer creates the file + a table + a row.
         {
             let w = open_writer(&path).expect("open_writer");
             w.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -544,14 +505,12 @@ mod tests {
             checkpoint_truncate(&w).expect("checkpoint");
         }
 
-        // Read-only connection can SELECT.
         let r = open_read(&path).expect("open_read");
         let n: i64 = r
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .expect("select count");
         assert_eq!(n, 1);
 
-        // ...but writes are rejected.
         assert!(
             r.execute("INSERT INTO t (v) VALUES ('b')", []).is_err(),
             "INSERT through a read-only conn must fail"
