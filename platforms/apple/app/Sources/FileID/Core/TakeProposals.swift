@@ -27,11 +27,16 @@ enum TakeProposals {
     }
 
     /// The chip marks exceptions: when most rows share one relation, repeating it on each adds nothing.
-    static func showsRelationChip(_ relation: String?, among relations: [String?]) -> Bool {
-        guard relations.count > 1 else { return true }
+    static func relationsShowingChip(among relations: [String?]) -> Set<String?> {
+        let distinct = Set(relations)
+        guard relations.count > 1 else { return distinct }
         let counts = Dictionary(grouping: relations, by: { $0 }).mapValues(\.count)
-        guard let top = counts.max(by: { $0.value < $1.value }), top.value * 2 > relations.count else { return true }
-        return relation != top.key
+        guard let top = counts.max(by: { $0.value < $1.value }), top.value * 2 > relations.count else { return distinct }
+        return distinct.subtracting([top.key])
+    }
+
+    static func showsRelationChip(_ relation: String?, among relations: [String?]) -> Bool {
+        relationsShowingChip(among: relations).contains(relation)
     }
 
     static func relationHelp(_ relation: String?) -> String? {
