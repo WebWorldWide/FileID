@@ -304,7 +304,6 @@ public sealed class SankeyFlowControl : Control
         var availH = h - 2 * margin;
         if (availH <= 0) return;
 
-        // Compute per-source y/height + per-category y/height (left-aligned vertical stacks).
         var srcYs = new Dictionary<string, (double y, double height)>();
         double cursor = margin;
         const double gap = 6;
@@ -325,12 +324,8 @@ public sealed class SankeyFlowControl : Control
             cursor += height + gap;
         }
 
-        // Brushes are pre-allocated at ctor (see field declarations).
-        // Aliases here keep the rest of Render() readable.
         var sourceBrush = _sourceBrush;
 
-        // Draw ribbons first (so labels + boxes overlay them).
-        // Each pair (source, category) → one bezier path.
         // Within each source/category we keep a running offset so multiple
         // ribbons don't overlap on the box edge.
         var srcOffsets = bySource.ToDictionary(g => g.Key, _ => 0.0);
@@ -374,7 +369,6 @@ public sealed class SankeyFlowControl : Control
             }
         }
 
-        // Draw the source rectangles + labels.
         foreach (var g in bySource)
         {
             var pos = srcYs[g.Key];
@@ -398,7 +392,6 @@ public sealed class SankeyFlowControl : Control
             _canvas.Children.Add(label);
         }
 
-        // Draw the category rectangles + labels.
         for (int i = 0; i < byCategory.Count; i++)
         {
             var g = byCategory[i];
@@ -537,13 +530,11 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
-        // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;
         if (_hoverTooltip != null) { _canvas?.Children.Remove(_hoverTooltip); _hoverTooltip = null; }
         if (hovered is null) return;
 
-        // Highlight the hovered ribbon + its source/destination rects.
         // White-highlight brush is pre-allocated to avoid per-hover
         // DispatcherObject construction during pointer moves.
         hovered.Path.Fill = hovered.HoverFill;
@@ -555,7 +546,6 @@ public sealed class SankeyFlowControl : Control
         {
             catRect.Fill = _whiteHighlight;
         }
-        // Tooltip — first sample point as anchor.
         var anchor = hovered.Samples[hovered.Samples.Length / 2];
         _hoverTooltip = new TextBlock
         {

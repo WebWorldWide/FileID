@@ -89,12 +89,10 @@ public sealed class TreeDiffControl : Control
 
         foreach (var m in plan.Moves)
         {
-            // Current: take parent of the source as the folder.
             var srcRel = TrimRoot(m.Source, libraryRoot);
             var srcDir = ParentDir(srcRel);
             EnsurePath(currentBuckets, current, srcDir, "moved-source").FileCount++;
 
-            // Proposed: parent of the destination.
             var dstRel = TrimRoot(m.Destination, libraryRoot);
             var dstDir = ParentDir(dstRel);
             EnsurePath(proposedBuckets, proposed, dstDir, "moved-dest").FileCount++;

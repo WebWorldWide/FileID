@@ -269,8 +269,6 @@ public sealed partial class RestructureView : UserControl
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
-    // ---- Plan rendering -------------------------------------------------
-
     internal static bool IsPlanRestructureErrorKind(string? kind)
         => kind is "plan_restructure_failed" or "plan_restructure_db" or "plan_restructure_store" or "plan_restructure_root";
 
@@ -489,8 +487,6 @@ public sealed partial class RestructureView : UserControl
             }
         }
     }
-
-    // ---- Selection ------------------------------------------------------
 
     private void OnFileSelectionChanged(RestructureFileRowVm row)
     {
@@ -757,8 +753,6 @@ public sealed partial class RestructureView : UserControl
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
-    // ---- Hover cross-highlight ------------------------------------------
-
     private void OnKeepTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Keep);
     private void OnTidyTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Tidy);
     private void OnReorgTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Reorganize);
@@ -794,8 +788,6 @@ public sealed partial class RestructureView : UserControl
         FileID.Theme.Motion.SpringEasing.SpringScale(tile, active ? 1.012f : 1.0f, FileID.Theme.Motion.SpringEasing.Tokens.Tight);
     }
 
-    // ---- Flow / Tree toggle ---------------------------------------------
-
     private void OnViewModeClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnViewModeClicked), () =>
         {
@@ -807,8 +799,6 @@ public sealed partial class RestructureView : UserControl
             TreeDiff.Visibility = tree ? Visibility.Visible : Visibility.Collapsed;
             VisualizationHeader.Text = tree ? "Current and after" : "Folder map";
         });
-
-    // ---- Deep Analyze nudge ---------------------------------------------
 
     private async Task RefreshDeepAnalyzeHintAsync()
     {
@@ -999,8 +989,6 @@ public sealed partial class RestructureView : UserControl
             _deepAnalyzeHintDismissed = true;
             DeepAnalyzeHintBanner.Visibility = Visibility.Collapsed;
         });
-
-    // ---- Plan / Apply ---------------------------------------------------
 
     private async void OnPlanClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnPlanClicked), async () =>
@@ -1232,7 +1220,6 @@ public sealed partial class RestructureView : UserControl
         _undoRequestInFlight = false;
         _applyRequestInFlight = false;
         _awaitingFreshPlan = r.Applied > 0;
-        // The result arrived — disarm the watchdog timer before touching any state.
         _applyTimeoutTimer?.Stop();
 
         // Anything actually moved -> the current plan is stale (real moves
@@ -1350,8 +1337,6 @@ public sealed partial class RestructureView : UserControl
         }
     }
 
-
-    // ---- Helpers --------------------------------------------------------
 
     private static string Count(int n, string noun)
         => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
