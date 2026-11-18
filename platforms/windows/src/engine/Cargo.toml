@@ -139,24 +139,6 @@ symphonia = { version = "0.5", default-features = false, features = ["all-codecs
 tract-onnx = "=0.23.10"
 ndarray = "0.16"
 
-# Optional accelerator: ONNX Runtime with the DirectML/CUDA/OpenVINO/QNN
-# execution providers, for Windows GPU/NPU users (tract has none of those). Off
-# by default; the Windows release builds turn it on with `--features ort-accel`.
-# Exact pins: the 2.0 RC line had ABI churn between rc.10 / rc.11 / rc.12. It
-# loads `onnxruntime.dll` dynamically (`ORT_DYLIB_PATH`) and never downloads one.
-ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = [
-    "load-dynamic",
-    "ndarray",
-    "directml",
-    "cuda",
-    "openvino",
-    "qnn",
-    # Bridge ORT's native C++ logger into `tracing` — without this, an EP that
-    # fails to register (missing provider DLL dependency, unsupported GPU arch)
-    # falls back silently and the engine log shows nothing.
-    "tracing",
-] }
-
 # libc is for getppid() / parent-death + inode file_ref in platform.rs.
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2"
@@ -203,10 +185,6 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-# ONNX Runtime as the inference backend when it can use a GPU/NPU execution
-# provider (Windows). Needs `onnxruntime.dll` beside the engine or in
-# `ORT_DYLIB_PATH`; without a usable accelerator the engine still runs on tract.
-ort-accel = ["dep:ort"]
 # `pdf-analyze` is on by default so Deep Analyze handles PDFs out of the
 # box (pdfium-render bundles its own pre-built libpdfium for Windows x64
 # / arm64, no system dependency). The non-feature stub in

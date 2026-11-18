@@ -1,12 +1,11 @@
 //! Hardware-detection IPC handlers: `emit_ready` (engine startup handshake)
-//! and `verifyCudaPack` (Settings → Performance "Verify install" button).
-//! Both surface the same `HardwareInfo` shape so the Ready event and the
-//! HardwareReprobed event agree on adapter / EP / pack-present state.
+//! and `verifyCudaPack` (kept in the contract; answers with the same
+//! `HardwareInfo` shape as the Ready event).
 
 use crate::ipc::{
     sink::Sink, EngineInfo, EventPayload, HardwareInfo, HardwareReprobed, IpcEvent, Wrap,
 };
-use crate::models::runtime::{active_provider, ExecutionProvider, GpuVendor, RuntimeProbe};
+use crate::models::runtime::{GpuVendor, RuntimeProbe};
 use crate::platform;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -25,52 +24,21 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
         GpuVendor::None => "none",
     };
 
-    // Recommendation copy. Only suggest packs that would actually help.
-    let recommendation = match (
-        probe.vendor,
-        probe.provider,
-        probe.cuda_pack_present,
-        probe.openvino_pack_present,
-        probe.qnn_pack_present,
-    ) {
-        (GpuVendor::Nvidia, ExecutionProvider::DirectMl, false, _, _) =>
-            "NVIDIA detected. Install the CUDA Pack in Settings → Performance for ~30% faster ML inference.".to_string(),
-        (GpuVendor::Intel, ExecutionProvider::DirectMl, _, false, _) =>
-            "Intel iGPU/Arc detected. Install the OpenVINO Pack in Settings → Performance for vendor-tuned inference.".to_string(),
-        (GpuVendor::Qualcomm, ExecutionProvider::DirectMl, _, _, false) =>
-            "Snapdragon NPU detected. Install the QNN Pack in Settings → Performance to use the Hexagon NPU.".to_string(),
-        (GpuVendor::None, _, _, _, _) =>
-            "No GPU detected. Falling back to CPU inference.".to_string(),
-        _ => String::new(),
-    };
-
     let topo = platform::cpu_topology();
     let mem_tier = platform::memory_tier();
     let ram_avail_mb = platform::available_memory_mb();
     let ram_total_mb = (platform::physical_memory_gb() * 1024.0) as u64;
     let vram_mb = platform::dedicated_vram_mb().unwrap_or(0);
     let (power_src, battery_pct) = platform::power_status();
-    // First-pass NPU detection — QNN pack presence is our existing proxy
-    // for "Hexagon NPU usable". Intel AI Boost / AMD XDNA detection is
-    // a NEXT.md follow-up (need OpenVINO NPU plugin / VitisAI EP probes).
-    let npu_present = matches!(probe.vendor, GpuVendor::Qualcomm) && probe.qnn_pack_present;
     HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
-        // Report the EP this process ACTUALLY bound (the memoized
-        // `active_provider()`), not a fresh `probe.provider`. They agree at
-        // startup, but on a `verifyCudaPack` reprobe AFTER the user installs a
-        // pack, a fresh probe would advertise the now-available GPU EP even
-        // though the running session is still bound to its original EP (a
-        // restart is required — see `reenable_ep` above). `cuda_pack_present` &
-        // friends stay fresh (they reflect the install), so the card shows
-        // "pack ✓, restart to use it" rather than a misleading active EP.
-        execution_provider: active_provider().as_str().into(),
+        execution_provider: crate::models::runtime::inference_backend().into(),
         physical_cpu_cores: num_cpus::get_physical().max(1) as u32,
-        cuda_pack_present: probe.cuda_pack_present,
-        openvino_pack_present: probe.openvino_pack_present,
-        qnn_pack_present: probe.qnn_pack_present,
-        recommendation,
+        cuda_pack_present: false,
+        openvino_pack_present: false,
+        qnn_pack_present: false,
+        recommendation: String::new(),
         p_cores: topo.p_cores,
         e_cores: topo.e_cores,
         logical_cpu_cores: topo.logical,
@@ -79,7 +47,7 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
         ram_available_mb: ram_avail_mb,
         memory_tier: mem_tier.as_str().into(),
         vram_mb,
-        npu_present,
+        npu_present: false,
         power_source: power_src.as_str().into(),
         battery_percent: battery_pct,
         // Phase-1 ships "auto" only; the Eco/Performance selector in
@@ -106,27 +74,16 @@ pub(crate) async fn emit_ready(sink: &Sink) {
         .await;
 }
 
-/// Handle `verifyCudaPack`. Re-runs the CUDA + cuDNN probe and emits a
-/// `HardwareReprobed` event with fresh `HardwareInfo` plus a diagnostics
-/// string when the pack is absent. Lets the Settings → Performance card
-/// flip to ✓ without an engine restart after the user installs cuDNN.
+/// Handle `verifyCudaPack`. No GPU pack exists any more (every model runs on
+/// the CPU), so this re-emits the hardware snapshot with a diagnostics string
+/// that says so; the command stays in the IPC contract for older apps.
 pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
-    // Verifying is the user's "try the GPU EP again" action — clear the CUDA
-    // crash-disable ONLY so the next engine launch re-attempts the CUDA bind.
-    // (Per-EP: must not also re-arm a separately crash-disabled OpenVINO pack.)
-    crate::models::ep_guard::reenable_ep("cuda");
-    crate::models::runtime::invalidate_cuda_stack_probe();
     let hardware = build_hardware_info();
-    let diagnostics = crate::models::runtime::probe_cuda_pack().diagnostics;
-    tracing::info!(
-        cuda_pack_present = hardware.cuda_pack_present,
-        execution_provider = %hardware.execution_provider,
-        "[VERIFY] hardware reprobed"
-    );
+    tracing::info!(execution_provider = %hardware.execution_provider, "[VERIFY] hardware reprobed");
     sink.send(IpcEvent::now(EventPayload::HardwareReprobed(Wrap::new(
         HardwareReprobed {
             hardware,
-            diagnostics,
+            diagnostics: Some("FileID runs its AI models on the CPU on every platform; there is no GPU pack to install.".to_string()),
         },
     ))))
     .await;

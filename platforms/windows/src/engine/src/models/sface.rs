@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array4;
 
-use super::inference::{Dim, InferenceSession, InputSpec};
-use super::runtime::commit_chain_session;
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 pub struct SFace {
     session: InferenceSession,
@@ -36,7 +35,7 @@ impl SFace {
         anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
         let digest = crate::util::content_hash::exact_file_sha256(path, size)?;
         let model_version = format!("sface128-sha256:{}", hex::encode(digest));
-        let (session, input_name) = commit_chain_session("SFace", path, &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(112), Dim::Fixed(112)])])?;
+        let (session, input_name) = load_session("SFace", path, &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(112), Dim::Fixed(112)])])?;
         let after = std::fs::metadata(path)?;
         anyhow::ensure!(before.len() == after.len() && before.modified()? == after.modified()?, "SFace weights changed during load");
 
@@ -108,13 +107,11 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Per-EP variant-aware weights path: `sface/face_recognition_sface_2021dec.onnx`
-/// (or an `_int8`/`_qnn` sibling on accelerated EPs when present).
+/// Weights path: `sface/face_recognition_sface_2021dec.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(crate::paths::installed_model_file(&super::variants::resolve_model_path(
-        &crate::paths::models_dir()?.join("sface"),
-        "face_recognition_sface_2021dec",
-    )))
+    Ok(crate::paths::installed_model_file(
+        &crate::paths::models_dir()?.join("sface").join("face_recognition_sface_2021dec.onnx"),
+    ))
 }
 
 #[cfg(test)]

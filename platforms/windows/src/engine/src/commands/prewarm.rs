@@ -329,22 +329,6 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
     // download_parallel below polls it after every chunk.
     let cancel = prewarm_cancel_flag(&model_kind);
 
-    // (Re)installing a GPU EP pack is an explicit "try this EP again" — clear
-    // any prior crash-disable (ep_guard) so the next launch re-attempts the bind,
-    // and drop the cached CUDA-stack loadability verdict so a completed install
-    // is visible to verify/probe flows in THIS session.
-    match model_kind.as_str() {
-        "ort_cuda_x64" => {
-            crate::models::ep_guard::reenable_ep("cuda");
-            crate::models::runtime::invalidate_cuda_stack_probe();
-        }
-        "cudnn_runtime_x64" | "llama_runtime_cuda_x64" => {
-            crate::models::runtime::invalidate_cuda_stack_probe();
-        }
-        "ort_openvino_x64" => crate::models::ep_guard::reenable_ep("openvino"),
-        _ => {}
-    }
-
     // Distinguish "the engine can't resolve its models dir" (a storage/env
     // misconfig that makes `lookup_full` return Unknown for EVERY kind) from a
     // genuinely unregistered kind — otherwise the unknown-kind message below

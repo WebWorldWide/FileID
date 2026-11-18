@@ -16,8 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array4;
 
-use super::inference::{Dim, InferenceSession, InputSpec};
-use super::runtime::commit_chain_session;
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 use super::face_geometry::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
@@ -38,7 +37,7 @@ impl YuNet {
         if !path.exists() {
             anyhow::bail!("YuNet weights missing at {}", path.display());
         }
-        let (session, input_name) = commit_chain_session(
+        let (session, input_name) = load_session(
             "YuNet",
             path,
             &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(INPUT as usize), Dim::Fixed(INPUT as usize)])],
@@ -256,12 +255,9 @@ fn decode_stride(
     }
 }
 
-/// Per-EP variant-aware weights path: `yunet/face_detection_yunet_2023mar.onnx`.
+/// Weights path: `yunet/face_detection_yunet_2023mar.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
-        &crate::paths::models_dir()?.join("yunet"),
-        "face_detection_yunet_2023mar",
-    ))
+    Ok(crate::paths::models_dir()?.join("yunet").join("face_detection_yunet_2023mar.onnx"))
 }
 
 #[cfg(test)]

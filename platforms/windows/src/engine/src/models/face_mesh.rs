@@ -14,8 +14,7 @@ use anyhow::{Context, Result};
 use ndarray::Array4;
 
 use super::face_geometry::Detection;
-use super::inference::{Dim, InferenceSession, InputSpec};
-use super::runtime::commit_chain_session;
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const INPUT: usize = 256;
 const POINTS: usize = 478;
@@ -53,7 +52,7 @@ impl FaceMesh {
     pub fn load<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        let (session, input_name) = commit_chain_session("FaceMesh", path, &input_contract())?;
+        let (session, input_name) = load_session("FaceMesh", path, &input_contract())?;
         Self::checked(session, input_name)
     }
 
@@ -63,7 +62,7 @@ impl FaceMesh {
     pub fn load_cpu<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        let session = InferenceSession::load_cpu("FaceMesh", path, &input_contract())?;
+        let session = InferenceSession::load("FaceMesh", path, &input_contract())?;
         let input_name = session.input_names().first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.clone();
         Self::checked(session, input_name)
     }

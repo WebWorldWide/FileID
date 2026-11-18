@@ -16,8 +16,6 @@ pub mod ipc;
 pub mod job_queue;
 pub mod logging;
 pub mod models;
-#[cfg(feature = "ort-accel")]
-pub mod ort_runtime;
 pub mod paths;
 pub mod pipeline;
 pub mod platform;

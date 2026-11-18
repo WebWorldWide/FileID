@@ -193,19 +193,7 @@ fn load_clip_text() -> anyhow::Result<crate::models::clip_text::ClipText> {
         anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e)
     })?;
     let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
-    // EP crash-safety: this is the one GPU-EP session bind that happens
-    // OUTSIDE the scan's load_default arm window — the CLIP-text encoder
-    // loads lazily on the first search query (and again after it was parked).
-    // Without arming here, a hard native crash while binding a freshly-installed
-    // CUDA/OpenVINO pack on the search path leaves no `.ep_attempt` breadcrumb,
-    // so the engine crash-loops on every search instead of reverting to
-    // DirectML. Mirror scan.rs: arm the override-aware EP, bind, then disarm (a
-    // Rust error still disarms below; only a hard crash leaves the breadcrumb).
-    let armed_ep = crate::models::runtime::armed_provider();
-    crate::models::ep_guard::arm(armed_ep.as_str());
-    let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
-    crate::models::ep_guard::disarm(armed_ep.as_str());
-    loaded
+    crate::models::clip_text::ClipText::load(weights, tokenizer)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::inference::{Dim, InferenceSession, InputSpec};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const CONTEXT_LEN: usize = 77;
 
@@ -133,7 +133,7 @@ impl ClipText {
 }
 
 fn session(path: &Path) -> Result<(InferenceSession, String)> {
-    super::runtime::commit_chain_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
+    load_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
 }
 
 fn l2_normalize(v: &mut [f32]) {

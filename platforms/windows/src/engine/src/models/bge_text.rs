@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array2;
 use super::inference::{Dim, Dtype, InferenceSession, Input, InputSpec};
-use super::runtime::ExecutionProvider;
 use super::wordpiece_tokenizer::WordPieceTokenizer;
 
 const HIDDEN: usize = 384;
@@ -45,12 +44,12 @@ impl BgeText {
         // scan start. Semantic doc-search is unchanged (same weights, same
         // output) — only where it runs differs.
         let sequence = [Dim::Fixed(1), Dim::Symbol("S")];
-        let session = InferenceSession::load_cpu(
+        let session = InferenceSession::load(
             "BGE",
             weights,
             &["input_ids", "attention_mask", "token_type_ids"].map(|name| InputSpec::named(name, Dtype::I64, &sequence)),
         )?;
-        tracing::info!(model = "BGE-small-en-v1.5", backend = session.backend(), "loaded");
+        tracing::info!(model = "BGE-small-en-v1.5", backend = super::inference::TRACT_CPU, "loaded");
         let input_names: Vec<String> = session.input_names().to_vec();
 
         let mut model = Self { session, input_names, tokenizer };
@@ -146,18 +145,9 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Per-EP variant-aware weights path: `bge_text/bge_small.onnx` (or
-/// `_int8.onnx` / `_qnn.bin` on accelerated EPs when present).
+/// Weights path: `bge_text/bge_small.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
-    // BGE always binds the CPU EP (see `load`), so resolve the CPU variant
-    // (= the base .onnx) explicitly rather than via active_provider(), which on
-    // an Intel-NPU/Snapdragon box would pick an _int8/_qnn variant a CPU session
-    // can't consume.
-    Ok(super::variants::resolve_model_path_for(
-        &crate::paths::models_dir()?.join("bge_text"),
-        "bge_small",
-        ExecutionProvider::Cpu,
-    ))
+    Ok(crate::paths::models_dir()?.join("bge_text").join("bge_small.onnx"))
 }
 
 pub fn default_vocab_path() -> Result<PathBuf> {

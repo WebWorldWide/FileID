@@ -1,9 +1,7 @@
 //! The inference seam every ONNX model wrapper runs through: a model loaded
 //! from a path, named tensors in, tensors out.
 //!
-//! The backend is tract (pure Rust, CPU) everywhere. A build with the
-//! `ort-accel` feature can bind ONNX Runtime instead when an accelerator
-//! execution provider is available (see `runtime::commit_chain_session`).
+//! The backend is tract (pure Rust, CPU), the same on every platform.
 //!
 //! A compiled model is shared by every [`InferenceSession`] loaded from the
 //! same file with the same input contract; each session owns only its run
@@ -19,9 +17,6 @@ use tract_onnx::prelude::{
     tvec, f16, Datum, Framework, InferenceFact, InferenceModelExt, IntoRunnable, TDim, TValue, Tensor, TypedModel, TypedRunnableModel, TypedSimpleState,
 };
 use tract_onnx::tract_hir::infer::Factoid;
-
-#[cfg(feature = "ort-accel")]
-pub(super) mod ort_backend;
 
 /// The backend label tract sessions report.
 pub const TRACT_CPU: &str = "tract-cpu";
@@ -98,14 +93,9 @@ struct CompiledModel {
     first_input_shape: Vec<i64>,
 }
 
-enum Backend {
-    Tract { model: Arc<CompiledModel>, state: Box<TypedSimpleState> },
-    #[cfg(feature = "ort-accel")]
-    Ort(ort_backend::OrtSession),
-}
-
 pub struct InferenceSession {
-    backend: Backend,
+    model: Arc<CompiledModel>,
+    state: Box<TypedSimpleState>,
 }
 
 type CacheKey = (PathBuf, u64, Option<std::time::SystemTime>, String);
@@ -118,7 +108,7 @@ static COMPILED: parking_lot::Mutex<Option<HashMap<CacheKey, Arc<parking_lot::Mu
 impl InferenceSession {
     /// Load `path` on tract. Sessions of the same file and `specs` share one
     /// compiled model.
-    pub fn load_cpu(label: &str, path: &Path, specs: &[InputSpec]) -> Result<Self> {
+    pub fn load(label: &str, path: &Path, specs: &[InputSpec]) -> Result<Self> {
         let metadata = std::fs::metadata(path).with_context(|| format!("{label} weights {}", path.display()))?;
         let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok(), format!("{specs:?}"));
         let slot = {
@@ -140,58 +130,33 @@ impl InferenceSession {
         };
         drop(held);
         let state = Box::new(model.plan.spawn().with_context(|| format!("tract run state ({label})"))?);
-        Ok(Self { backend: Backend::Tract { model, state } })
-    }
-
-    #[cfg(feature = "ort-accel")]
-    pub(super) fn from_ort(session: ort_backend::OrtSession) -> Self {
-        Self { backend: Backend::Ort(session) }
-    }
-
-    /// `"tract-cpu"`, or the ONNX Runtime execution provider's name.
-    pub fn backend(&self) -> &'static str {
-        match &self.backend {
-            Backend::Tract { .. } => TRACT_CPU,
-            #[cfg(feature = "ort-accel")]
-            Backend::Ort(session) => session.backend(),
-        }
+        Ok(Self { model, state })
     }
 
     pub fn input_names(&self) -> &[String] {
-        match &self.backend {
-            Backend::Tract { model, .. } => &model.input_names,
-            #[cfg(feature = "ort-accel")]
-            Backend::Ort(session) => session.input_names(),
-        }
+        &self.model.input_names
     }
 
     pub fn output_names(&self) -> &[String] {
-        match &self.backend {
-            Backend::Tract { model, .. } => &model.output_names,
-            #[cfg(feature = "ort-accel")]
-            Backend::Ort(session) => session.output_names(),
-        }
+        &self.model.output_names
     }
 
     /// The first input's shape with `-1` for a dimension that varies.
     pub fn first_input_shape(&self) -> Vec<i64> {
-        match &self.backend {
-            Backend::Tract { model, .. } => model.first_input_shape.clone(),
-            #[cfg(feature = "ort-accel")]
-            Backend::Ort(session) => session.first_input_shape(),
-        }
+        self.model.first_input_shape.clone()
     }
 
     /// Run the model; the outputs come back in the ONNX's output order.
     pub fn run(&mut self, inputs: Vec<(&str, Input)>) -> Result<Vec<Output>> {
-        super::runtime::ensure_gpu_inference_alive()?;
-        let result = match &mut self.backend {
-            Backend::Tract { model, state } => run_tract(model, state, inputs),
-            #[cfg(feature = "ort-accel")]
-            Backend::Ort(session) => session.run(inputs),
-        };
-        result.map_err(super::runtime::classify_inference_error)
+        run_tract(&self.model, &mut self.state, inputs)
     }
+}
+
+/// Load `path` and return the session with the ONNX's first input name.
+pub fn load_session(label: &str, path: &Path, specs: &[InputSpec]) -> Result<(InferenceSession, String)> {
+    let session = InferenceSession::load(label, path, specs)?;
+    let input_name = session.input_names().first().with_context(|| format!("{label} ONNX has no inputs"))?.clone();
+    Ok((session, input_name))
 }
 
 fn compile(path: &Path, specs: &[InputSpec]) -> Result<CompiledModel> {
@@ -288,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_a_load_error_not_a_panic() {
-        let error = InferenceSession::load_cpu("test", Path::new("/nonexistent/model.onnx"), &[InputSpec::f32(&[Dim::Fixed(1)])]).err().unwrap();
+        let error = InferenceSession::load("test", Path::new("/nonexistent/model.onnx"), &[InputSpec::f32(&[Dim::Fixed(1)])]).err().unwrap();
         assert!(format!("{error:#}").contains("test weights"));
     }
 }

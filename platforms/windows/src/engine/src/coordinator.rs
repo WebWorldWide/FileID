@@ -42,10 +42,6 @@ pub(crate) fn process_gpu_device_removed() -> bool {
     process_gpu_failure_latch().is_dead()
 }
 
-pub(crate) fn latch_process_gpu_device_removed() -> bool {
-    process_gpu_failure_latch().mark_dead()
-}
-
 pub(crate) const GPU_DEVICE_REMOVED_MESSAGE: &str = "The graphics card was disconnected or reset, so FileID stopped using it to keep your computer responsive. Quit and reopen FileID before scanning or using AI features again. If this keeps happening, switch FileID to CPU in Settings.";
 
 #[derive(Clone)]

@@ -19,8 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array4;
 
-use super::inference::{Dim, InferenceSession, InputSpec};
-use super::runtime::commit_chain_session;
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -165,7 +164,7 @@ impl RamPlusTagger {
         tracing::info!(model = "RAM++", tags = tags.len(), "tag list loaded");
         let n = INPUT_SIZE as usize;
         let (session, input_name) =
-            commit_chain_session("RAM++", onnx, &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(n), Dim::Fixed(n)])])?;
+            load_session("RAM++", onnx, &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(n), Dim::Fixed(n)])])?;
         let supports_dynamic_batch = ram_plus_shape_has_dynamic_batch(&session.first_input_shape());
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
@@ -493,13 +492,9 @@ fn sigmoid(z: f32) -> f32 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// Per-EP variant-aware ONNX path: `ram_plus/ram_plus.onnx` (or
-/// `_int8.onnx` / `_qnn.bin` on accelerated EPs when a variant is dropped in).
+/// ONNX path: `ram_plus/ram_plus.onnx`.
 pub fn default_onnx_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
-        &crate::paths::models_dir()?.join("ram_plus"),
-        "ram_plus",
-    ))
+    Ok(crate::paths::models_dir()?.join("ram_plus").join("ram_plus.onnx"))
 }
 
 pub fn default_tags_path() -> Result<PathBuf> {

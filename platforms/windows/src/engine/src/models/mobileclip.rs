@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array4;
 
-use super::inference::{Dim, InferenceSession, InputSpec};
-use super::runtime::commit_chain_session;
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 /// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
 /// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
@@ -49,7 +48,7 @@ impl MobileClipImage {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
         let (session, input_name) = super::clip_space::load_verified(&[(path, "mobileclip_s2", 0)], || {
-            commit_chain_session(
+            load_session(
                 "MobileCLIP image",
                 path,
                 &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(224), Dim::Fixed(224)])],

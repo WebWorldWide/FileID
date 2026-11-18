@@ -1,9 +1,9 @@
 # Cargo target-specific config.
 #
 # x86_64-pc-windows-msvc enables AVX2 baseline (Haswell, 2013) — universal in
-# any machine that runs modern Windows + the kind of GPU-accel workload FileID
+# any machine that runs modern Windows + the kind of workload FileID
 # does. Rules out very old Sandy Bridge (2011) but those won't be running our
-# llama.cpp / ORT DirectML pipeline at usable speeds anyway.
+# llama.cpp / ONNX pipeline at usable speeds anyway.
 #
 # aarch64-pc-windows-msvc gets ARMv8.2-A which Snapdragon X Elite supports.
 
