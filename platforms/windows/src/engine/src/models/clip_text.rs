@@ -184,3 +184,31 @@ pub fn default_weights_path() -> Result<PathBuf> {
         .join("clip_text")
         .join("clip_text.onnx"))
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, Probe, Tolerance};
+
+    const PATH: &str = "clip_text/clip_text.onnx";
+
+    #[test]
+    fn embedding_matches_the_golden_vector() {
+        let Some(path) = model_file(PATH) else { return };
+        let directory = path.parent().unwrap();
+        let tokenizer = ClipTokenizer::new(
+            &std::fs::read_to_string(directory.join("vocab.json")).unwrap(),
+            &std::fs::read_to_string(directory.join("merges.txt")).unwrap(),
+        )
+        .unwrap();
+        let mut model = ClipText::load(&path, tokenizer).unwrap();
+        let embedding = model.embed("a photo of a dog running on a beach at sunset").unwrap();
+        check(
+            "clip_text",
+            PATH,
+            "the query \"a photo of a dog running on a beach at sunset\" through the CLIP BPE tokenizer; L2-normalized 512-d embedding",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[Probe { name: "embedding", shape: vec![512], values: &embedding }],
+        );
+    }
+}

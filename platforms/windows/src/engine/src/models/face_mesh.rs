@@ -107,7 +107,16 @@ impl FaceMesh {
     }
 
     fn run(&mut self, rgb: &[u8], width: u32, height: u32, crop: &Crop) -> Result<Option<Vec<[f32; 2]>>> {
-        let input = Tensor::from_array(sample(rgb, width as usize, height as usize, crop)).context("Face mesh input tensor")?;
+        let (landmarks, logit) = self.forward(sample(rgb, width as usize, height as usize, crop))?;
+        if logit.is_nan() || logit < MIN_PRESENCE_LOGIT || !landmarks.iter().all(|v| v.is_finite()) {
+            return Ok(None);
+        }
+        Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
+    }
+
+    /// One forward pass: the 478 x 3 landmark values and the presence logit.
+    fn forward(&mut self, input: Array4<f32>) -> Result<(Vec<f32>, f32)> {
+        let input = Tensor::from_array(input).context("Face mesh input tensor")?;
         let input_name = self.input_name.clone();
         ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
@@ -118,11 +127,7 @@ impl FaceMesh {
         let (_, presence) = outputs[PRESENCE].try_extract_tensor::<f32>().context("Face mesh presence")?;
         let (_, landmarks) = outputs[LANDMARKS].try_extract_tensor::<f32>().context("Face mesh landmarks")?;
         anyhow::ensure!(landmarks.len() == POINTS * 3, "Face mesh produced {} values, expected {}", landmarks.len(), POINTS * 3);
-        let logit = presence.first().copied().unwrap_or(f32::NAN);
-        if logit.is_nan() || logit < MIN_PRESENCE_LOGIT || !landmarks.iter().all(|v| v.is_finite()) {
-            return Ok(None);
-        }
-        Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
+        Ok((landmarks.to_vec(), presence.first().copied().unwrap_or(f32::NAN)))
     }
 }
 
@@ -299,5 +304,31 @@ mod tests {
         for case in fixture["openness"].as_array().unwrap() {
             assert!((openness(case["ratio"].as_f64().unwrap()) - case["expect"].as_f64().unwrap()).abs() < 1e-9);
         }
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "face_mesh/face_landmarks.onnx";
+
+    #[test]
+    fn landmarks_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = FaceMesh::load(&path).unwrap();
+        let crop = Crop { cx: 128.0, cy: 128.0, side: 256.0, cos: 1.0, sin: 0.0 };
+        let (landmarks, presence) = model.forward(sample(&synthetic_rgb(256, 256), 256, 256, &crop)).unwrap();
+        check(
+            "face_mesh",
+            PATH,
+            "synthetic_rgb(256, 256) sampled with the identity crop into 1x256x256x3; 478x3 landmarks in 256 px and the presence logit",
+            Tolerance { max_abs: 1e-2, rel_norm: 1e-3 },
+            &[
+                Probe { name: LANDMARKS, shape: vec![POINTS * 3], values: &landmarks },
+                Probe { name: PRESENCE, shape: vec![1], values: &[presence] },
+            ],
+        );
     }
 }

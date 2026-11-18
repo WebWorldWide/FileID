@@ -254,3 +254,34 @@ mod tests {
         assert_close(out[11], norm(120, 2));
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "mobileclip/mobileclip_s2_image.onnx";
+
+    #[test]
+    fn embeddings_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = MobileClipImage::load(&path).unwrap();
+        let first = synthetic_rgb(224, 224);
+        let second: Vec<u8> = first.iter().rev().copied().collect();
+        let single = model.embed(&first).unwrap();
+        let batch = model.embed_batch(&[first, second]).unwrap();
+        let batch: Vec<f32> = batch.concat();
+        let gap = single.iter().zip(&batch[..512]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(gap < 1e-4, "batched embedding drifts from the single-image one by {gap}");
+        check(
+            "clip_image",
+            PATH,
+            "synthetic_rgb(224, 224) stretched-224 CLIP RGB; L2-normalized 512-d embedding, alone and as image 0 of a 2-image batch whose image 1 is the byte-reversed buffer",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[
+                Probe { name: "embedding", shape: vec![512], values: &single },
+                Probe { name: "batch", shape: vec![2, 512], values: &batch },
+            ],
+        );
+    }
+}

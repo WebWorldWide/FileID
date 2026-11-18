@@ -229,3 +229,25 @@ mod tests {
         assert!(v.iter().all(|x| x.is_finite()));
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "sface/face_recognition_sface_2021dec.onnx";
+
+    #[test]
+    fn embedding_matches_the_golden_vector() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = SFace::load(&path).unwrap();
+        let embedding = model.embed(&synthetic_rgb(112, 112)).unwrap();
+        check(
+            "sface",
+            PATH,
+            "synthetic_rgb(112, 112) as an aligned RGB8 face crop; L2-normalized 128-d embedding",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[Probe { name: "embedding", shape: vec![128], values: &embedding }],
+        );
+    }
+}

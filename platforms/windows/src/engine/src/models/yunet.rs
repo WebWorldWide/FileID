@@ -357,3 +357,31 @@ mod tests {
         assert!((out[0].score - 1.0).abs() < 1e-4);
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "yunet/face_detection_yunet_2023mar.onnx";
+
+    #[test]
+    fn raw_outputs_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = YuNet::load(&path).unwrap();
+        let input = YuNet::prepare(&synthetic_rgb(640, 640), 640, 640).unwrap().unwrap();
+        let mut outputs = model.forward(input.chw).unwrap();
+        outputs.sort_by(|a, b| a.0.cmp(&b.0));
+        let probes: Vec<Probe> = outputs
+            .iter()
+            .map(|(name, values)| Probe { name, shape: vec![values.len()], values })
+            .collect();
+        check(
+            "yunet",
+            PATH,
+            "synthetic_rgb(640, 640) letterboxed (identity) to BGR 1x3x640x640; the 12 raw cls/obj/bbox/kps outputs by name",
+            Tolerance { max_abs: 1e-3, rel_norm: 1e-3 },
+            &probes,
+        );
+    }
+}

@@ -300,37 +300,35 @@ impl RamPlusTagger {
     /// ONLY part that touches `&mut self.session`, so it is what the caller
     /// serializes under the pool Mutex.
     pub fn tag_prepared(&mut self, chw: Array4<f32>) -> Result<Vec<(String, f32)>> {
+        let logits = self.logits(chw)?;
+        Ok(self.select_tags(&logits))
+    }
+
+    /// The model's raw per-tag logits for one pre-normalized input tensor.
+    fn logits(&mut self, chw: Array4<f32>) -> Result<Vec<f32>> {
         let input = Tensor::from_array(chw).context("RAM++ input tensor")?;
         let input_name = self.input_name.clone();
-        // Extract the logits inside a block so the `outputs` borrow of
-        // `self.session` is released BEFORE the `&self` select_tags call below.
-        // `SessionOutputs` has a Drop impl, so its borrow lives to end-of-scope
-        // — calling select_tags in the same scope is the E0502 the old
-        // closure-locals workaround sidestepped; the block drops it first.
-        let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
-            let outputs: SessionOutputs = self
-                .session
-                .run(vec![(input_name, SessionInputValue::from(input))])
-                .context("RAM++ session.run")
-                .map_err(classify_inference_error)?;
-            let (_, value) = outputs
-                .iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-            let (_shape, logits) = value
-                .try_extract_tensor::<f32>()
-                .context("extract RAM++ logits as f32")?;
-            if logits.len() != self.tags.len() {
-                anyhow::bail!(
-                    "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
-                    logits.len(),
-                    self.tags.len()
-                );
-            }
-            logits.to_vec()
-        };
-        Ok(self.select_tags(&logits_vec))
+        ensure_gpu_inference_alive()?;
+        let outputs: SessionOutputs = self
+            .session
+            .run(vec![(input_name, SessionInputValue::from(input))])
+            .context("RAM++ session.run")
+            .map_err(classify_inference_error)?;
+        let (_, value) = outputs
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
+        let (_shape, logits) = value
+            .try_extract_tensor::<f32>()
+            .context("extract RAM++ logits as f32")?;
+        if logits.len() != self.tags.len() {
+            anyhow::bail!(
+                "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
+                logits.len(),
+                self.tags.len()
+            );
+        }
+        Ok(logits.to_vec())
     }
 
     /// Batched [`tag`]: preprocess N images into ONE (N,3,384,384) tensor and run
@@ -673,5 +671,28 @@ mod tests {
         assert!(set.contains("catch"));
         assert_eq!(set.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "ram_plus/ram_plus.onnx";
+
+    #[test]
+    fn logits_match_the_golden_vectors() {
+        let (Some(onnx), Some(tags)) = (model_file(PATH), model_file("ram_plus/ram_plus_tags.txt")) else { return };
+        let mut model = RamPlusTagger::load(&onnx, &tags).unwrap();
+        let chw = RamPlusTagger::preprocess_tensor(&synthetic_rgb(384, 384), 384, 384).unwrap();
+        let logits = model.logits(chw).unwrap();
+        check(
+            "ram_plus",
+            PATH,
+            "synthetic_rgb(384, 384) through the engine's bilinear-384 + ImageNet preprocessing; the raw per-tag logits",
+            Tolerance { max_abs: 0.6, rel_norm: 2e-3 },
+            &[Probe { name: "logits", shape: vec![logits.len()], values: &logits }],
+        );
     }
 }

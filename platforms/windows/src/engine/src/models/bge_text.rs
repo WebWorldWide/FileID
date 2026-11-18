@@ -194,3 +194,29 @@ pub fn default_weights_path() -> Result<PathBuf> {
 pub fn default_vocab_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("bge_text").join("vocab.txt"))
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, Probe, Tolerance};
+
+    const PATH: &str = "bge_text/bge_small.onnx";
+
+    #[test]
+    fn embeddings_match_the_golden_vectors() {
+        let (Some(path), Some(vocab)) = (model_file(PATH), model_file("bge_text/vocab.txt")) else { return };
+        let mut model = BgeText::load(&path, &vocab).unwrap();
+        let short = model.embed("invoice").unwrap();
+        let long = model.embed("Quarterly invoice for the office printer, paid by bank transfer on 3 March").unwrap();
+        check(
+            "bge_text",
+            PATH,
+            "the texts \"invoice\" and \"Quarterly invoice for the office printer, paid by bank transfer on 3 March\" through the BGE WordPiece tokenizer; mean-pooled L2-normalized 384-d embeddings",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[
+                Probe { name: "short", shape: vec![384], values: &short },
+                Probe { name: "long", shape: vec![384], values: &long },
+            ],
+        );
+    }
+}
