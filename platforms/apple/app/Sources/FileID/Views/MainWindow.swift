@@ -180,8 +180,8 @@ struct MainWindow: View {
                 }
             }
             .preferredColorScheme(.dark)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: sidebarVisible)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: sidebarVisible)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: chatPresented)
             .accentColor(Theme.gold)
             .onReceive(NotificationCenter.default.publisher(for: .fileIDChooseFolder)) { _ in pickFolder() }
             .onReceive(NotificationCenter.default.publisher(for: .fileIDGoToTab)) { note in
@@ -202,6 +202,7 @@ struct MainWindow: View {
                 handoff.navigate = { activeTabBinding.wrappedValue = $0 }
                 handoff.chooseFolder = { chooseProposed($0) }
                 #if DEBUG
+                if SelfShot.opensChatDrawer { chatPresented = true }
                 SelfShot.run(engine: engine, store: store,
                              navigate: { raw in if let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab } },
                              openFolder: { url, scan in if scan { choose(url) } else { pickedURL = url } })

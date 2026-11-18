@@ -2,8 +2,6 @@ import SwiftUI
 import AppKit
 import FileIDShared
 
-private let reviewSpring = Animation.spring(response: 0.38, dampingFraction: 0.8)
-
 struct FaceReviewList: View {
     let model: FaceReviewModel
     let personByID: [Int64: ReadStore.PersonRow]
@@ -23,8 +21,8 @@ struct FaceReviewList: View {
                 MetaText(FaceReviewText.empty, color: Theme.text3)
             }
         }
-        .animation(reduceMotion ? nil : reviewSpring, value: model.items.map(\.faceID))
-        .animation(reduceMotion ? nil : reviewSpring, value: model.undoOperationID)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: model.items.map(\.faceID))
+        .animation(reduceMotion ? nil : Theme.springStandard, value: model.undoOperationID)
     }
 
     private var acceptAll: some View {

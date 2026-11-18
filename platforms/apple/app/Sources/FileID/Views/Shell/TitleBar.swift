@@ -52,7 +52,7 @@ struct TitleBar: View {
     private var leading: some View {
         HStack(spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { sidebarVisible.toggle() }
+                withAnimation(Theme.springStandard) { sidebarVisible.toggle() }
             } label: {
                 Image(systemName: "sidebar.left").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget).contentShape(Rectangle())

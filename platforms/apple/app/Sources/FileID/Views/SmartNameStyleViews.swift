@@ -172,7 +172,7 @@ struct SmartNamePreviewSheet: View {
         NameStyle.naming(style: style, maxLength: maxLength, includePeople: includePeople, includeEvent: includeEvent,
                          includeDate: includeDate, learn: learn)
     }
-    private var rowSpring: Animation? { reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8) }
+    private var rowSpring: Animation? { Theme.spring }
     private var ready: [CatalogWrites.NamedRename] { NameStyle.renames(rows) }
 
     var body: some View {
