@@ -6,8 +6,6 @@ namespace FileID.App.Tests;
 
 public class AppSettingsTests
 {
-    // The production serializer options. We mirror the camelCase + null-skip
-    // settings so the test asserts the documented wire shape.
     private static readonly JsonSerializerOptions s_options = new()
     {
         WriteIndented = true,
@@ -145,9 +143,6 @@ public class AppSettingsTests
     [Fact]
     public void Serializer_OmitsNullStringProperties()
     {
-        // DefaultIgnoreCondition.WhenWritingNull means nullable strings that
-        // are null don't appear in the JSON output. Keeps settings.json
-        // compact and forward-compatible.
         var s = new AppSettings { LastFolderPath = null, GpuExecutionProviderOverride = null };
         var json = JsonSerializer.Serialize(s, s_options);
         Assert.DoesNotContain("lastFolderPath", json);
@@ -168,10 +163,6 @@ public class AppSettingsTests
     [Fact]
     public void Deserializer_IsCaseSensitive()
     {
-        // PropertyNameCaseInsensitive = false. A tampered settings.json
-        // that PascalCases field names won't read back as the canonical
-        // value — instead the field gets the default. This is the
-        // production posture per the AppSettings.cs comment.
         var pascalJson = "{\"ActiveTab\":\"people\"}";
         var decoded = JsonSerializer.Deserialize<AppSettings>(pascalJson, s_options);
         Assert.NotNull(decoded);
@@ -181,8 +172,6 @@ public class AppSettingsTests
     [Fact]
     public void Deserializer_IgnoresUnknownFields()
     {
-        // Forward-compatibility: a future schema version may add fields
-        // we don't yet declare. Deserializing must not throw.
         var futureJson = "{\"activeTab\":\"people\",\"someFutureField\":42,\"anotherFuture\":\"x\"}";
         var decoded = JsonSerializer.Deserialize<AppSettings>(futureJson, s_options);
         Assert.NotNull(decoded);
@@ -203,7 +192,6 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        // "{}" carries no schemaVersion → property default (current schema, v5).
         Assert.Equal(5, decoded.SchemaVersion);
     }
 }

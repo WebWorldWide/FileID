@@ -1,7 +1,4 @@
 ﻿// Perceptual near-duplicate grouping: Hamming distance over 64-bit dHashes +
-// union-find clustering. Drives the pure logic behind Cleanup's "Similar" mode
-// directly, separate from the SQLite query that feeds it. Mirrors the macOS
-// SharedTests/PerceptualGroupingTests.swift case-for-case.
 
 using System;
 using System.Collections.Generic;
@@ -14,8 +11,6 @@ namespace FileID.App.Tests;
 
 public class PerceptualGroupingTests
 {
-    // dHash bit-pattern helper: reinterpret a UInt64 as Int64 (the engine stores
-    // the signed bit-pattern of the unsigned hash). Mirrors macOS Int64(bitPattern:).
     private static long I(ulong u) => unchecked((long)u);
 
     private static List<(long Id, long Phash)> Items(params (long Id, long Phash)[] xs)
@@ -27,7 +22,6 @@ public class PerceptualGroupingTests
         Assert.Equal(0, PerceptualGrouping.HammingDistance(I(0x0), I(0x0)));   // identical
         Assert.Equal(1, PerceptualGrouping.HammingDistance(I(0x0), I(0x1)));   // one bit
         Assert.Equal(8, PerceptualGrouping.HammingDistance(I(0x0), I(0xFF)));  // low byte
-        // Sign bit is just bit 63 — XOR the bit patterns, not the signed values.
         Assert.Equal(64, PerceptualGrouping.HammingDistance(I(0x0), I(ulong.MaxValue)));
         Assert.Equal(0, PerceptualGrouping.HammingDistance(I(ulong.MaxValue), I(ulong.MaxValue)));
     }
@@ -44,7 +38,6 @@ public class PerceptualGroupingTests
     [Fact]
     public void WithinThreshold_Groups_FarImageStaysAlone()
     {
-        // 0x0 and 0x1 are Hamming 1; 0xFFFF... is far from both.
         var items = Items((1, I(0x0)), (2, I(0x1)), (3, I(ulong.MaxValue)));
         var groups = PerceptualGrouping.GroupByHamming(items, maxHamming: 8);
         Assert.Single(groups);
@@ -54,7 +47,6 @@ public class PerceptualGroupingTests
     [Fact]
     public void JustOverThreshold_DoesNotGroup_ThenGroupsWhenBumped()
     {
-        // 0x1FF has 9 bits set → Hamming 9 from 0x0, just over a threshold of 8.
         var items = Items((1, I(0x0)), (2, I(0x1FF)));
         Assert.Equal(9, PerceptualGrouping.HammingDistance(I(0x0), I(0x1FF)));
         Assert.Empty(PerceptualGrouping.GroupByHamming(items, maxHamming: 8));
@@ -67,7 +59,6 @@ public class PerceptualGroupingTests
     [Fact]
     public void Transitivity_AtoB_BtoC_UnionsIntoOneGroup()
     {
-        // a=0x00, b=0x0F (Ham 4 from a), c=0xFF (Ham 4 from b, but Ham 8 from a).
         long a = I(0x00), b = I(0x0F), c = I(0xFF);
         Assert.Equal(4, PerceptualGrouping.HammingDistance(a, b));
         Assert.Equal(4, PerceptualGrouping.HammingDistance(b, c));
@@ -96,9 +87,6 @@ public class PerceptualGroupingTests
     [Fact]
     public void GroupOrder_IsDeterministic_FirstSeenRoot()
     {
-        // Cluster of ids {2,3} appears before the cluster of {1,4} by first-seen
-        // index, since index 1 (id 2) precedes index 3 (id 4) — roots are the
-        // smallest member index. Mirrors macOS first-seen ordering.
         var items = Items(
             (10, I(0x00FF00FF)),     // index 0 — loner
             (2, I(0x0)), (3, I(0x1)),// indices 1,2 — cluster X

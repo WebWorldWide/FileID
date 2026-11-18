@@ -1,8 +1,4 @@
 ﻿// ChangeLog — the session change log behind UndoStack and the
-// SessionChangesSheet. Pins the log's contract: entries survive undo
-// (as Undone), survive failure (as UndoFailed + retry), restructure
-// pushes supersede older restructure entries, and reverse capacity
-// expires closures without dropping session history.
 
 using System;
 using System.ComponentModel;
