@@ -23,7 +23,7 @@ struct Detail: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
+        .background(Theme.pageSurface, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed, spotlightEnabled {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
@@ -153,47 +153,53 @@ private struct EmptyState: View {
     ]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel("FileID / Get started")
-                    Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
-                    Text("Organizes your photos, videos and documents. Everything runs on this Mac, and your files never leave it.")
-                        .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
-                }
-                .padding(.bottom, 26)
+        GeometryReader { geometry in
+            ScrollView {
+                content
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(.horizontal, Theme.Metrics.pageInsetX)
+                    .padding(.vertical, 40)
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+            }
+        }
+    }
 
-                Panel {
-                    PanelHeader("How it works")
-                    ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                        HStack(alignment: .firstTextBaseline, spacing: 14) {
-                            Text(String(index + 1)).font(Theme.ChromeFont.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
-                                .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 8) {
-                                    Text(step.1).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
-                                    MetaText(step.0.uppercased(), size: 10.5)
-                                }
-                                Text(step.2).font(Theme.Font.body(13)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("FileID / Get started")
+                Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
+                Text("Organizes your photos, videos and documents. Everything runs on this Mac, and your files never leave it.")
+                    .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
+            }
+            .padding(.bottom, 26)
+
+            Panel {
+                PanelHeader("How it works")
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    HStack(alignment: .firstTextBaseline, spacing: 14) {
+                        Text(String(index + 1)).font(Theme.ChromeFont.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
+                            .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(step.1).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                                MetaText(step.0.uppercased(), size: 10.5)
                             }
-                            Spacer(minLength: 0)
+                            Text(step.2).font(Theme.Font.body(13)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                        Spacer(minLength: 0)
                     }
-                }
-                .padding(.bottom, 20)
-
-                HStack(spacing: 12) {
-                    Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
-                        .buttonStyle(.dsPrimary)
-                    MetaText("Or drag a folder onto this window (⌘O).")
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
-            .padding(.horizontal, 40)
-            .padding(.vertical, 48)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 20)
+
+            HStack(spacing: 12) {
+                Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
+                    .buttonStyle(.dsPrimary)
+                MetaText("Or drag a folder here, or press ⌘O.")
+            }
         }
     }
 }

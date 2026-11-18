@@ -21,6 +21,7 @@ struct PipelineBlock: View {
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
     }
     private var captionsRunning: Bool { engine.deepAnalyzeInFlight }
+    private var helperDown: Bool { if case .crashed = engine.state { return true } else { return false } }
 
     private var stage: Stage {
         if let p = progress {
@@ -94,7 +95,7 @@ struct PipelineBlock: View {
     private var stepText: String {
         if captionsRunning && !scanRunning { return "Optional · Describe Files" }
         if let phase = progress?.phase, phase == .cancelled || phase == .failed { return "Not finished" }
-        return stage == .done ? "Done" : "Step \(stage.rawValue + 1) of 4 · \(stage.label)"
+        return stage == .done ? "4 of 4 steps finished" : "Step \(stage.rawValue + 1) of 4 · \(stage.label)"
     }
 
     @State private var showDetails = false
@@ -201,14 +202,14 @@ struct PipelineBlock: View {
                 Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight)
-                    .help(captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
+                    .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight || helperDown)
+                    .help(helperDown ? "FileID's helper isn't running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(startRequested)
-                    .help("Read every file in this folder (⌘R). Nothing is moved or changed.")
+                    .disabled(startRequested || helperDown)
+                    .help(helperDown ? "FileID's helper isn't running. Restart it, then scan." : "Read every file in this folder (⌘R). Nothing is moved or changed.")
             }
         }
         .frame(maxWidth: .infinity)

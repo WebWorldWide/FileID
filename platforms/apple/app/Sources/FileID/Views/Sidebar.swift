@@ -43,34 +43,33 @@ struct Sidebar: View {
                 .padding(.horizontal, 14).padding(.bottom, 10)
             }
 
-            Group {
-                if let url = pickedURL {
-                    PipelineBlock(engine: engine, store: store, pickedURL: url, openPage: { activeTab = $0 })
-                } else {
+            if let url = pickedURL {
+                folderCard { PipelineBlock(engine: engine, store: store, pickedURL: url, openPage: { activeTab = $0 }) }
+            } else if store.totalFiles > 0 || activeTab == .settings {
+                folderCard {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Start with a folder").font(Theme.ChromeFont.body(13, .semibold)).foregroundStyle(Theme.text1)
-                        if store.totalFiles == 0 {
-                            Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
-                                .buttonStyle(DSSecondaryButtonStyle(height: 30))
-                        } else {
-                            Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
-                                .buttonStyle(DSPrimaryButtonStyle(height: 30))
-                        }
+                        Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
+                            .buttonStyle(DSPrimaryButtonStyle(height: 30))
                         MetaText("Or drag a folder onto this window.")
                     }
                 }
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
-            .padding(10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { shownArea = activeTab.area ?? .browse }
         .onChange(of: activeTab) { _, tab in if let area = tab.area, area != shownArea { withAnimation(Theme.quick) { shownArea = area } } }
         .background(Theme.bg1.opacity(0.55), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
+    }
+
+    private func folderCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
+            .padding(10)
     }
 
     /// Browse / Analyze / Act: picks which pages the list shows and opens the
@@ -151,7 +150,7 @@ struct Sidebar: View {
             // A count, like the other badges, and nothing when the plan moves no files.
             guard let plan = engine.restructurePlan else { return nil }
             let moves = plan.totalMoves ?? plan.moves.count
-            return moves > 0 ? (compact(moves), Theme.gold) : nil
+            return moves > 0 ? (compact(moves), Theme.text3) : nil
         default:
             return nil
         }
