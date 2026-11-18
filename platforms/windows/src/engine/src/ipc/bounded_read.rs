@@ -77,7 +77,7 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
 /// framing after rejecting an oversized frame. Best-effort; swallows errors
 /// and returns on any failure or EOF.
 ///
-/// Scans the BufReader's buffer in chunks (same R4-04 reasoning as
+/// Scans the BufReader's buffer in chunks (same reasoning as
 /// `bounded_read_line` — not one ReadExact future per byte), and gives up after
 /// `MAX_DRAIN` bytes without a newline. This drain runs *outside* the stdio
 /// loop's `select!`, so a multi-GB newline-free stream on an unbounded

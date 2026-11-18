@@ -1,4 +1,4 @@
-//! Stage 7: MLX vision-language models for the engine the Mac app hosts.
+//! MLX vision-language models for the engine the Mac app hosts.
 //!
 //! The sessions are the Swift engine's `DeepAnalyze` code compiled into
 //! FileIDAppleKit (`FileIDAppleVLM`), so prompts, decoding, the prefix and chat

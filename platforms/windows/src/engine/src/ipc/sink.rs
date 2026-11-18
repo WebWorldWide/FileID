@@ -24,8 +24,8 @@ const CHANNEL_CAPACITY: usize = 16384;
 // app's bounded reader (it resyncs to the next newline), which hangs the UI
 // that was awaiting the reply (e.g. a huge restructurePlan). Rather than emit
 // the oversize frame, the sink substitutes a small structured
-// `ipc_frame_too_large` error the app can surface. Bumped 32→64 MiB,
-// symmetric with the inbound caps, to carry a whole-library plan.
+// `ipc_frame_too_large` error the app can surface.
+// symmetric with the inbound caps, and sized for a whole-library plan.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// The event wire when it is not stdout: the macOS app-hosted engine writes
@@ -193,7 +193,6 @@ fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
         if !write_line(handle, &mut scratch, &first) {
             break;
         }
-        // Drain the rest of the current burst without flushing.
         loop {
             match rx.try_recv() {
                 Ok(event) => {
@@ -209,13 +208,11 @@ fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
                 }
             }
         }
-        // One flush per drained burst.
         if let Err(err) = handle.flush() {
             tracing::error!(?err, "ipc sink flush failed");
             break;
         }
     }
-    // Channel closed: best-effort final flush.
     let _ = handle.flush();
 }
 
@@ -300,7 +297,6 @@ mod tests {
             hardware: None,
         })))).await;
         drop(sink);
-        // Writer task drains and exits.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
     }
 
@@ -445,9 +441,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_phase_send_is_never_dropped_under_backpressure() {
         let (sink, mut rx) = Sink::channel_for_test(1);
-        // Fill the single slot.
         sink.try_send(log_event("filler".into())).unwrap();
-        // The channel is now full: the droppable path fails.
         assert!(
             sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Cancelled
@@ -461,7 +455,6 @@ mod tests {
         let drainer = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let _ = rx.recv().await; // drop the filler, freeing one slot
-            // Receive the terminal frame that send() delivered.
             rx.recv().await
         });
 

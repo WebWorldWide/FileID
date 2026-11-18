@@ -1,4 +1,4 @@
-//! Stage 5: safe wrappers over the FileIDAppleKit scan adapters. Images stay in
+//! Safe wrappers over the FileIDAppleKit scan adapters. Images stay in
 //! the adapter as decoded CGImages behind a handle; Vision, the text read, CLIP
 //! and RAM++ read them there, so the scan sees the same pixels the Swift engine
 //! sees. Results cross as JSON. Policy (which stages run, what is stored) stays

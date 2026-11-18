@@ -372,9 +372,9 @@ pub struct HardwareInfo {
     /// already on the optimal path.
     #[serde(default)]
     pub recommendation: String,
-    // ─── Adaptive-utilization diagnostics. All optional
+    // Adaptive-utilization diagnostics. All optional
     //     so an older C# build talking to a newer engine still deserializes
-    //     cleanly. ───
+    //     cleanly.
     /// CPU performance-core count (Intel hybrid 12th-gen+, future AMD
     /// dense-core parts). 0 on non-hybrid CPUs (use physical_cpu_cores).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -447,8 +447,6 @@ impl EngineError {
         IpcEvent::now(EventPayload::Error(Wrap::new(self)))
     }
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

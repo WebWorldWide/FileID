@@ -93,7 +93,7 @@ impl ResourceScheduler {
             .get_or_init(|| {
                 // Installed memory never changes and free memory is probed at most
                 // every 100 ms: a scan asks twice per file, and each probe is a
-                // system call (or two) that used to run for every one.
+                // system call (or two) that would otherwise run for every ask.
                 static TOTAL_MB: OnceLock<u64> = OnceLock::new();
                 static AVAILABLE_MB: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
                 Self::new(

@@ -89,7 +89,7 @@ fn extract_archive(
             );
         }
         // Cheap early-out on an honest header; the AUTHORITATIVE cumulative cap
-        // is charged the ACTUAL decompressed bytes after the copy below (ENG-88).
+        // is charged the ACTUAL decompressed bytes after the copy below.
         if total_bytes.saturating_add(entry_size) > max_bytes {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", max_bytes);
         }
@@ -106,7 +106,7 @@ fn extract_archive(
             .with_context(|| format!("creating staged entry {}", dest.display()))?;
         // Bound the ACTUAL decompressed output, not the attacker-controlled
         // declared entry.size(): a lying central directory could otherwise
-        // make io::copy inflate far past the caps (zip bomb, ENG-88). The cap
+        // make io::copy inflate far past the caps (zip bomb). The cap
         // shrinks to the remaining cumulative budget; +1 so an entry exactly
         // at the cap copies fully while an over-cap one is still detected.
         let entry_cap = max_entry_bytes.min(max_bytes.saturating_sub(total_written));

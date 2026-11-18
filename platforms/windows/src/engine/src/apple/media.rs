@@ -1,4 +1,4 @@
-//! Stage 8: AVFoundation media tools, timeline frames and on-device Apple
+//! AVFoundation media tools, timeline frames and on-device Apple
 //! Speech through FileIDAppleKit. Probes, the trim/remux/audio/proxy/rotate
 //! exports and speech run in process, as in the Swift engine; frame decoding,
 //! the frame pool and the video export run in this binary's own worker
