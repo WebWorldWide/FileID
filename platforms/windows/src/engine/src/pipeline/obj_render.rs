@@ -1,12 +1,4 @@
-//! Hand-rolled software rasterizer: a Wavefront `.obj` → a small shaded PNG the Deep
-//! Analyze VLM can recognize, so a generically-named model (`mesh_001.obj`) still gets a
-//! descriptive name ("a wooden chair"). No new dependency — it parses the text `.obj` /
-//! `.mtl` itself, projects with a fixed 3/4 (isometric-ish) camera, z-buffers flat-shaded
-//! triangles (per-face `.mtl` Kd colour + one Lambert light), and encodes the PNG with the
-//! `image` crate we already ship. The target is "the VLM can tell it's a chair / car /
-//! character", not photoreal — flat shading from a 3/4 view is enough, so this needs no
-//! GPU and isn't lockstep-bound to macOS (which renders the same `.obj` via QuickLook).
-//!
+//! Software rasterizer: a `.obj` becomes a shaded 512×512 PNG for the Deep Analyze VLM, so generically named models still get a descriptive name.
 //! macOS counterpart: `DeepAnalyze.quickLookThumbnail` (the OS 3D QuickLook generator).
 
 use std::path::Path;
@@ -32,7 +24,6 @@ const MAX_MATERIALS: usize = 50_000;
 /// a million full-frame triangles would otherwise take minutes per file.
 const MAX_RASTER_PIXELS: u64 = 500_000_000;
 
-/// A triangle ready to rasterize: the three positions and its flat surface colour.
 struct Tri {
     p: [[f32; 3]; 3],
     kd: [f32; 3],
@@ -126,7 +117,6 @@ fn parse_obj(obj_path: &Path) -> Result<(Vec<[f32; 3]>, Vec<Tri>)> {
                 if tris.len().saturating_add(triangle_count) > MAX_OBJ_TRIANGLES {
                     bail!("obj triangle count exceeds safety cap");
                 }
-                // Fan-triangulate: (v0, vk, vk+1) for k in 1..=n-2.
                 for k in 1..idx.len().saturating_sub(1) {
                     tris.push(Tri {
                         p: [verts[idx[0]], verts[idx[k]], verts[idx[k + 1]]],
@@ -227,9 +217,7 @@ fn read_text_bounded(path: &Path, limit: u64) -> Result<(String, u64)> {
 
 /// Project, shade, and z-buffer the triangles into a `SIZE×SIZE` RGB buffer.
 fn rasterize(verts: &[[f32; 3]], tris: &[Tri]) -> Vec<u8> {
-    // Fixed 3/4 view: yaw(30°) then pitch(22°) so we see front + top + one side (reads
-    // well for most assets). Precompute the rotation's sin/cos once, then rotate every
-    // vertex and fit the rotated XY bounds to the frame.
+    // Fixed 3/4 view (yaw 30°, pitch 22°): front, top and one side read well for most assets.
     let (sy, cy) = 30.0_f32.to_radians().sin_cos();
     let (sp, cp) = 22.0_f32.to_radians().sin_cos();
     let rotate = |v: [f32; 3]| -> [f32; 3] {
@@ -381,7 +369,6 @@ mod tests {
 
     #[test]
     fn parse_obj_reads_verts_and_triangulates_quads() {
-        // A unit quad → two triangles; negative-index face resolves too.
         let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\nf -4 -3 -2\n";
         let p = write_tmp("quad.obj", obj);
         let (verts, tris) = parse_obj(&p).unwrap();
@@ -430,7 +417,6 @@ mod tests {
             load_mtl(&obj, unsafe_ref, &mut out, &mut remaining);
             assert!(out.is_empty(), "unsafe mtllib was not rejected: {unsafe_ref}");
         }
-        // A real sibling .mtl IS read.
         write_tmp("model.mtl", "newmtl red\nKd 1 0 0\n");
         let mut out = std::collections::HashMap::new();
         let mut remaining = MAX_MTL_TOTAL_BYTES;

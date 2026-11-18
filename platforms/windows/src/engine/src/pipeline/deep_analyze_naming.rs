@@ -133,7 +133,6 @@ pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<Strin
     }
     // Pull `newmtl` names from the referenced .mtl too (often richer than the
     // `usemtl` refs).
-    //
     // SEC: the `mtllib` value is untrusted .obj content. Accept it ONLY as a
     // safe single-component filename inside the .obj's own folder. An absolute
     // value (`mtllib C:\pagefile.sys`) would otherwise REPLACE `parent` via

@@ -1,5 +1,4 @@
-//! When a file's text deserves a careful read: the scan's OCR gate and Deep
-//! Analyze's VLM transcription. Mirrors macOS `TextReading.swift` rule for rule
+//! Decides when a file's text deserves a careful read; mirrors macOS `TextReading.swift` rule for rule.
 //! (macOS adds Vision's accurate tier in the scan; this engine's OCR has no
 //! handwriting tier, so the VLM transcription is its handwriting path).
 

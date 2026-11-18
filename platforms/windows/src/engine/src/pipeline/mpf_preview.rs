@@ -1,8 +1,5 @@
-//! The large preview a camera stores inside its JPEGs as a CIPA DC-007 (MPF)
-//! "large thumbnail" (Sony 1616x1080; Nikon and Fujifilm similar). Decoding it
-//! instead of the 24-60 MP frame skips the entropy decode that bounds camera
-//! JPEG scans; the Mac engine's `JPEGPreview.swift` carries the same rules
-//! and measured the outputs against full decodes (DECISIONS 2026-11-10).
+//! CIPA DC-007 (MPF) large thumbnail of a camera JPEG. Decoding it skips the entropy decode that bounds full-frame scans.
+//! Same rules as macOS `JPEGPreview.swift`, measured against full decodes.
 
 const LARGE_THUMBNAIL_TYPES: [u32; 2] = [0x0001_0001, 0x0001_0002];
 pub const MAX_PREVIEW_BYTES: usize = 8 << 20;

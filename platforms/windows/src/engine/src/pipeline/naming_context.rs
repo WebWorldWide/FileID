@@ -245,9 +245,7 @@ impl NamingContext {
     }
 }
 
-/// Organize Folders: a file whose reviewed label gives a name uses it in place of
-/// the stored model name; any load failure or abstention keeps the stored name
-/// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
+/// Organize Folders: a reviewed label's name replaces the stored model name; any load failure or abstention keeps it (macOS `Restructure.swift`).
 pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
     let labelled = match labelled_files(conn, files) {
         Ok(ids) if !ids.is_empty() => ids,

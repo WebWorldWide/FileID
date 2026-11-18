@@ -22,7 +22,6 @@ pub struct Marker {
     pub face_count: i64,
 }
 
-// MARK: - Files that keep failing
 
 /// A file that could not be analysed is retried on this many scans, then left
 /// alone until its size or date changes, the engine is updated, or the user
@@ -73,7 +72,6 @@ pub fn failure_is_about_the_file(path: &std::path::Path) -> bool {
     std::fs::File::open(long).and_then(|mut file| file.read(&mut [0u8; 1])).is_ok()
 }
 
-// MARK: - RAM++ after the scan
 
 /// A file's catch-up is given up after this many failed attempts
 /// (`ScanCatchUp.maxAttempts`); it keeps the tags the scan stored.
@@ -868,7 +866,6 @@ mod tests {
         assert_eq!(unicode_fold("ÉCOLE"), "école");
     }
 
-    // MARK: the pass over a real catalog, with a stub in place of the models
 
     struct Library {
         dir: PathBuf,

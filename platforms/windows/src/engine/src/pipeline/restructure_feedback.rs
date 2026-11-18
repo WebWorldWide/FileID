@@ -1,10 +1,4 @@
-//! Learn-from-corrections: a token→folder co-occurrence memory backed by the v18
-//! `restructure_feedback` table. Every move a user APPLIES is approved, so the moved
-//! file's filename tokens are credited toward its destination folder; the next plan
-//! reads those weights as an ADDITIVE confidence hint — it can upgrade a move the
-//! planner already produced to Auto, never re-route. Instance-based, no model
-//! retraining (the SOTA pattern, deep-research 2026-06-17). Lockstep with the Swift
-//! engine's `RestructureFeedback`.
+//! Learn-from-corrections: token→folder co-occurrence memory over `restructure_feedback`. Additive confidence hint only; never re-routes a move. Lockstep with macOS `RestructureFeedback`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -69,13 +63,7 @@ pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
         return;
     };
     for m in moves.iter_mut() {
-        // Only upgrade Review → Auto. An Ask-tier move is one the butler was
-        // explicitly UNSURE about — RESTRUCTURE.md defines Ask as "leave in
-        // place, needs per-file consent". Upgrading Ask → Auto here (at plan
-        // time, before the plan is spooled) let feedback weight silently
-        // rewrite an unsure move to auto, so exclude_ask_tier no longer
-        // matched it and it rode the bulk stored-plan apply without the
-        // consent the Ask tier exists to require.
+        // Review → Auto only: Ask-tier moves are explicitly unsure and need per-file consent, so feedback never upgrades them.
         if matches!(m.confidence, Confidence::Auto | Confidence::Ask) {
             continue;
         }

@@ -1,6 +1,5 @@
 // Two-pass density clustering + quality validation for face identity.
 // Replaces Chinese Whispers, which collapsed bridge faces into mega-clusters.
-//
 //   Pass 1 — connected components on a kNN graph at cosine ≥ pass1Cosine.
 //            Components of size ≥ 2 become identity "cores".
 //   Pass 2 — each unassigned face joins its nearest core iff
@@ -10,7 +9,6 @@
 //   Pass 3 — any cluster with low mean intra-cosine or high variance
 //            is split via 2-means in cosine space and re-validated;
 //            hard floor against mega-cluster collapse.
-//
 // Convergent with Immich (DBSCAN), FaceNet (agglomerative + verification
 // net), and InsightFace reference (DBSCAN/HDBSCAN, cosine 0.4–0.5).
 
@@ -41,19 +39,8 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
-        // SFace defaults recalibrated on the isolated 41,855-face Family Photos
-        // catalog (RTX 5080, 2026-08-08) with an explicit crop oracle. The old
-        // 0.50/0.45 core admitted every reviewed impostor, including unrelated
-        // adults, children, siblings, and a non-face object. 0.66/0.54 with
-        // mutual-kNN separated every negative pair while retaining the reviewed
-        // clear same-person pair and lifting top-cluster p05 cohesion from 0.28
-        // to 0.47. Ambiguous low-quality faces are gated before this stage rather
-        // than being allowed to bridge otherwise-clean identities.
-        //
-        // All values remain env-overridable for corpus-specific sweeps
-        // (unset → these defaults): FILEID_FACE_PASS1_COSINE / _PASS2_COSINE /
-        // _PASS2_MARGIN / _MUTUAL_KNN / _PASS3_MIN_MEAN_COSINE /
-        // _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS, plus the quality gate.
+        // SFace defaults, calibrated on a labelled 41,855-face catalog: 0.66/0.54 with mutual-kNN separates every reviewed negative pair.
+        // Env-overridable (FILEID_FACE_PASS1_COSINE and siblings) for corpus-specific sweeps.
         // Further recall gains require stronger labelled evidence or a stronger
         // commercially clean embedder, not a blind reduction of these floors.
         // Reject non-finite (NaN/inf) env values — they'd silently poison
@@ -79,13 +66,7 @@ impl Default for Hyperparameters {
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .map(|v| v.clamp(1, 64))
                 .unwrap_or(7),
-            // k_nn caps how many neighbors Pass 1 sees per face; 10 truncated
-            // dense identities (anyone with >10 similar faces) into split cores
-            // that Pass 2/consolidate can't always rejoin. Measured on the full
-            // 84,582-face Adlon corpus (2026-07-14): k 10→32 alone cut person
-            // clusters 2,272 → 864 while the top clusters got TIGHTER (mean
-            // cosine-to-centroid up), i.e. it heals real fragmentation instead
-            // of chaining identities. Env-tunable for corpus-specific sweeps.
+        // k=10 split dense identities into cores that could not rejoin; k=32 heals fragmentation without chaining identities (measured on 84,582 faces).
             k_nn: std::env::var("FILEID_FACE_KNN")
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok())
@@ -148,14 +129,7 @@ where
     E: AsRef<[f32]>,
     F: FnMut(usize) -> Vec<Neighbor>,
 {
-    // MUTUAL-kNN is the DEFAULT here (label-validated 2026-07-05): an edge i—j is
-    // kept only when EACH face is in the other's above-threshold neighbourhood,
-    // which breaks the single "bridge" face that would otherwise chain two
-    // identities into one mega-cluster. Set FILEID_FACE_MUTUAL_KNN=0 to fall back
-    // to plain single-linkage (union i with every kNN hit above the threshold —
-    // simpler, zero extra allocation, but chains through bridge faces). Both fail
-    // toward over-split (UI-mergeable, the safe direction); Pass 3's 2-means split
-    // is unchanged either way.
+        // Mutual-kNN is the default: an edge is kept only when each face is in the other's neighbourhood, so one bridge face cannot chain two identities. FILEID_FACE_MUTUAL_KNN=0 falls back to single-linkage, which chains through bridge faces. Both fail toward over-split, the safe direction.
     let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
         .ok()
         .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
@@ -209,7 +183,6 @@ where
         };
     }
 
-    // ── Pass 1: connected components above pass1_cosine ───────────
     let mut cannot_neighbors = vec![HashSet::new(); n];
     for &(a, b) in cannot_links {
         if a >= n || b >= n || a == b {
@@ -306,13 +279,7 @@ where
     }
     let pass1_cores = cores.len();
 
-    // ── Pass 2: outlier assignment with margin ────────────────────
-    // Maintain a parallel unnormalized running sum per core alongside the
-    // normalized centroid. Recomputing centroid_normalized over the full
-    // membership on every outlier add is O(S) per add → O(S^2) over a pass;
-    // folding the outlier into the running sum is O(dim) per add and the
-    // normalized copy is recomputed from that sum. Mathematically identical
-    // (only floating-point reassociation differs).
+        // Running unnormalized sum per core: an outlier add is O(dim) instead of recomputing the centroid over all members.
     let mut core_sums: Vec<Vec<f32>> = cores
         .iter()
         .map(|c| centroid_sum(c, embeddings, dim))
@@ -373,8 +340,6 @@ where
         } else {
             let singleton_index = cores.len();
             cores.push(vec![outlier]);
-            // A singleton's unnormalized sum is the embedding itself; its
-            // normalized centroid is the (already L2-normalized) embedding.
             core_sums.push(v.to_vec());
             core_centroids.push(v.to_vec());
             core_of_face[outlier] = Some(singleton_index);
@@ -382,7 +347,6 @@ where
         }
     }
 
-    // ── Pass 3: quality validation + 2-means split ────────────────
     let mut splits_applied = 0;
     let mut refined: Vec<Vec<usize>> = Vec::with_capacity(cores.len());
     for cluster_members in cores {
@@ -399,7 +363,6 @@ where
         refined.extend(parts);
     }
 
-    // ── Materialize result ────────────────────────────────────────
     let mut cluster_ids = vec![0usize; n];
     for (cid, members) in refined.iter().enumerate() {
         for &m in members {
@@ -463,8 +426,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 
 /// Recursively split a cluster if it fails the variance / mean-cosine
 /// quality bar. Returns one or more sub-clusters.
-// The 2-means split uses paired `seed_a_*` / `seed_b_*` names; the
-// pairing is the algorithm.
 #[allow(clippy::similar_names)]
 fn validate_and_split(
     cluster: Vec<usize>,
@@ -549,7 +510,6 @@ fn validate_and_split(
         }
         let new_a = centroid_normalized(&group_a, embeddings, dim);
         let new_b = centroid_normalized(&group_b, embeddings, dim);
-        // Convergence: both centroids barely moved.
         let converged = dot(&new_a, &cent_a) > 0.999 && dot(&new_b, &cent_b) > 0.999;
         cent_a = new_a;
         cent_b = new_b;
@@ -566,7 +526,6 @@ fn validate_and_split(
     left
 }
 
-// ── Union-Find with path compression + union by rank ───────────────
 
 struct UnionFind {
     parent: Vec<usize>,
@@ -585,7 +544,6 @@ impl UnionFind {
         while self.parent[r] != r {
             r = self.parent[r];
         }
-        // Path compression.
         let mut cur = x;
         while self.parent[cur] != r {
             let next = self.parent[cur];

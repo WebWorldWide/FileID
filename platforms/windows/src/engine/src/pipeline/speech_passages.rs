@@ -1,7 +1,4 @@
-//! Speech chunks and passages for on-device recognisers that return timed
-//! words (Apple Speech in the Mac app's engine): the rules of the Swift
-//! engine's `TimelineSpeechTranscription`, so both engines write the same
-//! coverage and passage rows and resume each other's jobs chunk by chunk.
+//! Chunks and passages for timed-word recognisers. Must match the Swift engine's `TimelineSpeechTranscription`, so both engines write the same rows and resume each other's jobs.
 
 use serde::Deserialize;
 

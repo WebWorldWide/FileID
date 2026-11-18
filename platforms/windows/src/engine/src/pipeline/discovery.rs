@@ -1,16 +1,4 @@
-// Discovery — walks the user-picked root, emitting one DiscoveredFile per
-// readable file the scan should consider.
-//
-// Rewrite: jwalk (rayon-backed parallel walk) + process_read_dir
-// directory-level pruning + atomic count-before-send. The previous
-// walkdir + tx.blocking_send implementation tied the discovery counter
-// to tagging throughput; if the ML pipeline stalled (a busy
-// CPU) the walk also stalled because the
-// 1024-slot channel filled in under a second on NVMe. Users saw
-// "Discovered 1,324" after 60s for a 22 files/s observed rate against a
-// 50K+ file NVMe → bottleneck was tagging, not the FS.
-//
-// New semantics:
+// Discovery — walks the user-picked root, emitting one DiscoveredFile per readable file the scan should consider. jwalk walks in parallel; the counter is bumped before the blocking send, so it tracks the walk even when tagging stalls.
 //   - jwalk distributes stat() calls across `walk_concurrency_for(root)`
 //     threads (NVMe → 16, SATA SSD → 8, HDD → 2; see platform.rs).
 //   - process_read_dir prunes noise directories (node_modules, .git, etc.)
@@ -24,7 +12,6 @@
 //     completion at filesystem speed, so `done`, the discovered total,
 //     and DiscoveryComplete are truthful within minutes even when the
 //     ML stage is orders of magnitude slower.
-//
 // Filters:
 //   - Hidden / system files: skipped (starts with `.`, OR matches
 //     thumbs.db / desktop.ini / etc.)
@@ -68,14 +55,7 @@ pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
 /// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low).
 /// Once the channel fills, `blocking_send` stalls the walker — from that point
 /// the discovered counter, the `done` flag, and the DiscoveryComplete event all
-/// advance in lockstep with ML throughput instead of filesystem speed. On the
-/// 2026-07-20 overnight run (163k-file corpus, ML serialized to ~0.55 file/s)
-/// the old flat 32768 cap pinned "Discovered"/total at the channel capacity for
-/// 17 hours. Tier-scaled caps below let the walk of any realistically-sized
-/// library complete within minutes of scan start so totals/ETA are real; the
-/// per-entry cost is a `DiscoveredFile` (~300 B with its PathBuf), so even the
-/// High-tier worst case bounds queue memory at ~300 MB — and only while ML is
-/// genuinely that far behind.
+/// advance in lockstep with ML throughput instead of filesystem speed.
 const DISCOVERY_CHANNEL_CAP_LOW: usize = 32_768;
 const DISCOVERY_CHANNEL_CAP_BALANCED: usize = 262_144;
 const DISCOVERY_CHANNEL_CAP_HIGH: usize = 1_048_576;
@@ -115,7 +95,6 @@ impl FileKind {
         }
     }
 
-    /// Inverse of [`FileKind::as_str`] for the stored `files.kind` column.
     pub fn from_db_str(kind: &str) -> Self {
         match kind {
             "image" => FileKind::Image,
@@ -541,24 +520,7 @@ impl Discovery {
         );
 
         let join = tokio::task::spawn_blocking(move || {
-            // jwalk: rayon-backed parallel walk. process_read_dir prunes
-            // noise directories at the read_dir level so we never recurse
-            // into them (the win is dramatic on trees with deep
-            // node_modules / .git subtrees — those entire subtrees are
-            // dropped with a single name check per directory rather than
-            // per-file component traversal).
-            //
-            // The per-file metadata + file_ref opens used to run on
-            // the single consumer thread (the for-loop below), capping
-            // discovery throughput at one stat/open per file once the ML
-            // stage stopped being the bottleneck. We now do that work INSIDE
-            // process_read_dir — which jwalk runs on the rayon pool, one task
-            // per directory — and stash the finished DiscoveredFile in the
-            // entry's typed client_state. The consumer loop then only takes
-            // the pre-computed payload and sends it, so the stat/open syscalls
-            // fan out across `walk_threads` instead of serializing. Ordering
-            // is unchanged: jwalk still yields entries in the same traversal
-            // order regardless of which thread filled each client_state.
+            // jwalk runs process_read_dir on the rayon pool: directory pruning and the per-file stat/file_ref open happen in parallel, and the consumer loop only sends the precomputed payload in traversal order.
             let coord_for_dir = coordinator.clone();
             let context_for_dir = context.clone();
             let excl_for_dir = exclusions.clone();
@@ -721,13 +683,7 @@ impl Discovery {
                 }
                 let Some(discovered) = discovered else { continue };
 
-                // Increment the FS-walk counter BEFORE the channel send so
-                // the "Discovered N" sidebar reflects walk progress even if
-                // the channel briefly backs up. Order matters: this is the
-                // Decoupling fix — under the old code, blocking_send
-                // could stall a file's count when ML stalled. The count +
-                // send stay on this single consumer thread so the counter is
-                // monotonic and the test_file_cap stop condition is exact.
+                // Count before the send so the "Discovered N" counter tracks the walk even when the channel backs up. The count and send stay on this thread so the test cap stop is exact.
                 count_inner.fetch_add(1, Ordering::Relaxed);
                 if matches!(
                     discovered.kind,
@@ -776,7 +732,6 @@ impl Discovery {
 /// (C6-017). Returns both the optional pipeline payload and an optional
 /// stable path hash for reconciliation. Already-current supported files are seen
 /// even though they do not enter the expensive tagging pipeline.
-///
 /// `entry_path` is the verbatim-prefixed walk path (children inherit the
 /// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
 #[cfg(test)]
@@ -857,12 +812,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         .ok()
         .and_then(crate::util::catalog_unix_seconds)
         .unwrap_or(0.0);
-    // Incremental skip: drop a file only when the DB row for THIS path is
-    // genuinely current — same size AND same on-disk mtime as the stored values.
-    // Mirrors the macOS reference (Discovery.isAlreadyCurrent) and the dbwriter
-    // "unchanged" contract. The previous bare path-membership skip stranded any
-    // file edited after its last scan, because the stored modified_at is never
-    // refreshed for a skipped row (its UPSERT never runs).
+    // Incremental skip: drop a file only when its DB row is current (same size and on-disk mtime), mirroring macOS Discovery.isAlreadyCurrent. A skipped row's modified_at is never refreshed, so path-only membership would strand edited files.
     if let Some(&(db_size, db_modified)) = skip_paths.get(&fingerprint) {
         let unchanged = db_size == size as i64
             && match db_modified {
@@ -1214,7 +1164,7 @@ mod tests {
     /// Zero-byte and unsupported-kind files are skipped by the pipeline but are
     /// still PRESENT on disk, so they must stay in the reconciliation seen-set —
     /// otherwise a clean walk soft-hides their catalog rows as "no longer
-    /// present" while the files plainly exist. (audit 2026-07-14)
+    /// present" while the files plainly exist.
     #[test]
     fn skipped_but_present_files_stay_in_the_seen_set() {
         let dir = std::env::temp_dir().join(format!("fileid-disc-seen-{}", std::process::id()));
@@ -1568,15 +1518,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            // Retry the walk a few times over the same tree. Under `cargo test`
-            // the jwalk rayon pool is shared with the whole suite, and on a
-            // saturated CI runner (observed on windows-arm64) a per-file
-            // `symlink_metadata` can transiently fail — classify_entry then
-            // returns `discovered: None` and bumps error_count, so `count`
-            // lands a few below 100 even though the walk completed. A fresh
-            // walk recovers; a genuine persistent under-enumeration still fails
-            // after every attempt. The decoupling property under test (count
-            // reflects walk progress before the receiver drains) is unaffected.
+            // Retry the walk: under `cargo test` a saturated runner can transiently fail a per-file symlink_metadata and undercount a completed walk.
             let mut last = 0u64;
             for _attempt in 0..5 {
                 let coord = ScanCoordinator::new();

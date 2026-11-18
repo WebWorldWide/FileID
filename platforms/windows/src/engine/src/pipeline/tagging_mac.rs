@@ -1,9 +1,4 @@
-//! Stage 5 (convergence): the scan's per-file work when the Mac app hosts the
-//! engine. Rust keeps the orchestration (discovery, decoder threads, workers,
-//! admission, the DB writer); FileIDAppleKit decodes and runs Vision, the text
-//! read, CLIP and RAM++, and each kind's stored result follows the Swift
-//! engine's `Tagging.processFile`, so a library scanned by either engine reads
-//! the same. Faces are stored as the Swift scan stores them (Vision boxes,
+//! Stage 5 convergence path: the scan's per-file work when the Mac app hosts the engine. Each stored result follows the Swift engine's `Tagging.processFile`, so either engine reads the other's library.
 //! quality and the clustering hold, no vectors yet) and get their vectors in the
 //! Mac face space later; this path never writes `rust-align112-v1` faces.
 //! `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
@@ -36,7 +31,6 @@ pub(super) fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_APPLE_SCAN").map_or(true, |v| v.trim() != "0"))
 }
 
-/// What the decoder thread hands the worker besides the shared fields.
 pub(crate) struct Frame {
     image: Option<Arc<scan::Image>>,
     audio: AudioTags,
