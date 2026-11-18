@@ -122,6 +122,7 @@ struct WelcomeSheet: View {
             }
             .disabled(vlmInProgress)
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .font(Theme.Font.body(13.5))
             .padding(.horizontal, 22).padding(.top, 12)
             .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
@@ -169,7 +170,7 @@ struct WelcomeSheet: View {
             footer
         }
         .frame(width: 600)
-        .background(Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94), ignoresSafeAreaEdges: [])
+        .background(Theme.sheetFill, ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         .preferredColorScheme(.dark)
         .onAppear {
@@ -308,7 +309,8 @@ struct WelcomeSheet: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                     .help(technical)
-                Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
+                Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if installed {
                     MetaText("Ready", color: Theme.delight, size: 11)

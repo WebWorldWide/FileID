@@ -548,7 +548,8 @@ struct ToolsWorkbench: View {
                 Spacer()
                 if busy { IndeterminateBar().frame(width: 60) }
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.top, Theme.Metrics.pageInsetY)
             Hairline()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -601,7 +602,7 @@ struct ToolsWorkbench: View {
                 .padding(14)
             }
             Hairline()
-            VStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Button("Preview") {
                         send(ToolRequest(requestID: UUID().uuidString, action: "preview",

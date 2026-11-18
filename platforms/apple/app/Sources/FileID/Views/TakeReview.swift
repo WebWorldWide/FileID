@@ -304,7 +304,7 @@ struct TakeReview: View {
                         ForEach(Array(qualities.enumerated()), id: \.element.primaryFileID) { index, q in
                             FilmstripTile(quality: q, index: index + 1, count: qualities.count, noun: noun.one,
                                           best: q.primaryFileID == bestID, kept: keep.contains(q.primaryFileID),
-                                          focused: index == focusedIndex,
+                                          focused: index == focusedIndex, stripFocused: stripFocused,
                                           onFocus: { focus(index) }, onToggleKeep: { toggleKeep(q) })
                                 .id(q.primaryFileID)
                         }
@@ -319,11 +319,6 @@ struct TakeReview: View {
             .focusable()
             .focused($stripFocused)
             .focusEffectDisabled()
-            .overlay {
-                if stripFocused {
-                    RoundedRectangle(cornerRadius: Theme.Radius.m + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false)
-                }
-            }
             .onKeyPress(.leftArrow) { focus(focusedIndex - 1); return .handled }
             .onKeyPress(.rightArrow) { focus(focusedIndex + 1); return .handled }
             .onKeyPress(.space) { if let q = qualities[safe: focusedIndex] { toggleKeep(q) }; return .handled }
@@ -583,6 +578,8 @@ private struct FilmstripTile: View {
     let best: Bool
     let kept: Bool
     let focused: Bool
+    /// The strip has keyboard focus: the current tile wears the gold focus ring instead of the white marker.
+    let stripFocused: Bool
     let onFocus: () -> Void
     let onToggleKeep: () -> Void
 
@@ -596,7 +593,7 @@ private struct FilmstripTile: View {
                 HStack(spacing: 4) {
                     Text("\(index)").font(Theme.Font.mono(10.5, .semibold)).foregroundStyle(best ? Theme.onGold : Theme.text1)
                         .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(best ? Theme.gold : Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+                        .background(best ? Theme.gold : Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
                     if best { Image(systemName: "star.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.gold) }
                 }
                 .padding(5)
@@ -608,7 +605,7 @@ private struct FilmstripTile: View {
                 }
             }
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
-                .stroke(focused ? Theme.text1 : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
+                .strokeBorder(focused ? (stripFocused ? Theme.focusRing : Theme.text1) : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
             .scaleEffect(focused ? 1.04 : 1)
         }
         .buttonStyle(.plain)

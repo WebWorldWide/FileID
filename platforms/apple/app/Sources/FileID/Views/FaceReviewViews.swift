@@ -229,12 +229,8 @@ struct FaceReviewSheet: View {
     private var waiting: Int { model.total + merges.total + splits.total }
 
     private var picker: some View {
-        Picker("Queue", selection: $queue) {
-            ForEach(FaceQueueKind.allCases) { kind in Text("\(kind.title) (\(count(kind)))").tag(kind) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityLabel("Which suggestions to review")
+        SegmentedBar(selection: $queue, options: FaceQueueKind.allCases.map { ($0, "\($0.title) (\(count($0)))") })
+            .accessibilityLabel("Which suggestions to review")
     }
 
     private func count(_ kind: FaceQueueKind) -> Int {

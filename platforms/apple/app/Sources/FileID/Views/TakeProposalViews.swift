@@ -34,12 +34,20 @@ struct RelatedTriesSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(proposals) { group in
-                ProposalRow(group: group, selected: selectedKey == group.groupKey) { onOpen(group) }
+                ProposalRow(group: group, selected: selectedKey == group.groupKey, showsRelation: showsRelation(of: group)) { onOpen(group) }
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .animation(Theme.springStandard, value: proposals.map(\.groupKey))
         .animation(Theme.springStandard, value: job?.state)
+    }
+
+    /// The chip marks exceptions: when most rows share one relation, repeating it on each adds nothing.
+    private func showsRelation(of group: CatalogTakeAutoGroup) -> Bool {
+        guard proposals.count > 1 else { return true }
+        let counts = Dictionary(grouping: proposals, by: \.relation).mapValues(\.count)
+        guard let majority = counts.max(by: { $0.value < $1.value })?.key else { return true }
+        return group.relation != majority
     }
 
     private var header: some View {
@@ -75,6 +83,7 @@ struct RelationChip: View {
 private struct ProposalRow: View {
     let group: CatalogTakeAutoGroup
     let selected: Bool
+    let showsRelation: Bool
     let action: () -> Void
 
     var body: some View {
@@ -86,9 +95,13 @@ private struct ProposalRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     let title = Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
                         .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 6) { title.fixedSize(); RelationChip(relation: group.relation).fixedSize() }
-                        VStack(alignment: .leading, spacing: 3) { title.fixedSize(); RelationChip(relation: group.relation) }
+                    if showsRelation {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { title.fixedSize(); RelationChip(relation: group.relation).fixedSize() }
+                            VStack(alignment: .leading, spacing: 3) { title.fixedSize(); RelationChip(relation: group.relation) }
+                        }
+                    } else {
+                        title
                     }
                     let suffix = group.status == "skipped" ? " · Skipped" : ""
                     ViewThatFits(in: .horizontal) {
@@ -98,7 +111,7 @@ private struct ProposalRow: View {
                     }
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                     Text(TakeProposals.evidenceText(group.evidence))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(2)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

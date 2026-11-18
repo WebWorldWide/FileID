@@ -188,19 +188,9 @@ struct CleanupView: View {
                         totalSelected == 0 ? "Move to Trash" : "Move \(totalSelected) to Trash · \(totals.size)",
                         systemImage: "trash"
                     )
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Theme.danger)
                     .fixedSize()
-                    .padding(.horizontal, 14)
-                    .frame(minHeight: Theme.Metrics.hitTarget)
-                    .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                            .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSDangerButtonStyle(height: Theme.Metrics.control))
                 .disabled(totalSelected == 0)
                 .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
                 .confirmationDialog(
@@ -256,15 +246,12 @@ struct CleanupView: View {
                 message: "Scan a folder first. Extra copies of the same file then show up here in groups, and you choose which copy to keep."
             )
         } else if !skippedGroups.isEmpty {
-            VStack(spacing: 14) {
-                EmptyStateView(
-                    icon: "checkmark.seal.fill",
-                    title: "Every group is hidden",
-                    message: "You skipped all the groups. Show them again to keep going."
-                )
-                Button("Show skipped groups again") { skippedGroups.removeAll() }
-                    .buttonStyle(.dsSecondary)
-            }
+            EmptyStateView(
+                icon: "checkmark.seal.fill",
+                title: "Every group is hidden",
+                message: "You skipped all the groups. Show them again to keep going.",
+                primaryAction: (label: "Show skipped groups again", run: { skippedGroups.removeAll() })
+            )
         } else if !isSimilar && exactPreviewPartial {
             EmptyStateView(
                 icon: "exclamationmark.magnifyingglass",
@@ -903,7 +890,7 @@ private struct CopyTile: View {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))
                     .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.4)))
+                    .background(Circle().fill(.black.opacity(0.5)))
             }
             .buttonStyle(.plain)
             .help(isSelected ? "Don't move this copy to Trash" : "Choose this copy for Trash")

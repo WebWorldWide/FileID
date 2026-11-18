@@ -582,8 +582,7 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Color.secondary.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+        .dsBannerSurface(fill: Color.white.opacity(0.04), stroke: Theme.hairline)
     }
 
     /// Item 2: positive "keep moving" affordance — once at least one person is
@@ -617,8 +616,7 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
+        .dsBannerSurface(fill: Theme.gold.opacity(0.10), stroke: Theme.gold.opacity(0.30))
     }
 
     // MARK: - Content
@@ -740,21 +738,15 @@ struct PeopleView: View {
         )
     }
 
-    @ViewBuilder
     private var noClustersYet: some View {
-        VStack(spacing: 14) {
-            EmptyStateView(
-                icon: "person.crop.circle.badge.questionmark",
-                title: "\(totalFacePrints) faces found",
-                message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
-                primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
-                secondaryMessage: "Then click a card to type that person's name."
-            )
-            if engine.faceClusteringInFlight {
-                ProgressView("Grouping faces…")
-                    .padding(.top, 4)
-            }
-        }
+        EmptyStateView(
+            icon: "person.crop.circle.badge.questionmark",
+            title: "\(totalFacePrints) faces found",
+            message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
+            primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
+            secondaryMessage: "Then click a card to type that person's name.",
+            progressLabel: engine.faceClusteringInFlight ? "Grouping faces…" : nil
+        )
     }
 
     private var modelMissingBanner: some View {
@@ -874,15 +866,10 @@ private struct PersonCard: View {
                 .overlay(LinearGradient(colors: [.white.opacity(0.06), .black.opacity(0.3)], startPoint: .top, endPoint: .bottom))
                 .overlay(selectionOverlay)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                .overlay {
-                    if person.hasAnyName {
-                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1)
-                    } else {
-                        RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
-                    }
-                }
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
-                    .stroke(Theme.gold.opacity(hovering && !selectionMode ? 0.7 : 0), lineWidth: 1.5))
+                    .strokeBorder(Theme.hairlineStrong, lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .strokeBorder(Theme.gold.opacity(hovering && !selectionMode ? 0.7 : 0), lineWidth: 1.5))
             Text(displayName)
                 .font(Theme.Font.body(14, .semibold))
                 .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
@@ -934,11 +921,11 @@ private struct PersonCard: View {
     private var selectionOverlay: some View {
         if selectionMode {
             ZStack {
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(isChecked ? selectionTint : Color.white.opacity(0.25),
-                            lineWidth: isChecked ? 3 : 1.5)
+                RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .strokeBorder(isChecked ? selectionTint : Color.white.opacity(0.25),
+                                  lineWidth: isChecked ? 3 : 1.5)
                 if isChecked {
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
@@ -1121,11 +1108,11 @@ private struct PersonDetailSheet: View {
                     Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                         GridRow {
                             namedField("Title", placeholder: "Uncle, Grandma…", text: $title)
-                            namedField("First name", placeholder: "optional", text: $firstName)
-                            namedField("Middle", placeholder: "optional", text: $middleName)
+                            namedField("First name", placeholder: "Optional", text: $firstName)
+                            namedField("Middle", placeholder: "Optional", text: $middleName)
                         }
                         GridRow {
-                            namedField("Last name", placeholder: "optional", text: $lastName)
+                            namedField("Last name", placeholder: "Optional", text: $lastName)
                             namedField("Suffix", placeholder: "Jr, III…", text: $suffix)
                             Color.clear.gridCellUnsizedAxes(.vertical)   // grid alignment only
                         }
@@ -1379,7 +1366,7 @@ private struct PersonDetailSheet: View {
                 .font(Theme.Font.body(12, .semibold))
                 .foregroundStyle(Theme.text3)
             TextField(placeholder, text: text)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
         }
     }
@@ -1411,7 +1398,7 @@ private struct PersonFileTile: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Color.black.opacity(0.3)
+            Theme.well
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(tile)
                 .overlay(selectionOverlay)
@@ -1455,7 +1442,7 @@ private struct PersonFileTile: View {
                 Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 18))
                     .foregroundStyle(isChecked ? Theme.gold : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.4)))
+                    .background(Circle().fill(.black.opacity(0.5)))
                     .padding(6)
             }
         }

@@ -23,12 +23,8 @@ struct NameStyleControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Name style").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
-            Picker("Name style", selection: $style) {
-                ForEach(NameStyle.styles, id: \.id) { Text($0.title).tag($0.id) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .tint(Theme.gold)
+            SegmentedBar(selection: $style, options: NameStyle.styles.map { ($0.id, $0.title) })
+                .accessibilityLabel("Name style")
             HStack(spacing: 12) {
                 Slider(value: lengthBinding, in: Double(NameStyle.lengthRange.lowerBound)...Double(NameStyle.lengthRange.upperBound), step: 1) {
                     Text("Longest name")
