@@ -300,4 +300,4 @@ Read the root [`CLAUDE.md`](CLAUDE.md) for cross-platform principles (no telemet
 
 ## License
 
-[Apache-2.0](LICENSE). Bundled fonts (Instrument Serif, Archivo) are SIL Open Font License.
+[Apache-2.0](LICENSE). Bundled fonts (Instrument Serif, Archivo) are SIL Open Font License. Every third-party dependency, runtime and model licence is listed in [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt) (generated and policy-checked) and audited in [`shared/docs/LICENSES.md`](shared/docs/LICENSES.md).

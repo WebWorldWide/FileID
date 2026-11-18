@@ -89,6 +89,8 @@
               "$out/share/metainfo/io.github.fileid.FileID.metainfo.xml"
             install -Dm644 platforms/linux/data/io.github.fileid.FileID.svg \
               "$out/share/icons/hicolor/scalable/apps/io.github.fileid.FileID.svg"
+            install -Dm644 LICENSE "$out/share/licenses/fileid/LICENSE"
+            install -Dm644 THIRD_PARTY_NOTICES.txt "$out/share/licenses/fileid/THIRD_PARTY_NOTICES.txt"
           '';
 
           meta = with pkgs.lib; {

@@ -438,6 +438,8 @@ function Stage-Engine($triple, $rid, $platform) {
     if (-not (Test-Path $src)) { throw "Missing engine binary: $src" }
     if (-not (Test-Path $dst)) { throw "Missing publish dir: $dst" }
     Copy-Item $src (Join-Path $dst "FileIDEngine.exe") -Force
+    Copy-Item -LiteralPath (Join-Path $PlatformDir '../../LICENSE') -Destination (Join-Path $dst 'LICENSE.txt') -Force
+    Copy-Item -LiteralPath (Join-Path $PlatformDir '../../THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $dst 'THIRD_PARTY_NOTICES.txt') -Force
     $enginePdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
     if (-not (Test-Path -LiteralPath $enginePdb -PathType Leaf)) {
         throw "Missing native crash symbols: $enginePdb"
