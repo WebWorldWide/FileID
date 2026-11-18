@@ -93,12 +93,14 @@ private struct FaceReviewRow: View {
         .accessibilityLabel(FaceReviewText.rowLabel(item))
     }
 
+    private var personLabel: String? { item.personName == nil ? candidate?.displayName : nil }
+
     private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(FaceReviewText.name(item.personName).capitalizedFirst)
+            Text((personLabel ?? FaceReviewText.name(item.personName)).capitalizedFirst)
                 .font(Theme.Font.body(14, .semibold))
-                .foregroundStyle(item.personName == nil ? Theme.text3 : Theme.text1)
-            Text(FaceReviewText.reason(item))
+                .foregroundStyle(item.personName == nil && personLabel == nil ? Theme.text3 : Theme.text1)
+            Text(FaceReviewText.reason(item, personLabel: personLabel))
                 .font(Theme.Font.body(12.5))
                 .foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -116,6 +118,7 @@ private struct FaceReviewRow: View {
             button("Accept", .accept, style: .primary, label: FaceReviewText.acceptLabel(item))
                 .help(FaceReviewText.acceptHelp)
         }
+        .fixedSize()
         .disabled(model.busy)
     }
 

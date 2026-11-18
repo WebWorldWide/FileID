@@ -31,6 +31,8 @@ private func page(_ action: String, status: String = "ok", total: Int = 0, offse
 struct FaceReviewTextTests {
     @Test func reasonsUseTheSharedSentences() {
         #expect(FaceReviewText.reason(item(1)) == "This is very likely Alex.")
+        #expect(FaceReviewText.reason(item(1, name: nil)) == "This is very likely an unnamed person.")
+        #expect(FaceReviewText.reason(item(1, name: nil), personLabel: "Person 3") == "This is very likely Person 3.")
         #expect(FaceReviewText.reason(item(1, score: 0.474, reason: "uncertain")) == "This might be Alex, but it's hard to tell.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2, runnerName: "Sam")) == "Could be Alex or Sam; both look about as close.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2)) == "Could be Alex or an unnamed person; both look about as close.")

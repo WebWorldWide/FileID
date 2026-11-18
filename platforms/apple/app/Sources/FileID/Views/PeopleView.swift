@@ -450,8 +450,7 @@ struct PeopleView: View {
                 Label(suggestionsLoading ? "Looking for the same person twice…" : "Suggest merges",
                       systemImage: suggestionsLoading ? "hourglass" : "sparkle.magnifyingglass")
             }
-            .buttonStyle(.dsPrimary)
-            .tint(Theme.gold)
+            .buttonStyle(.dsSecondary)
             .disabled(suggestionsLoading || mergeInFlight)
             .help("Find cards that might show the same person, so you can combine them.")
 
@@ -1122,7 +1121,7 @@ private struct PersonDetailSheet: View {
                         GridRow {
                             namedField("Last name", placeholder: "optional", text: $lastName)
                             namedField("Suffix", placeholder: "Jr, III…", text: $suffix)
-                            Color.clear   // grid alignment only
+                            Color.clear.gridCellUnsizedAxes(.vertical)   // grid alignment only
                         }
                     }
                     Text("Descriptions will call this person **“\(deepAnalyzeRef)”**.")
