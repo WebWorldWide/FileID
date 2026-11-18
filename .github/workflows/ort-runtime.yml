@@ -55,6 +55,10 @@ jobs:
 
       - name: Build from source without telemetry
         if: steps.cache.outputs.cache-hit != 'true'
+        # Optional repository variable pointing at an owned onnxruntime mirror;
+        # empty uses the script's default (the pinned commit is verified either way).
+        env:
+          FILEID_ORT_REPOSITORY: ${{ vars.FILEID_ORT_REPOSITORY }}
         run: ./platforms/windows/build/build-ort-runtime.ps1 -Architecture ${{ matrix.arch }} -WorkDir "${{ runner.temp }}\ort"
 
       - name: Privacy — reject a Windows telemetry build

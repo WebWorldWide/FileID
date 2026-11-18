@@ -20,6 +20,7 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string]$Architecture = 'x64',
     [string]$OutputDir = '',
+    [string]$OrtRepository = '',
     # Kept short: ORT's build tree is deep enough to hit MAX_PATH.
     [string]$WorkDir = ''
 )
@@ -28,7 +29,16 @@ $ErrorActionPreference = 'Stop'
 
 $OrtVersion = '1.22.0'
 $OrtCommit = 'f217402897f40ebba457e2421bc0a4702771968e'
-$OrtRepository = 'https://github.com/microsoft/onnxruntime.git'
+# microsoft/onnxruntime stopped resolving on 2026-11-17. The pinned commit below
+# is fetched by hash and the checkout is verified against it, so any server that
+# serves it yields the same tree; Intel's fork carries it (tree 29be5f8a...).
+# Override with -OrtRepository or FILEID_ORT_REPOSITORY (an owned mirror).
+$DefaultOrtRepository = 'https://github.com/intel/onnxruntime.git'
+if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $env:FILEID_ORT_REPOSITORY }
+if ([string]::IsNullOrWhiteSpace($OrtRepository)) { $OrtRepository = $DefaultOrtRepository }
+if ($OrtRepository -notmatch '^https://' -and -not (Test-Path -LiteralPath $OrtRepository)) {
+    throw "OrtRepository must be an https:// URL or an existing local path: $OrtRepository"
+}
 $NugetExeSha256 = '96a1dc5ad572716b2ab345a6830365cf0103661ec906b0e78fd04a064a7bb730'
 $DirectMlNupkgSha256 = '4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9'
 $Outputs = @('onnxruntime.dll', 'onnxruntime_providers_shared.dll')
