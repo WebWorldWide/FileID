@@ -1,18 +1,6 @@
-// Lazy thumbnail service for the Library grid, backed by Apple's
-// QuickLookThumbnailing (handles images, videos, PDFs, docs). Video frames
-// come from the engine when it answers; Quick Look is the fallback.
-//
-// Cache + inflight-task bookkeeping live on MainActor; the actual QL
-// request runs nonisolated because QL's completion block fires on its
-// private GCD queue and resuming a checked continuation across a
-// MainActor boundary trips Swift 6's executor-isolation check.
-//
-// Two cache tiers keep a NAS / USB library scrollable: an in-memory
-// NSCache sized for a whole ~3–4k-file library, and an on-disk JPEG cache
-// keyed by path+mtime+size so thumbnails survive relaunch and never
-// re-decode a (slow, remote) original twice. A small actor gate bounds
-// concurrent QL decodes so a fast scroll can't fan out hundreds of
-// simultaneous reads of the originals.
+// Lazy Library thumbnails: Quick Look for images, PDFs and docs; the engine for video frames.
+// Cache and in-flight tasks live on MainActor. The QL request runs nonisolated because its completion fires on a private GCD queue, which trips Swift 6's executor check across a MainActor boundary.
+// Two cache tiers (in-memory NSCache, on-disk JPEG keyed by path+mtime+size) keep a NAS or USB library scrollable; a permit gate bounds concurrent decodes.
 import SwiftUI
 import AppKit
 import CryptoKit
