@@ -398,9 +398,9 @@ final class LibraryTileItem: NSCollectionViewItem {
 
     private let thumbLayer = CALayer()
     private let ringLayer = CALayer()
-    private let badge = TextLayer(size: 10.5, weight: .semibold, color: NSColor(hex: 0xE2E5E8), align: .center)
+    private let badge = TextLayer(size: 10.5, weight: .semibold, color: Theme.nsTextOnPanel, align: .center)
     private let offlineBadge = TextLayer(size: 10.5, weight: .semibold, color: LibraryTileItem.warning, align: .center)
-    private let name = TextLayer(size: 13, weight: .medium, color: NSColor(hex: 0xF0F1F2), truncation: .middle)
+    private let name = TextLayer(size: 13, weight: .medium, color: Theme.nsText1, truncation: .middle)
     private let chips = [TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center),
                          TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center)]
     private let size = TextLayer(size: 11, weight: .regular, color: Theme.nsText3)
@@ -537,7 +537,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         date.text = row.displayDate?.formatted(date: .numeric, time: .omitted) ?? ""
         check.isHidden = !selectMode
         check.image = NSImage(systemSymbolName: checked ? "checkmark.circle.fill" : "circle", accessibilityDescription: nil)
-        check.contentTintColor = checked ? NSColor(hex: 0xFFCC00) : NSColor.white.withAlphaComponent(0.7)
+        check.contentTintColor = checked ? Theme.nsGold : NSColor.white.withAlphaComponent(0.7)
         updateRing()
         view.needsLayout = true
         view.setAccessibilityElement(true)
@@ -591,7 +591,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         if isChosen || checked {
             ringLayer.borderWidth = 2
-            ringLayer.borderColor = NSColor(hex: 0xFFCC00).cgColor
+            ringLayer.borderColor = Theme.nsGold.cgColor
             ringLayer.cornerRadius = 11
         } else {
             ringLayer.borderWidth = 1
@@ -650,7 +650,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         return field
     }
 
-    nonisolated static let warning = NSColor(hex: 0xE0A340)
+    nonisolated static let warning = Theme.nsWarning
 
     nonisolated static func brandFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let base = NSFont(name: "Archivo", size: size) ?? .systemFont(ofSize: size, weight: weight)

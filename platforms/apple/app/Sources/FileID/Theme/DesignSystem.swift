@@ -331,7 +331,7 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
         @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
-            let red = Color(hex: 0xE8433A)
+            let red = Theme.dangerSolid
             let active = (configuration.isPressed || hovering) && isEnabled
             configuration.label
                 .font(Theme.Font.body(13, .semibold, fixed: fixed))

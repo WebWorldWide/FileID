@@ -307,10 +307,12 @@ struct ChatWorkbench: View {
                 }
             }
             HStack(spacing: 10) {
-                Toggle("Summarize with local AI", isOn: $useModel)
+                Toggle(isPage ? "Summarize with local AI" : "Summarize with AI", isOn: $useModel)
                     .toggleStyle(DSToggleStyle())
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .fixedSize()
                 Button { modelsPresented = true } label: {
                     Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
                 }
@@ -319,8 +321,10 @@ struct ChatWorkbench: View {
                 .help(useModel ? "Choose the AI that writes answers. Now using \(modelName)." : "Turn on Summarize with local AI to choose a model")
                 .accessibilityLabel("Choose the AI model for Chat")
                 if useModel {
-                    MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
-                        .help(modelName)
+                    if isPage {
+                        MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
+                            .help(modelName)
+                    }
                     if !followsDescribe {
                         Button("Use the same one") { chatModelKind = "" }
                             .buttonStyle(.dsGhost)

@@ -18,6 +18,7 @@ enum Theme {
     static let info    = Color(hex: 0xA0E2EA)
     static let delight = Color(hex: 0xF2A6C0)
     static let danger  = Color(hex: 0xFF6A5E)
+    static let dangerSolid = Color(hex: 0xE8433A)
     static let warning = Color(hex: 0xE0A340)
     static let paused  = Color(red: 185/255, green: 190/255, blue: 196/255).opacity(0.5)
 
@@ -54,6 +55,10 @@ enum Theme {
                 .map { $0.rawValue.contains("HighContrast") } == true ? increased : normal
         }
     }
+    static let nsText1 = NSColor(hex: 0xF0F1F2)
+    static let nsTextOnPanel = NSColor(hex: 0xE2E5E8)
+    static let nsGold = NSColor(hex: 0xFFCC00)
+    static let nsWarning = NSColor(hex: 0xE0A340)
     static let nsText2 = nsAdaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
     static let nsText3 = nsAdaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))

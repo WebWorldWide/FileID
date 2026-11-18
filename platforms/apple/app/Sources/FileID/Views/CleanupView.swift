@@ -834,11 +834,17 @@ private struct CopyTile: View {
             PathLabel(path: folder, font: Theme.Font.body(11.5), color: Theme.text2)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .help(fullFolder)
-            HStack(spacing: 4) {
-                Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                Spacer(minLength: 4)
-                if let date = file.displayDate {
-                    Text(date.formatted(date: .numeric, time: .omitted))
+            let sizeText = Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
+            let dateText = file.displayDate.map { Text($0.formatted(date: .numeric, time: .omitted)) }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    sizeText.fixedSize()
+                    Spacer(minLength: 4)
+                    if let dateText { dateText.fixedSize() }
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    sizeText
+                    if let dateText { dateText }
                 }
             }
             .font(Theme.Font.body(11.5))

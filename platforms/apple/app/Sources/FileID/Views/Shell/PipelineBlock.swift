@@ -141,7 +141,7 @@ struct PipelineBlock: View {
                     .accessibilityLabel(showDetails ? "Hide scan details" : "Show scan details")
                 }
             }
-            Text(s.sub).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            Text(s.sub).font(Theme.ChromeFont.body(12)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(2, reservesSpace: scanRunning || captionsRunning).fixedSize(horizontal: false, vertical: true)
             if showsNextStep {
                 Button { openPage(.deep) } label: {
                     HStack(spacing: 4) {
