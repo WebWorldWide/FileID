@@ -164,7 +164,6 @@ TOTAL = len(src_files)
 before = snapshot()
 
 e = start()
-# ---- status
 r = reply(e, "healthCheck", {"requestID": "hc"}, ("healthCheckResult",))
 step("healthCheck echoes requestID and pid", inner(r).get("requestID") == "hc" and inner(r).get("pid") == e.p.pid, inner(r))
 r = reply(e, "requestStatus", {}, ("ready",))
@@ -174,7 +173,6 @@ models = inner(r).get("models") or []
 step("listModels returns the catalog", inner(r).get("requestID") == "lm" and len(models) > 0 and all(m.get("license") for m in models),
      f"{len(models)} models: {[m['id'] for m in models][:6]}")
 
-# ---- first scan
 t0 = time.time()
 r, seen = scan(e, excluded=EXCLUDED)
 v = inner(r) if kind(r) == "scanComplete" else {}
@@ -200,7 +198,6 @@ r = reply(e, "listRoots", {"requestID": "lr"}, ("rootsList",))
 roots = [x.get("path") or x.get("rootPath") for x in inner(r).get("roots", [])]
 step("listRoots lists the scanned root", inner(r).get("requestID") == "lr" and LIB in roots, inner(r).get("roots"))
 
-# ---- incremental rescan
 stamps = dict(q("SELECT id, scanned_at FROM files"))
 r, _ = scan(e, excluded=EXCLUDED)
 v = inner(r) if kind(r) == "scanComplete" else {}
@@ -231,7 +228,6 @@ finally:
     os.rename(LIB + "-away", LIB)
 step("missing root keeps every row untouched", q("SELECT id, failed FROM files ORDER BY id") == n, f"reply={kind(r)} {json.dumps(inner(r))[:160]}")
 
-# ---- pause / resume / cancel
 forced = time.time()
 e.send("startScan", {"rootPath": LIB, "rescan": True, "excludedPaths": EXCLUDED})
 e.wait(lambda p: kind(p) == "progress" and inner(p).get("processed", 0) >= 2, 300)
@@ -252,7 +248,6 @@ time.sleep(1)
 r, _ = scan(e, excluded=EXCLUDED)
 step("a scan after cancel completes", kind(r) == "scanComplete" and counts(True) == counts_visible, json.dumps(inner(r))[:160])
 
-# ---- search
 MODEL = one("SELECT DISTINCT model FROM clip_embeddings")
 docs_txt = one("SELECT f.id FROM files f WHERE f.extension='txt'")
 res = catalog(e, "search", query="baseball", searchMode="keyword")
@@ -283,7 +278,6 @@ step("find-similar from a seed photo", res.get("status") == "ok" and res.get("hi
 res = catalog(e, "search", query="", searchMode="keyword")
 step("empty keyword search is refused", res.get("status") != "ok", res.get("message"))
 
-# ---- chat
 total_bytes = one("SELECT sum(size_bytes) FROM files WHERE failed=0")
 def says(text, *needles):
     r = chat(e, text)
@@ -320,7 +314,6 @@ dup_paths = {i: one("SELECT path_text FROM files WHERE id=?", i) for i in dup_id
 step("chat: the copies are the planted ones", all(("copy-of-" in (p or "")) or ("dup-" in (p or "")) for p in dup_paths.values()),
      [os.path.basename(p or "") for p in dup_paths.values()])
 
-# ---- trash / restore
 k, res = bulk(e, "trashFiles", {"fileIDs": dup_ids})
 batch = (res.get("action") or "").split(":")[-1] if k == "bulkActionResult" else None
 gone = all(not os.path.exists(p) for p in dup_paths.values())
@@ -336,7 +329,6 @@ else:
     step("library identical after trash+restore", snapshot() == before)
     r, _ = scan(e, excluded=EXCLUDED)
 
-# ---- rename
 fid, old = q("SELECT id, path_text FROM files WHERE path_text LIKE ? ORDER BY id LIMIT 1", LIB + "/Misc/DSC%")[0]
 old_sha = sha(old)
 k, res = bulk(e, "renameFiles", {"renames": [{"fileID": fid, "newName": "Renamed By Test.jpg"}]})
@@ -349,7 +341,6 @@ step("renameFiles refuses '../x'", (k == "error" or res.get("failed") == 1) and 
 bulk(e, "renameFiles", {"renames": [{"fileID": fid, "newName": os.path.basename(old)}]})
 step("rename back restores the library", snapshot() == before)
 
-# ---- restructure
 t0 = time.time()
 r = reply(e, "planRestructure", {"libraryRoot": LIB}, ("restructurePlan", "error"), 600)
 plan = inner(r) if kind(r) == "restructurePlan" else {}
@@ -371,7 +362,6 @@ if moves:
     step("no empty folders left behind", not leftovers, leftovers[:4])
     step("catalog paths restored after undo", all(one("SELECT path_text FROM files WHERE id=?", m["fileID"]) == m["source"] for m in moves))
 
-# ---- file tools
 caps = {c["id"]: c for c in tool(e, "capabilities").get("capabilities", [])}
 step("tools capabilities list photo and video", "photo" in caps and "video" in caps, {k2: v2["available"] for k2, v2 in caps.items()})
 def megapixels(path):
@@ -416,7 +406,6 @@ else:
     pv = tool(e, "preview", fileIDs=[vid], recipe=vrec, destination=OUT)
     step("video export refused without the vetted FFmpeg runtime", pv.get("status") != "ok" and not os.listdir(OUT), pv.get("message"))
 
-# ---- best takes
 res = catalog(e, "autoTakeGroups", limit=20)
 groups = res.get("takeGroups") or []
 step("autoTakeGroups finds the burst", res.get("status") == "ok" and len(groups) >= 1, [(g["groupKey"], len(g["shots"]), g["status"]) for g in groups][:4])
@@ -438,7 +427,6 @@ if groups:
     step("decideTakeGroup reopen brings it back open", res.get("status") == "ok" and after.get(g["groupKey"]) == "open", after)
     step("take decisions never touch files", snapshot() == before)
 
-# ---- events
 ev_ids = sorted(images)[:3]
 res = catalog(e, "saveEvent", event={"id": "e2e-game", "title": "Kyle's game", "goal": "Kyle gets a hit", "fileIDs": ev_ids, "userEdited": False})
 step("saveEvent stores the event", res.get("status") == "ok" and q("SELECT title, goal, user_edited FROM catalog_events WHERE id='e2e-game'") == [("Kyle's game", "Kyle gets a hit", 1)]
@@ -457,7 +445,6 @@ res = catalog(e, "undoEventEdit", eventID="e2e-game")
 step("undoEventEdit brings a deleted event back", res.get("status") == "ok" and one("SELECT title FROM catalog_events WHERE id='e2e-game'") == "Kyle's game"
      and one("SELECT count(*) FROM catalog_event_files WHERE event_id='e2e-game'") == 3, res.get("message"))
 
-# ---- chapters
 chap = {"id": "e2e-ch1", "fileID": vid, "startSeconds": 0.0, "endSeconds": 2.0, "title": "Opening", "summary": "First seconds",
         "sourceRevision": "", "modelVersion": "", "confidence": 0.5, "userEdited": False, "stale": False}
 res = catalog(e, "saveChapter", chapter=chap)
@@ -474,7 +461,6 @@ step("undoChapterEdit restores a deleted chapter", res.get("status") == "ok" and
 res = catalog(e, "saveChapter", chapter=dict(chap, id="bad", startSeconds=5.0, endSeconds=1.0))
 step("saveChapter refuses end before start", res.get("status") != "ok" and one("SELECT count(*) FROM catalog_chapters WHERE id='bad'") == 0, res.get("message"))
 
-# ---- tags
 tagged = sorted(images)[:3]
 k, res = bulk(e, "applyTags", {"fileIDs": tagged, "tags": ["e2e-tag", "keeper"], "mode": "add"})
 rows = q("SELECT file_id, tag FROM tags WHERE source='user' ORDER BY file_id, tag")
@@ -490,7 +476,6 @@ else:
     step("user tags are searchable", {h["fileID"] for h in res.get("hits", [])} >= set(tagged[1:]), [h["fileID"] for h in res.get("hits", [])])
 step("tags never change file bytes", snapshot() == before)
 
-# ---- wipe
 r = reply(e, "wipeLibrary", {}, ("libraryWiped", "error"), 120)
 left = {t: one(f"SELECT count(*) FROM {t}") for t in ("files", "tags", "clip_embeddings", "catalog_events", "catalog_chapters", "doc_text")}
 step("wipeLibrary clears the catalog", kind(r) == "libraryWiped" and inner(r).get("ok") and not any(left.values()), f"{json.dumps(inner(r))[:100]} {left}")

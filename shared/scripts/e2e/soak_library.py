@@ -113,13 +113,11 @@ def main():
     for i in range(n(900)):
         w, h = rng.choice((64, 96, 128, 160, 200)), rng.choice((64, 96, 128, 160, 200))
         pngs.append(put(folder(), f"IMG_{rng.randint(1000, 9999)}.png", png(w, h, rng)))
-    # near-duplicates: same picture with one pixel changed
     for i in range(n(80)):
         w, h = 128, 128
         seed = rng.randrange(1 << 30)
         for t in (0, 1, 2):
             put(folder(), f"near-{seed % 1000}-{t}.png", png(w, h, random.Random(seed), tweak=t))
-    # JPEGs through sips
     jpg_src = os.path.join(os.path.dirname(root), "soak-jpeg-src-" + os.path.basename(root))
     os.makedirs(jpg_src, exist_ok=True)
     for i in range(n(400)):
@@ -140,14 +138,12 @@ def main():
                 jpgs.append(put(folder(), f"DSC{rng.randint(10000, 99999)}.jpg", f.read()))
     finally:
         shutil.rmtree(jpg_src, ignore_errors=True)
-    # exact duplicate groups
     pool = pngs + jpgs
     for g in range(n(60)):
         src = rng.choice(pool)
         data = open(src, "rb").read()
         for c in range(rng.randint(1, 3)):
             put(folder(), "copy-of-" + os.path.basename(src), data)
-    # documents
     for i in range(n(300)):
         put(folder(), f"{rng.choice(WORDS)}-{i}.txt", (sentence(rng, 60) + "\n").encode())
     for i in range(n(150)):
@@ -185,7 +181,6 @@ def main():
     for name in sorted(os.listdir(MEDIA)):
         for k in range(2):
             put(os.path.join("Media", "clips"), f"{k}-{name}", open(os.path.join(MEDIA, name), "rb").read())
-    # edge cases
     for i in range(n(20)):
         put("Edge/zero", f"empty-{i}.dat" if i % 2 else f"empty-{i}.jpg", b"")
     for i in range(n(20)):

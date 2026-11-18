@@ -268,7 +268,6 @@ def refine(hits):
 
 
 def simulate(photos: dict, thresholds: dict, rules: dict, matrix: dict | None):
-    """Re-select tags from a wide catalog the way the engine would."""
     floor = rules.get("floor", 0.62)
     cap = rules.get("max_tags", 8)
     thr_delta = rules.get("thr_delta", 0.0)

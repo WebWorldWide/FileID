@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Tests for check_app_command_coverage.py on small synthetic repositories."""
 
 from __future__ import annotations
 

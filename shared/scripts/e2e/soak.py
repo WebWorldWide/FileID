@@ -345,7 +345,6 @@ class Soak:
         self.notes = {}
         self.cycles, self.catchups, self.kills, self.overlap_log, self.heals = [], [], [], [], []
 
-    # ---------- model of the library on disk
     def p(self, rel):
         return os.path.join(self.lib, rel)
 
@@ -382,7 +381,6 @@ class Soak:
             return {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(
                 "SELECT path_text, id, failed, kind, error_message FROM files WHERE path_text LIKE ?", (prefix + "/%",))}
 
-    # ---------- invariants
     def check_disk(self, rnd, model, root, name):
         snap = snapshot(root)
         lost = sorted(set(model) - set(snap))
@@ -459,7 +457,6 @@ class Soak:
             fail(rnd, "engine log has no panic/fatal/lock lines", new[:3])
         return len(LOGBAD)
 
-    # ---------- steps
     def ids_by_path(self, eng, rels):
         rows = self.db_rows(eng.db, self.lib)
         return {r: rows[self.p(r)][0] for r in rels if self.p(r) in rows}
@@ -525,7 +522,6 @@ class Soak:
         log("skip-set gate report:", json.dumps(rep))
 
     def mutate(self, rnd, eng):
-        """Change the disk, update the model, rescan and verify the catalog follows."""
         rng = self.rng
         regular = [r for r in sorted(self.model) if self.classify(self.p(r)) == "other" and "Edge/" not in r and os.access(self.p(r), os.W_OK)]
         before_ids = self.ids_by_path(eng, regular)
@@ -746,7 +742,6 @@ class Soak:
         k, v = eng.wait_scan_end(300)
         if k not in ("cancelled", "scanComplete"):
             fail(rnd, "cancelScan ends the scan", (k, v))
-        # pause/resume
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         eng.wait(lambda e: kind(e) == "progress", 120)
         eng.send("pauseScan")
@@ -759,13 +754,11 @@ class Soak:
             k, v = eng.wait_scan_end(600)
         if k != "scanComplete":
             fail(rnd, "paused then resumed scan completes", (k, v))
-        # cancel then a normal scan completes with the same catalog
         k, v = eng.scan(self.lib)
         if k != "scanComplete":
             fail(rnd, "scan after cancel completes", (k, v))
 
     def step_overlap(self, rnd, eng):
-        # a mutation during a scan and two scans at once
         rows = self.db_rows(eng.db, self.lib)
         cand = [(p, v[0]) for p, v in rows.items() if not v[1] and "/Edge/" not in p and p[len(self.lib) + 1:] in self.model]
         (p1, i1), = self.rng.sample(cand, 1)
@@ -802,7 +795,6 @@ class Soak:
             fail(rnd, "scan during overlapping commands ends", json.dumps(rec))
         if not got_bulk:
             fail(rnd, "rename during a scan gets its reply", json.dumps(rec))
-        # whichever way it landed, put the name back and rescan
         cur = self.p1_current(eng, p1, newp)
         rel_old = os.path.relpath(p1, self.lib)
         if cur != p1:
@@ -817,7 +809,6 @@ class Soak:
         k, v = eng.scan(self.lib)
         if k != "scanComplete":
             fail(rnd, "scan after overlapping commands completes", (k, v))
-        # a folder deleted while its scan runs
         eph = os.path.join(self.work, "ephemeral")
         shutil.rmtree(eph, ignore_errors=True)
         for rel in sorted(self.model)[::6][:400]:
@@ -875,7 +866,6 @@ class Soak:
             fail(rnd, "malformed burst changed the library", "")
 
 
-    # ---------- hosted flavor: the shared Rust engine with the Apple adapters and real models
     def engine_log_lines(self, eng):
         out = []
         logdir = os.path.join(eng.state, "FileID", "logs")
@@ -949,7 +939,6 @@ class Soak:
                              (self.lib + "/%",)).fetchone()[0]
 
     def step_real_first(self, eng):
-        """Scan the real camera files alone, first, and report aggregate throughput, tags per photo and failures."""
         root = self.p(self.a.real_dir)
         if not os.path.isdir(root):
             return
@@ -1479,7 +1468,6 @@ class Soak:
         return self.step_victim_plain(rnd)
 
     def step_victim_plain(self, rnd):
-        """SIGKILL an engine in the middle of a scan, restart it on the same catalog, rescan."""
         v = Engine(self.a.engine, self.a.flavor, os.path.join(self.work, "victim"), os.path.join(self.work, "victim-engine.log"),
                    self.trash, self.models, self.a.no_trash, "victim")
         try:
@@ -1510,7 +1498,6 @@ class Soak:
         finally:
             v.close()
 
-    # ---------- the rounds
     def round(self, rnd, eng, steps):
         marks = len(LOGBAD)
         timing = {}
@@ -1524,7 +1511,6 @@ class Soak:
                 if not eng.alive():
                     raise
             timing[name] = round(time.time() - t, 1)
-        # invariants
         t0 = time.time()
         self.check_disk(rnd, self.model, self.lib, "library")
         self.check_trash(rnd)
@@ -1589,7 +1575,6 @@ class Soak:
                     eng = self.start_main()
             if (a.max_rounds and rnd >= a.max_rounds) or time.time() > deadline:
                 break
-        # final: SIGKILL the long-lived engine, restart on the same catalog and verify everything again
         log("final: SIGKILL main engine mid-scan, restart on the same catalog")
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         time.sleep(1.0)

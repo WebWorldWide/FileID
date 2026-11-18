@@ -18,17 +18,14 @@ def inner(p, k): v = p[k]; return v.get("_0", v)
 def step(name, ok, detail=""): print(("PASS " if ok else "FAIL ") + name + (" | " + str(detail) if detail else ""), flush=True)
 def bulk(cmd, body, t=120):
     e.send(cmd, body); r = e.wait(lambda p: kind(p) in ("bulkActionResult", "error"), t); return kind(r), (inner(r, kind(r)) if kind(r) else r)
-# ---- scan
 t = time.time(); e.send("startScan", {"rootPath": LIB}); done = e.wait(lambda p: kind(p) == "scanComplete", 600)
 v = inner(done, "scanComplete"); step("scan copy", v["processedFiles"] == 32 and v["failedFiles"] == 0, f"{v['processedFiles']} files {round(time.time()-t)}s")
-# ---- duplicates via chat
 rid = str(uuid.uuid4()); e.send("chatRequest", {"request": dict(requestID=rid, conversationID="d", action="send", text="move my duplicate files to the trash")})
 r = inner(e.wait(lambda p: kind(p) == "chatResponse" and inner(p, "chatResponse").get("requestID") == rid and inner(p, "chatResponse").get("status") == "completed", 60), "chatResponse")
 acts = r.get("actions") or []; trash = [a for a in acts if a["kind"] == "moveDuplicatesToTrash"]
 step("chat finds the 2 planted duplicates", len(trash) == 1 and len(trash[0].get("fileIDs") or []) == 2 and trash[0].get("requiresConfirmation"), (r.get("message") or "")[:100] + " | actions=" + str([(a["kind"], len(a.get("fileIDs") or [])) for a in acts]))
 ids = trash[0]["fileIDs"] if trash else []; keepers = trash[0].get("keeperFileIDs") if trash else []
 paths = {i: db().execute("select path_text from files where id=?", (i,)).fetchone()[0] for i in ids}
-# ---- trash + restore
 k, res = bulk("trashFiles", {"fileIDs": ids}); batch = (res.get("action") or "").split(":")[-1] if k == "bulkActionResult" else None
 gone = all(not os.path.exists(p) for p in paths.values()); step("trash moves exactly the copies", k == "bulkActionResult" and res["succeeded"] == 2 and gone, f"succeeded={res.get('succeeded')} batch={batch}")
 kept = all(os.path.exists(db().execute("select path_text from files where id=?", (i,)).fetchone()[0]) for i in keepers if db().execute("select count(*) from files where id=?", (i,)).fetchone()[0]) if keepers else True
@@ -36,7 +33,6 @@ step("keepers untouched", kept)
 k, res = bulk("restoreFromTrash", {"batchID": batch}); back = all(os.path.exists(p) for p in paths.values())
 step("restore puts them back", k == "bulkActionResult" and back, f"{res.get('succeeded')} restored")
 step("library identical after trash+restore", {p: sha(os.path.join(LIB, p)) for p in tree()} == before)
-# ---- restructure
 t = time.time(); e.send("planRestructure", {"libraryRoot": LIB, "supportsPagedPlans": False}); pl = e.wait(lambda p: kind(p) in ("restructurePlan", "error"), 300)
 plan = inner(pl, "restructurePlan") if kind(pl) == "restructurePlan" else {}
 moves = plan.get("moves") or []; step("restructure plan", kind(pl) == "restructurePlan", f"{len(moves)} moves, categories={json.dumps(plan.get('categoryCounts'))[:120]}, {round(time.time()-t,1)}s")
@@ -50,14 +46,12 @@ if moves:
     step("restructure undo restores layout", {p: sha(os.path.join(LIB, p)) for p in tree()} == before, kind(un))
     leftovers = [os.path.relpath(os.path.join(r, d), LIB) for r, ds, _ in os.walk(LIB) for d in ds if not os.listdir(os.path.join(r, d))]
     step("no empty folders left behind", not leftovers, leftovers[:3])
-# ---- rename
 fid = db().execute("select id from files where path_text like '%/Misc/DSC%' order by id limit 1").fetchone()[0]; old = db().execute("select path_text from files where id=?", (fid,)).fetchone()[0]
 k, res = bulk("renameFiles", {"renames": [{"fileID": fid, "newName": "Renamed By Test.jpg"}]}); newp = os.path.join(os.path.dirname(old), "Renamed By Test.jpg")
 step("rename changes the file name", k == "bulkActionResult" and os.path.exists(newp) and not os.path.exists(old), res.get("succeeded"))
 k, res = bulk("renameFiles", {"renames": [{"fileID": fid, "newName": "../escape.jpg"}]})
 step("rename refuses path separators", k == "bulkActionResult" and res.get("failed", 0) == 1 and not os.path.exists(os.path.join(LIB, "..", "escape.jpg")), json.dumps(res)[:130])
 bulk("renameFiles", {"renames": [{"fileID": fid, "newName": os.path.basename(old)}]}); step("rename back", os.path.exists(old))
-# ---- file tools
 def tool(action, **kw):
     rid = str(uuid.uuid4()); e.send("toolRequest", {"request": dict(requestID=rid, action=action, **kw)})
     return inner(e.wait(lambda p: kind(p) == "toolResponse" and inner(p, "toolResponse").get("requestID") == rid, 300), "toolResponse")

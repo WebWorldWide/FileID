@@ -88,7 +88,6 @@ def chat(text, **extra):
                         and inner(p, "chatResponse").get("status") in ("completed", "error", "cancelled"), 300), "chatResponse")
 
 
-# ---------------------------------------------------------------- scanning
 @check("first scan")
 def _():
     v, s = scan()
@@ -204,7 +203,6 @@ def _():
     e2.close()
 
 
-# ---------------------------------------------------------------- tags written to the files
 @check("applyTags")
 def _():
     ids = [r[0] for r in db().execute("select id from files where kind='image' order by id limit 2")]
@@ -220,7 +218,6 @@ def _():
     step("removing the tag clears it", k == "bulkActionResult" and not any(b"FileID Audit" in x for x in xattr), res)
 
 
-# ---------------------------------------------------------------- events, takes, chapters
 @check("events")
 def _():
     ids = [r[0] for r in db().execute("select id from files where kind='image' order by id limit 5")]
@@ -301,7 +298,6 @@ def _():
          v.get("path") == path and jpeg[:2] == b"\xff\xd8", json.dumps(v)[:200])
 
 
-# ---------------------------------------------------------------- people
 @check("people")
 def _():
     e.send("runFaceClustering", {})
@@ -346,7 +342,6 @@ def _():
          and q1("select count(*) from face_prints where person_id=?", a)[0] >= faces_b, res)
 
 
-# ---------------------------------------------------------------- describe, file tools, model controls
 @check("describe one file, a folder, and cancel")
 def _():
     doc = q1("select id from files where kind in ('doc','pdf') order by id limit 1")[0]
@@ -449,7 +444,6 @@ def _():
     step("cancelRestructure with nothing running is harmless", e.p.poll() is None)
 
 
-# ---------------------------------------------------------------- chat actions
 @check("chat action proposals")
 def _():
     cases = {

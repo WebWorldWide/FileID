@@ -66,7 +66,6 @@ KNOWN_NONSPDX = {
 
 
 def parse_spdx(expression: str) -> list[frozenset[str]]:
-    """Return every set of licences that satisfies the expression."""
     tokens = re.findall(r"\(|\)|[^\s()]+", expression.replace("/", " OR "))
     position = 0
 

@@ -34,7 +34,6 @@ class GenError(Exception):
     pass
 
 
-# ─── Schema model ────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -208,7 +207,6 @@ def strip_descriptions(node):
     return node
 
 
-# ─── Naming helpers ──────────────────────────────────────────────────────────
 
 
 def pascal(name: str) -> str:
@@ -232,7 +230,6 @@ def doc_lines(text: str, indent: str, prefix: str, width: int = 100) -> list[str
     return [f"{indent}{prefix} {line}".rstrip() for line in wrapped]
 
 
-# ─── Rust ────────────────────────────────────────────────────────────────────
 
 RUST_DERIVE_ORDER = ["Debug", "Clone", "Copy", "Default", "PartialEq", "Eq", "Serialize", "Deserialize"]
 RUST_MODES = {"required", "option", "option_keep_null", "default", "default_true", "skip_false", "skip_empty"}
@@ -451,8 +448,6 @@ class RustGen:
         return ("\n".join(header + out)).rstrip() + "\n"
 
 
-# ─── Hand-written mirrors (C#, Swift) ────────────────────────────────────────
-#
 # Languages that are not generated yet are compared field by field with the
 # schema: each schema object maps to one mirror type whose wire keys must equal
 # the schema's properties, and each union's variant tags must match.
@@ -622,7 +617,6 @@ def mirror_problems(model: Model, lang: str, spec: dict) -> list[str]:
     return [p for p in problems if p not in known]
 
 
-# ─── Driver ──────────────────────────────────────────────────────────────────
 
 
 def load() -> tuple[Model, dict]:

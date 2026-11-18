@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
 """Export RAM++ (Recognize Anything Plus) to a single-pass ONNX tagger for FileID.
 
-WHY: FileID's automatic image tagging must run on every Windows GPU/iGPU/NPU
-(via ONNX Runtime's DirectML / OpenVINO / QNN execution providers) and must be
-license-clean. RAM++ (ram_plus_swin_large_14m) is Apache-2.0, a purpose-built
-open-set image tagger (Swin-Large @ 384px, 4585-tag English vocabulary with
-*frozen* tag embeddings), and runs as a single forward pass — exactly the shape
-NPU EPs accelerate well. There is no official ONNX, so we export it ourselves.
+WHY: FileID's image tagging runs on Windows GPUs/iGPUs/NPUs through ONNX Runtime
+execution providers, so it needs a single-pass ONNX graph. RAM++
+(ram_plus_swin_large_14m) is Apache-2.0 and has no official ONNX, so we export it here.
 
-This is the WS2 "export spike" from the plan. It is meant to be RUN AND ITERATED
-ON by a developer with the RAM++ weights + a Python/torch environment — not a
-guaranteed-first-run black box. It:
-
-  1. loads ram_plus (swin_l, image_size=384),
-  2. wraps the tagging forward so it takes a normalized image tensor and returns
-     the per-tag logits (frozen tag embeddings baked into the graph as constants),
-  3. exports to ONNX at a FIXED 1x3x384x384 input (fixed shapes sidestep the
-     Swin window-attention dynamic-`nW` export issue and maximize NPU operator
-     coverage; if export still trips the Concat/ShapeInferenceError, apply the
-     documented Swin fix — see SWIN_EXPORT_NOTE below),
-  4. writes the index-aligned English tag list next to the .onnx, and
-  5. validates the ONNX output against the torch model on a sample image.
+Developer-run tool, not a guaranteed-first-run black box: it loads ram_plus, wraps the
+tagging forward, exports a fixed 384x384 graph, writes the tag list, and checks the ONNX
+output against torch on a sample image.
 
 ONNX CONTRACT (this is what models/ram_plus.rs depends on — keep them in sync):
   input  "image"  : float32 [1, 3, 384, 384]  (RGB, ImageNet-normalized, see below)
@@ -58,13 +45,8 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 IMAGE_SIZE = 384
 NUM_TAGS_EXPECTED = 4585  # ram_plus_tag_embedding_class_4585_des_51
 
-# SWIN_EXPORT_NOTE: Swin's window attention computes the number of windows from
-# a mask tensor's shape, which torch.onnx cannot shape-infer (Concat rank
-# mismatch — microsoft/Swin-Transformer#89). At a FIXED 384x384 input the window
-# grid is static, so the common workaround is unnecessary; if you still hit the
-# error, patch the swin block to derive nW from (H//window, W//window) instead of
-# mask.shape[0], or export with torch>=2.2 + opset 17 (dynamo=False), which traces
-# the static grid cleanly.
+# Swin's window attention derives nW from a mask tensor's shape, which torch.onnx cannot
+# shape-infer, so the window grid must stay static: export at a fixed IMAGE_SIZE.
 
 
 def build_logits_wrapper(model):
@@ -95,13 +77,10 @@ def build_logits_wrapper(model):
             self.register_buffer("tag_mask", mask)
 
         def forward(self, image):
-            # Faithfully mirrors recognize-anything ram_plus.generate_tag up to
-            # (but not including) the sigmoid: the per-class description
-            # embeddings are reweighted by CLS-token similarity + softmax, then
-            # run through the tagging cross-attention head. (The earlier version
-            # skipped the reweight and emitted [B, num_class*51] — wrong shape,
-            # tagger never loaded.) Frozen tag embeddings are graph constants, so
-            # the exported model takes ONLY the image and emits [B, num_class].
+            # Mirrors recognize-anything ram_plus.generate_tag up to the sigmoid: the
+            # per-class description embeddings are reweighted by CLS similarity before the
+            # tagging head. Frozen tag embeddings are graph constants, so the model takes
+            # only the image.
             m = self.m
             image_embeds = m.image_proj(m.visual_encoder(image))
             image_atts = torch.ones(
@@ -118,7 +97,6 @@ def build_logits_wrapper(model):
             sim = (reweight * image_cls @ m.label_embed.t()).view(bs, -1, des_per_class)
             weight = F.softmax(sim, dim=2)  # [bs, num_class, des]
             reshaped = m.label_embed.view(int(m.num_class), des_per_class, -1)  # [num_class, des, 512]
-            # Weighted sum over descriptions → one embedding per class.
             label_embed = (weight.unsqueeze(-1) * reshaped.unsqueeze(0)).sum(dim=2)  # [bs, num_class, 512]
             label_embed = F.relu(m.wordvec_proj(label_embed))
 
@@ -138,12 +116,8 @@ def build_logits_wrapper(model):
 def load_model(checkpoint):
     import torch
 
-    # transformers >= 4.0 moved these utility fns from modeling_utils to
-    # pytorch_utils; recognize-anything's vendored bert.py still imports them from
-    # the old location, so it ImportErrors on modern transformers (incl. the
-    # transformers 5.x that Python 3.14 forces — there are no Python-3.14 wheels
-    # for the old transformers RAM++ was built against). Re-export them into the
-    # legacy namespace so the import resolves; the functions are unchanged.
+    # recognize-anything's vendored bert.py imports utilities that transformers >= 4.0 moved
+    # to pytorch_utils; re-export them into the legacy namespace so the import resolves.
     try:
         import transformers.modeling_utils as _mu
         import transformers.pytorch_utils as _pu
@@ -162,10 +136,8 @@ def load_model(checkpoint):
     try:
         from ram.models import ram_plus
     except ImportError as e:
-        # The `ram` package itself rarely fails to import — the usual cause is a
-        # MISSING DEPENDENCY (recognize-anything doesn't declare timm /
-        # transformers / fairscale, so pip doesn't pull them). Surface the real
-        # error instead of a misleading "not installed".
+        # The usual cause is a missing dependency (recognize-anything doesn't declare timm,
+        # transformers or fairscale); surface the real error instead of "not installed".
         sys.exit(
             f"Could not import ram.models.ram_plus: {e!r}\n\n"
             "If 'ram' itself is missing:\n"
@@ -262,11 +234,8 @@ def main():
         f.write("\n".join(tag_list) + "\n")
     print(f"wrote {len(tag_list)} tags → {tags_path}")
 
-    # Per-class sigmoid thresholds. RAM++ ships calibrated per-class cutoffs
-    # (mean ~0.68) in `model.class_threshold`; dumping them lets ram_plus.rs
-    # apply a per-class cutoff instead of a single global one (precision win).
-    # Wrapped so a missing/oddly-shaped attribute on the installed package
-    # version degrades to a constant-0.68 vector instead of failing the export.
+    # Per-class sigmoid thresholds (RAM++'s calibrated class_threshold, mean ~0.68). If the
+    # attribute is missing on this package version, fall back to a constant 0.68 vector.
     thr_path = os.path.join(args.out_dir, "ram_plus_thresholds.txt")
     try:
         ct = getattr(model, "class_threshold", None)
@@ -297,34 +266,21 @@ def main():
     print(f"wrote {len(thr)} per-class thresholds → {thr_path}")
 
     dummy = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE, dtype=torch.float32)
-    # A dynamic batch axis lets a caller run N images per forward. NOTE (corrects
-    # the original HW-4 hypothesis): batched RAM++ was MEASURED on an RTX 2060
-    # (2026-06) and DISPROVEN — the GPU is compute+VRAM saturated at batch=1 (util
-    # p50 87%, VRAM ~90% full), so batch=4 ran ~23% SLOWER, not faster. Keep the
-    # dynamic axis (harmless; opt-in via the engine's batch coordinator for
-    # high-SM/high-VRAM cards that do NOT saturate at batch=1), but the real
-    # throughput levers are a lighter/lower-res model or a faster-kernel EP, not
-    # batching. ONLY dim 0 is made dynamic; the Swin window grid stays static at
-    # the chosen image size so the window-attention reshapes (the dynamic-`nW`
-    # Concat issue in SWIN_EXPORT_NOTE) are untouched.
+    # Only dim 0 is dynamic; the Swin window grid stays static at IMAGE_SIZE. Batching does
+    # not raise throughput on GPUs that saturate at batch=1 (measured on an RTX 2060).
     dyn_axes = (
         {"image": {0: "batch"}, "logits": {0: "batch"}} if args.dynamic_batch else None
     )
-    # torch >= 2.5 DEFAULTS torch.onnx.export to the dynamo exporter, which for
-    # this model emits a Loop/SequenceInsert graph that (a) the SWIN_EXPORT_NOTE
-    # warns against and (b) breaks fp16 conversion (Sequence vs Tensor elem-type
-    # mismatch → the ONNX won't even load). Force the legacy TorchScript tracer
-    # (dynamo=False): it unrolls the static 384² Swin window grid into a clean
-    # constant graph that fp16-converts and loads. Passed only when the running
-    # torch supports the kwarg (>=2.5) so the script still runs on torch 2.2-2.4.
+    # torch >= 2.5 defaults torch.onnx.export to the dynamo exporter, which emits a
+    # Loop/SequenceInsert graph that breaks fp16 conversion. dynamo=False forces the
+    # TorchScript tracer, which unrolls the static Swin window grid into a constant graph.
+    # Passed only when the kwarg exists so the script still runs on torch 2.2-2.4.
     export_kwargs = dict(
         input_names=["image"],
         output_names=["logits"],
         opset_version=args.opset,
-        # Constant-folding evaluates Swin-L's conv/matmul subgraphs on CPU at
-        # export time — pathologically slow for this model (tens of minutes /
-        # hours). Skip it: onnxruntime constant-folds at session load instead,
-        # for the same runtime graph.
+        # Constant folding of Swin-L's conv/matmul subgraphs at export time takes hours on CPU;
+        # onnxruntime folds them at session load instead.
         do_constant_folding=False,
         dynamic_axes=dyn_axes,
     )
@@ -336,11 +292,9 @@ def main():
         torch.onnx.export(wrapper, dummy, onnx_path, **export_kwargs)
     print(f"exported → {onnx_path}  (dynamic_batch={args.dynamic_batch})")
 
-    # fp16: convert graph weights to half precision (≈450 MB vs ≈800 MB) so the
-    # tagger fits a 4 GB GPU next to faces+CLIP. keep_io_types=True leaves the
-    # "image" input + "logits" output as fp32 → ram_plus.rs feeds/reads fp32
-    # unchanged; only internal weights/compute are fp16. (fp16 diverges a little
-    # more from torch — judge by top-k overlap below, not max|Δlogit|.)
+    # fp16 halves the graph (≈450 MB vs ≈800 MB) so the tagger fits a 4 GB GPU next to
+    # faces+CLIP. keep_io_types leaves "image"/"logits" fp32 so ram_plus.rs is unchanged.
+    # fp16 diverges more from torch, so judge by top-k overlap below, not max|Δlogit|.
     if args.precision == "fp16":
         import onnx
         from onnxconverter_common import float16
@@ -351,25 +305,19 @@ def main():
                 "runs. Pass --sample-image to validate top-k agreement before shipping.",
                 file=sys.stderr,
             )
-        # Keep the numerically sensitive ops fp32: the reweight_scale.exp()
-        # CLS-similarity path + softmax + layernorm + reductions overflow/lose
-        # precision in fp16. The bulk (Conv/MatMul) still goes fp16 → ~half size.
+        # Softmax, layernorm, reductions and the CLS-similarity path lose precision in fp16.
         m16 = float16.convert_float_to_float16(
             onnx.load(onnx_path),
             keep_io_types=True,
-            # "Cast" is blocked too: the tagging head has Cast ops at fp16/fp32
-            # boundaries that the converter otherwise leaves emitting fp16 where a
-            # blocked downstream op declares fp32 (load-time "Type (float16) does
-            # not match expected (float)"). Keeping Casts as-is lets the converter
-            # insert its own boundary casts consistently.
+            # Cast is blocked too: otherwise the converter leaves fp16 at tagging-head boundaries
+            # where a blocked op expects fp32 (load-time type mismatch).
             op_block_list=["Softmax", "LayerNormalization", "ReduceMean", "ReduceSum", "Exp", "Div", "Cast"],
         )
         onnx.save(m16, onnx_path)
         print(f"converted to fp16 (fp32 I/O + sensitive ops) → {onnx_path}")
 
-    # ALWAYS assert the ONNX output dim == tag count — the exact invariant
-    # ram_plus.rs enforces at load. A cheap zero-input run catches an H1-class
-    # head-shape bug even without --sample-image.
+    # Invariant ram_plus.rs enforces at load: ONNX output dim == tag count. Checked even
+    # without --sample-image.
     import onnxruntime as _ort
 
     _sess = _ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
@@ -381,7 +329,6 @@ def main():
         )
     print(f"output dim OK: {_out.shape[-1]} == {len(tag_list)} tags")
 
-    # Optional numerical validation: torch vs onnxruntime top-k agreement.
     if args.sample_image:
         import onnxruntime as ort
 
@@ -397,7 +344,7 @@ def main():
         o_top = set(np.argsort(-onnx_logits)[:k].tolist())
         overlap = len(t_top & o_top)
         print(f"validation: max|Δlogit|={max_abs:.4g}  top{k}_overlap={overlap}/{k}")
-        thr = 1.0 / (1.0 + np.exp(-onnx_logits))  # sigmoid
+        thr = 1.0 / (1.0 + np.exp(-onnx_logits))
         top = np.argsort(-thr)[:k]
         print("top tags:", [f"{tag_list[i]}={thr[i]:.2f}" for i in top])
         if max_abs > 1e-2 or overlap < k - 2:
