@@ -1,7 +1,6 @@
-//! Schema-conformance suite: serializes an exemplar of every CommandPayload /
-//! EventPayload variant and structurally checks the wire JSON against
-//! `shared/ipc-schema/ipc.schema.json`. Guards against key-casing drift
-//! (`fileID` vs `fileId`) that a pure Rust↔Rust round-trip cannot see.
+//! Serializes an exemplar of every CommandPayload / EventPayload variant and structurally checks the wire JSON against
+//! `shared/ipc-schema/ipc.schema.json`, catching key-casing drift (`fileID` vs `fileId`) a Rust↔Rust round-trip cannot
+//! see.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -27,10 +26,8 @@ use super::{
     TrashFilesPayload, UndoRestructurePayload, Wrap,
 };
 
-/// Schema tags with no Windows implementation. Empty today: the schema's
-/// `startScan` carries the shared `rootPath` shape and optional bookmark;
-/// every other schema tag is implemented here. Add a tag ONLY for a
-/// platform divergence documented in the schema's description for it.
+/// Schema tags with no Windows implementation; empty today. Add one ONLY for a platform divergence documented in the
+/// schema.
 const SCHEMA_ONLY_COMMAND_TAGS: &[&str] = &[];
 const SCHEMA_ONLY_EVENT_TAGS: &[&str] = &[];
 
@@ -80,12 +77,9 @@ fn variant_schema<'a>(root: &'a Value, union_def: &str, tag: &str) -> &'a Value 
         .unwrap_or_else(|| panic!("$defs.{union_def} has no oneOf variant tagged '{tag}'"))
 }
 
-/// Recursively asserts the serialized value fits the schema node:
-/// every serialized key exists in `properties` wherever the schema is closed
-/// (`additionalProperties: false` — catches casing drift), every `required`
-/// key is present (optional-when-None fields are only checked if required),
-/// and string values respect `enum` lists. `anyOf` here is always the
-/// nullable `[null, X]` shape; open objects (no `properties`) are skipped.
+/// Every serialized key must exist in `properties` where the schema is closed (`additionalProperties: false`), every
+/// `required` key must be present, and strings must respect `enum`. `anyOf` is always the nullable `[null, X]` shape;
+/// open objects are skipped.
 fn assert_conforms(root: &Value, schema_node: &Value, value: &Value, path: &str) {
     let node = resolve(root, schema_node);
 
@@ -185,8 +179,7 @@ fn assert_tag_sets_match(root: &Value, union_def: &str, rust_tags: &BTreeSet<&st
     }
 }
 
-/// Exhaustive match (no wildcard arm) — adding a CommandPayload variant fails
-/// compilation here until its wire tag + an exemplar below are added.
+/// Exhaustive (no wildcard): a new variant fails compilation until its tag and an exemplar are added.
 fn command_tag(payload: &CommandPayload) -> &'static str {
     match payload {
         CommandPayload::ChatRequest(_) => "chatRequest",
@@ -238,8 +231,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
     }
 }
 
-/// Exhaustive match (no wildcard arm) — adding an EventPayload variant fails
-/// compilation here until its wire tag + an exemplar below are added.
+/// Exhaustive (no wildcard): a new variant fails compilation until its tag and an exemplar are added.
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::ChatResponse(_) => "chatResponse",
@@ -319,8 +311,7 @@ fn restructure_move() -> RestructureMove {
     }
 }
 
-/// Optional fields are deliberately `Some(...)` so every serializable key is
-/// exercised against the schema's `properties`.
+/// Optional fields are `Some(...)` so every serializable key is checked against the schema.
 pub(crate) fn command_exemplars() -> Vec<CommandPayload> {
     vec![
         serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
@@ -478,8 +469,7 @@ pub(crate) fn command_exemplars() -> Vec<CommandPayload> {
     ]
 }
 
-/// Optional fields are deliberately `Some(...)` so every serializable key is
-/// exercised against the schema's `properties`.
+/// Optional fields are `Some(...)` so every serializable key is checked against the schema.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
         serde_json::from_value(serde_json::json!({"chatResponse":{"_0":{"requestID":"chat","conversationID":"c","status":"completed","message":"Found","messages":[{"id":"m","role":"user","text":"birthday","createdAt":1}],"hits":[]}}})).unwrap(),
@@ -804,8 +794,7 @@ fn mark_persons_different_bulk_result_matches_schema() {
     );
 }
 
-/// Negative self-test: the checker must reject the exact L1 drift class
-/// (`fileId` instead of `fileID`), or this suite guards nothing.
+/// The checker must reject the L1 drift class (`fileId` for `fileID`), or this suite guards nothing.
 #[test]
 #[should_panic(expected = "wire-format drift")]
 fn checker_rejects_wrong_cased_key() {

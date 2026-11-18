@@ -5,15 +5,10 @@ use rusqlite::Connection;
 use crate::pipeline::discovery::FileKind;
 use crate::pipeline::restructure::{FileForClassify, PlannedIdentity};
 
-/// Files + per-file person names for restructure planning. Person names come
-/// from a deduped, ordered correlated subquery — NOT
-/// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
-/// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
-/// char(31)-separated list; only an unambiguous single-person result enables
-/// the People rule so group photos are not auto-filed under an arbitrary name.
-///
-/// Bind `(root, prefix, upper)` from [`plan_root_bounds`]; an empty root
-/// selects every active file.
+/// Person names come from a deduped, ordered correlated subquery, NOT `GROUP_CONCAT(DISTINCT p.name, char(31))` (SQLite
+/// rejects it: "DISTINCT aggregates must have exactly one argument"). `names` (column 8) is char(31)-separated; only an
+/// unambiguous single-person result enables the People rule so group photos are not filed under an arbitrary name. Bind
+/// `(root, prefix, upper)` from [`plan_root_bounds`]; an empty root selects every active file.
 pub const PLAN_FILES_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
    f.location_lat, f.location_lon, f.has_text,
@@ -41,7 +36,7 @@ pub const PLAN_FILES_SQL: &str = "SELECT
         OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
  ORDER BY f.id";
 
-/// [`PLAN_FILES_SQL`] keyset-paged: also binds `?4` (last id) and `?5` (limit).
+/// Also binds `?4` (last id) and `?5` (limit).
 pub const PLAN_FILES_PAGE_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
    f.location_lat, f.location_lon, f.has_text,
@@ -71,10 +66,9 @@ pub const PLAN_FILES_PAGE_SQL: &str = "SELECT
  ORDER BY f.id
  LIMIT ?5";
 
-/// `(root, prefix, upper)` bind values scoping [`PLAN_FILES_SQL`] to `root`.
 pub fn plan_root_bounds(root: &str) -> (String, String, String) {
-    // Take the separator from the ORIGINAL root: a trimmed drive root like "C:" has no backslash left,
-    // so deriving it from the trimmed string would build a "/"-based prefix matching no stored path.
+    // Take the separator from the ORIGINAL root: a trimmed drive root like "C:" has no backslash left and would build a
+    // "/"-based prefix matching no stored path.
     let separator = if root.contains('\\') { '\\' } else { '/' };
     let root = root.trim_end_matches(['/', '\\']).to_string();
     let prefix = format!("{root}{separator}");
@@ -110,7 +104,6 @@ pub fn unambiguous_person_name(
         .flatten()
 }
 
-/// Row mapper for [`PLAN_FILES_SQL`] / [`PLAN_FILES_PAGE_SQL`].
 pub fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
     let kind: String = row.get(2)?;
     let names: Option<String> = row.get(8)?;
@@ -140,9 +133,8 @@ pub fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClas
     })
 }
 
-/// Deepest folder containing every active file, plus the active-file count.
-/// `None` when the library is empty. The component prefix of a sorted set's
-/// first and last members bounds every member, so only two rows are read.
+/// `None` when the library is empty. The component prefix of a sorted set's first and last members bounds every member,
+/// so only two rows are read.
 pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)>> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |row| row.get(0))?;
     if count == 0 {
@@ -162,7 +154,6 @@ pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)
     Ok(Some((root, count)))
 }
 
-/// True when `root` is a filesystem root (`/`, `C:\`) — no parent folder.
 pub fn is_filesystem_root(root: &Path) -> bool {
     root.parent().is_none()
 }
