@@ -2,6 +2,11 @@ use super::*;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
+fn listener() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    (listener, url)
+}
 
 const RESPONSE: &[u8] = br#"{"choices":[{"message":{"content":"generated terminal response, not inference"}}]}"#;
 
@@ -17,11 +22,6 @@ fn root() -> PathBuf {
     std::fs::write(path.join("image.png"), [0x89, b'P', b'N', b'G']).unwrap();
     println!("Generated request lifetime state retained: {}", path.display());
     path
-}
-fn listener() -> (std::net::TcpListener, String) {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (listener, url)
 }
 fn request(stream: &mut std::net::TcpStream) {
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();

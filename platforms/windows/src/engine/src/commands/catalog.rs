@@ -59,7 +59,7 @@ pub async fn handle(
         Ok(Ok((response, queued))) => {
             if let Some(database) = scheduler {
                 let resumed = match (action == "resumeJob", job_id.clone()) {
-                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| super::timeline::is_timeline_job(conn, &id))
+                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| is_job_of_kind(conn, &id, super::timeline::JOB_KIND))
                         .await
                         .unwrap_or(false),
                     _ => false,
@@ -118,7 +118,6 @@ fn execute_with_index(
             return Ok(result);
         }
     }
-    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
     if ["search", "detail", "jobs"].contains(&request.action.as_str())
         && let Some(mut reader) = crate::db::reader_for(&database)?
     {
@@ -128,8 +127,7 @@ fn execute_with_index(
     execute(&mut conn, &request)
 }
 
-/// Scores outside the database lock: the lock is held only to read the files
-/// and their cached signals, and again to store new signals.
+/// The lock is held only to read files and cached signals, and again to store new ones.
 fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
     use super::catalog_take_auto::{prepare, store, TakeFaceAnalyzer};
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
@@ -306,10 +304,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "pauseJob" | "resumeJob" | "cancelJob" => {
             let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
-            // Only jobs with a worker in this engine can change state (Swift `FileIDEngineMain`).
-            if !super::timeline::is_timeline_job(&tx, id)?
-                && !super::take_grouping::is_job(&tx, id)?
-                && !super::face_refresh::is_job(&tx, id)?
+            if !is_job_of_kind(&tx, id, super::timeline::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::take_grouping::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::face_refresh::JOB_KIND)?
             {
                 bail!("This job has no supported worker in this engine.")
             }
@@ -418,7 +415,6 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     let mut statement = conn.prepare("SELECT id,kind,file_ids_json,state,progress,error,created_at,updated_at FROM catalog_jobs ORDER BY created_at DESC LIMIT 200")?;
     let rows = statement
         .query_map([], |r| {
-            // One malformed row (another engine, a hand edit) must not hide every job.
             let json: Option<String> = r.get(2)?;
             let ids = json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
             Ok(CatalogJob {
@@ -434,6 +430,17 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+pub(crate) fn jobs_of_kind(conn: &Connection, kind: &str) -> Result<Vec<CatalogJob>> {
+    Ok(jobs(conn)?.into_iter().filter(|job| job.kind == kind).collect())
+}
+
+pub(crate) fn is_job_of_kind(conn: &Connection, id: &str, kind: &str) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
+        .optional()?
+        .is_some_and(|found| found == kind))
 }
 
 #[cfg(test)]

@@ -82,7 +82,6 @@ pub(super) fn search(
         } else {
             "CASE WHEN e.kind='chapter' THEN 0 WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 2 ELSE 1 END,bm25(catalog_evidence_fts),e.evidence_id"
         };
-        // Empty temporal queries require timed observations, not a face elsewhere in the file.
         let temporal_people = if quoted.is_empty() {
             " AND (?3 IS NULL OR f.id IN (SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?3)) AND stale=0 AND start_seconds IS NOT NULL AND ((start_seconds<=?5 AND COALESCE(end_seconds,start_seconds)>=?5) OR ABS(start_seconds-?5)<=15)))"
         } else {
@@ -106,8 +105,8 @@ pub(super) fn search(
     if !quoted.is_empty() && time.is_none() {
         let seen: std::collections::HashSet<i64> = hits.iter().map(|h| h.file_id).collect();
         hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events, root))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
-        // Handwriting (Vision's accurate tier or a VLM transcription) is its own
-        // hit kind so results can say "Handwritten text". Mirrors CatalogStore.ocrHitKindSQL.
+        // Handwriting (Vision's accurate tier or a VLM transcription) is its own hit kind so results can say
+        // "Handwritten text" (CatalogStore.ocrHitKindSQL).
         const OCR_KIND: &str = "(SELECT CASE WHEN o.handwritten=1 THEN 'handwrittenText' ELSE 'ocrText' END FROM ocr_text o WHERE o.file_id=f.id)";
         for (table, kind) in [("doc_fts", "'documentText'"), ("ocr_fts", OCR_KIND)] {
             let sql = format!(
@@ -123,12 +122,8 @@ pub(super) fn search(
     Ok(hits)
 }
 
-/// Files whose scan tags match the query words, best first. Each word matches
-/// the start of a tag word ("grass" hits "grassland", "sky" hits "blue_sky"),
-/// and only files matching the most words are kept so a filler word in the
-/// question can't hide a real match. Words are matched against the v27 tag
-/// vocabulary, then files come from the tag index. Mirrors macOS
-/// `CatalogStore.tagHits`.
+/// Each word matches the start of a tag word ("grass" hits "grassland"), and only files matching the most words are
+/// kept so a filler word can't hide a real match. Mirrors `CatalogStore.tagHits`.
 fn tag_hits(
     conn: &Connection,
     query: &str,
@@ -147,9 +142,8 @@ fn tag_hits(
     if words.is_empty() {
         return Ok(vec![]);
     }
-    // One statement counts the words each file's tags match and keeps the
-    // hundred newest best-matching files, so a word that matches most of the
-    // library never brings every id back.
+    // One statement counts matched words per file and keeps the hundred newest best matches, so a word matching most of
+    // the library never returns every id.
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone()), Box::new(None::<f64>), Box::new(root.map(str::to_owned))];
     let mut per_word = Vec::with_capacity(words.len());
     for word in &words {
@@ -176,8 +170,7 @@ fn tag_hits(
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// The word plus its singular stems, so "dogs" and "beaches" reach the singular
-/// scan tags. Mirrors macOS `CatalogStore.wordForms`.
+/// The word plus its singular stems, so "dogs" and "beaches" reach singular scan tags (`CatalogStore.wordForms`).
 pub(super) fn word_forms(word: &str) -> Vec<String> {
     if word.chars().count() < 4 {
         return vec![word.to_owned()];

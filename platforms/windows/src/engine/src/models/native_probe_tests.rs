@@ -1,5 +1,6 @@
 use super::super::native_runtime::{discover_at, validate_binary};
 use super::*;
+use crate::models::test_support::receipt;
 use std::{
     path::{Path, PathBuf},
     sync::atomic::AtomicU64,
@@ -32,9 +33,6 @@ fn command(root: &Path, mode: &str) -> Command {
         .env("FILEID_GENERATED_PROBE_MODE", mode)
         .env("FILEID_GENERATED_PROBE_READY", root.join("ready.json"));
     command
-}
-fn receipt(root: &Path, value: serde_json::Value) {
-    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&value).unwrap()).unwrap();
 }
 #[test]
 #[ignore = "generated own test executable, not an installed runtime"]

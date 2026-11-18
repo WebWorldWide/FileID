@@ -1,13 +1,10 @@
-//! Deterministic Chat parsing. Mirrors macOS `ChatIntent.swift` line for line;
-//! the shared cases live in `shared/test-corpus/chat-intents.json`.
-//!
-//! Only the user's own words are parsed. Retrieved file text never reaches
-//! these functions, so instructions inside documents cannot start actions.
+//! Deterministic Chat parsing, line for line with macOS `ChatIntent.swift` (shared cases:
+//! `shared/test-corpus/chat-intents.json`). Only the user's own words are parsed, so instructions inside retrieved
+//! documents cannot start actions.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// An imperative request, before it is resolved against the library.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Intent {
@@ -38,8 +35,7 @@ impl Intent {
     }
 }
 
-/// A date window over `COALESCE(created_at, modified_at)`. `from`/`to` are
-/// SQLite date-modifier lists, evaluated in local time and converted to UTC.
+/// `from`/`to` are SQLite date-modifier lists, evaluated in local time and converted to UTC.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DateFilter {
@@ -51,13 +47,11 @@ pub struct DateFilter {
     pub month_day: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub month: Option<String>,
-    /// A season without a year: these months in any year.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub months: Option<Vec<String>>,
     pub phrase: String,
 }
 
-/// The structured part of a question: what to measure and which filters apply.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Question {
@@ -70,26 +64,19 @@ pub struct Question {
     pub folder: Option<String>,
     pub duplicates: bool,
     pub undescribed: bool,
-    /// The message without the words the structure consumed.
     pub reduced: String,
-    /// File extensions named in the question ("RAW", "PNGs"), lowercase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formats: Option<Vec<String>>,
-    /// "the 3 largest", "top 10": how many files to list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
-    /// "bigger than 1 GB" / "under 500 KB", in bytes (exclusive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<i64>,
-    /// "per year" / "by month": counts grouped by "year" or "month".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<String>,
-    /// "which year has the most photos": "most" or "least" over the breakdown groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak: Option<String>,
-    /// "how many people are in my library" is "count"; "who is in my photos" is "who".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub people: Option<String>,
 }
@@ -128,7 +115,6 @@ const QUESTION_WORDS: [&str; 16] = [
 ];
 const KNOWN_FOLDERS: [&str; 9] = ["downloads", "desktop", "documents", "pictures", "movies", "videos", "music", "home", "docs"];
 
-/// Lowercased word with surrounding punctuation removed; inner punctuation stays.
 pub fn clean(word: &str) -> String {
     word.replace('’', "'")
         .trim_start_matches(|c: char| "\"'“”‘(".contains(c))
@@ -162,8 +148,6 @@ fn is_path(word: &str) -> bool {
         || (word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && word.get(1..3) == Some(":\\"))
 }
 
-/// Strips polite lead-ins and trailing courtesy words. Returns cleaned and
-/// original-case words, parallel.
 fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let mut lower: Vec<String> = raw.iter().map(|word| clean(word)).collect();
@@ -190,8 +174,6 @@ fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
     (lower, cased)
 }
 
-/// A folder reference inside an imperative: a path, a known home folder,
-/// `this`, `library` or `named:<folder>`.
 pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Option<String> {
     if let Some(quoted) = quoted_path(text) {
         return Some(quoted);
@@ -291,8 +273,7 @@ fn rest_text(words: &[String], from: usize) -> Option<String> {
 
 const DUPLICATE_WORDS: [&str; 6] = ["duplicate", "duplicates", "dupes", "dupe", "duplicated", "copies"];
 
-/// Parses an imperative request. `None` means the message is a question or
-/// search; `refuse` means a request Chat will not turn into an action.
+/// `None` means the message is a question or search; `refuse` means a request Chat will not turn into an action.
 pub fn parse_intent(text: &str) -> Option<Intent> {
     let (words, cased) = imperative_words(text);
     let verb = words.first()?.as_str();
@@ -485,8 +466,6 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
     None
 }
 
-/// Parses the structured part of a question (counts, sizes, ordering, dates,
-/// folders, duplicates, descriptions).
 pub fn parse_question(text: &str) -> Question {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
@@ -675,7 +654,6 @@ pub fn parse_question(text: &str) -> Question {
     question
 }
 
-/// "the largest video", "my newest photo": a singular noun after an order word asks for one file.
 const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording"];
 
 const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "collection", "files"];
@@ -690,9 +668,8 @@ const WHO_WORDS: &[&str] = &[
 ];
 const LIST_LEADS: &[&str] = &["which", "what", "whats", "list", "show", "give", "tell"];
 
-/// "how many people are in my library?" is "count"; "who is in my photos?" and
-/// "show me the people" are "who". Anything with another filter or subject is
-/// not a people question and keeps its normal parse.
+/// "how many people are in my library?" is "count"; "who is in my photos?" / "show me the people" are "who". Anything
+/// with another filter or subject keeps its normal parse.
 fn people_ask(words: &[String]) -> Option<&'static str> {
     let words: Vec<&str> = words.iter().map(String::as_str).filter(|word| !word.is_empty()).collect();
     let is_people = |word: &&str| ["people", "persons"].contains(word);
@@ -718,8 +695,6 @@ fn people_ask(words: &[String]) -> Option<&'static str> {
     (leads && !about_photos && words.iter().all(|word| WHO_WORDS.contains(word) || LIST_LEADS.contains(word) || ["me", "a", "any"].contains(word))).then_some("who")
 }
 
-/// "which year has the most photos", "what was my busiest month": the group
-/// unit, the extreme asked for and the words it consumed.
 fn peak_unit(words: &[String]) -> Option<(&'static str, &'static str, Vec<usize>)> {
     let peak = words.iter().position(|word| ["most", "busiest", "highest", "fewest", "least", "lowest"].contains(&word.as_str()))?;
     if words.get(peak + 1).is_some_and(|next| ["recent", "recently", "common", "commonly"].contains(&next.as_str())) {
@@ -745,9 +720,8 @@ fn peak_unit(words: &[String]) -> Option<(&'static str, &'static str, Vec<usize>
     Some((extreme, unit, range))
 }
 
-/// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
-/// bounds and the words they used. Decimal units, as sizes are shown.
-/// Mirrors macOS `ChatIntent.sizeBounds`.
+/// "bigger than 1 GB", "under 2.5 gb": byte bounds and the words used. Decimal units, as sizes are shown
+/// (`ChatIntent.sizeBounds`).
 pub fn size_bounds(words: &[String]) -> Option<(Option<i64>, Option<i64>, BTreeSet<usize>)> {
     let unit = |word: &str| -> Option<f64> {
         Some(match word {
@@ -822,7 +796,6 @@ const RAW_EXTENSIONS: [&str; 20] = [
     "raw", "arw", "cr2", "cr3", "nef", "dng", "orf", "rw2", "raf", "srw", "pef", "3fr", "erf", "kdc", "mef", "mos", "mrw", "rwl", "srf", "x3f",
 ];
 
-/// "How many RAW photos?" / "show my PNGs": format words that filter by extension.
 fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
     Some(match word {
         "raw" | "raws" => &RAW_EXTENSIONS,
@@ -869,8 +842,6 @@ const OVERVIEW_WORDS: [&str; 26] = [
     "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
 ];
 
-/// "What is in my library?" and "which folder has the most files?": questions about the
-/// library as a whole, answered from totals rather than searched for as words.
 fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     let words: Vec<String> = words.iter().filter(|word| !word.is_empty()).cloned().collect();
     if words.is_empty() {
@@ -881,7 +852,6 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     {
         return Some(("overview", "newest"));
     }
-    // "tell me about my Adlon library": one name before "library", never after it ("library of dogs" is a search).
     let unknown: Vec<(usize, &String)> = words.iter().enumerate().filter(|(_, word)| !OVERVIEW_WORDS.contains(&word.as_str())).collect();
     if let [(at, word)] = unknown.as_slice()
         && let Some(library) = words.iter().position(|word| word == "library" || word == "collection")
@@ -892,7 +862,6 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
             {
                 return Some(("overview", "newest"));
             }
-    // "what file formats do I have", "which extensions are in my library"
     if has(&words, &["format", "formats", "extension", "extensions"])
         && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list"])
         && !has(&words, &["folder", "folders", "directory"])
@@ -900,7 +869,6 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     {
         return Some(("formats", "newest"));
     }
-    // "how many of each file type", "break down my files by type", "what file types do I have"
     if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])
         || has(&words, &["type", "types", "kinds"]) && has(&words, &["what", "which"]) && has(&words, &["files", "file"]))
         && !has(&words, &["folder", "folders", "in", "inside", "under", "from"])
@@ -974,7 +942,6 @@ fn year(word: &str) -> Option<u32> {
     (word.len() == 4 && word.chars().all(|c| c.is_ascii_digit())).then(|| word.parse().ok()).flatten().filter(|value| (1900..=2100).contains(value))
 }
 
-/// A single date expression: its window and how many words it spans.
 #[derive(Clone)]
 struct Span {
     filter: DateFilter,
@@ -1102,8 +1069,7 @@ fn month_day(m: u32, d: u32, length: usize) -> Span {
     }
 }
 
-/// The first date expression and the words it consumed, including its
-/// preposition. A bare year or month name needs a preposition before it.
+/// A bare year or month name needs a preposition before it.
 const MEDIA_NOUNS: [&str; 10] = ["photos", "photo", "pictures", "picture", "pics", "images", "videos", "video", "clips", "shots"];
 
 fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)> {
@@ -1115,8 +1081,7 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
         if bare && !prepositions.contains(&previous) {
             continue;
         }
-        // "winter photos", "in the summer": a season alone needs a media word after it
-        // or a preposition before it, so "spring cleaning" stays a subject.
+        // A season alone needs a media word after it or a preposition before it, so "spring cleaning" stays a subject.
         let seasonal = span.filter.months.is_some();
         let after_the = previous == "the" && index >= 2 && prepositions.contains(&words[index - 2].as_str());
         let media_next = words.get(index + 1).is_some_and(|word| MEDIA_NOUNS.contains(&word.as_str()));
@@ -1163,7 +1128,7 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
     None
 }
 
-/// "1.2 GB" with decimal units and round-half-up tenths, identical in both engines.
+/// Decimal units, round-half-up tenths, identical in both engines.
 pub fn bytes_label(bytes: i64) -> String {
     let bytes = bytes.max(0);
     if bytes < 1000 {
@@ -1186,7 +1151,6 @@ pub fn bytes_label(bytes: i64) -> String {
     format!("{}.{} {}", tenths / 10, tenths % 10, units[index])
 }
 
-/// "15,021".
 pub fn count_label(value: i64) -> String {
     let digits = value.abs().to_string();
     let mut grouped = String::new();
@@ -1203,7 +1167,6 @@ pub fn count_label(value: i64) -> String {
     }
 }
 
-/// Plural or singular noun for a set of kinds.
 pub fn noun(kinds: &[String], count: i64) -> String {
     let one = count == 1;
     let label = |kind: &str| -> &str {
@@ -1255,10 +1218,8 @@ fn capitalised_word(word: &str) -> bool {
         && word.chars().any(char::is_lowercase)
 }
 
-/// The person a question is spoken about, when it asks "of Kyle" or "with Kyle Smith": one or two
-/// capitalised words after of/with/featuring/including/showing. Longer capitalised runs are folder
-/// or event titles, and months, weekdays, holidays and brands are not people. Mirrors Swift
-/// `ChatIntent.spokenName`; the shared cases are the corpus `spokenNames`.
+/// One or two capitalised words after of/with/featuring/including/showing; longer runs are folder or event titles, and
+/// months, weekdays, holidays and brands are not people (`ChatIntent.spokenName`, corpus `spokenNames`).
 pub fn spoken_name(text: &str) -> Option<String> {
     let words: Vec<&str> = text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric())).collect();
     let lead = words.iter().position(|word| NAME_LEADS.contains(&word.to_lowercase().as_str()))?;
@@ -1270,8 +1231,7 @@ pub fn spoken_name(text: &str) -> Option<String> {
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
 const GEOTAG_WORDS: [&str; 5] = ["gps", "geotagged", "geotag", "geotags", "geolocated"];
 
-/// "where were my photos taken?", "do my photos have GPS?": a question about places. Returns the kinds it
-/// names (empty for every file). Mirrors Swift `ChatIntent.placeAsk`; the shared cases are the corpus `placeAsks`.
+/// Returns the kinds named (empty for every file) (`ChatIntent.placeAsk`, corpus `placeAsks`).
 pub fn place_ask(text: &str) -> Option<Vec<String>> {
     let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).collect();
     let asks = (has(&words, &["where"]) && has(&words, &TAKEN_WORDS))
@@ -1295,8 +1255,7 @@ pub fn place_ask(text: &str) -> Option<Vec<String>> {
     Some(kinds)
 }
 
-/// "what's in Kyle Senior Pics": the name a question asks the contents of, left for the catalog to say
-/// whether it is a folder. Mirrors Swift `ChatIntent.askedInside`; the shared cases are the corpus `insideAsks`.
+/// Left for the catalog to say whether it is a folder (`ChatIntent.askedInside`, corpus `insideAsks`).
 pub fn asked_inside(text: &str) -> Option<String> {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();

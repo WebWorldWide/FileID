@@ -36,8 +36,7 @@ fn artifacts(kind: &str) -> Vec<super::registry::FileEntry> {
 
 type VerifiedKey = (std::path::PathBuf, String, usize);
 
-/// Files that passed the checksum, with the size and modification time they
-/// had then; a file with the same pair is not hashed again.
+/// Files that passed the checksum with the (size, mtime) they had then; the same pair is not hashed again.
 static VERIFIED: parking_lot::Mutex<Vec<(VerifiedKey, u64, std::time::SystemTime)>> = parking_lot::Mutex::new(Vec::new());
 
 pub fn verify(path: &Path, kind: &str, index: usize) -> Result<()> {
@@ -86,8 +85,6 @@ fn hash_matches(path: &Path, kind: &str, index: usize) -> Result<()> {
     Ok(())
 }
 
-/// Runs `load` while `checks` hash the weights on another thread; the loaded
-/// value is returned only when every check passed.
 pub fn load_verified<T>(checks: &[(&Path, &str, usize)], load: impl FnOnce() -> Result<T>) -> Result<T> {
     let (verified, loaded) = std::thread::scope(|scope| {
         let verifier = scope.spawn(|| checks.iter().try_for_each(|(path, kind, index)| verify(path, kind, *index)));

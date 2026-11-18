@@ -1,7 +1,5 @@
-//! The curated model download set, embedded from `shared/models/manifest.json`
-//! at compile time. Each artifact's URL is derived from its Hugging Face repo,
-//! revision and path. A document that fails validation yields an empty set, so
-//! nothing downloads from a malformed manifest.
+//! The curated model download set, embedded from `shared/models/manifest.json`. A document that fails validation yields
+//! an empty set, so nothing downloads from a malformed manifest.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -71,8 +69,6 @@ pub fn artifact(id: &str) -> Option<&'static Artifact> {
     manifest().artifacts.iter().find(|artifact| artifact.id == id)
 }
 
-/// The terms-required policy key governing any manifest artifact or VLM repo
-/// of `kind`.
 pub fn terms_policy_for_kind(kind: &str) -> Option<&'static str> {
     let manifest = manifest();
     manifest

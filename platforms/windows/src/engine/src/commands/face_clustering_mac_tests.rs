@@ -22,7 +22,6 @@ fn space() -> Space {
     Space { model: MODEL.into(), processing: crate::commands::face_refresh::MAC_PROCESSING.into() }
 }
 
-/// Unit vector near axis `identity`, nudged by `jitter` along axis 100 + `face`.
 fn vector(identity: usize, face: usize, jitter: f32) -> Vec<u8> {
     let mut values = vec![0.0f32; DIM];
     values[identity] = 1.0;
@@ -42,7 +41,6 @@ impl Catalog {
         Self { conn, dir: tempdir() }
     }
 
-    /// A photo on disk with one face, stamped as the Swift engine stamps it.
     fn face(&self, id: i64, identity: usize, quality: f64, person: Option<i64>) {
         let path = self.dir.0.join(format!("{id}.jpg"));
         std::fs::write(&path, format!("photo {id}")).unwrap();

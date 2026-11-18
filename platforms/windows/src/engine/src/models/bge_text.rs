@@ -1,14 +1,7 @@
-// BGE-small-en-v1.5 text embedding wrapper. Maps a string to a 384-d
-// L2-normalized float32 embedding via the BERT-family WordPiece tokenizer
-// (`models::wordpiece_tokenizer`) + ONNX inference. Used for semantic search
-// over document text. It is a different vector space from CLIP, so the
-// dbwriter persists these into a parallel `text_embeddings` table keyed by
-// model.
-//
-// Input names are read from the session so a re-export with different
-// names still binds; token_type_ids is passed only when the session
-// actually advertises it (some BGE exports drop it).
+// BGE-small-en-v1.5 document embeddings: 384-d, L2-normalized, stored in `text_embeddings` (a different vector space
+// from CLIP). Some exports drop token_type_ids, so it is bound only when advertised.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -17,14 +10,10 @@ use super::inference::{Dim, Dtype, InferenceSession, Input, InputSpec};
 use super::wordpiece_tokenizer::WordPieceTokenizer;
 
 const HIDDEN: usize = 384;
-/// BERT max-length cap; longer text gets truncated by the tokenizer.
 const MAX_SEQ: usize = 256;
 
 pub struct BgeText {
     session: InferenceSession,
-    /// The ONNX's input tensor names, read once at load. BGE binds up to three
-    /// inputs (ids/mask/token_type) by name; caching the list avoids rebuilding
-    /// a `Vec<String>` from `session.inputs` on every `embed`.
     input_names: Vec<String>,
     tokenizer: WordPieceTokenizer,
 }
@@ -38,11 +27,7 @@ impl BgeText {
         let tokenizer = WordPieceTokenizer::from_vocab_file(vocab_txt.as_ref(), true)
             .context("loading BGE vocab.txt")?;
 
-        // BGE is a tiny 384-d text encoder over short document strings, off the
-        // GPU-bound image hot path, so it always runs on the CPU: on a small-VRAM
-        // card it must not consume VRAM or contend on the accelerator queue at
-        // scan start. Semantic doc-search is unchanged (same weights, same
-        // output) — only where it runs differs.
+        // Tiny encoder over short strings: must not contend on the accelerator queue at scan start.
         let sequence = [Dim::Fixed(1), Dim::Symbol("S")];
         let session = InferenceSession::load(
             "BGE",
@@ -58,9 +43,7 @@ impl BgeText {
         Ok(model)
     }
 
-    /// Embed `text` to a HIDDEN-d L2-normalized vector. Returns `Err` only on
-    /// genuine session failures; an empty / whitespace string still produces
-    /// a deterministic vector (the `[CLS]`/`[SEP]` pair alone).
+    /// An empty/whitespace string still yields a deterministic vector (the `[CLS]`/`[SEP]` pair alone).
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         let enc = self.tokenizer.encode(text, MAX_SEQ);
         let n = enc.ids.len();
@@ -72,8 +55,6 @@ impl BgeText {
             mask[[0, i]] = enc.attention_mask[i];
             type_ids[[0, i]] = enc.type_ids[i];
         }
-        // Bind by name so a session missing `token_type_ids` (some exports
-        // do) still runs with just ids + mask. Names are cached at load.
         let mut ids_opt = Some(Input::from(ids));
         let mut mask_opt = Some(Input::from(mask));
         let mut type_opt = Some(Input::from(type_ids));
@@ -99,10 +80,8 @@ impl BgeText {
         if shape.len() != 3 || shape[2] != HIDDEN {
             anyhow::bail!("BGE output shape {:?} != (1, seq, {HIDDEN})", shape);
         }
-        // The reported sequence length must match the tokens we fed (a malformed
-        // or wrong-variant ONNX re-export can disagree). Validate before pooling
-        // so a hostile/buggy model is a clean per-file error, not an index-OOB
-        // panic that kills the scan worker.
+        // A malformed or wrong-variant ONNX can report a sequence length that disagrees with the tokens fed; validate
+        // so it is a per-file error, not an index-OOB panic that kills the scan worker.
         let seq = shape[1];
         if shape[0] != 1 || seq != enc.attention_mask.len() || data.len() < seq * HIDDEN {
             anyhow::bail!(
@@ -112,8 +91,6 @@ impl BgeText {
             );
         }
 
-        // Mean-pool over the sequence dim using the attention mask, then
-        // L2-normalize. Matches BGE-small's canonical pooling.
         let mut emb = vec![0f32; HIDDEN];
         let mut total: f32 = 0.0;
         for t in 0..seq {
@@ -138,14 +115,6 @@ impl BgeText {
     }
 }
 
-fn l2_normalize(v: &mut [f32]) {
-    let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= n;
-    }
-}
-
-/// Weights path: `bge_text/bge_small.onnx`.
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("bge_text").join("bge_small.onnx"))
 }

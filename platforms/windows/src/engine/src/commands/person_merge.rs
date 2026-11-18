@@ -1,7 +1,6 @@
-//! Undo journal for ordinary People merges (mergeClusters). Each merge is one
-//! catalog operation of kind person_merge, written in the merge's transaction
-//! and undone through undoFaceReview. The JSON matches the Swift engine's
-//! `PersonMergeJournal` so either engine can undo the other's merge.
+//! Undo journal for ordinary People merges: one catalog operation of kind person_merge written in the merge's
+//! transaction and undone through undoFaceReview. The JSON matches Swift's `PersonMergeJournal` so either engine can
+//! undo the other's merge.
 
 use std::collections::BTreeMap;
 
@@ -22,8 +21,6 @@ const VERDICT_COLUMNS: &str = "person_a, person_b, same_person, confidence, vlm_
 
 type Verdicts = BTreeMap<(i64, i64), Value>;
 
-/// The verdicts a merge can replace or drop: every "different people" row, the
-/// pair's own row and any row naming the person being merged in.
 fn verdicts(conn: &Connection, pair: (i64, i64), source: i64) -> rusqlite::Result<Verdicts> {
     let mut statement = conn.prepare(&format!(
         "SELECT {VERDICT_COLUMNS} FROM face_verifications \
@@ -53,8 +50,7 @@ fn verdicts(conn: &Connection, pair: (i64, i64), source: i64) -> rusqlite::Resul
         .collect()
 }
 
-/// What a merge looked like before it ran. Take it first, run the merge, then
-/// `record` it in the same transaction.
+/// Take it first, run the merge, then `record` it in the same transaction.
 pub(crate) struct Pending {
     target: i64,
     source: i64,
@@ -83,7 +79,6 @@ pub(crate) fn begin(conn: &Connection, target: i64, source: i64) -> rusqlite::Re
 }
 
 impl Pending {
-    /// Journals the finished merge and returns the operation to undo.
     pub(crate) fn record(self, conn: &Connection, at: f64) -> rusqlite::Result<String> {
         let now = verdicts(conn, ordered(self.target, self.source), self.source)?;
         let replaced: Vec<Value> =
@@ -111,8 +106,6 @@ fn movable(conn: &Connection, faces: &[i64], keep: i64) -> rusqlite::Result<Vec<
         .collect()
 }
 
-/// The people and the faces that can still go back, or None when the merged-in
-/// person's id is in use again or none of its faces can return.
 fn undoable(conn: &Connection, after: &Value) -> rusqlite::Result<Option<(i64, i64, Vec<i64>)>> {
     let (Some(keep), Some(other)) = (after["personID"].as_i64(), after["otherPersonID"].as_i64()) else { return Ok(None) };
     if person_exists(conn, other)? {
@@ -126,7 +119,6 @@ fn undoable(conn: &Connection, after: &Value) -> rusqlite::Result<Option<(i64, i
     Ok(Some((keep, other, back)))
 }
 
-/// The newest merge from the last day that can still be undone.
 pub(crate) fn latest(conn: &Connection, at: f64) -> rusqlite::Result<Option<(String, i64, i64)>> {
     let rows: Vec<(String, String)> = {
         let mut statement = conn.prepare(

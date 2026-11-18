@@ -1,9 +1,6 @@
-//! IPC protocol types for `shared/ipc-schema/ipc.schema.json`.
-//!
-//! The message types live in `generated.rs`, written by
-//! `shared/scripts/gen_ipc_dtos.py` from the schema plus `codegen.json`. This
-//! module keeps the hand-written helpers: `Empty`, `Wrap`, `HardwareInfo`
-//! (an open object in the schema), constructors and command validation.
+//! IPC protocol types for `shared/ipc-schema/ipc.schema.json`. Message types live in `generated.rs`
+//! (`shared/scripts/gen_ipc_dtos.py`); this module keeps `Empty`, `Wrap`, `HardwareInfo` (open object in the schema),
+//! constructors and command validation.
 
 mod generated;
 pub use generated::*;
@@ -22,7 +19,6 @@ impl IpcEvent {
 }
 
 impl CommandPayload {
-    /// `BulkActionResult.action` for the commands that answer with one.
     pub fn action_name(&self) -> Option<&'static str> {
         Some(match self {
             Self::ApplyTags(_) => "applyTags",
@@ -40,7 +36,6 @@ impl CommandPayload {
         })
     }
 
-    /// Ids a bulk action reports per item; empty means one summary item.
     pub fn target_ids(&self) -> Vec<i64> {
         match self {
             Self::ApplyTags(payload) => payload.file_ids.clone(),
@@ -60,9 +55,7 @@ const MAX_EXCLUDED_PATHS: usize = 10_000;
 const MAX_TAGS_PER_COMMAND: usize = 1_024;
 const MAX_APPLY_TAG_OPERATIONS: usize = 100_000;
 const MAX_EXACT_TRASH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-/// A Windows long path is 32,767 UTF-16 units, up to three UTF-8 bytes each.
 const MAX_PATH_BYTES: usize = 128 * 1024;
-/// Tags, person names and file names (255 UTF-16 units at most on disk).
 const MAX_NAME_BYTES: usize = 4 * 1024;
 const MAX_MODEL_KIND_BYTES: usize = 128;
 const MAX_TOKEN_BYTES: usize = 1024;
@@ -77,7 +70,6 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
         }
     }
 
-    /// No real path, name or identifier is this long or holds a NUL.
     fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
         if value.len() > max {
             Err(format!("{field} is {} bytes; maximum is {max}", value.len()))
@@ -157,9 +149,8 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
         }
         CommandPayload::DeepAnalyzeAll(payload) => {
             check_text("deepAnalyzeAll.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
-            // The schema caps excludedFolders at 256; enforce it here too so the
-            // bound doesn't depend solely on each app's own sanitizer (a
-            // hand-edited settings.json or a third-party client bypasses those).
+            // The schema caps excludedFolders at 256; enforce it here too since a hand-edited settings.json or
+            // third-party client bypasses the app's sanitizer.
             if let Some(folders) = &mut payload.excluded_folders {
                 check_len(
                     "deepAnalyzeAll.excludedFolders",
@@ -283,8 +274,7 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
     Ok(())
 }
 
-/// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
-/// an empty struct with no fields encodes as `{}` like Swift produces.
+/// Serde encodes a unit struct as `null`; an empty struct encodes as `{}` like Swift.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
@@ -333,8 +323,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
-/// auto-synthesis for cases like `case ready(EngineInfo)`.
+/// `{"_0": ...}` to match Swift Codable's synthesis for cases like `case ready(EngineInfo)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wrap<T> {
     #[serde(rename = "_0")]
@@ -347,75 +336,49 @@ impl<T> Wrap<T> {
     }
 }
 
-/// `EngineInfo.hardware` / `hardwareReprobed.hardware`. The schema leaves this
-/// object open, so it stays hand-written.
+/// `EngineInfo.hardware` / `hardwareReprobed.hardware`; open in the schema, so hand-written.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareInfo {
-    /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
     pub gpu_vendor: String,
-    /// Friendly adapter name as reported by DXGI ("NVIDIA GeForce RTX 4070",
-    /// "AMD Radeon RX 7900 XT", "Intel(R) Arc(TM) A380 Graphics", etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_name: Option<String>,
-    /// The inference backend: always "tract-cpu".
     pub execution_provider: String,
-    /// Number of physical CPU cores.
     pub physical_cpu_cores: u32,
-    /// Always false: there are no GPU packs; kept for contract compatibility.
+    /// Always false (no GPU packs); kept for contract compatibility.
     pub cuda_pack_present: bool,
     pub openvino_pack_present: bool,
     pub qnn_pack_present: bool,
-    /// "Install the NVIDIA CUDA Pack for ~30% faster inference" — the
-    /// engine writes a contextual recommendation here based on detected
-    /// vendor + already-installed packs. Empty string when the user is
-    /// already on the optimal path.
+    /// Always empty; kept for contract compatibility.
     #[serde(default)]
     pub recommendation: String,
-    // ─── Adaptive-utilization diagnostics. All optional
-    //     so an older C# build talking to a newer engine still deserializes
-    //     cleanly. ───
-    /// CPU performance-core count (Intel hybrid 12th-gen+, future AMD
-    /// dense-core parts). 0 on non-hybrid CPUs (use physical_cpu_cores).
+    // Adaptive-utilization diagnostics, all optional so an older C# build still deserializes a newer engine.
+    /// 0 on non-hybrid CPUs (use physical_cpu_cores).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub p_cores: u32,
-    /// CPU efficiency-core count. 0 on non-hybrid CPUs.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub e_cores: u32,
-    /// Logical processor count (cores × SMT threads).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub logical_cpu_cores: u32,
-    /// Worker thread cap currently in effect (= cpu_topology().worker_cap()).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub worker_cap: u32,
-    /// Total physical RAM in MiB.
     #[serde(rename = "ramTotalMB", default, skip_serializing_if = "is_zero_u64")]
     pub ram_total_mb: u64,
-    /// Currently-available RAM in MiB (GlobalMemoryStatusEx ullAvailPhys).
     #[serde(rename = "ramAvailableMB", default, skip_serializing_if = "is_zero_u64")]
     pub ram_available_mb: u64,
-    /// Active memory tier: "low" / "balanced" / "high". Drives batch size,
-    /// channel caps, ML pool size.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_tier: String,
-    /// Dedicated GPU VRAM in MiB (DXGI DedicatedVideoMemory). 0 when no
-    /// physical adapter was found.
+    /// 0 when no physical adapter was found.
     #[serde(rename = "vramMB", default, skip_serializing_if = "is_zero_u64")]
     pub vram_mb: u64,
-    /// NPU presence (Intel AI Boost, AMD XDNA, Qualcomm Hexagon).
-    /// Detection is first-pass — Qualcomm via the existing QNN probe;
-    /// Intel/AMD report `false` for now (NEXT.md entry tracks).
+    /// First-pass detection; Intel/AMD report `false` for now.
     #[serde(default, skip_serializing_if = "is_false")]
     pub npu_present: bool,
-    /// Power source: "ac" / "battery" / "unknown".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub power_source: String,
-    /// Battery percent (0–100) when on battery. None on desktops without
-    /// a battery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_percent: Option<u8>,
-    /// Currently-active performance profile: "eco" / "auto" / "performance".
-    /// Phase-1 ships "auto" only; Eco / Performance are grayed in the UI.
+    /// "eco" / "auto" / "performance"; only "auto" ships, Eco / Performance are grayed in the UI.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub active_profile: String,
 }
@@ -448,14 +411,11 @@ impl EngineError {
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The engine MUST emit ready in the exact shape Swift Codable expects.
-    /// Spot-check: `{"t":"...","payload":{"ready":{"_0":{...}}}}` with sorted keys.
+    /// Must match the exact shape Swift Codable expects: `{"t":"...","payload":{"ready":{"_0":{...}}}}`.
     #[test]
     fn ready_event_wire_shape() {
         let evt = IpcEvent {
@@ -481,8 +441,6 @@ mod tests {
         assert_eq!(inner.get("physicalMemoryGB").unwrap(), 16.0);
     }
 
-    /// startScan sent by the app must round-trip cleanly with the shared
-    /// path and optional bookmark fields.
     #[test]
     fn start_scan_command_roundtrip() {
         let cmd = IpcCommand {
@@ -508,8 +466,6 @@ mod tests {
         }
     }
 
-    /// `excludedPaths` is additive-optional: legacy JSON without the key must
-    /// decode to `None`, and a populated list must round-trip verbatim.
     #[test]
     fn start_scan_excluded_paths_optional_roundtrip() {
         let legacy = r#"{"id":"c-1","payload":{"startScan":{"rootPath":"C:\\pics"}}}"#;
@@ -537,8 +493,7 @@ mod tests {
         }
     }
 
-    /// Empty-payload commands must serialize as `{"shutdown":{}}`, NOT
-    /// `"shutdown"` (which would be serde's default for a unit variant).
+    /// Empty-payload commands serialize as `{"shutdown":{}}`, not serde's unit-variant `"shutdown"`.
     #[test]
     fn shutdown_command_wire_shape() {
         let cmd = IpcCommand {
@@ -552,9 +507,8 @@ mod tests {
         assert_eq!(shutdown.as_object().unwrap().len(), 0);
     }
 
-    /// A schema-conformant `deepAnalyzeAll` that OMITS `tagsOnly`
-    /// (and `proposeRenames`) must decode, defaulting `tags_only=false` and
-    /// `propose_renames=true`. This is the contract the Swift mirror must match.
+    /// A schema-conformant `deepAnalyzeAll` omitting `tagsOnly`/`proposeRenames` must decode with `tags_only=false`,
+    /// `propose_renames=true` (the Swift mirror must match).
     #[test]
     fn deep_analyze_all_decodes_with_optional_fields_omitted() {
         let json = r#"{"id":"c-1","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":true}}}"#;
@@ -568,7 +522,6 @@ mod tests {
             }
             other => panic!("expected DeepAnalyzeAll, got {other:?}"),
         }
-        // proposeRenames explicitly false must survive (caption + tags, no rename).
         let json2 = r#"{"id":"c-2","payload":{"deepAnalyzeAll":{"modelKind":"m","skipExisting":false,"tagsOnly":false,"proposeRenames":false}}}"#;
         let cmd2: IpcCommand = serde_json::from_str(json2).unwrap();
         match cmd2.payload {
@@ -611,9 +564,8 @@ mod tests {
         }
     }
 
-    /// `cancelPrewarm` must decode with `modelKind` OMITTED (the
-    /// cancel-all form → `None`) and with it present (targeted per-model cancel).
-    /// The empty-object form `{"cancelPrewarm":{}}` is the canonical cancel-all.
+    /// `cancelPrewarm` decodes with `modelKind` omitted (cancel-all, canonical form `{"cancelPrewarm":{}}`) and present
+    /// (per-model).
     #[test]
     fn cancel_prewarm_decodes_with_optional_model_kind() {
         let all = r#"{"id":"c-1","payload":{"cancelPrewarm":{}}}"#;
@@ -934,9 +886,6 @@ mod tests {
         }
     }
 
-    /// The `thumbnailGenerated` event must serialize in the Wrap<T> `_0`-nested
-    /// camelCase shape, carry `modifiedAt` through, and round-trip without
-    /// losing its base64 string payload.
     #[test]
     fn thumbnail_generated_event_round_trips() {
         let evt = IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(
@@ -970,9 +919,7 @@ mod tests {
         }
     }
 
-    // Arbitrary StartScan root_paths must round-trip through serde_json
-    // without character corruption — guards against encoder changes that
-    // drop non-ASCII bytes or fail to escape backslashes / quotes.
+    // Non-ASCII bytes, backslashes and quotes must survive an encoder round trip.
     proptest::proptest! {
         #[test]
         fn start_scan_root_path_round_trips(path in "[\\PC]{1,200}") {

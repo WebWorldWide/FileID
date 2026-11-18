@@ -1,6 +1,5 @@
-//! `proposeNames`: preview smart names in a saved style from stored catalog
-//! evidence only. No model call, no file or row change. Lockstep with macOS
-//! `CatalogNameProposals.swift`.
+//! `proposeNames`: preview smart names from stored catalog evidence only (no model call, nothing written). Lockstep
+//! with macOS `CatalogNameProposals.swift`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -226,8 +225,7 @@ impl Run<'_> {
     }
 }
 
-/// learnNames: stores one sample per edit with the unlearned name the engine
-/// would propose for that file now, then replies with the preferences.
+/// Stores one sample per edit with the unlearned name the engine would propose now, then replies with the preferences.
 pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
     let options = options(request)?;
     let style_name = request.naming.as_ref().map(|naming| naming.style.clone()).unwrap_or_default();
@@ -260,8 +258,8 @@ pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<V
     preferences(conn)
 }
 
-/// unlearnNames: after renames are undone, deletes for each edit the newest
-/// sample for that file whose applied name matches, then replies with the preferences.
+/// After renames are undone, deletes the newest sample per edit whose applied name matches, then replies with the
+/// preferences.
 pub(crate) fn unlearn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
     let edits: &[CatalogNameEdit] = request.name_edits.as_deref().unwrap_or(&[]);
     if edits.is_empty() || edits.len() > MAX_FILES || !edits.iter().all(|e| e.applied.chars().count() <= MAX_EDIT_SCALARS) {
@@ -308,7 +306,6 @@ fn learned(conn: &Connection) -> Result<Learned> {
     Ok(learning::derive(&samples))
 }
 
-/// The learned preferences as namePreference hits, then the stored sample count as nameSamples.
 pub(crate) fn preferences(conn: &Connection) -> Result<Vec<CatalogHit>> {
     let learned = learned(conn)?;
     let hit = |kind: &str, key: Option<&str>, text: String| CatalogHit {

@@ -1,16 +1,10 @@
-//! Bench face clustering on a synthetic 5K-face corpus.
-//!
-//! The brute-force O(n²) similarity pass is the hot loop; this bench tracks
-//! its scaling as we move from the current implementation to (eventually) HNSW.
-//! Use `cargo bench -p fileid-engine --bench face_clustering_5k`.
+//! Face clustering on a synthetic 5K-face corpus; the O(n²) similarity pass is the hot loop. `cargo bench -p
+//! fileid-engine --bench face_clustering_5k`.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fileid_engine::pipeline::face_clustering::{cluster, FaceRow};
 
-/// L2-normalize a vector in place. ArcFace embeddings are always
-/// unit-length on the way out of the model; reproducing that invariant
-/// here ensures the cosine similarities in the clusterer behave
-/// realistically.
+/// Model embeddings are unit-length; reproducing that keeps the clusterer's cosine similarities realistic.
 fn normalize(v: &mut [f32]) {
     let mag: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if mag > 0.0 {
@@ -20,9 +14,7 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
-/// Build `n` synthetic 512-d embeddings clustered around `n / cluster_size`
-/// hidden anchors with low-amplitude noise. Deterministic via a simple
-/// LCG so bench runs are comparable across machines without pulling rand.
+/// Deterministic via a simple LCG so runs compare across machines without pulling rand.
 fn synthetic_faces(n: usize, cluster_size: usize) -> Vec<FaceRow> {
     const DIM: usize = 512;
     let mut seed: u64 = 0x9E3779B97F4A7C15;
@@ -58,9 +50,8 @@ fn synthetic_faces(n: usize, cluster_size: usize) -> Vec<FaceRow> {
 
 fn bench_cluster_5k(c: &mut Criterion) {
     let faces = synthetic_faces(5000, 50);
-    // Pre-size the group + set sample size LOW — clustering 5K faces is
-    // a multi-second operation; criterion's default 100 samples would
-    // take minutes. 10 samples is enough for a stable median.
+    // Sample size LOW: clustering 5K faces takes seconds, so criterion's default 100 samples would take minutes; 10
+    // gives a stable median.
     let mut group = c.benchmark_group("face_clustering");
     group.sample_size(10);
     group.bench_function("cluster_5000_faces", |b| {

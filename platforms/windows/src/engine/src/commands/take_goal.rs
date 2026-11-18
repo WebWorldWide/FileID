@@ -1,6 +1,5 @@
-//! Best Takes "rank by a goal": the installed description model sees one numbered
-//! contact sheet of up to six shots and names the one that best shows the goal.
-//! Mirrors macOS `CatalogTakeAuto.rankWithGoal` and `TakeMediaAnalysis`.
+//! Best Takes "rank by a goal": the installed description model sees one numbered contact sheet of up to six shots and
+//! names the best for the goal (`CatalogTakeAuto.rankWithGoal`, `TakeMediaAnalysis`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -17,7 +16,7 @@ pub(crate) const GOAL_TILES: usize = 6;
 const TILE: u32 = 448;
 const GOLD: Rgb<u8> = Rgb([255, 204, 0]);
 
-/// Five-by-seven digits for the tile numbers 1–6; each row is five bits, high bit left.
+/// Five-by-seven digits for tile numbers 1–6; each row is five bits, high bit left.
 const DIGITS: [[u8; 7]; 6] = [
     [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
     [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
@@ -27,8 +26,7 @@ const DIGITS: [[u8; 7]; 6] = [
     [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
 ];
 
-/// Shots laid out left to right, top to bottom, each with its number in a gold box
-/// at the top-left. Unreadable shots stay black so the numbers still line up.
+/// Each shot has its number in a gold box top-left; unreadable shots stay black so the numbers still line up.
 pub(crate) fn contact_sheet(shots: &[Option<(Vec<u8>, u32, u32)>]) -> Option<RgbImage> {
     let count = shots.len().min(GOAL_TILES);
     if count < 2 {
@@ -118,8 +116,6 @@ pub(crate) fn parse_goal_reply(raw: &str, count: usize) -> Option<GoalReply> {
     })
 }
 
-/// The best shot first, then the others that met the goal, then the rest in
-/// their quality order.
 pub(crate) fn ranking(goal: &str, order: &[i64], candidates: &[i64], reply: &GoalReply, model: &str) -> CatalogTakeGoalRanking {
     let best = candidates[reply.best - 1];
     let met: Vec<i64> = reply.met.iter().map(|n| candidates[n - 1]).collect();
@@ -199,7 +195,6 @@ pub(crate) async fn rank(database: Arc<Mutex<Connection>>, goal: String, order: 
     let cancel = Arc::new(AtomicBool::new(false));
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if crate::apple::vlm::model_spec(model).is_ok() {
-        // The Swift engine's goal check: the contact sheet at 448 px through `benchmarkPass`.
         let reply = match crate::apple::vlm::Resident::shared().acquire(model, &cancel, |_| {}).await {
             Ok(mut lease) => lease.generate(&goal_prompt(&goal, candidates.len()), crate::apple::vlm::Image::File(&sheet.0, None), 160, 448, &cancel).await,
             Err(error) => {

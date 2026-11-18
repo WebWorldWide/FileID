@@ -1,7 +1,3 @@
-//! Small cross-cutting helpers used by multiple command handlers.
-//!
-//! Each submodule is leaf-level (no engine state, no cross-deps) so handlers
-//! can pull them in without dragging in the wider command graph.
 
 pub mod content_hash;
 pub mod display;
@@ -23,23 +19,18 @@ pub(crate) mod model_memory;
 pub(crate) mod qos;
 pub(crate) mod vector_math;
 
-/// File timestamps as catalog seconds since 1970: whole seconds plus nanoseconds
-/// divided by 1e9. The Swift engine stores the same number (`FileModificationTime`);
-/// Foundation's `Date.timeIntervalSince1970` rounds the last bit differently for
-/// about a quarter of timestamps. A time before 1970 has no value.
+/// Whole seconds plus nanoseconds / 1e9, the number the Swift engine stores (`FileModificationTime`); Foundation's
+/// `timeIntervalSince1970` rounds the last bit differently for ~a quarter of timestamps. Pre-1970 has no value.
 pub(crate) fn catalog_unix_seconds(time: std::time::SystemTime) -> Option<f64> {
     Some(time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
 }
 
-/// Two stored modification times name the same instant when they are within a
-/// microsecond: the scanners' rule, which also covers catalogs written before the
-/// engines stored one number.
+/// Within a microsecond: the scanners' rule, which also covers catalogs written before the engines stored one number.
 pub(crate) fn same_modified_time(left: f64, right: f64) -> bool {
     left.is_finite() && right.is_finite() && (left - right).abs() < 0.000_001
 }
 
-/// Revisions are `"<size>:<IEEE bits of modified_at>"`; two revisions are the same file
-/// state when the size is equal and the times are the same instant.
+/// Revisions are `"<size>:<IEEE bits of modified_at>"`.
 pub(crate) fn same_source_revision(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -56,9 +47,7 @@ mod catalog_time_tests {
     use super::{catalog_unix_seconds, same_modified_time, same_source_revision};
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// (seconds, nanoseconds, bits of the stored double). The Swift engine's
-    /// `FileModificationTimeTests` pins the same table; most rows are timestamps
-    /// whose double `Date.timeIntervalSince1970` rounds one bit differently.
+    /// (seconds, nanoseconds, bits of the stored double); pinned by the Swift `FileModificationTimeTests`.
     const TABLE: [(u64, u32, u64); 13] = [
         (1_724_989_629, 833_179_165, 0x41d9_b450_2f75_52cf),
         (1_603_520_313, 785_102_536, 0x41d7_e4f1_ce72_3f1f),
@@ -80,8 +69,7 @@ mod catalog_time_tests {
         for (seconds, nanos, bits) in TABLE {
             let since = Duration::new(seconds, nanos);
             assert_eq!(since.as_secs_f64().to_bits(), bits, "{seconds}.{nanos:09}");
-            // Windows keeps a `SystemTime` in 100 ns ticks, so only a whole tick
-            // survives the trip through one there.
+            // Windows keeps a `SystemTime` in 100 ns ticks, so only a whole tick survives there.
             if cfg!(unix) || nanos.is_multiple_of(100) {
                 assert_eq!(catalog_unix_seconds(UNIX_EPOCH + since).unwrap().to_bits(), bits, "{seconds}.{nanos:09}");
             }

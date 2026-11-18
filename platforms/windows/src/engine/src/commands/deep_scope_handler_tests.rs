@@ -2,8 +2,7 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
-/// The next event other than the "Queued"/"Finding files" lines the app-hosted build sends first.
-async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
+pub(super) async fn next_payload(rx: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>) -> EventPayload {
     loop {
         let event = rx.recv().await.unwrap();
         if !matches!(event.payload, EventPayload::DeepAnalyzeStarting(_)) {
@@ -63,7 +62,6 @@ fn handler_scope_selected_order_dedup_and_supported_nonfailed_filter() {
     f.row(3, &f.file(&public, "audio.bin"), "audio", 0);
     f.row(4, &f.file(&public, "failed.png"), "image", 1);
     let scope = DeepScope::from_fields(Some(&[2, 1, 2, 99, 3, 4]), Some(&[private.to_str().unwrap().into()])).unwrap();
-    // The Mac app's engine also analyzes audio, as the Swift engine does.
     let audio = cfg!(all(target_os = "macos", feature = "apple-adapters"));
     assert_eq!(collect_scoped_file_ids(&f.db, &scope).unwrap(), if audio { vec![2, 1, 3] } else { vec![2, 1] });
     assert!(scoped_catalog_path(&f.db, &scope, 2).is_ok());

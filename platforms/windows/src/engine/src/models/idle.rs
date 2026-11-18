@@ -1,12 +1,9 @@
-//! Process-wide model slots that free their contents after a quiet period and
-//! load again on the next use, like the Mac parks Deep Analyze models.
 
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Matches the Mac's five-minute park for Deep Analyze models.
 pub const PARK_AFTER: Duration = Duration::from_secs(300);
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
@@ -29,8 +26,7 @@ impl<T: Send> IdleSlot<T> {
         Self { name, idle, registered: AtomicBool::new(false), state: Mutex::new(None) }
     }
 
-    /// Runs `work` on the held value, loading it first when parked. A failed
-    /// load leaves the slot empty so the next use retries.
+    /// A failed load leaves the slot empty so the next use retries.
     pub fn with<R>(&'static self, load: impl FnOnce() -> Result<T>, work: impl FnOnce(&mut T) -> R) -> Result<R> {
         self.register();
         let mut state = self.state.lock();
@@ -46,7 +42,6 @@ impl<T: Send> IdleSlot<T> {
         Ok(result)
     }
 
-    /// Runs `work` on the held value without loading it; `None` when parked.
     pub fn peek<R>(&self, work: impl FnOnce(&T) -> R) -> Option<R> {
         let mut state = self.state.lock();
         let (value, used) = state.as_mut()?;
@@ -54,14 +49,12 @@ impl<T: Send> IdleSlot<T> {
         Some(work(value))
     }
 
-    /// Holds `value` in place of whatever was held and restarts the idle period.
     pub fn put(&'static self, value: T) {
         self.register();
         let replaced = self.state.lock().replace((value, Instant::now()));
         drop(replaced);
     }
 
-    /// Frees the held value now; true when there was one.
     pub fn clear(&self) -> bool {
         let parked = self.state.lock().take();
         parked.is_some()
@@ -105,7 +98,6 @@ impl<T: Send> Park for IdleSlot<T> {
     }
 }
 
-/// Parks every registered slot idle at `now`; returns how many were freed.
 pub fn sweep(now: Instant) -> usize {
     let slots: Vec<&'static dyn Park> = SLOTS.lock().clone();
     slots.into_iter().filter(|slot| slot.park_idle(now)).count()

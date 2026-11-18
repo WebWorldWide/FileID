@@ -1,9 +1,6 @@
-// CLIP text encoder — query-time semantic search. Tokenize a string
-// via `ClipTokenizer`, run the ONNX session, L2-normalize, return 512
-// floats. Held inside a process-static `OnceLock` in main.rs so
-// back-to-back queries reuse the session (avoids recompiling
-// the model on every keystroke).
+// Query-time CLIP text encoder, held in a process-static OnceLock so back-to-back keystroke queries reuse one session.
 
+use crate::util::vector_math::l2_normalize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,8 +13,6 @@ const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
     session: InferenceSession,
-    /// The ONNX's single input tensor name, read once at load and reused on
-    /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
     tokenizer: ClipTokenizer,
 }
@@ -41,11 +36,7 @@ impl ClipText {
         for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
             padded[i] = *t as i64;
         }
-        // ENG-65: CLIP pools the sentence embedding at the EOT token (the
-        // highest-id token). A query longer than the 77-token context had EOT
-        // truncated off the end, so the model pooled at a content token → a
-        // wrong embedding. Force the original EOT into the last slot when
-        // truncated so the pooling position is correct.
+        // CLIP pools at the EOT token: when truncating, keep EOT in the last slot.
         if tokens.len() > CONTEXT_LEN
             && let Some(&eot) = tokens.last() {
                 padded[CONTEXT_LEN - 1] = eot as i64;
@@ -74,12 +65,8 @@ impl ClipText {
         Ok(emb)
     }
 
-    /// Batched variant of [`ClipText::embed`] — tokenize + encode every query
-    /// in one ONNX run with a `(B, 77)` input, returning one L2-normalized
-    /// embedding per query. Used to build the zero-shot scene-label matrix at
-    /// startup; far cheaper than B separate session runs. Assumes the exported
-    /// text model has a dynamic batch axis (the Xenova MobileCLIP-S2 export
-    /// does).
+    /// Batched `embed` (`(B, 77)` input) used to build the scene-label matrix at startup; needs the export's dynamic
+    /// batch axis (Xenova MobileCLIP-S2 has one).
     pub fn embed_batch(&mut self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
         if queries.is_empty() {
             return Ok(Vec::new());
@@ -91,7 +78,6 @@ impl ClipText {
             for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
                 flat[qi * CONTEXT_LEN + i] = *t as i64;
             }
-            // ENG-65: preserve EOT for an over-length query (see embed()).
             if tokens.len() > CONTEXT_LEN
                 && let Some(&eot) = tokens.last() {
                     flat[qi * CONTEXT_LEN + (CONTEXT_LEN - 1)] = eot as i64;
@@ -134,13 +120,6 @@ impl ClipText {
 
 fn session(path: &Path) -> Result<(InferenceSession, String)> {
     load_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
-    }
 }
 
 pub fn default_weights_path() -> Result<PathBuf> {

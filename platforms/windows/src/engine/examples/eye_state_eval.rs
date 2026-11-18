@@ -2,10 +2,9 @@
 //!
 //!     cargo run --release --example eye_state_eval -- <face_landmarks.onnx> <jobs.jsonl>
 //!
-//! Each job line is `{"id":…,"image":<upright PNG/JPEG>,"bbox":[x1,y1,x2,y2]}` in that
-//! image's pixels. Prints `{"id":…,"ratio":…}` per face (`null` when the mesh finds no
-//! face). The first crop is levelled from the box alone; the refinement pass then
-//! follows the mesh's own eye line, as it does after a YuNet detection.
+//! Each job line is `{"id":…,"image":<upright PNG/JPEG>,"bbox":[x1,y1,x2,y2]}` in that image's pixels; prints
+//! `{"id":…,"ratio":…}` per face (`null` when the mesh finds no face). The first crop is levelled from the box alone,
+//! then refined along the mesh's own eye line as after a YuNet detection.
 
 use fileid_engine::models::face_geometry::Detection;
 use fileid_engine::models::face_mesh::FaceMesh;

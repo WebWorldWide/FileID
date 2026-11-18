@@ -10,7 +10,6 @@ fn db() -> Connection {
     conn
 }
 
-/// A person with `faces` faces, one file each; the last face is the representative.
 fn person(conn: &Connection, first: Option<&str>, title: Option<&str>, unknown: bool, faces: i64) -> (i64, Vec<i64>) {
     conn.execute(
         "INSERT INTO persons(name,first_name,title,file_count,created_at,is_unknown) VALUES(?1,?1,?2,?3,100.0,?4)",

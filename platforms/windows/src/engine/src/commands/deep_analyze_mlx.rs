@@ -1,8 +1,6 @@
-//! Deep Analyze in the engine the Mac app hosts: the batch loop of
-//! `run_deep_analyze_batch`, with the Swift engine's MLX analysis
-//! (`crate::apple::vlm`) as the only backend. Events follow the Swift runner
-//! (`DeepAnalyzeRunner.run`): loading, per-file progress with the live caption,
-//! one `deepAnalyzeFileDone` per file and a single terminal complete.
+//! Deep Analyze in the Mac-hosted engine: the batch loop of `run_deep_analyze_batch` with the Swift MLX analysis
+//! (`crate::apple::vlm`) as the only backend. Events follow `DeepAnalyzeRunner.run`: loading, per-file progress with
+//! the live caption, one `deepAnalyzeFileDone` per file and a single terminal complete.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,7 +25,6 @@ async fn send_complete(sink: &Sink, complete: DeepAnalyzeComplete) {
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
 }
 
-/// `ModelDownloadProgress` frames for a load, as the Swift runner forwards them.
 fn load_progress(sink: &Sink, model_kind: &str) -> impl FnMut(Event) + use<> {
     let sink = sink.clone();
     let model_kind = model_kind.to_owned();
@@ -45,8 +42,7 @@ fn load_progress(sink: &Sink, model_kind: &str) -> impl FnMut(Event) + use<> {
     }
 }
 
-/// `AIModelKind(rawValue:)` refuses a kind outside the favourites and the catalog:
-/// Swift's error and one failure. True when refused.
+/// `AIModelKind(rawValue:)` refuses a kind outside the favourites and catalog: one failure, true when refused.
 async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
     if crate::models::mlx::repo(model_kind).is_some() {
         return false;
@@ -61,9 +57,8 @@ async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// What the Swift engine sends for a Deep Analyze command before it resolves the
-/// targets: the refusal of an unknown kind, or "Queued" then "Finding files to
-/// analyze…". False when refused (the terminal event is sent).
+/// What Swift sends before resolving targets: the refusal of an unknown kind, or "Queued" then "Finding files to
+/// analyze…". False when refused (terminal event sent).
 pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     if refuse_unknown_kind(sink, model_kind).await {
         return false;
@@ -82,8 +77,7 @@ pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// Load the model for a batch. Emits the failure and the terminal complete
-/// itself and returns `None` when the batch can't start.
+/// Emits the failure and terminal complete itself and returns `None` when the batch can't start.
 async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started: Instant) -> Option<MlxLease> {
     if !vlm::installed(model_kind) {
         sink.send(
@@ -135,7 +129,6 @@ fn image_path(db: &Mutex<rusqlite::Connection>, file_id: i64) -> Option<std::pat
         .map(std::path::PathBuf::from)
 }
 
-/// Per-token live caption on `deepAnalyzeProgress`, throttled to 4 Hz.
 fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta: Option<f64>, path: Option<String>) -> impl FnMut(&str) + use<> {
     let sink = sink.clone();
     let model_kind = model_kind.to_owned();
@@ -159,8 +152,7 @@ fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta
     }
 }
 
-/// Keeps a run's proposed names unique per folder, as the Swift engine does
-/// (`RESERVES_PROPOSED_NAMES`), and stores the reserved name.
+/// Keeps proposed names unique per folder, as Swift does (`RESERVES_PROPOSED_NAMES`).
 fn reserve_name(
     db: &Arc<Mutex<rusqlite::Connection>>,
     file_id: i64,
@@ -183,7 +175,6 @@ fn reserve_name(
     unique
 }
 
-/// Deep Analyze `file_ids` with the MLX model; sends the terminal complete.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batch(
     sink: Sink,
@@ -288,8 +279,7 @@ pub(crate) async fn run_batch(
         }))))
         .await;
 
-        // A queued Chat answer gets the model between files (the Swift
-        // runner's ChatYield); the weights stay loaded for the batch.
+        // A queued Chat answer gets the model between files (Swift's ChatYield); weights stay loaded.
         if Resident::shared().has_waiters() {
             drop(lease);
             tokio::task::yield_now().await;
@@ -306,7 +296,6 @@ pub(crate) async fn run_batch(
                 }
             }
         }
-        // Decode the next distinct photo while this one runs, as the Swift runner does.
         if let Some(next) = ordered[index + 1..]
             .iter()
             .find(|next| group.is_none() || grouping.group_of.get(next).copied() != group)

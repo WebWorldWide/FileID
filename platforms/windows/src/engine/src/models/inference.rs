@@ -1,11 +1,5 @@
-//! The inference seam every ONNX model wrapper runs through: a model loaded
-//! from a path, named tensors in, tensors out.
-//!
-//! The backend is tract (pure Rust, CPU), the same on every platform.
-//!
-//! A compiled model is shared by every [`InferenceSession`] loaded from the
-//! same file with the same input contract; each session owns only its run
-//! state (scratch buffers), so a worker pool costs one copy of the weights.
+//! The inference seam every ONNX wrapper runs through (tract, pure-Rust CPU, same on every platform). Sessions loaded
+//! from the same file and input contract share one compiled model; each owns only its scratch buffers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,16 +12,13 @@ use tract_onnx::prelude::{
 };
 use tract_onnx::tract_hir::infer::Factoid;
 
-/// The backend label tract sessions report.
 pub const TRACT_CPU: &str = "tract-cpu";
 
 const MAX_DEFAULT_MATMUL_THREADS: usize = 16;
 
-/// Threads one matmul may use: `FILEID_TRACT_THREADS` when set (`1` keeps tract
-/// single-threaded), else the machine's performance cores, never more than
-/// the CPUs this process may run on (cgroup quotas included) or 16. Applied
-/// once, before the first model compiles, so every platform and every entry
-/// point (engine, CLI, GTK app, tests) runs the same configuration.
+/// `FILEID_TRACT_THREADS` when set (`1` = single-threaded), else the performance cores, capped at the CPUs this process
+/// may use (cgroup quotas included) and 16. Applied once before the first compile so every entry point runs the same
+/// configuration.
 pub fn matmul_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THREADS.get_or_init(|| {
@@ -46,15 +37,10 @@ pub fn matmul_threads() -> usize {
     })
 }
 
-/// One dimension of a model input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dim {
     Fixed(usize),
-    /// A dimension that varies between runs, named so that inputs which share
-    /// it agree (BGE's sequence length).
     Symbol(&'static str),
-    /// The batch axis: symbolic when the ONNX leaves it open, the ONNX's own
-    /// size when it fixes it.
     Batch,
 }
 
@@ -64,8 +50,7 @@ pub enum Dtype {
     I64,
 }
 
-/// The shape and element type one model input is compiled for. `name` is the
-/// ONNX input name; `None` stands for a model with a single input.
+/// `name` is the ONNX input name; `None` means a single-input model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputSpec {
     pub name: Option<&'static str>,
@@ -114,7 +99,6 @@ struct CompiledModel {
     plan: Arc<TypedRunnableModel>,
     input_names: Vec<String>,
     output_names: Vec<String>,
-    /// The first input's shape; `-1` marks a symbolic dimension.
     first_input_shape: Vec<i64>,
 }
 
@@ -125,14 +109,10 @@ pub struct InferenceSession {
 
 type CacheKey = (PathBuf, u64, Option<std::time::SystemTime>, String);
 
-/// One slot per model file and contract, so loading one model never waits for
-/// another's compile.
 static COMPILED: parking_lot::Mutex<Option<HashMap<CacheKey, Arc<parking_lot::Mutex<Weak<CompiledModel>>>>>> =
     parking_lot::Mutex::new(None);
 
 impl InferenceSession {
-    /// Load `path` on tract. Sessions of the same file and `specs` share one
-    /// compiled model.
     pub fn load(label: &str, path: &Path, specs: &[InputSpec]) -> Result<Self> {
         matmul_threads();
         let metadata = std::fs::metadata(path).with_context(|| format!("{label} weights {}", path.display()))?;
@@ -167,18 +147,15 @@ impl InferenceSession {
         &self.model.output_names
     }
 
-    /// The first input's shape with `-1` for a dimension that varies.
     pub fn first_input_shape(&self) -> Vec<i64> {
         self.model.first_input_shape.clone()
     }
 
-    /// Run the model; the outputs come back in the ONNX's output order.
     pub fn run(&mut self, inputs: Vec<(&str, Input)>) -> Result<Vec<Output>> {
         run_tract(&self.model, &mut self.state, inputs)
     }
 }
 
-/// Load `path` and return the session with the ONNX's first input name.
 pub fn load_session(label: &str, path: &Path, specs: &[InputSpec]) -> Result<(InferenceSession, String)> {
     let session = InferenceSession::load(label, path, specs)?;
     let input_name = session.input_names().first().with_context(|| format!("{label} ONNX has no inputs"))?.clone();
@@ -236,9 +213,8 @@ fn compile(path: &Path, specs: &[InputSpec]) -> Result<CompiledModel> {
     Ok(CompiledModel { plan, input_names, output_names, first_input_shape })
 }
 
-/// RAM++ ships as an f16 graph. tract's CPU f16 kernels round more than ONNX
-/// Runtime's f16 path does (tags near a threshold flip), so a graph with f16
-/// values runs in f32: the same weights, with the arithmetic done at full width.
+/// RAM++ ships as f16. tract's CPU f16 kernels round more than ONNX Runtime's (near-threshold tags flip), so f16 graphs
+/// run in f32.
 fn widen_half_precision(typed: TypedModel) -> Result<TypedModel> {
     let half = f16::datum_type();
     let has_half = typed.nodes().iter().any(|node| node.outputs.iter().any(|output| output.fact.datum_type == half));

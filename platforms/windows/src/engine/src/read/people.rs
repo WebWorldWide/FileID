@@ -1,6 +1,5 @@
 use rusqlite::{params, Connection};
 
-/// A person cluster with at least one face on an active file.
 #[derive(Clone, Debug)]
 pub struct Person {
     pub id: i64,
@@ -10,7 +9,6 @@ pub struct Person {
     pub faces: i64,
 }
 
-/// Display name: explicit name, else "first last", else Unknown/Unnamed.
 pub fn display_name(
     name: Option<&str>,
     first: Option<&str>,
@@ -36,7 +34,6 @@ pub fn display_name(
     }
 }
 
-/// People with faces on active files, most faces first. `limit` caps the rows.
 pub fn active_people(conn: &Connection, limit: Option<usize>) -> rusqlite::Result<Vec<Person>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, \

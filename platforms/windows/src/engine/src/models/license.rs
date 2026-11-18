@@ -1,10 +1,7 @@
-//! Opt-in model license terms: which kinds need acceptance, and the on-device
-//! record of what the user accepted. Policy URLs and review dates come from
-//! `shared/models/manifest.json` (`licensePolicies`). Acceptances live in
-//! `<state root>/model-licenses.json` as a sorted JSON array of
-//! `ModelLicenseAccepted:<policy>:<reviewedAt>` keys — the format WinUI writes,
-//! so every front end shares one record. A re-review bumps `reviewedAt` and
-//! therefore asks again.
+//! Opt-in model license terms and the on-device record of acceptance: `<state root>/model-licenses.json`, a sorted JSON
+//! array of `ModelLicenseAccepted:<policy>:<reviewedAt>` keys (the format WinUI writes, so every front end shares it).
+//! A re-review bumps `reviewedAt` and so asks again. Policy URLs and dates come from `shared/models/manifest.json`
+//! (`licensePolicies`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,8 +24,7 @@ impl LicensePolicy {
 
 fn policy_key(model_kind: &str) -> Option<&'static str> {
     match model_kind {
-        // The CUDA llama runtime carries CUDA Toolkit redistributables, so the
-        // CUDA EULA governs it.
+        // The CUDA llama runtime carries CUDA Toolkit redistributables, so the CUDA EULA governs it.
         "llama_runtime_cuda_x64" => Some("NVIDIA-CUDA"),
         _ => super::manifest::terms_policy_for_kind(model_kind).or_else(|| {
             super::catalog::find(model_kind).filter(|entry| entry.terms_required).map(|entry| entry.license.as_str())
@@ -44,8 +40,6 @@ fn display_name(key: &str) -> &'static str {
     }
 }
 
-/// The terms a model kind needs accepted before download; `None` when its
-/// license is permissive.
 pub fn policy_for(model_kind: &str) -> Option<LicensePolicy> {
     let (key, policy) = super::manifest::manifest().license_policies.get_key_value(policy_key(model_kind)?)?;
     policy.terms_required.then(|| LicensePolicy {
@@ -71,13 +65,11 @@ fn load(state_root: &Path) -> Result<BTreeSet<String>> {
     }
 }
 
-/// True when this exact policy revision was accepted on this device. An
-/// unreadable record counts as not accepted.
+/// An unreadable record counts as not accepted.
 pub fn is_accepted(state_root: &Path, policy: &LicensePolicy) -> bool {
     load(state_root).is_ok_and(|accepted| accepted.contains(&policy.acceptance_key()))
 }
 
-/// Persist acceptance of `policy`, keeping every other recorded key.
 pub fn record(state_root: &Path, policy: &LicensePolicy) -> Result<()> {
     let mut accepted = load(state_root)?;
     if !accepted.insert(policy.acceptance_key()) {

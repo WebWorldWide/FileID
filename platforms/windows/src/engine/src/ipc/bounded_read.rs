@@ -1,23 +1,16 @@
-//! Bounded line reads + resync helpers for the stdin IPC loop.
-//!
-//! We don't use `BufReader::lines()` / `next_line()` because those buffer
-//! the whole line before returning, which lets a hostile no-newline blob
-//! OOM the engine before any cap fires. Instead, this module reads byte
-//! by byte (well, in 8 KB chunks via the BufReader's internal buffer) and
-//! rejects the moment the in-progress line crosses `max_bytes`.
+//! Bounded line reads + resync helpers for the stdin IPC loop. `BufReader::lines()`/`next_line()` buffer the whole line
+//! first, so a hostile no-newline blob could OOM the engine before any cap fires; this reads in BufReader-buffer chunks
+//! and rejects as soon as the line crosses `max_bytes`.
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
-/// Outcome of one stdin line read.
 pub(crate) enum BoundedRead {
     Line(String),
     Oversized(usize),
     Eof,
 }
 
-/// Read up to `max_bytes` of one newline-delimited frame from `reader`.
-/// The supplied `buf` is cleared at entry and reused across calls so the
-/// hot path doesn't allocate.
+/// `buf` is cleared at entry and reused across calls so the hot path doesn't allocate.
 pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
@@ -25,22 +18,20 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
 ) -> std::io::Result<BoundedRead> {
     buf.clear();
     loop {
-        // Pull the BufReader's already-buffered slice (<= 8 KiB) in one
-        // shot instead of one ReadExact future per byte — O(bytes / 8192) polls,
-        // not O(bytes). fill_buf returns an empty slice at EOF.
+        // Take the already-buffered slice in one shot (O(bytes / 8192) polls, not per byte); fill_buf is empty at EOF.
         let available = reader.fill_buf().await?;
         if available.is_empty() {
             if buf.is_empty() {
                 return Ok(BoundedRead::Eof);
             }
-            // Trailing partial line at EOF — treat as a complete frame.
+            // A trailing partial line at EOF is a complete frame.
             let text = String::from_utf8_lossy(buf).into_owned();
             return Ok(BoundedRead::Line(text));
         }
         match available.iter().position(|&b| b == b'\n') {
             Some(nl) => {
-                // Reject before copying if the line content crosses the cap;
-                // leave the '\n' unconsumed so drain_to_newline can resync.
+                // Reject before copying; leave the '
+                // ' unconsumed so drain_to_newline can resync.
                 if buf.len() + nl > max_bytes {
                     let seen = buf.len() + nl;
                     reader.consume(nl);
@@ -51,11 +42,8 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
                 if buf.last() == Some(&b'\r') {
                     buf.pop();
                 }
-                // Build the String from a borrow, NOT `mem::take(buf)`:
-                // taking swaps the caller's pre-grown 8 KB Vec out for an
-                // empty one, so every frame after the first re-grows from
-                // capacity 0 — defeating the documented zero-alloc reuse.
-                // `buf` is cleared at the top of the next call.
+                // Build the String from a borrow, NOT `mem::take(buf)`: taking swaps out the caller's pre-grown Vec, so
+                // every later frame would re-grow from capacity 0.
                 let text = String::from_utf8_lossy(buf).into_owned();
                 return Ok(BoundedRead::Line(text));
             }
@@ -73,16 +61,9 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-/// Drain bytes from `reader` until the next newline. Used to resync the IPC
-/// framing after rejecting an oversized frame. Best-effort; swallows errors
-/// and returns on any failure or EOF.
-///
-/// Scans the BufReader's buffer in chunks (same R4-04 reasoning as
-/// `bounded_read_line` — not one ReadExact future per byte), and gives up after
-/// `MAX_DRAIN` bytes without a newline. This drain runs *outside* the stdio
-/// loop's `select!`, so a multi-GB newline-free stream on an unbounded
-/// byte-at-a-time drain could pin the loop and defeat shutdown; bounding it
-/// keeps each resync cheap and lets the loop re-check shutdown promptly.
+/// Best-effort resync after an oversized frame; swallows errors. Gives up after `MAX_DRAIN` bytes without a newline:
+/// this runs outside the stdio loop's `select!`, so an unbounded drain of a newline-free multi-GB stream would pin the
+/// loop and defeat shutdown.
 pub(crate) async fn drain_to_newline<R: AsyncBufRead + Unpin>(reader: &mut R) {
     const MAX_DRAIN: usize = 64 * 1024 * 1024;
     let mut drained = 0usize;
@@ -92,7 +73,7 @@ pub(crate) async fn drain_to_newline<R: AsyncBufRead + Unpin>(reader: &mut R) {
             Err(_) => return,
         };
         if available.is_empty() {
-            return; // EOF
+            return;
         }
         if let Some(pos) = available.iter().position(|&b| b == b'\n') {
             reader.consume(pos + 1);
@@ -159,7 +140,6 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversized_frame() {
-        // 64 KB of "a" followed by a newline; cap at 1024.
         static BIG: &[u8] = &[b'a'; 65536];
         let mut r = br(BIG);
         let mut buf = Vec::new();
@@ -172,11 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn drains_to_newline_resyncs_after_oversize() {
-        // After an oversized frame is rejected, drain_to_newline should
-        // skip ahead so the next bounded_read_line sees a fresh frame.
         let mut r = br(b"junkjunkjunk\nsecond\n");
-        // Pretend we already consumed 12 bytes ("junkjunkjunk").
-        // We test from a clean position: call drain then bounded_read.
         drain_to_newline(&mut r).await;
         let mut buf = Vec::new();
         let out = bounded_read_line(&mut r, &mut buf, 1024).await.unwrap();

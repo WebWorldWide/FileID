@@ -1,8 +1,3 @@
-//! `runFaceClustering` IPC handler: re-cluster every face in the DB and
-//! refresh the People tab. The actual clustering algorithm lives in
-//! `pipeline::face_clustering`; this handler loads embeddings, calls the
-//! algorithm, and persists the resulting `persons` + `face_prints.person_id`
-//! assignments in one transaction.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -528,11 +523,8 @@ fn insert_cluster_person(
     Ok(conn.last_insert_rowid())
 }
 
-/// The person row each new cluster keeps. A cluster that inherits a named
-/// identity keeps that person's id; any other cluster keeps the id of the
-/// stored person that owns most of its faces. Each id goes to one cluster, and
-/// people outside this pass are never reused. Keeping ids lets faces whose
-/// person did not change stay untouched.
+/// A cluster inheriting a named identity keeps that person's id; any other keeps the stored person owning most of its
+/// faces. Each id goes to one cluster and people outside this pass are never reused, so unchanged faces stay untouched.
 fn reusable_person_ids(
     assignments: &[ClusterAssignment],
     stored_owner_by_face: &HashMap<i64, i64>,
@@ -579,10 +571,8 @@ struct PersistPlan<'a> {
     preserve_owner_ids: &'a HashSet<i64>,
 }
 
-/// Writes the clusters: people outside the pass stay byte-for-byte intact,
-/// every other person is rewritten in place or removed, and only faces whose
-/// person changes are updated (each update fires a trigger). Returns the
-/// person row of each cluster.
+/// People outside the pass stay byte-for-byte intact; others are rewritten in place or removed, and only faces whose
+/// person changes are updated (each fires a trigger).
 fn persist_clusters(tx: &rusqlite::Connection, plan: &PersistPlan<'_>, now: f64) -> anyhow::Result<HashMap<i32, i64>> {
     tx.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS face_cluster_preserve (id INTEGER PRIMARY KEY);\
@@ -602,9 +592,8 @@ fn persist_clusters(tx: &rusqlite::Connection, plan: &PersistPlan<'_>, now: f64)
             keep.execute([person_id])?;
         }
     }
-    // A person that keeps its row is still a new person as far as review
-    // queues and other people's observations go: clear what deleting the row
-    // used to clear through its foreign keys.
+    // A person keeping its row is still new to review queues and other people's observations: clear what deleting the
+    // row used to clear through its foreign keys.
     tx.execute_batch(
         "DELETE FROM face_review_candidates WHERE person_id NOT IN (SELECT id FROM face_cluster_preserve);\
          UPDATE face_review_candidates SET runner_up_person_id = NULL \
@@ -624,9 +613,8 @@ fn persist_clusters(tx: &rusqlite::Connection, plan: &PersistPlan<'_>, now: f64)
             .identity_anchor_by_cluster
             .get(&anchor.cluster_id)
             .ok_or_else(|| anyhow::anyhow!("missing identity anchor for cluster"))?;
-        // One prior identity may span several new clusters when a
-        // different-person verdict separates its old faces; exactly one
-        // cluster inherits it.
+        // One prior identity may span several new clusters when a different-person verdict separates its old faces;
+        // exactly one inherits it.
         let inherited = plan
             .inherited_person_by_cluster
             .get(&anchor.cluster_id)
@@ -679,7 +667,6 @@ fn persist_clusters(tx: &rusqlite::Connection, plan: &PersistPlan<'_>, now: f64)
     Ok(cid_to_person)
 }
 
-/// Creates the cluster's person, or rewrites every column of the row it keeps.
 fn write_cluster_person(
     conn: &rusqlite::Connection,
     reuse: Option<i64>,
@@ -722,10 +709,6 @@ fn release_active_before_terminal(active: &AtomicBool) {
     active.store(false, Ordering::Release);
 }
 
-/// Refuses to recluster unless every face cache shares one current model and
-/// processing space with valid unit vectors, so incompatible embeddings never
-/// reshape existing People.
-/// The single model and processing space every clustered face must share.
 #[derive(Default)]
 struct FaceSpaceCheck {
     space: Option<(String, String)>,
@@ -763,9 +746,8 @@ impl FaceSpaceCheck {
     }
 }
 
-/// Refuses to recluster unless every face cache shares one current model and
-/// processing space with valid unit vectors, so incompatible embeddings never
-/// reshape existing People.
+/// Refuses to recluster unless every face cache shares one current model and processing space with valid unit vectors,
+/// so incompatible embeddings never reshape existing People.
 pub(crate) fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyhow::Result<Option<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT fp.arcface_embedding, fp.embedding_model, fp.processing_version, fp.source_revision, r.revision \
@@ -783,8 +765,6 @@ pub(crate) fn ensure_compatible_face_space(conn: &rusqlite::Connection) -> anyho
     Ok(check.space)
 }
 
-/// One clustering pass over the portable face space: read the pool, cluster
-/// without the writer lock, then persist under it.
 fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
         let count: u64 = db.lock().query_row("SELECT COUNT(*) FROM face_prints WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded,0)=0", [], |row| row.get(0))?;
@@ -792,42 +772,22 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             crate::resource_scheduler::Demand { memory_mb: 64 + count.saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
             crate::resource_scheduler::Priority::Background, || false)?;
 
-        // PHASE 1 — hold the writer lock only for the DB reads. The multi-second
-        // cluster() pass below runs lock-free so suggested-merges (a read-only
-        // query) and other writes don't serialize behind it. consolidate() —
-        // which is cheap relative to clustering — runs in phase 3 under the
-        // persist lock, so its name-based auto-merge guard sees the same snapshot
-        // the persist uses (audit C1-023). The engine-side single-flight guard
-        // (main.rs) keeps two clustering runs from racing; a face inserted between
-        // phase 1 and phase 3 is benign — it lands with person_id=NULL and is
-        // picked up next run.
+        // PHASE 1 holds the writer lock only for reads so the multi-second cluster() pass runs lock-free; consolidate()
+        // runs in phase 3 under the persist lock so its name-based auto-merge guard sees the persist's snapshot. The
+        // single-flight guard (main.rs) stops two runs racing; a face inserted between phases lands with person_id=NULL
+        // for the next run.
         let mut faces: Vec<FaceRow> = Vec::new();
         let space;
         let held: HashSet<i64>;
         {
             let conn = db.lock();
-            // The space check and the load share one read of the vectors.
             let mut check = FaceSpaceCheck::default();
 
-            // (a) Load every face that has an ArcFace embedding.
-            //
-            // Pre-clustering quality gate (FILEID_FACE_CLUSTER_MIN_QUALITY): faces
-            // below this quality produce non-discriminative "noise" embeddings —
-            // ground-truth labels showed same-person cosine on such faces is ~0.14
-            // (indistinguishable from different-person ~0.16), and they chain
-            // through hub faces into low-cohesion mega-cones. Faces at/above it
-            // separate cleanly (same ~0.59 vs diff max ~0.47). Gated faces are left
-            // UNCLUSTERED (person_id NULL) — still searchable, never in a bad
-            // cluster. `face_quality` = YuNet det.score × landmark geometry, so this
-            // naturally keeps well-detected frontal faces on any corpus. 0 disables.
-            //
-            // Recalibrated on the isolated 41,855-face Family Photos catalog
-            // (2026-08-08): 0.25 admitted visually confirmed sibling, unrelated-
-            // adult, and object contamination. 0.33 separated every labelled
-            // negative, retained the clear same-person pair, cut displayable
-            // People groups from about 420 to 170, and improved every top-cluster
-            // cohesion floor. Lower-quality detections remain searchable and can
-            // be reviewed, but do not manufacture identities. 0 disables.
+            // Quality gate (FILEID_FACE_CLUSTER_MIN_QUALITY, 0 disables): low-quality faces give non-discriminative
+            // embeddings (same-person cosine ~0.14 vs different-person ~0.16) and chain through hub faces into
+            // low-cohesion mega-cones. Gated faces stay UNCLUSTERED (person_id NULL): searchable, never in a bad
+            // cluster. face_quality is YuNet score × landmark geometry. 0.33 was calibrated on the 41,855-face Family
+            // Photos catalog (2026-08-08): it separated every labelled negative and kept the clear same-person pair.
             let min_cluster_quality: f32 = std::env::var("FILEID_FACE_CLUSTER_MIN_QUALITY")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
@@ -902,41 +862,25 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             };
             faces.retain(|face| !held.contains(&face.face_id));
 
-            // The user-identity snapshot (prior names/title/is_unknown + the
-            // face->person map) is read in PHASE 3 under the persist lock — NOT
-            // here — so a People-tab edit (rename / merge / mark-unknown) that
-            // commits during the lock-free phase 2 is carried forward instead of
-            // being silently clobbered by a phase-1 snapshot that predates it.
-            // (audit S0)
+            // The identity snapshot is read in PHASE 3 under the persist lock: a People-tab edit committed during the
+            // lock-free phase 2 must be carried forward, not clobbered by a stale capture.
             drop(conn);
         }
         let face_count = faces.len() as u64;
-        // Raw clustering only. Auto-consolidation (which applies the name-based
-        // auto-merge guard) is deferred to PHASE 3 so the name guard can be built
-        // from the identity snapshot read UNDER the persist lock, not from a
-        // phase-1 snapshot that a rename during the lock-free window would
-        // invalidate. (audit C1-023)
+        // Auto-consolidation is deferred to PHASE 3 so its name-based auto-merge guard uses the under-lock snapshot,
+        // not one a rename could invalidate.
         let (assignments, _raw_anchors) = cluster(&faces);
 
-        // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
 
-        // Read the user-identity snapshot HERE — under the persist lock, inside
-        // the transaction, BEFORE the DELETE below — rather than in phase 1.
-        // Re-clustering drops + re-creates the persons table on EVERY run and is
-        // auto-fired after every scan, so the names + "not this person" verdicts
-        // the user entered must be carried forward. Reading it now (not from a
-        // phase-1 snapshot) means a People-tab edit committed during the lock-free
-        // phase 2 — which had to take this same writer lock — is reflected, instead
-        // of being silently overwritten by a stale capture (data loss). We re-attach
-        // each new cluster's identity from the prior person that owned the MAJORITY
-        // of its member faces (ties broken toward the cluster's anchor face).
-        // (audit S0)  [PriorIdentity is defined at the top of this closure.]
+        // Read under the persist lock and before the DELETE: re-clustering drops and re-creates persons, so names and
+        // 'not this person' verdicts must carry forward from a read including any edit committed during phase 2. Each
+        // new cluster re-attaches the prior person owning the MAJORITY of its faces (ties go to the anchor face's
+        // owner).
         let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
         let mut face_to_owner: HashMap<i64, i64> = HashMap::new();
         let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
-        // What `face_prints.person_id` holds now, before manual-merge overrides.
         let mut stored_owner_by_face: HashMap<i64, i64> = HashMap::new();
         {
             let mut stmt = tx.prepare(
@@ -1072,17 +1016,11 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
                 preserve_owner_ids.contains(&owner_id).then_some(face_id)
             })
             .collect();
-        // A different-people verdict endpoint owned by a preserved identity is
-        // dropped from the clustering pool (that owner is kept separate
-        // wholesale via the preserve set), so it never lands in the partitioned
-        // cluster set. Such a pair is already satisfied by preservation; keeping
-        // it would make the downstream blocked-set build and
-        // validate_protected_clusters fail closed on a face that legitimately
-        // left the partition (permanently breaking the People tab, since
-        // clustering re-fires after every scan). Retain only pairs whose BOTH
-        // endpoints remain in the active pool — a non-excluded endpoint is
-        // always re-assigned by partition, so cluster_of lookups below cannot
-        // miss. Mirrors FaceClustering.swift's tolerant validate.
+        // A different-people verdict endpoint owned by a preserved identity is dropped from the pool (that owner is
+        // kept separate via the preserve set); keeping the pair would make the blocked-set build and
+        // validate_protected_clusters fail closed on a face that legitimately left the partition, permanently breaking
+        // the People tab since clustering re-fires after every scan. Retain only pairs whose BOTH endpoints remain in
+        // the pool. Mirrors FaceClustering.swift's tolerant validate.
         let verdict_pairs: HashSet<(i64, i64)> = verdict_pairs
             .into_iter()
             .filter(|&(a, b)| {
@@ -1142,13 +1080,10 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             );
         }
 
-        // Auto-consolidate near-certain duplicate clusters the over-split-safe
-        // clusterer left fragmented (the "WAY too many similar faces" symptom),
-        // RIGHT HERE under the persist lock — not in the lock-free phase 2 — so
-        // the verification-aware blocked set is built from the same under-lock
-        // snapshot the persist below uses. Protected prior owners and explicit
-        // different-people anchors were partitioned before this pass and remain
-        // transitive cannot-links during consolidation.
+        // Auto-consolidate near-certain duplicate clusters the over-split-safe clusterer left fragmented, under the
+        // persist lock so the verification-aware blocked set is built from the same snapshot the persist uses.
+        // Protected prior owners and explicit different-people anchors were partitioned earlier and remain transitive
+        // cannot-links.
         let (assignments, anchors) = {
             let threshold = crate::pipeline::face_clustering::automerge_threshold();
             let cluster_of: HashMap<i64, i32> =
@@ -1252,8 +1187,8 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
                     "[CLUSTER] recovered unambiguous small identity fragments"
                 );
             }
-            // Suppress unresolved low-quality micro-clusters only after recovery,
-            // so corroborated doubleton fragments can join a recurring identity.
+            // Suppress unresolved low-quality micro-clusters only after recovery, so corroborated doubleton fragments
+            // can join a recurring identity.
             let always_keep = crate::pipeline::face_clustering::protected_cluster_ids(
                 &a,
                 &protected_faces,
@@ -1379,9 +1314,7 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
         let review_queued = face_review::pending_count(&tx)?;
         tx.commit()?;
 
-        // Faces that stayed person_id=NULL — either they never clustered, or their
-        // micro-cluster was suppressed (below min-size / quality). = loaded faces
-        // minus those assigned to a promoted person cluster.
+        // Faces left person_id=NULL: never clustered, or their micro-cluster was suppressed (below min size / quality).
         let matched = matched_pool_face_count(
             &assignments,
             &cid_to_person,
@@ -1398,9 +1331,8 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
         })
 }
 
-/// Whether a pass should start by itself after a completed scan: faces wait for a person
-/// (the Swift engine's `autoEnqueueFaceClusteringIfNeeded`) and the catalog is not exactly as
-/// the last finished pass left it, so a rescan that found nothing new starts nothing.
+/// Faces wait for a person (Swift `autoEnqueueFaceClusteringIfNeeded`) and the catalog is not exactly as the last
+/// finished pass left it, so a rescan that found nothing new starts nothing.
 #[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
 pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -> bool {
     skip::with_reader(db, |conn| {
@@ -1411,10 +1343,8 @@ pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -
     })
 }
 
-/// The Swift engine's answer to a pass that cannot embed faces: the model is not installed
-/// (the app shows the message as it stands) or is installed but does not start. Only said while
-/// some face still has no vector: a catalog whose faces were all embedded earlier clusters
-/// without the model.
+/// The Swift engine's answer to a pass that cannot embed faces: the model is not installed or does not start. Only said
+/// while some face still has no vector (a fully embedded catalog clusters without the model).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn embedder_problem(db: &parking_lot::Mutex<rusqlite::Connection>) -> Option<(&'static str, String)> {
     let unembedded: bool = db
@@ -1523,11 +1453,8 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Err(err) => {
             tracing::warn!(?err, "face clustering spawn failed");
-            // PAR-111: emit a face_clustering error so the app-side auto-trigger
-            // gate (_faceClusterAutoInFlight) is released even when the
-            // clustering closure panics — a JoinError otherwise fires no
-            // completion/error event, leaving auto-clustering stuck for the
-            // session.
+            // Emit an error so the app's auto-trigger gate is released even if the closure panics; a JoinError
+            // otherwise fires no completion and auto-clustering sticks for the session.
             sink.send(EngineError::event(
                 "face_clustering_failed",
                 "FileID couldn't finish grouping faces. Try again.",
@@ -2332,9 +2259,8 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM face_writes"), 5);
     }
 
-    /// `persist_clusters` clears by hand what deleting a person row clears
-    /// through foreign keys, and rewrites every person column in place. A new
-    /// reference to `persons` or a new column must be added there too.
+    /// `persist_clusters` clears by hand what deleting a person row clears through foreign keys: a new reference to
+    /// `persons` or a new column must be added there too.
     #[test]
     fn the_person_schema_the_in_place_rewrite_assumes_is_unchanged() {
         let conn = crate::db::test_support::memory_db();

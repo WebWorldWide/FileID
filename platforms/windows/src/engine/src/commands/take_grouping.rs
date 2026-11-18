@@ -1,11 +1,9 @@
-//! Library-wide related-take proposals: a durable `takeGrouping` catalog job
-//! that groups tries by capture session, CLIP similarity and user-named
-//! people, and stores them as suggestions. Mirror of the macOS
-//! `CatalogTakeGrouping.swift`; keep thresholds, keys and evidence in step.
+//! Library-wide related-take proposals: a durable `takeGrouping` catalog job grouping tries by capture session, CLIP
+//! similarity and user-named people. Keep thresholds, keys and evidence in step with macOS `CatalogTakeGrouping.swift`.
 
 use super::catalog_take_auto::{self as auto, apply_decisions, rank};
 use crate::ipc::sink::Sink;
-use crate::ipc::{CatalogJob, CatalogRequest, CatalogResponse, CatalogTakeAutoGroup, EventPayload, IpcEvent, Wrap};
+use crate::ipc::{CatalogRequest, CatalogResponse, CatalogTakeAutoGroup, EventPayload, IpcEvent, Wrap};
 use crate::pipeline::near_duplicate_grouping::Item;
 use crate::pipeline::take_scoring::round4;
 use crate::util::smart_name_style as style;
@@ -98,17 +96,6 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_job(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
-        .optional()?
-        .is_some_and(|kind| kind == JOB_KIND))
-}
-
-pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
-    Ok(super::catalog::jobs(conn)?.into_iter().filter(|job| job.kind == JOB_KIND).collect())
-}
-
 pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
     queue_job(conn)?;
     let mut response = super::catalog::response(
@@ -116,7 +103,7 @@ pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest) -> Result<Cat
         "ok",
         Some("Looking for related tries across the library. Suggestions never change, move or hide files.".into()),
     );
-    response.jobs = jobs(conn)?;
+    response.jobs = super::catalog::jobs_of_kind(conn, JOB_KIND)?;
     Ok(response)
 }
 
@@ -134,8 +121,7 @@ fn queue_job(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// A job that is already queued, running or paused (the user stopped it) is
-/// left alone; only a finished, cancelled or failed one is started again.
+/// A queued, running or paused (user-stopped) job is left alone; only a finished, cancelled or failed one restarts.
 fn may_start_after_scan(conn: &Connection) -> Result<bool> {
     let state: Option<String> = conn
         .query_row("SELECT state FROM catalog_jobs WHERE id=?1 AND kind=?2", params![JOB_ID, JOB_KIND], |r| r.get(0))
@@ -163,12 +149,9 @@ impl Drop for WaitingGuard {
     }
 }
 
-/// Starts the job once after a scan that stored new or changed images or
-/// videos, but only while nothing else heavy is running or queued (`busy` covers
-/// Describe Files, face clustering, Organize Folders and model downloads; other
-/// catalog jobs are read from the catalog). It waits for them, bounded, then
-/// queues the job that `schedule` runs. A job the user paused or one already
-/// queued is left alone.
+/// Starts once after a scan that stored new or changed media, but only while nothing else heavy runs (`busy` covers
+/// Describe Files, face clustering, Organize Folders and model downloads; other catalog jobs are read from the
+/// catalog); waits for them, bounded. A paused or already queued job is left alone.
 pub(crate) fn start_after_scan(
     sink: Sink,
     database: Arc<Mutex<Connection>>,
@@ -278,7 +261,7 @@ pub(crate) fn proposals(conn: &Connection, request: &CatalogRequest) -> Result<C
     ranked.truncate(limit);
     let mut response = super::catalog::response(&request.request_id, "ok", None);
     response.take_groups = Some(ranked);
-    response.jobs = jobs(conn)?;
+    response.jobs = super::catalog::jobs_of_kind(conn, JOB_KIND)?;
     Ok(response)
 }
 
@@ -310,7 +293,7 @@ pub(crate) fn schedule(sink: Sink, database: Arc<Mutex<Connection>>) {
 }
 
 async fn publish(sink: &Sink, database: &Arc<Mutex<Connection>>) {
-    if let Ok(jobs) = super::timeline::with_db(database, |conn| jobs(conn)).await {
+    if let Ok(jobs) = super::timeline::with_db(database, |conn| super::catalog::jobs_of_kind(conn, JOB_KIND)).await {
         let mut response = super::catalog::response(JOB_ID, "ok", None);
         response.jobs = jobs;
         sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response)))).await;
@@ -464,8 +447,6 @@ fn revision(size: i64, modified: Option<f64>) -> String {
     format!("{}:{}", size, modified.map(|m| m.to_bits().to_string()).unwrap_or_else(|| "unknown".into()))
 }
 
-/// User-named people per file with the revision their evidence was taken
-/// from: compatible faces of a named person, or the person's user observations.
 fn subjects(conn: &Connection) -> Result<HashMap<i64, Vec<(i64, String)>>> {
     let mut statement = conn.prepare(
         "SELECT fp.file_id,p.id,p.title,p.first_name,p.name,fp.source_revision

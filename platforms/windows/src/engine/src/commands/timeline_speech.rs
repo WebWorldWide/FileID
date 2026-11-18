@@ -1,8 +1,6 @@
-//! Speech pass with an on-device recogniser that needs no model install
-//! (Apple Speech in the Mac app's engine). Rows match the Swift engine's
-//! `TimelineAnalysis.transcribeSpeech` byte for byte: one coverage row per
-//! file and per overlapping chunk, so a job resumed by either engine skips the
-//! chunks the other verified, and an unreadable chunk stays incomplete.
+//! Speech pass with an on-device recogniser needing no model install (Apple Speech in the Mac-hosted engine). Rows
+//! match Swift's `TimelineAnalysis.transcribeSpeech` byte for byte: one coverage row per file and per overlapping
+//! chunk, so a job resumed by either engine skips verified chunks and an unreadable chunk stays incomplete.
 
 use super::{
     blocking, interrupted_or, publish, running_source, set_progress, upsert_coverage, while_running, with_db,
@@ -18,15 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub(super) trait Recognizer: Send + Sync + 'static {
-    /// Whether recognition can run now; may show the system permission prompt.
     fn available(&self) -> bool;
     fn model_version(&self) -> String;
-    /// Words of `[start, end)`, timestamps relative to `start`.
     fn transcribe(&self, source: &Path, start: f64, end: f64, cancel: &AtomicBool) -> Result<Vec<Segment>>;
 }
 
-/// Apple Speech runs in the Mac app's engine unless FILEID_TIMELINE_SPEECH=0,
-/// the Swift engine's switch.
+/// On in the Mac-hosted engine unless FILEID_TIMELINE_SPEECH=0 (Swift's switch).
 pub(super) fn enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) && std::env::var("FILEID_TIMELINE_SPEECH").as_deref() != Ok("0")
 }
@@ -65,7 +60,6 @@ pub(super) async fn transcribe(
     }
 }
 
-/// What the speech pass needs to know about a video: the decoder's probe.
 pub(super) type Probe = fn(&Path, &AtomicBool) -> Result<super::video_export::AnalysisProbe>;
 
 #[allow(clippy::too_many_arguments)]
@@ -161,7 +155,6 @@ pub(super) async fn transcribe_with<R: Recognizer>(
     Ok(())
 }
 
-/// The Swift engine's `persistSpeechChunk`.
 fn persist_chunk(
     conn: &Connection,
     file_id: i64,
@@ -198,7 +191,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    /// Scripted words per chunk; `None` makes that chunk unreadable.
     struct Scripted {
         available: bool,
         chunks: Mutex<Vec<Option<Vec<Segment>>>>,

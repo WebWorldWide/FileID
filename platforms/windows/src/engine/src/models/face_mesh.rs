@@ -1,12 +1,8 @@
-// MediaPipe Face Mesh V2 (Google, Apache-2.0), the 478-point face landmark
-// network from the Face Landmarker bundle, as a format-only ONNX conversion
-// pinned in shared/models/manifest.json. Used for eye openness in Best Takes:
-// YuNet's five landmarks cannot tell an open eye from a closed one.
+// MediaPipe Face Mesh V2 (Google, Apache-2.0), 478-point landmarks as a format-only ONNX conversion pinned in
+// shared/models/manifest.json; gives eye openness for Best Takes (YuNet's 5 landmarks cannot).
 //
-// Input `input_12`: [1, 256, 256, 3] RGB in [0, 1], a square crop around one
-// face with a 25% margin on each side, rolled so the eyes are level.
-// Outputs: `Identity` 478 × (x, y, z) in crop pixels, `Identity_1` the face
-// presence logit.
+// Input `input_12`: [1, 256, 256, 3] RGB in [0, 1], a square face crop with 25% margin, eyes level.
+// Outputs: `Identity` 478 × (x, y, z) in crop pixels, `Identity_1` face-presence logit.
 
 use std::path::{Path, PathBuf};
 
@@ -56,8 +52,6 @@ impl FaceMesh {
         Self::checked(session, input_name)
     }
 
-    /// The CPU session, for callers that keep one per worker (the Mac's take
-    /// workers); sessions of the same file share one compiled model.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     pub fn load_cpu<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
@@ -79,8 +73,7 @@ impl FaceMesh {
         Ok(model)
     }
 
-    /// Eye openness 0…1 for one detected face in `rgb`, or `None` when the
-    /// network says the crop holds no face.
+    /// Eye openness 0…1, or `None` when the network says the crop holds no face.
     pub fn eyes_open(&mut self, rgb: &[u8], width: u32, height: u32, face: &Detection) -> Result<Option<f64>> {
         Ok(self.eye_ratio(rgb, width, height, face)?.map(openness))
     }
@@ -103,7 +96,6 @@ impl FaceMesh {
         Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
     }
 
-    /// One forward pass: the 478 x 3 landmark values and the presence logit.
     fn forward(&mut self, input: Array4<f32>) -> Result<(Vec<f32>, f32)> {
         let input_name = self.input_name.clone();
         let outputs = self.session.run(vec![(input_name.as_str(), input.into())]).context("Face mesh session.run")?;
@@ -168,7 +160,6 @@ fn crop_from_points(points: &[[f32; 2]]) -> Option<Crop> {
     (side.is_finite() && side >= 1.0).then_some(Crop { cx: mx * crop.cos - my * crop.sin, cy: mx * crop.sin + my * crop.cos, side, ..crop })
 }
 
-/// Mean eye aspect ratio over both eyes: eyelid gap over eye width.
 pub fn eye_aspect_ratio(points: &[[f32; 2]]) -> Option<f64> {
     if points.len() < POINTS {
         return None;
@@ -186,7 +177,6 @@ pub fn openness(ratio: f64) -> f64 {
     ((ratio - CLOSED_RATIO) / (OPEN_RATIO - CLOSED_RATIO)).clamp(0.0, 1.0)
 }
 
-/// `face_mesh/face_landmarks.onnx` under the models folder.
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("face_mesh").join("face_landmarks.onnx"))
 }

@@ -1,47 +1,31 @@
-//! IPC sink — bounded mpsc channel that drains to stdout one frame per line.
-//!
-//! Mirror of `IPCSink.swift` on macOS. Every IPCEvent the engine wants to
-//! emit goes through `Sink::send`. A single writer task reads from the
-//! channel, serializes with sorted keys + a trailing newline, and writes
-//! atomically to stdout. Backpressure: if the channel fills, senders block —
-//! the engine slows itself down rather than dropping events.
+//! Bounded mpsc channel that drains to stdout one frame per line (mirror of `IPCSink.swift`). A single writer task
+//! serializes and writes atomically; when the channel fills, senders block so the engine slows down rather than
+//! dropping events.
 
 use std::io::Write;
 use tokio::sync::mpsc;
 
 use super::{EngineError, IpcEvent};
 
-// 16384 is comfortable for the worst burst we've measured: Deep Analyze
-// emits ~50 token events/sec/file and a batch of 100 files can transiently
-// buffer 5000+ events. 4096 was an inherited default from before Deep
-// Analyze landed; the bump costs ~256 KB peak memory and eliminates
-// senders blocking on the channel during fast scans + caption streams.
+// 16384 covers the worst measured burst (Deep Analyze ~50 token events/sec/file, 100-file batches buffer 5000+ events)
+// for ~256 KB peak.
 const CHANNEL_CAPACITY: usize = 16384;
 
-// per-frame size cap, symmetric with the app's inbound cap
-// (EngineClient.MaxFrameBytes) and the engine's command-read cap
-// (main.rs MAX_FRAME_BYTES). A frame above this is silently dropped by the
-// app's bounded reader (it resyncs to the next newline), which hangs the UI
-// that was awaiting the reply (e.g. a huge restructurePlan). Rather than emit
-// the oversize frame, the sink substitutes a small structured
-// `ipc_frame_too_large` error the app can surface. Bumped 32→64 MiB,
-// symmetric with the inbound caps, to carry a whole-library plan.
+// Symmetric with the app's inbound cap (EngineClient.MaxFrameBytes) and the engine's command-read cap (main.rs
+// MAX_FRAME_BYTES), sized for a whole-library plan. The app silently drops a larger frame and resyncs, hanging the UI
+// awaiting the reply (e.g. a huge restructurePlan), so the sink substitutes a small `ipc_frame_too_large` error.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-/// The event wire when it is not stdout: the macOS app-hosted engine writes
-/// events on fd 2, like the Swift engine (see [`route_events_to_stderr`]).
+/// When not stdout: the macOS app-hosted engine writes events on fd 2, like the Swift engine (see
+/// [`route_events_to_stderr`]).
 static EVENT_WIRE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 
-/// Same rotation as the Swift engine's `engine-stderr.log`.
 #[cfg(unix)]
 const STDERR_LOG_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Move the event stream to fd 2 for the macOS app, which reads events from
-/// the engine's stderr. fd 2 is duplicated for the sink's exclusive use, then
-/// pointed at `<logs>/engine-stderr.log`, so tracing, panics and native
-/// library chatter (ORT, Metal) can never splice into an event line. Call once
-/// at process start, before any thread or native library writes to stderr.
-/// If the log cannot be opened the events still go to fd 2, shared as before.
+/// The macOS app reads events from the engine's stderr. fd 2 is duplicated for the sink's exclusive use, then pointed
+/// at `<logs>/engine-stderr.log`, so tracing, panics and native library chatter can never splice into an event line.
+/// Call once at process start before any thread writes to stderr; if the log can't be opened events still go to fd 2.
 #[cfg(unix)]
 pub fn route_events_to_stderr(logs_dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -88,10 +72,8 @@ pub struct Sink {
 }
 
 impl Sink {
-    /// Create the sink and spawn the writer task (stdout, or fd 2 after
-    /// [`route_events_to_stderr`]). Returns the sink
-    /// handle (cheap to clone) and a join handle for the writer task; the
-    /// caller awaits the join handle on shutdown to flush in-flight events.
+    /// Returns the sink handle and the writer's join handle, which the caller awaits on shutdown to flush in-flight
+    /// events.
     pub fn spawn() -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<IpcEvent>(CHANNEL_CAPACITY);
 
@@ -101,9 +83,8 @@ impl Sink {
                 drain_to(&mut handle, &mut rx);
             }
             None => {
-                // Stdout is line-buffered: unwrapped, every frame is its own
-                // write call. The buffer is flushed whenever the queue runs
-                // empty (see `drain_to`), so no event waits behind it.
+                // Stdout is line-buffered, so unwrapped every frame is its own write call; flushed whenever the queue
+                // runs empty (see `drain_to`).
                 let stdout = std::io::stdout();
                 let mut handle = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
                 drain_to(&mut handle, &mut rx);
@@ -113,33 +94,27 @@ impl Sink {
         (Self { tx, command_id: None, before_terminal: None }, writer)
     }
 
-    /// Send an event. Blocks the caller's task if the channel is full —
-    /// applying backpressure so the engine slows down rather than dropping.
+    /// Blocks while the channel is full (backpressure).
     pub async fn send(&self, event: IpcEvent) {
         let event = self.stamped(event);
         if self.tx.send(event).await.is_err() {
-            // Receiver dropped — sink is shutting down. Silent: the engine
-            // is exiting anyway.
+            // Receiver dropped: the sink is shutting down.
         }
     }
 
-    /// Try-send variant for hot paths that can't await. Drops the event if
-    /// the channel is full; logs a warning at most once per N drops (caller
-    /// is responsible for the dedup if it cares).
+    /// For hot paths that can't await: drops the event if the channel is full.
     pub fn try_send(&self, event: IpcEvent) -> Result<(), mpsc::error::TrySendError<IpcEvent>> {
         self.tx.try_send(self.stamped(event))
     }
 
-    /// A handle to the same channel that stamps `command_id` on every
-    /// `BulkActionResult` it sends, so each reply, refusal and result from a
-    /// spawned task carries the id of the command it answers (schema 1.28.0).
+    /// Stamps `command_id` on every `BulkActionResult` it sends so each reply from a spawned task carries the id of the
+    /// command it answers (schema 1.28.0).
     pub fn for_command(&self, id: &str) -> Self {
         Self { command_id: Some(id.into()), ..self.clone() }
     }
 
-    /// A handle that runs `release` before it queues a job's terminal event.
-    /// A client sends its next command as soon as it reads that event, which
-    /// can be before the task that sent it has returned.
+    /// Runs `release` before queuing a job's terminal event: a client sends its next command as soon as it reads that
+    /// event, possibly before the sending task has returned.
     pub(crate) fn releasing_before(
         &self,
         is_terminal: fn(&super::EventPayload) -> bool,
@@ -160,9 +135,8 @@ impl Sink {
         event
     }
 
-    /// Test-only sink backed by a caller-held receiver instead of the stdout
-    /// writer task — lets tests assert backpressure semantics (try_send drops,
-    /// send blocks) without writing to real stdout.
+    /// Backed by a caller-held receiver so tests can assert backpressure (try_send drops, send blocks) without real
+    /// stdout.
     #[cfg(test)]
     pub(crate) fn channel_for_test(capacity: usize) -> (Self, mpsc::Receiver<IpcEvent>) {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
@@ -170,30 +144,20 @@ impl Sink {
     }
 }
 
-/// Write every event to `handle` until the channel closes or a write fails.
 fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
     let mut scratch: Vec<u8> = Vec::new();
-    // The runtime can't await on the blocking thread, so we use a
-    // sync-style consumer over the channel via blocking_recv.
-    //
-    // Coalesce flushes. blocking_recv blocks for the first
-    // event of a burst; we then drain every already-queued event with
-    // try_recv, writing each as a line WITHOUT flushing, and flush ONCE
-    // when the channel momentarily empties. During the bursts the 16384
-    // cap was sized for this cuts the flush syscall rate from per-frame
-    // to per-drain. Terminal events are NOT delayed: a drain cycle ends
-    // (and flushes) the instant try_recv finds nothing, so a terminal
-    // frame is on the wire within the same cycle it was written.
+    // blocking_recv blocks for the first event of a burst; then every already-queued event is written with try_recv
+    // WITHOUT flushing, and flushed ONCE when the channel empties, cutting flush syscalls from per-frame to per-drain.
+    // Terminal events are not delayed: the cycle flushes as soon as try_recv finds nothing.
     let mut closed = false;
     while !closed {
         let first = match rx.blocking_recv() {
             Some(event) => event,
-            None => break, // channel closed and drained
+            None => break,
         };
         if !write_line(handle, &mut scratch, &first) {
             break;
         }
-        // Drain the rest of the current burst without flushing.
         loop {
             match rx.try_recv() {
                 Ok(event) => {
@@ -209,33 +173,24 @@ fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
                 }
             }
         }
-        // One flush per drained burst.
         if let Err(err) = handle.flush() {
             tracing::error!(?err, "ipc sink flush failed");
             break;
         }
     }
-    // Channel closed: best-effort final flush.
     let _ = handle.flush();
 }
 
-/// Serialize `event` and write it as one newline-terminated frame. Does NOT
-/// flush — the caller coalesces flushes per drained burst. Returns
-/// `false` only on a fatal stdout write error (the writer loop then exits).
-///
-/// Serialize to a buffer first so we can enforce `MAX_FRAME_BYTES`.
-/// An over-cap frame is dropped app-side with no error, hanging whatever UI
-/// awaited the reply; we substitute a small structured `ipc_frame_too_large`
-/// event so the app can surface the failure instead of hanging.
+/// Does NOT flush (the caller coalesces per burst); `false` only on a fatal write error. Serializes to a buffer first
+/// to enforce `MAX_FRAME_BYTES`: an over-cap frame is dropped app-side with no error, so a small `ipc_frame_too_large`
+/// event is substituted.
 fn write_line<W: Write>(w: &mut W, buf: &mut Vec<u8>, event: &IpcEvent) -> bool {
-    // Insertion-order keys are fine — consumers don't care about JSON key
-    // order. Byte-for-byte parity with sorted output would require a
-    // custom sorted-key writer.
-    // `buf` is reused across frames so the hot drain loop allocates no Vec per event.
+    // Insertion-order keys are fine; consumers don't care about JSON key order. `buf` is reused so the drain loop
+    // allocates no Vec per event.
     buf.clear();
     if let Err(err) = serde_json::to_writer(&mut *buf, event) {
         tracing::error!(?err, "ipc sink encode failed");
-        return true; // skip this frame; the channel is still healthy
+        return true;
     }
     if buf.len() > MAX_FRAME_BYTES {
         tracing::warn!(
@@ -248,8 +203,7 @@ fn write_line<W: Write>(w: &mut W, buf: &mut Vec<u8>, event: &IpcEvent) -> bool 
     write_raw_line(w, buf)
 }
 
-/// Emit the structured replacement for an over-cap frame. Tiny and fixed-size,
-/// so it can never itself exceed the cap.
+/// Tiny and fixed-size, so it can never itself exceed the cap.
 fn write_frame_too_large<W: Write>(w: &mut W, frame_bytes: usize) -> bool {
     let event = EngineError::event(
         "ipc_frame_too_large",
@@ -270,9 +224,7 @@ fn write_frame_too_large<W: Write>(w: &mut W, frame_bytes: usize) -> bool {
 
 fn write_raw_line<W: Write>(w: &mut W, bytes: &[u8]) -> bool {
     if let Err(err) = w.write_all(bytes).and_then(|_| w.write_all(b"\n")) {
-        // We can't emit an IPC event about a stdout write failure (stdout is
-        // the failing surface). Log via tracing — it hits the local file and
-        // stderr.
+        // stdout is the failing surface, so log via tracing (local file and stderr) instead of an IPC event.
         tracing::error!(?err, "ipc sink write failed");
         return false;
     }
@@ -286,10 +238,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn sink_writes_one_line_per_event() {
-        // Smoke test: spawn the sink, send a single event, drop it, ensure
-        // the writer task exits cleanly. We don't actually capture stdout
-        // here (Rust test stdout interception is tricky); this just exercises
-        // the code path for panics / panics on encoder.
+        // Smoke test: the writer task exits cleanly after one event (stdout is not captured).
         let (sink, join) = Sink::spawn();
         sink.send(IpcEvent::now(EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),
@@ -300,12 +249,9 @@ mod tests {
             hardware: None,
         })))).await;
         drop(sink);
-        // Writer task drains and exits.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
     }
 
-    /// A `Write` that tallies writes vs. flushes so a test can prove the sink
-    /// no longer flushes per frame.
     #[derive(Default)]
     struct CountingWriter {
         bytes: Vec<u8>,
@@ -331,9 +277,8 @@ mod tests {
         })))
     }
 
-    /// An outbound frame above the cap must be replaced by a small,
-    /// structured `ipc_frame_too_large` error — never emitted oversize (the app
-    /// would silently drop it and hang the awaiting UI).
+    /// An oversize frame becomes a small `ipc_frame_too_large` error, never emitted oversize (the app would drop it and
+    /// hang the UI).
     #[test]
     fn oversize_frame_becomes_structured_error_event() {
         let huge = log_event("X".repeat(MAX_FRAME_BYTES + 1024));
@@ -341,7 +286,6 @@ mod tests {
         let mut buf = Vec::new();
         assert!(write_line(&mut out, &mut buf, &huge), "write_line must not report a fatal error");
 
-        // The bytes on the wire are the substitute event, well under the cap.
         assert!(
             out.bytes.len() < MAX_FRAME_BYTES,
             "substitute frame must be small, got {} bytes",
@@ -357,8 +301,7 @@ mod tests {
         }
     }
 
-    /// A within-cap frame is written verbatim (regression guard so the cap
-    /// doesn't reject normal traffic).
+    /// A within-cap frame is written verbatim.
     #[test]
     fn normal_frame_is_written_verbatim() {
         let evt = log_event("hello".into());
@@ -373,11 +316,8 @@ mod tests {
         }
     }
 
-    /// Writing a burst of frames must NOT flush per frame. `write_line`
-    /// is the per-event primitive; flushing is the writer loop's job, coalesced
-    /// once per drained burst. Proven here by asserting write_line performs zero
-    /// flushes across many events (the old `write_frame` flushed every call).
-    /// What the stdout branch does: a 64 KiB buffer in front of the stream.
+    /// `write_line` performs zero flushes across many events; flushing is the writer loop's job, once per drained
+    /// burst.
     #[test]
     fn a_buffered_burst_reaches_the_stream_in_one_write_and_a_lone_event_is_not_held_back() {
         #[derive(Clone, Default)]
@@ -416,7 +356,6 @@ mod tests {
         };
         let (writes, _) = wait_for(100);
         assert!(writes < 100, "a burst is not one write per frame (got {writes})");
-        // The sender stays open: a terminal event must still be on the stream at once.
         tx.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Cancelled)))).unwrap();
         wait_for(101);
         drop(tx);
@@ -437,17 +376,12 @@ mod tests {
         assert!(out.writes >= 100, "each frame still produces output");
     }
 
-    /// A terminal PhaseChanged must use the guaranteed (blocking/
-    /// awaiting) `send` path, which delivers even when the channel is full —
-    /// unlike `try_send`, which drops. A dropped terminal frame makes the app
-    /// render a cancelled/failed scan as Completed. This pins the difference:
-    /// try_send drops on a full channel; send delivers once capacity frees.
+    /// A terminal PhaseChanged must use the awaiting `send` path, which delivers when the channel is full; `try_send`
+    /// drops, and a dropped terminal frame renders a cancelled/failed scan as Completed.
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_phase_send_is_never_dropped_under_backpressure() {
         let (sink, mut rx) = Sink::channel_for_test(1);
-        // Fill the single slot.
         sink.try_send(log_event("filler".into())).unwrap();
-        // The channel is now full: the droppable path fails.
         assert!(
             sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Cancelled
@@ -456,12 +390,9 @@ mod tests {
             "try_send must drop a terminal PhaseChanged on a full channel — the bug"
         );
 
-        // The guaranteed path awaits capacity instead. Free a slot from the
-        // receiver after a beat; the awaiting send must then deliver.
         let drainer = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let _ = rx.recv().await; // drop the filler, freeing one slot
-            // Receive the terminal frame that send() delivered.
+            let _ = rx.recv().await;
             rx.recv().await
         });
 

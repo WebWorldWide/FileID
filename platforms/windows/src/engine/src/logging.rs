@@ -1,17 +1,11 @@
-//! Engine-wide logging setup: tracing subscriber + panic hook.
-//!
-//! Both must be installed before any log call site fires. `init()` does the
-//! tracing-subscriber wiring; `install_panic_hook()` captures panic site +
-//! backtrace into the same tracing pipeline so the next crash report has a
-//! file:line + backtrace to point at.
+//! Tracing subscriber + panic hook; both must be installed before any log call site fires.
 
 use anyhow::{Context, Result};
 
 use crate::paths;
 
-/// Initialize structured tracing — daily rolling JSON file in
-/// `%LOCALAPPDATA%/FileID/logs/` plus stderr layer. Local-only; PII
-/// redaction happens at call sites.
+/// Daily rolling JSON file in `%LOCALAPPDATA%/FileID/logs/` plus a stderr layer. Local-only; PII redaction happens at
+/// call sites.
 pub(crate) fn init() -> Result<()> {
     use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
@@ -21,9 +15,7 @@ pub(crate) fn init() -> Result<()> {
 
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "engine.jsonl");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
-    // Leak the guard so the appender flushes on every event. Engine
-    // lifetime is short enough that this is fine; main returns once
-    // and process exits.
+    // Leaked so the appender flushes on every event; the engine is short-lived.
     Box::leak(Box::new(file_guard));
 
     let file_layer = fmt::layer()
@@ -50,12 +42,8 @@ pub(crate) fn init() -> Result<()> {
     Ok(())
 }
 
-/// Capture every panic into the tracing pipeline. Without this hook, a
-/// panic anywhere in the scan pipeline crashes the engine silently — the
-/// C# app sees a broken pipe and the user sees "app crashed" with no
-/// traceable cause. The hook leaves default unwinding behavior intact;
-/// it just forces a tracing::error first so the next crash report has a
-/// file:line + backtrace.
+/// Without it a panic crashes the engine silently (the C# app sees a broken pipe with no traceable cause); unwinding is
+/// unchanged, it just logs file:line + backtrace first.
 pub(crate) fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info

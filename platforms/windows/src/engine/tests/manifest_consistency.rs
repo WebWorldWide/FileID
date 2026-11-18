@@ -1,6 +1,5 @@
-// The registry serves every shared-engine artifact in
-// shared/models/manifest.json exactly once, with its manifest URL, hash and
-// size, and no download the manifest lacks.
+// The registry serves every shared-engine artifact in shared/models/manifest.json exactly once with its manifest URL,
+// hash and size, and no download the manifest lacks.
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -20,8 +19,7 @@ const CANONICAL_KINDS: &[&str] = &[
     "face_mesh",
 ];
 
-/// The engine the Mac app hosts serves the Mac's ONNX set; its VLMs are MLX
-/// repos (`vlmRepos`), resolved in `models::mlx`.
+/// The Mac-hosted engine serves the Mac's ONNX set; its VLMs are MLX repos (`vlmRepos`), resolved in `models::mlx`.
 const MAC_APP_KINDS: &[&str] = &["yunet_sface", "mobileclip_s2", "clip_text", "ram_plus", "bge_text", "face_mesh"];
 
 fn platform() -> &'static str {
@@ -36,7 +34,6 @@ fn manifest() -> serde_json::Value {
     serde_json::from_str(&raw).expect("manifest.json must parse")
 }
 
-/// url -> (sha256, approxBytes) for every artifact of this engine's platform.
 fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
     manifest()["artifacts"]
         .as_array()
