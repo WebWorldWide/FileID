@@ -68,11 +68,9 @@ public sealed partial class TitleBar : UserControl
         Unloaded += OnUnloaded;
     }
 
-    /// <summary>Controls that must receive pointer input inside the
-    /// non-client title-bar region.</summary>
+    /// <summary>Controls that must receive pointer input inside the non-client title-bar region.</summary>
     internal IReadOnlyList<FrameworkElement> InteractiveElements { get; }
 
-    /// <summary>Raised when an interactive control may have moved or resized.</summary>
     public event EventHandler? InteractiveLayoutChanged;
 
     public void SetCaptionInset(double width) => CaptionColumn.Width = new GridLength(Math.Max(0, width));
