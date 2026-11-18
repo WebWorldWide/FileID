@@ -1,6 +1,4 @@
-// In-app downloader for the CLIP ViT-B/32 image and text encoders and BPE
-// vocab, as pinned in shared/models/manifest.json — per-file streaming with
-// up to 3 concurrent fetches.
+// Files are pinned in shared/models/manifest.json.
 import Foundation
 import AppKit
 import CryptoKit
@@ -16,22 +14,12 @@ final class CLIPModelInstaller: ModelInstalling {
     typealias Status = ModelInstaller.Status
 
     private(set) var status: Status = .unknown
-    /// On-disk presence of each required file, refreshed only on real disk
-    /// transitions (appear / install / uninstall) via refreshStatus — never on
-    /// download ticks. The Settings card reads this instead of calling
-    /// FileManager.fileExists in its row builder, so an active download no longer
-    /// fires a stat() syscall on the main thread on every progress tick.
+    /// On-disk presence of each required file. Refreshed only on real disk transitions, never on download ticks: a stat() per progress tick would hit the main thread.
     private(set) var presentFilePaths: Set<String> = []
-    /// True once the CLIP files are on disk, so the engine can embed search
-    /// text — Library observes it to drop the keyword-only hint and re-run
-    /// the active search.
+    /// True once the CLIP files are on disk; Library re-runs the active search when it flips.
     private(set) var textEncoderReady = false
     private var task: Task<Void, Never>?
-    /// True only while a hub fetch is actively running. Progress ticks
-    /// arrive as queued MainActor tasks and can be scheduled AFTER the
-    /// catch arm wrote a terminal status — gate `publishFromTracker` on
-    /// liveness so a stale tick can't resurrect a phantom "Downloading…"
-    /// footer with a dead Cancel button. Mirrors ArcFaceModelInstaller.active.
+    /// True only while a hub fetch runs. Progress ticks can be scheduled after the terminal status is written, so `publishFromTracker` gates on this to avoid resurrecting a stale "Downloading…" footer.
     private var installing = false
     private var uninstalling = false
 
@@ -39,8 +27,7 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Required files
 
-    /// Files the installer must produce on disk for both the image
-    /// embedder and the text encoder (both run in the engine) to be usable.
+    /// Required on disk for both the image embedder and the text encoder.
     static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
@@ -103,11 +90,7 @@ final class CLIPModelInstaller: ModelInstalling {
         }
     }
 
-    /// Refresh on-disk presence WITHOUT touching `status`. The partial-install
-    /// failure paths (promote / verify / extract) leave some required files in
-    /// the live tree but must keep their `.installFailed` status — calling
-    /// refreshStatus() there would overwrite it with .missing/.installed, so they
-    /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
+    /// Refreshes on-disk presence without touching `status`: partial-install failures must keep `.installFailed`, which refreshStatus() would overwrite.
     private func recomputePresentFiles() {
         var present: Set<String> = []
         for f in Self.requiredFiles where FileManager.default.fileExists(atPath: f.path) {
@@ -160,8 +143,7 @@ final class CLIPModelInstaller: ModelInstalling {
         for d in Self.modelDirectories {
             try? FileManager.default.removeItem(at: d)
         }
-        // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
-        // and falls back to keyword-only search. (Install→Remove leaked it true.)
+        // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint and falls back to keyword-only search.
         textEncoderReady = false
         status = .unknown
         refreshStatus()
@@ -169,11 +151,7 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Implementation
 
-    /// Concurrent per-file fetch from HF (3 streams). Each file's
-    /// tick lands in the shared tracker; the global Status.downloading
-    /// reads sum-of-writtens / sum-of-totals + summed bandwidth.
-    /// Files stage into a sibling dir and atomic-promote on full
-    /// success — a partial install never poisons the production tree.
+    /// Files stage into a sibling dir and atomically promote on full success, so a partial install never touches the live tree.
     private func runHubFetch() async {
         guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         installing = true
@@ -233,7 +211,6 @@ final class CLIPModelInstaller: ModelInstalling {
             }
         }
 
-        // The engine embeds search text; marking ready lets search use it now.
         markTextEncoderReady()
         refreshStatus()
     }
@@ -319,10 +296,7 @@ final class CLIPModelInstaller: ModelInstalling {
             at: dest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        // parallelStreamingDownload HEADs first, decides parts based
-        // on Content-Length, and falls back to single-stream when the
-        // host doesn't expose ranges or the file is small. weight.bin
-        // (~80 MB) gets 8-way; Manifest.json (~few KB) stays single.
+        // weight.bin (~80 MB) gets 8-way ranged GETs; Manifest.json stays single-stream.
         try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12,
                                             expectedSHA256: sha256) { tick in
             tracker.update(index: index, tick: tick)
