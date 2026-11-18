@@ -273,6 +273,10 @@ jobs:
             "schemas.microsoft.com"
             "schemas.openxmlformats.org"
             "ai.google.dev"
+            # Build time only: SwiftPM fetches the pinned ONNX Runtime
+            # archive (checksum-locked) named in the vendored package's
+            # Package.swift. Nothing at runtime talks to this host.
+            "download.onnxruntime.ai"
           )
           hits=()
           # Find all .swift under apple/, excluding .build/ + DerivedData.

@@ -45,7 +45,7 @@ let package = Package(
         // ONNX directly from upstream (Immich's HF mirror) at runtime —
         // same posture Immich itself uses, no weight redistribution on
         // our part. CoreML execution provider keeps ANE acceleration.
-        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0")
+        .package(path: "vendor/onnxruntime-swift-package-manager")
     ],
     targets: [
         // Shared types (Codable DTOs, IPC envelope) plus code the engine and

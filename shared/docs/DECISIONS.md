@@ -5065,3 +5065,7 @@ The Rust tools refused photos above 32 MP; the owner's camera writes 32.7 MP. 10
 ## 2026-11-17 — The Linux app is not reformatted
 
 `cargo fmt` on `platforms/linux` restyles 59 files and changes two digest-locked network sources; no gate requires it and the engine turns formatting off on purpose. Not adopted until the owner approves a digest refresh.
+
+## 2026-11-17 — The ONNX Runtime Swift package is vendored
+
+On 2026-11-17 `github.com/microsoft/onnxruntime-swift-package-manager` (and `microsoft/onnxruntime`) stopped resolving; CI failed at package resolution. The package is a thin MIT wrapper: Objective-C bindings plus a checksum-pinned binary from `download.onnxruntime.ai`, which still serves the same 1.24.2 archive. The bindings at the pinned revision (`b7fb7f7d`) now live in `platforms/apple/vendor/onnxruntime-swift-package-manager` with Microsoft's LICENSE; training and extensions targets are dropped (unused). Same code, same binary, same checksum: not a new dependency. `download.onnxruntime.ai` joins the macOS source-URL allowlist as a build-time host only. The Windows from-source ONNX Runtime build (`build-ort-runtime.ps1`) still clones `microsoft/onnxruntime`; it works from the Actions cache and fails on a cache miss until a source mirror the owner controls exists.
