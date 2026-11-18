@@ -13,9 +13,6 @@ using Windows.UI;
 
 namespace FileID.Views.DeepAnalyze;
 
-/// <summary>Describe Files ▸ Name style (macOS smartNamesCard "Name style" + Preview names):
-/// the saved style, a proposeNames preview of the Library selection (or the files with
-/// suggestions), editable names, and Rename through renameFiles with Undo.</summary>
 internal sealed class NameStyleCard : UserControl
 {
     private const double RowResponse = 0.35;
@@ -329,8 +326,7 @@ internal sealed class NameStyleCard : UserControl
     {
         var selection = SelectionRegistry.Instance.LibrarySelection;
         if (selection.Count > 0) return NameStylePolicy.FileIds(selection, Array.Empty<long>());
-        // Microsoft.Data.Sqlite's async calls run synchronously, so the read
-        // has to leave the UI thread explicitly.
+        // Microsoft.Data.Sqlite's async calls run synchronously, so the read has to leave the UI thread explicitly.
         var pendingIds = await Task.Run(async () =>
         {
             using var store = new ReadStore(AppPaths.DbPath);
