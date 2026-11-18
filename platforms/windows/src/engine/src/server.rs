@@ -124,14 +124,12 @@ async fn async_main() -> Result<()> {
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
     tracing::info!(backend = models::runtime::inference_backend(), "[ML] inference backend");
 
-    // VRAM probe at startup. The ML session-pool sizer clamps pool size to
-    // fit available video memory — without this clamp, a larger pool
-    // exhausts VRAM on a 6 GB RTX 2060 and wedges the DirectML driver
-    // requiring a hard reboot.
+    // VRAM probe at startup; the llama.cpp launch tuning sizes its GPU offload
+    // from it.
     if let Some(vram_mb) = platform::dedicated_vram_mb() {
         tracing::info!(dedicated_vram_mb = vram_mb, "[VRAM] dedicated video memory probed");
     } else {
-        tracing::info!("[VRAM] no dedicated GPU detected; ML pool will run at minimum");
+        tracing::info!("[VRAM] no dedicated GPU detected");
     }
 
     // Replay AddDllDirectory for the llama.cpp runtimes already extracted from

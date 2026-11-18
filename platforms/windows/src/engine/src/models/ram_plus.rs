@@ -1,14 +1,13 @@
 // RAM++ (Recognize Anything Plus) image tagger — the universal FileID tagger.
 //
-// WHY this and not a VLM: tagging must run on every Windows GPU/iGPU/NPU and be
+// WHY this and not a VLM: tagging must run on every machine and be
 // license-clean. RAM++ (Apache-2.0, Swin-Large @ 384px, 4585-tag English
-// vocabulary with frozen tag embeddings) is a single forward pass — exactly the
-// shape ONNX Runtime's GPU/NPU EPs (DirectML / CUDA / OpenVINO / QNN) accelerate
-// — so it rides the SAME EP chain as MobileCLIP/faces (see runtime.rs). The VLM
-// is reserved for opt-in Deep Analyze.
+// vocabulary with frozen tag embeddings) is a single forward pass that runs on
+// tract (CPU) like the other ONNX models. The VLM is reserved for opt-in Deep
+// Analyze.
 //
 // Inference order: decode → bilinear resize to 384×384 → ImageNet mean/std
-// normalize → CHW f32 → ORT session.run → sigmoid → threshold + top-k → map tag
+// normalize → CHW f32 → tract session run → sigmoid → threshold + top-k → map tag
 // indices to strings. The ONNX is produced by shared/scripts/export_ram_plus_onnx.py;
 // the contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and
 // the ImageNet constants below MUST stay in sync with that script.
@@ -138,10 +137,8 @@ pub struct RamPlusTagger {
 }
 
 impl RamPlusTagger {
-    /// Load the exported RAM++ ONNX + its index-aligned tag list. Registers the
-    /// same EP priority chain the rest of the ONNX stack uses (via
-    /// `runtime::priority_chain` + `configure_session_builder`) and warms up so
-    /// first-call kernel compile happens at load.
+    /// Load the exported RAM++ ONNX + its index-aligned tag list. Compiles the
+    /// graph for the fixed 384x384 input.
     pub fn load<P: AsRef<Path>, Q: AsRef<Path>>(onnx: P, tag_list: Q) -> Result<Self> {
         let onnx = onnx.as_ref();
         let tag_list = tag_list.as_ref();

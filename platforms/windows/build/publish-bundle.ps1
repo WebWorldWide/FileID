@@ -390,7 +390,7 @@ if (-not $SkipArm64) {
 function Build-Engine($triple) {
     Write-Host "Building engine ($triple, release-debuginfo)..." -ForegroundColor Cyan
     Push-Location $EngineDir
-    try { & rustup run 1.98 cargo build --profile release-debuginfo --features ort-accel --locked --target $triple } finally { Pop-Location }
+    try { & rustup run 1.98 cargo build --profile release-debuginfo --locked --target $triple } finally { Pop-Location }
 }
 
 Build-Engine "x86_64-pc-windows-msvc"

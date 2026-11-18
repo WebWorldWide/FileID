@@ -421,6 +421,22 @@ pub fn cpu_topology() -> CpuTopology {
     }
 }
 
+/// Cores that run heavy work at full speed: the performance cluster on Apple
+/// silicon and on hybrid Intel parts, every physical core elsewhere.
+pub fn performance_core_count() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        let mut value: u32 = 0;
+        let mut size = std::mem::size_of::<u32>();
+        // SAFETY: `value` and `size` outlive the call and `size` is the buffer's size.
+        let status = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
+        if status == 0 && value > 0 {
+            return value as usize;
+        }
+    }
+    cpu_topology().p_cores as usize
+}
+
 /// Number of tagging workers to spin up by default. macOS-parity formula
 /// P + E + max(1, P/2) capped at logical-cores and [2, 32]. Replaces the
 /// older `physical * 1.7` heuristic which mis-sized hybrid CPUs (treated
@@ -1249,7 +1265,7 @@ mod sleep_guard_linux_tests {
 // ─── Process priority ───────────────────────────────────────────────────────
 //
 // Default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU
-// during scans, and when DirectML hits TDR (GPU device removed) the
+// during scans, and when a GPU driver hits TDR (device removed) the
 // high-priority workers spam retries faster than DWM can recover the GPU
 // → full system hang. NORMAL lets the compositor win under contention.
 //
@@ -1374,9 +1390,8 @@ pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBu
 
 /// Returns the primary (largest-VRAM) non-software adapter's
 /// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
-/// physical adapter is present. Used to gate the ML Session pool —
-/// without this, a multi-Session config can exhaust a 6 GB card's VRAM
-/// and wedge the DirectML driver (full system hang).
+/// physical adapter is present. Used to size the llama.cpp
+/// GPU offload.
 ///
 /// VRAM is constant for the process, so the DXGI factory + adapter walk is
 /// memoized after the first call (same pattern as `RuntimeProbe::shared`,

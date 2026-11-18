@@ -146,7 +146,7 @@ async fn load_scan_models(
 
     // A model that IS installed (missing ones were reported above) but whose
     // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
-    // file, or an EP bind failure on every provider) must ABORT the scan — not
+    // file, or a graph tract cannot compile) must ABORT the scan — not
     // silently skip its stage. A skipped stage still writes every file row with
     // failed=0 and a fresh scanned_at; the incremental skip-set
     // (scan_session.rs) is purely timestamp-based, so those files are NEVER

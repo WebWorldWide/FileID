@@ -1,5 +1,6 @@
 {
   "model": "sface/face_recognition_sface_2021dec.onnx",
+  "generator": "onnxruntime 1.22.0 cpu",
   "input": "synthetic_rgb(112, 112) as an aligned RGB8 face crop; L2-normalized 128-d embedding",
   "tolerance": {
     "maxAbs": 0.0001,

@@ -183,8 +183,7 @@ fn default_models_dir() -> Result<PathBuf> {
     Ok(root()?.join("Models"))
 }
 
-/// Unit tests never load the owner's installed models: with weights there and
-/// no ONNX Runtime, every model path would panic inside `ort`.
+/// Unit tests never load the owner's installed models.
 #[cfg(all(target_os = "macos", not(feature = "apple-adapters"), test))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 

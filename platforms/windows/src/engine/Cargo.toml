@@ -137,6 +137,9 @@ symphonia = { version = "0.5", default-features = false, features = ["all-codecs
 # shared/docs/DECISIONS.md (2026-11-18) has the rationale and the rejected
 # alternatives.
 tract-onnx = "=0.23.10"
+# tract's multithreaded matmul is a cargo feature of its own kernel crate that
+# tract-onnx does not expose; the same pinned version, already in the tree.
+tract-linalg = { version = "=0.23.10", features = ["multithread-mm"] }
 ndarray = "0.16"
 
 # libc is for getppid() / parent-death + inode file_ref in platform.rs.

@@ -2,10 +2,9 @@
 // run the per-file ML pipeline, and emit TaggedFile rows that DBWriter
 // batches into SQLite.
 //
-// Worker count: physical_cores * 1.7. Semaphores cap concurrent ORT
-// inferences to prevent VRAM thrash on the GPU EP — 4 for vision models,
-// 2 for CLIP. Missing models gracefully degrade (the pipeline emits a
-// TaggedFile with the missing fields = None).
+// Worker count: physical_cores * 1.7. Semaphores cap concurrent inferences:
+// 4 for vision models, 2 for CLIP. Missing models gracefully degrade (the
+// pipeline emits a TaggedFile with the missing fields = None).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -466,14 +465,11 @@ pub struct ModelStack {
     pub scrfd: Option<Vec<Mutex<YuNet>>>,
     /// MobileCLIP has two paths (the default is chosen in `load_default`):
     /// - `mobileclip_batch` (DEFAULT) — single Session behind
-    ///   `ClipBatchCoordinator`, fed batched (N,3,224,224) tensors. On a 6 GB
-    ///   card the VRAM clamp drops the pool to ~1-3 sessions behind the
-    ///   `CLIP_CONCURRENCY=2` semaphore, so batching amortizes DirectML
-    ///   dispatch better. Opt OUT with `FILEID_CLIP_USE_BATCH=0`.
-    /// - `mobileclip_pool` — N-Session pool, VRAM-clamped via
-    ///   `resolve_pool_size`; the fallback (`FILEID_CLIP_USE_BATCH=0`), kept
-    ///   for CUDA-EP experiments. NOTE: the batch-vs-pool default is PENDING
-    ///   hardware confirmation (run the A/B and compare clip_p95_ms).
+    ///   `ClipBatchCoordinator`, fed batched (N,3,224,224) tensors, so one
+    ///   multithreaded forward pass serves several workers. Opt OUT with
+    ///   `FILEID_CLIP_USE_BATCH=0`.
+    /// - `mobileclip_pool` — N-Session pool sized by `resolve_pool_size`; the
+    ///   fallback (`FILEID_CLIP_USE_BATCH=0`).
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
     /// CLIP zero-shot scene labeler — a label-embedding matrix built once
@@ -795,23 +791,9 @@ where
         pool.push(Mutex::new(model));
     }
     for idx in pool.len()..pool_size {
-        // Stagger each post-first Session allocation by 250 ms so a 6-session
-        // pool
-        // (2 × 3 models) doesn't burst DirectML's command queue at engine
-        // startup — the riskiest TDR window.
-        if idx > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
         match loader(p.clone()) {
             Ok(model) => pool.push(Mutex::new(model)),
             Err(err) => {
-                // If a slot's warmup hit device-removed, bail the whole
-                // stack rather than try further slots against the dead GPU.
-                use crate::models::runtime::error_has_device_removed_marker;
-                if error_has_device_removed_marker(&err) {
-                    tracing::error!(model = label, slot = idx, ?err, "[STARTUP-TDR] device-removed during warmup; aborting pool load");
-                    return None;
-                }
                 tracing::warn!(model = label, slot = idx, ?err, "model pool load failed; stage will skip if pool empty");
                 break;
             }
@@ -2813,8 +2795,7 @@ async fn process_file_predecoded(
                 }
 
                 // RAM++ multi-label tagging — the PRIMARY in-scan tagger. One
-                // Swin-L forward pass on the same GPU/NPU EP chain as faces;
-                // its 4585-tag vocabulary supersedes the CLIP zero-shot scene
+                // Swin-L forward pass; its 4585-tag vocabulary supersedes the CLIP zero-shot scene
                 // labeler (gated below on `!ram_plus_ran`). Runs AFTER the
                 // MobileCLIP embed so semantic-search embeddings are always
                 // computed regardless of which tagger is active. Shares the

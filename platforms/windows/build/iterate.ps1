@@ -48,7 +48,7 @@ function Assert($name, [bool]$cond, $detail = "") {
 if (-not $SkipBuild) {
     Step "Building engine + app"
     Push-Location $EngineDir
-    try { & cargo build --release --features ort-accel --target x86_64-pc-windows-msvc 2>&1 | Select-Object -Last 3 }
+    try { & cargo build --release --target x86_64-pc-windows-msvc 2>&1 | Select-Object -Last 3 }
     finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Fail "engine build failed"; exit 2 }
     OK "engine binary built"

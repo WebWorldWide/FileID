@@ -1,8 +1,8 @@
 // CLIP text encoder — query-time semantic search. Tokenize a string
 // via `ClipTokenizer`, run the ONNX session, L2-normalize, return 512
 // floats. Held inside a process-static `OnceLock` in main.rs so
-// back-to-back queries reuse the session (avoids the 100-300 ms ORT
-// session-create on every keystroke).
+// back-to-back queries reuse the session (avoids recompiling
+// the model on every keystroke).
 
 use std::path::{Path, PathBuf};
 

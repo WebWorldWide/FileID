@@ -21,6 +21,25 @@ use tract_onnx::tract_hir::infer::Factoid;
 /// The backend label tract sessions report.
 pub const TRACT_CPU: &str = "tract-cpu";
 
+/// Threads one matmul may use: `FILEID_TRACT_THREADS` when set (`1` keeps tract
+/// single-threaded), else the machine's performance cores. Applied once, before
+/// the first model compiles, so every platform and every entry point (engine,
+/// CLI, GTK app, tests) runs the same configuration.
+pub fn matmul_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let threads = std::env::var("FILEID_TRACT_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or_else(|| crate::platform::performance_core_count())
+            .max(1);
+        if threads > 1 {
+            tract_linalg::multithread::set_default_executor(tract_linalg::multithread::Executor::multithread_with_name(threads, "fileid-tract"));
+        }
+        threads
+    })
+}
+
 /// One dimension of a model input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dim {
@@ -109,6 +128,7 @@ impl InferenceSession {
     /// Load `path` on tract. Sessions of the same file and `specs` share one
     /// compiled model.
     pub fn load(label: &str, path: &Path, specs: &[InputSpec]) -> Result<Self> {
+        matmul_threads();
         let metadata = std::fs::metadata(path).with_context(|| format!("{label} weights {}", path.display()))?;
         let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok(), format!("{specs:?}"));
         let slot = {

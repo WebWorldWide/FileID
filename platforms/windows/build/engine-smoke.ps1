@@ -48,7 +48,7 @@ if (-not $NoBuild) {
     Write-Host "[engine-smoke] Building release binary..." -ForegroundColor Cyan
     Push-Location $engineDir
     try {
-        cargo build --release --features ort-accel --bin FileIDEngine 2>&1 | Write-Host
+        cargo build --release --bin FileIDEngine 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Error "[engine-smoke] cargo build failed (exit $LASTEXITCODE)"
             exit 1

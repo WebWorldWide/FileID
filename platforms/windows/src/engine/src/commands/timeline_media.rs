@@ -99,7 +99,7 @@ pub(crate) fn pool(_: &Path, _: f64, _: &Path, _: &AtomicBool) -> Result<Pool> {
 pub(crate) const POOL_MAX_SIDE: u32 = 448;
 
 /// The CLIP image tower for pool frames: MLX through FileIDAppleKit in the Mac
-/// app's engine (the Swift engine's `CLIPVisionMLX`, on the GPU), ONNX Runtime
+/// app's engine (the Swift engine's `CLIPVisionMLX`, on the GPU), tract
 /// elsewhere. `None` when neither can load; callers fall back to luma.
 enum ClipEncoder {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]

@@ -102,9 +102,9 @@ fn ensure_license_acceptance(ctx: &Ctx, pending: &[&Resolved]) -> Result<()> {
 }
 
 /// The models `fileid models` lists + downloads, in display order. The Windows
-/// accelerator runtime/EP packs (llama.cpp / cuDNN / ORT-CUDA / ORT-OpenVINO)
-/// are intentionally absent: they're platform-specific DLL bundles, not
-/// cross-platform model weights, and several aren't HuggingFace-hosted. Every
+/// llama.cpp runtime bundles are intentionally absent: they're
+/// platform-specific DLL bundles, not cross-platform model weights, and aren't
+/// HuggingFace-hosted. Every
 /// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
 /// commercially-usable Gemma Terms) per the commercial-clean posture.
 const CATALOG: &[Catalog] = &[

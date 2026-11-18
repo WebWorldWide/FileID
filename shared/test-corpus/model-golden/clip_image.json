@@ -1,5 +1,6 @@
 {
   "model": "mobileclip/mobileclip_s2_image.onnx",
+  "generator": "onnxruntime 1.22.0 cpu",
   "input": "synthetic_rgb(224, 224) stretched-224 CLIP RGB; L2-normalized 512-d embedding, alone and as image 0 of a 2-image batch whose image 1 is the byte-reversed buffer",
   "tolerance": {
     "maxAbs": 0.0001,

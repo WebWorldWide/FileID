@@ -61,7 +61,7 @@ Push-Location $EngineDir
 try {
     $profileFlag = if ($Release) { "--release" } else { "" }
     Write-Host "Building FileIDEngine (aarch64-pc-windows-msvc)..." -ForegroundColor Cyan
-    cargo build $profileFlag --features ort-accel --target aarch64-pc-windows-msvc
+    cargo build $profileFlag --target aarch64-pc-windows-msvc
 
     if ($RunTests) {
         # Tests can only run if we're on ARM64 hardware (cross-runs aren't
@@ -71,7 +71,7 @@ try {
         # Architecture: 0 = x86, 9 = x64, 12 = ARM64 (per Win32_Processor docs)
         if ($hostArch -eq 12) {
             Write-Host "Running cargo tests on native ARM64 host..." -ForegroundColor Cyan
-            cargo test --features ort-accel --target aarch64-pc-windows-msvc
+            cargo test --target aarch64-pc-windows-msvc
         } else {
             Write-Host "Skipping tests (cross-target ARM64 from non-ARM64 host)" -ForegroundColor Yellow
         }

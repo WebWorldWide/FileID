@@ -11,8 +11,6 @@ on:
       - 'scripts/package-tools.py'
       - 'scripts/test_package_tools.py'
       - 'platforms/windows/build/fetch-runtime-deps.ps1'
-      - 'platforms/windows/build/build-ort-runtime.ps1'
-      - '.github/workflows/ort-runtime.yml'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
@@ -27,8 +25,6 @@ on:
       - 'scripts/package-tools.py'
       - 'scripts/test_package_tools.py'
       - 'platforms/windows/build/fetch-runtime-deps.ps1'
-      - 'platforms/windows/build/build-ort-runtime.ps1'
-      - '.github/workflows/ort-runtime.yml'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
@@ -44,10 +40,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ort-runtime:
-    name: ONNX Runtime (no telemetry)
-    uses: ./.github/workflows/ort-runtime.yml
-
   verify:
     name: Native tools
     uses: ./.github/workflows/tools-verify.yml
@@ -58,11 +50,8 @@ jobs:
          {"label": "Linux x64", "artifact": "linux-x64", "runner": "ubuntu-24.04"},
          {"label": "Linux arm64", "artifact": "linux-arm64", "runner": "ubuntu-24.04-arm"}]
 
-  # Only the Windows jobs package the ONNX Runtime, so only they wait for its
-  # build (about an hour per architecture when the cache is cold).
   verify-windows:
     name: Native tools
-    needs: ort-runtime
     uses: ./.github/workflows/tools-verify.yml
     with:
       include: >-

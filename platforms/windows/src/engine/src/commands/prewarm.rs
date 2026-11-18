@@ -417,7 +417,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
 
     // Partition into regular vs zip files. Zip files run sequentially
     // because the post-download extract step mutates DLL search paths and
-    // is order-sensitive (Performance Packs).
+    // is order-sensitive (llama.cpp runtimes).
     let mut regular_indices: Vec<usize> = Vec::with_capacity(file_count);
     let mut zip_indices: Vec<usize> = Vec::with_capacity(file_count);
     for (idx, file) in model.files.iter().enumerate() {

@@ -118,7 +118,7 @@ impl YuNet {
             return Ok(None);
         }
         // Letterbox to a fixed 640x640 (top-left, zero-pad remainder) — the
-        // export's only input shape, and a fixed shape keeps DirectML happy.
+        // export's only input shape, and a fixed shape lets tract compile the graph once.
         let scale = (INPUT as f32 / width as f32).min(INPUT as f32 / height as f32);
         let new_w = ((width as f32 * scale) as u32).max(1);
         let new_h = ((height as f32 * scale) as u32).max(1);
@@ -205,7 +205,7 @@ fn decode_outputs(named: &[(String, Vec<f32>)], scale: f32, width: u32, height: 
 }
 
 /// Decode one stride's cls/obj/bbox/kps tensors into Detections. Pure function
-/// for unit-testing the decode math without an ORT session.
+/// for unit-testing the decode math without a model session.
 fn decode_stride(
     stride: u32,
     input: u32,

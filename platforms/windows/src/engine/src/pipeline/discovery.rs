@@ -4,8 +4,8 @@
 // Rewrite: jwalk (rayon-backed parallel walk) + process_read_dir
 // directory-level pruning + atomic count-before-send. The previous
 // walkdir + tx.blocking_send implementation tied the discovery counter
-// to tagging throughput; if the ML pipeline stalled (GPU saturation,
-// DirectML command-queue pressure) the walk also stalled because the
+// to tagging throughput; if the ML pipeline stalled (a busy
+// CPU) the walk also stalled because the
 // 1024-slot channel filled in under a second on NVMe. Users saw
 // "Discovered 1,324" after 60s for a 22 files/s observed rate against a
 // 50K+ file NVMe → bottleneck was tagging, not the FS.

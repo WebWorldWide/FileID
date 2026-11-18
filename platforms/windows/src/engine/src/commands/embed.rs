@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs installed CLIP text weights and ONNX Runtime: FILEID_MODELS_DIR=... ORT_DYLIB_PATH=... cargo test --lib clip_text_parks -- --ignored --nocapture"]
+    #[ignore = "needs installed CLIP text weights: FILEID_MODELS_DIR=... cargo test --lib clip_text_parks -- --ignored --nocapture"]
     fn clip_text_parks_and_frees_memory() {
         let pause = std::env::var_os("FILEID_PARK_PAUSE").is_some();
         let phase = |label: &str| {

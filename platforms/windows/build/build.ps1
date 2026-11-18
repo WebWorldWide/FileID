@@ -76,11 +76,11 @@ Push-Location $EngineDir
 try {
     $profileFlag = if ($Release) { "--release" } else { "" }
     Write-Host "Building FileIDEngine ($([IO.Path]::Combine('release', 'x86_64-pc-windows-msvc')))..." -ForegroundColor Cyan
-    cargo build $profileFlag --features ort-accel --target x86_64-pc-windows-msvc
+    cargo build $profileFlag --target x86_64-pc-windows-msvc
 
     if ($RunTests) {
         Write-Host "Running cargo tests..." -ForegroundColor Cyan
-        cargo test --features ort-accel --target x86_64-pc-windows-msvc
+        cargo test --target x86_64-pc-windows-msvc
     }
 }
 finally {

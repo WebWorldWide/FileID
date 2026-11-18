@@ -1,5 +1,6 @@
 {
   "model": "bge_text/bge_small.onnx",
+  "generator": "onnxruntime 1.22.0 cpu",
   "input": "the texts \"invoice\" and \"Quarterly invoice for the office printer, paid by bank transfer on 3 March\" through the BGE WordPiece tokenizer; mean-pooled L2-normalized 384-d embeddings",
   "tolerance": {
     "maxAbs": 0.0001,

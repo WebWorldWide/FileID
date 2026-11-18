@@ -65,12 +65,7 @@ def windows_runtime_sources(root: Path) -> dict[str, Path]:
         if line.startswith("RUNTIME_DLL="):
             path = Path(line.removeprefix("RUNTIME_DLL="))
             resolved[path.name] = path
-    required = {
-        "onnxruntime.dll",
-        "onnxruntime_providers_shared.dll",
-        "DirectML.dll",
-        "pdfium.dll",
-    }
+    required = {"pdfium.dll"}
     missing = sorted(required - resolved.keys())
     if missing:
         raise SystemExit(
@@ -174,14 +169,9 @@ def main() -> int:
     shutil.copy2(root / "LICENSE", stage / "LICENSE")
 
     runtime = (
-        "Keep all DLLs beside the three executables."
+        "Keep pdfium.dll beside the three executables."
         if windows
-        else (
-            "For full AI scans on macOS, run `fileid runtime status` and install "
-            "Homebrew ONNX Runtime when requested."
-            if sys.platform == "darwin"
-            else "The Linux engine contains the CPU ONNX Runtime."
-        )
+        else "The engine runs its AI models on the CPU; nothing else needs installing."
     )
     (stage / "README.txt").write_text(
         "FileID command-line tools\n\n"

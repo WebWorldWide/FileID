@@ -1,5 +1,6 @@
 {
   "model": "clip_text/clip_text.onnx",
+  "generator": "onnxruntime 1.22.0 cpu",
   "input": "the query \"a photo of a dog running on a beach at sunset\" through the CLIP BPE tokenizer; L2-normalized 512-d embedding",
   "tolerance": {
     "maxAbs": 0.0001,

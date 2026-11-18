@@ -139,7 +139,7 @@ fn report_missing_models(ctx: &Ctx, missing: &[MissingModel], models_dir: Option
     if ctx.json {
         let hint = if on_macos {
             format!(
-                "install the engine's own models with `{install_command}` (downloads from huggingface.co), then re-run; or scan with full ML in the FileID desktop app, which owns separate CoreML models. ONNX Runtime is also required on macOS"
+                "install the engine's own models with `{install_command}` (downloads from huggingface.co), then re-run; or scan with full ML in the FileID desktop app, which owns separate CoreML models"
             )
         } else {
             format!(

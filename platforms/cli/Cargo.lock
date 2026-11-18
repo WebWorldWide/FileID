@@ -643,7 +643,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "walkdir",
 ]
 
@@ -682,6 +681,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tract-linalg",
  "tract-onnx",
  "uuid",
  "walkdir",
@@ -3108,6 +3108,7 @@ dependencies = [
  "minijinja",
  "num-traits",
  "pastey",
+ "rayon",
  "tract-data",
  "walkdir",
 ]

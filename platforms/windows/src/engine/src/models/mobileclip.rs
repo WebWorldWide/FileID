@@ -4,7 +4,7 @@
 // clustering and query-time semantic search.
 //
 // Inference order: resize → CLIP mean/std normalize → CHW float32
-// → ORT session.run → L2 normalize. Persisted as raw little-endian bytes
+// → tract session run → L2 normalize. Persisted as raw little-endian bytes
 // in `clip_embeddings.embedding`.
 //
 // File was originally MobileCLIP-S2 (256×256, research-only license); now
@@ -107,10 +107,9 @@ impl MobileClipImage {
     /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
-    /// Per-call dispatch overhead through DirectML is sizable (kernel queue
-    /// submission, fence wait, GPU↔CPU sync). Doing 4 images in one call ≈
-    /// 2× the wall time of one image, so throughput is ~2× per Session
-    /// without growing VRAM.
+    /// One call over N images lets tract's multithreaded matmul split the
+    /// batch across the performance cores; a single image gets little from
+    /// extra threads.
     pub fn embed_batch(
         &mut self,
         rgb_images: &[Vec<u8>],

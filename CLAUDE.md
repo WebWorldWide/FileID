@@ -23,7 +23,7 @@ All three desktop apps implement six tabs (Library · People · Cleanup · Deep 
 ## Per-platform dev guides
 
 Read the one for the work in front of you:
-- `platforms/windows/CLAUDE.md` — Rust engine, WinUI 3, ONNX Runtime (DirectML/CUDA/…), llama.cpp.
+- `platforms/windows/CLAUDE.md` — Rust engine, WinUI 3, tract (CPU inference), llama.cpp.
 - `platforms/apple/CLAUDE.md` — Swift engine + SwiftUI app, MLX, GRDB.
 - `platforms/linux/CLAUDE.md` — Rust engine client, GTK4/libadwaita, and Linux packaging.
 
