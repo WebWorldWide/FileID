@@ -252,6 +252,7 @@ pub(crate) async fn handle_prewarm_model(
     model_kind: String,
     http_client: Arc<reqwest::Client>,
 ) {
+    crate::pipeline::catch_up::forget_careful_reader_failures();
     // The Mac app's engine prewarms an MLX model as the Swift engine does:
     // verify (or download) the repo and write its install records, then load
     // it through FileIDAppleKit.

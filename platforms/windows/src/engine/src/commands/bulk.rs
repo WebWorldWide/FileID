@@ -1218,6 +1218,7 @@ pub(crate) async fn handle_trash_files(
         let mut file_ids = payload.file_ids;
         let mut seen_ids = std::collections::HashSet::with_capacity(file_ids.len());
         file_ids.retain(|file_id| seen_ids.insert(*file_id));
+        let library_roots = super::trash::library_roots(&db.lock()).unwrap_or_default();
         let mut candidates = Vec::with_capacity(file_ids.len());
         let mut snapshots = std::collections::HashMap::new();
         let mut exact_by_id = std::collections::HashMap::new();
@@ -1324,6 +1325,8 @@ pub(crate) async fn handle_trash_files(
                 .map(|candidate| TrashLogItem {
                     file_id: candidate.file_id,
                     original_path: candidate.path.to_string_lossy().into_owned(),
+                    library_root: super::trash::containing_root(&library_roots, &candidate.path)
+                        .map(|root| root.to_string_lossy().into_owned()),
                     // macOS trashes in place: there is no claim to recover.
                     recycle_bin_id: (!cfg!(all(target_os = "macos", feature = "apple-adapters")))
                         .then(|| candidate.staging_path.to_string_lossy().into_owned()),

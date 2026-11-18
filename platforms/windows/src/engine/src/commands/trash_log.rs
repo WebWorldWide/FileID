@@ -26,6 +26,10 @@ pub(crate) struct TrashLogEntry {
 pub(crate) struct TrashLogItem {
     pub(crate) file_id: i64,
     pub(crate) original_path: String,
+    /// The library root that authorized `original_path` when it was trashed, so a put back still
+    /// finds its anchor after the catalog (and its scan sessions) was wiped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) library_root: Option<String>,
     /// Path the Trash backend recorded as the source. Identity-bound deletion
     /// first claims a file under a unique sibling name; Windows restore looks
     /// up that claimed path, then renames it back to `original_path`.
@@ -623,6 +627,17 @@ mod tests {
         let persons: Vec<(i64, i64, Option<i64>)> =
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
         assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
+    #[test]
+    fn the_recorded_library_root_round_trips_and_older_entries_have_none() {
+        let mut entry = make_entry("batch-root");
+        let without = serde_json::to_string(&entry).unwrap();
+        assert!(!without.contains("library_root"));
+        assert_eq!(serde_json::from_str::<TrashLogEntry>(&without).unwrap().items[0].library_root, None);
+        entry.items[0].library_root = Some("/lib".into());
+        let decoded: TrashLogEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(decoded.items[0].library_root.as_deref(), Some("/lib"));
     }
 
     #[test]
