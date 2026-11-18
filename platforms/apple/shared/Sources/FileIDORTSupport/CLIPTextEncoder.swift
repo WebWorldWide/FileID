@@ -1,13 +1,6 @@
-// CLIP text encoder — query-time semantic search. Tokenize a string via
-// CLIPTokenizer (OpenAI BPE), run the OpenCLIP ViT-B/32 text ONNX through
-// ONNX Runtime, L2-normalize, return 512 floats in the same space as the
-// image embeddings in `clip_embeddings`. Cosine over the two gives search.
-//
-// Commercial-clean: ViT-B/32 (MIT) ONNX via ORT replaces Apple's MobileCLIP-S2
-// CoreML text model (research-only). Input contract MUST match the Windows
-// engine's `models/clip_text.rs` exactly — input_ids as int64, shape [1, 77],
-// zero-padded, truncated to 77 — or the text embedding lands in a different
-// space than the ViT-B/32 image embeddings and search breaks.
+// CLIP text encoder for query-time semantic search: BPE-tokenize, run the OpenCLIP ViT-B/32 text ONNX via ONNX Runtime, L2-normalize into the image embedding space.
+// The input contract must match the Windows engine's models/clip_text.rs (int64 input_ids, [1, 77], zero-padded, truncated), or search breaks.
+// ViT-B/32 (MIT) replaces Apple's research-only MobileCLIP-S2 text model.
 import Foundation
 import FileIDShared
 import OnnxRuntimeBindings
@@ -16,11 +9,8 @@ public final class CLIPTextEncoder: @unchecked Sendable {
 
     public static let shared = CLIPTextEncoder()
 
-    // `lock` guards ONLY the `env`/`session`/`inputName` slots and is held
-    // for microseconds. `loadLock` serializes the (multi-second) session
-    // build — the CoreML EP compiles the model — so it is never held while
-    // isReady/embedText — often called on the MainActor — read `session`.
-    // Holding the single lock across the build froze the UI.
+    // `lock` guards only the env/session/inputName slots and is held for microseconds. `loadLock` serializes the multi-second session build.
+    // Holding one lock across the build froze the UI, which reads `session` from the MainActor.
     private let lock = NSLock()
     private let loadLock = NSLock()
     private var env: ORTEnv?
@@ -47,15 +37,13 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         FileManager.default.fileExists(atPath: CLIPEmbeddingSpace.textModelURL.path)
     }
 
-    /// Load the ViT-B/32 text ONNX + the BPE tokenizer's vocabulary. Returns
-    /// true iff both are present and loaded successfully.
+    /// Loads the ViT-B/32 text ONNX and BPE vocabulary; true iff both loaded.
     @discardableResult
     public func load() -> Bool {
-        // Fast path — already loaded.
         lock.lock(); let already = (session != nil); lock.unlock()
         if already { return true }
 
-        // Serialize concurrent loads WITHOUT holding `lock` during the build.
+        // Serialize loads without holding `lock` during the build, so isReady and embedText stay responsive.
         loadLock.lock(); defer { loadLock.unlock() }
         lock.lock(); let nowLoaded = (session != nil); lock.unlock()
         if nowLoaded { return true }
@@ -74,12 +62,9 @@ public final class CLIPTextEncoder: @unchecked Sendable {
                     && CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("merges.txt"), id: "clip_bpe_merges")
             }) { () throws -> (ORTEnv, ORTSession, String?)? in
                 guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else { return nil }
-                // Slow work — NO `lock` held, so isReady/embedText stay responsive.
                 lock.lock(); let existingEnv = self.env; lock.unlock()
                 let env = try existingEnv ?? ORTPrivacy.makeEnv(loggingLevel: ORTLoggingLevel.warning)
-                // CPU only: the CoreML provider splits this graph into ~110
-                // partitions, which took ~3.5 s to compile on every launch, left
-                // each compilation in the temporary folder and ran no faster.
+                // CPU only: the CoreML provider splits this graph into ~110 partitions, which took ~3.5 s per launch and ran no faster.
                 let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: try ORTSessionOptions())
                 return (env, session, try session.inputNames().first)
             }
@@ -104,12 +89,8 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         }
     }
 
-    /// Tear down the in-memory ORT session so semantic search stops querying
-    /// a model the user just uninstalled, instead of running against a deleted
-    /// file until the next app launch. After this, `isReady` is false and
-    /// `embedText` returns nil; a later `load()` re-builds if the model is
-    /// reinstalled. Takes `loadLock` so it can't race a build in progress and
-    /// drop a session another thread is mid-way through creating.
+    /// Tears down the ORT session so search stops querying a model the user just uninstalled. `isReady` becomes false and `embedText` returns nil until `load()` rebuilds.
+    /// Takes `loadLock` so it can't race a build in progress.
     public func unload() {
         loadLock.lock(); defer { loadLock.unlock() }
         lock.lock()
@@ -119,15 +100,13 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         // `env` is cheap to retain and reused if the user reinstalls CLIP.
     }
 
-    /// Embed a free-text query into the CLIP image-embedding space.
-    /// L2-normalized; nil if the model/tokenizer isn't ready or inference fails.
+    /// Embeds a free-text query into the CLIP image-embedding space. L2-normalized; nil if not ready or inference fails.
     public func embedText(_ query: String) -> [Float]? {
         guard load() else { return nil }
         guard let tokens = CLIPTokenizer.shared.encode(query) else { return nil }
         lock.lock(); let s = session; let name = inputName; lock.unlock()
         guard let s, let name else { return nil }
 
-        // int64 input_ids, [1, 77], zero-padded — matches clip_text.rs.
         var ids = [Int64](repeating: 0, count: Self.contextLen)
         for (i, t) in tokens.prefix(Self.contextLen).enumerated() { ids[i] = Int64(t) }
 
