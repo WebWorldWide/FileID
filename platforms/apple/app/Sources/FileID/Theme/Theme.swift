@@ -28,6 +28,14 @@ enum Theme {
     static let label = Color(hex: 0xAEB4BB)
     static let textOnPanel = Color(hex: 0xE2E5E8)
 
+    /// Neutral surfaces behind pages, sheets and popovers.
+    static let surfaceBase    = Color(red: 15/255, green: 15/255, blue: 17/255)
+    static let pageSurface    = surfaceBase.opacity(0.8)
+    static let sheetFill      = Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94)
+    static let chromeFill     = Color(hex: 0x161618)
+    static let canvas         = Color(hex: 0x0C0C0E)
+    static let popoverFill    = Color(hex: 0x1A1A1D).opacity(0.85)
+
     static let panel          = Color(red: 24/255, green: 24/255, blue: 27/255).opacity(0.78)
     static let panelHeader    = Color.white.opacity(0.02)
     static let pane           = Color.white.opacity(0.015)
@@ -52,6 +60,11 @@ enum Theme {
     static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
     static let controlBorderHover = adaptive(normal: NSColor.white.withAlphaComponent(0.24), increased: NSColor.white.withAlphaComponent(0.6))
     static let focusRing      = gold.opacity(0.9)
+    /// A disabled primary button is a neutral chip, not faded gold, which turns muddy over dark.
+    static let disabledFill   = Color.white.opacity(0.08)
+    static let disabledLabel  = text3.opacity(0.8)
+    /// Other disabled controls keep their style at this strength so their text stays legible.
+    static let disabledOpacity = 0.55
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
 

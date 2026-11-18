@@ -85,7 +85,7 @@ struct CaptureDateFilter: View {
         }
         .padding(14)
         .frame(width: 280)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 

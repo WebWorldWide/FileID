@@ -196,7 +196,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 360)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -320,7 +320,7 @@ struct TitleBar: View {
         }
         .padding(.bottom, 6)
         .frame(width: 400)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -481,7 +481,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 400)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 }

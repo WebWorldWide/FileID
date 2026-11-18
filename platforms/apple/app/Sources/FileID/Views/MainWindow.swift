@@ -172,7 +172,7 @@ struct MainWindow: View {
                             .font(Theme.Font.body(13.5))
                             .frame(width: 380)
                             .focusSection()
-                            .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
+                            .background(Theme.surfaceBase.opacity(0.86), ignoresSafeAreaEdges: [])
                             .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
                             .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
                     }

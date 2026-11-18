@@ -209,11 +209,11 @@ struct DSPrimaryButtonStyle: PrimitiveButtonStyle {
             let small = controlSize == .small || controlSize == .mini
             configuration.label
                 .font(Theme.Font.body(small ? 12 : 13, .semibold, fixed: fixed))
-                .foregroundStyle(Theme.onGold)
+                .foregroundStyle(isEnabled ? Theme.onGold : Theme.disabledLabel)
                 .padding(.horizontal, small ? 10 : 14)
                 .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.controlLarge))
-                .background(configuration.isPressed ? Theme.goldDim : (hovering && isEnabled ? Theme.goldHover : Theme.gold), in: rounded(Theme.Radius.s))
-                .opacity(isEnabled ? 1 : 0.4)
+                .background(isEnabled ? (configuration.isPressed ? Theme.goldDim : (hovering ? Theme.goldHover : Theme.gold)) : Theme.disabledFill, in: rounded(Theme.Radius.s))
+                .overlay { if !isEnabled { rounded(Theme.Radius.s).stroke(Theme.hairline, lineWidth: 1) } }
                 .scaleEffect(configuration.isPressed ? 0.98 : 1)
                 .contentShape(rounded(Theme.Radius.s))
                 .dsFocusRing()
@@ -246,7 +246,7 @@ struct DSSecondaryButtonStyle: PrimitiveButtonStyle {
                 .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.control))
                 .background(Color.white.opacity(configuration.isPressed ? 0.14 : (hovering && isEnabled ? 0.09 : 0.05)), in: rounded(Theme.Radius.s))
                 .overlay(rounded(Theme.Radius.s).stroke(hovering && isEnabled ? Theme.controlBorderHover : Theme.hairlineStrong, lineWidth: 1))
-                .opacity(isEnabled ? 1 : 0.4)
+                .opacity(isEnabled ? 1 : Theme.disabledOpacity)
                 .contentShape(rounded(Theme.Radius.s))
                 .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
@@ -277,7 +277,7 @@ struct DSGhostButtonStyle: PrimitiveButtonStyle {
                 .padding(.horizontal, 6)
                 .frame(minHeight: Theme.Metrics.hitTarget)
                 .background(Color.white.opacity(hovering && isEnabled ? 0.06 : 0), in: rounded(Theme.Radius.xs))
-                .opacity(isEnabled ? 1 : 0.4)
+                .opacity(isEnabled ? 1 : Theme.disabledOpacity)
                 .contentShape(rounded(Theme.Radius.xs))
                 .dsFocusRing(radius: Theme.Radius.xs)
                 .modifier(HoverTracking(hovering: $hovering))
@@ -309,7 +309,7 @@ struct DSAccentOutlineButtonStyle: PrimitiveButtonStyle {
                 .frame(height: height)
                 .background(color.opacity(configuration.isPressed ? 0.24 : (hovering && isEnabled ? 0.16 : 0.1)), in: rounded(Theme.Radius.s))
                 .overlay(rounded(Theme.Radius.s).stroke(color.opacity(0.6), lineWidth: 1))
-                .opacity(isEnabled ? 1 : 0.4)
+                .opacity(isEnabled ? 1 : Theme.disabledOpacity)
                 .contentShape(rounded(Theme.Radius.s))
                 .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
@@ -335,12 +335,11 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
             let active = (configuration.isPressed || hovering) && isEnabled
             configuration.label
                 .font(Theme.Font.body(13, .semibold, fixed: fixed))
-                .foregroundStyle(active ? .white : Theme.danger)
+                .foregroundStyle(!isEnabled ? Theme.disabledLabel : active ? .white : Theme.danger)
                 .padding(.horizontal, 12)
                 .frame(height: height)
-                .background(configuration.isPressed ? red : red.opacity(hovering && isEnabled ? 0.85 : 0.12), in: rounded(Theme.Radius.s))
-                .overlay(rounded(Theme.Radius.s).stroke(red.opacity(0.5), lineWidth: 1))
-                .opacity(isEnabled ? 1 : 0.4)
+                .background(!isEnabled ? Theme.disabledFill : configuration.isPressed ? red : red.opacity(hovering ? 0.85 : 0.12), in: rounded(Theme.Radius.s))
+                .overlay(rounded(Theme.Radius.s).stroke(isEnabled ? red.opacity(0.5) : Theme.hairline, lineWidth: 1))
                 .contentShape(rounded(Theme.Radius.s))
                 .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
@@ -616,6 +615,24 @@ struct TagChip: View {
 
 // MARK: - Inputs
 
+extension View {
+    /// Inline page banners (scan progress, hints, problems): one tinted surface and hairline at the panel radius.
+    func dsBannerSurface(fill: Color, stroke: Color) -> some View {
+        background(fill, in: rounded(Theme.Radius.l))
+            .overlay(rounded(Theme.Radius.l).strokeBorder(stroke, lineWidth: 1))
+    }
+
+    /// One border for text inputs: the hairline at rest, the gold focus ring in its place while
+    /// the field has focus, so a focused field never shows two outlines.
+    func dsFieldBorder(focused: Bool) -> some View {
+        overlay {
+            rounded(Theme.Radius.s)
+                .strokeBorder(focused ? Theme.focusRing : Theme.hairlineStrong, lineWidth: focused ? 2 : 1)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
 /// Text field on a dark well. Keyboard focus draws the same gold ring as
 /// the buttons; `mono` is for paths, numbers and timecodes.
 struct DSTextField: View {
@@ -643,9 +660,8 @@ struct DSTextField: View {
         }
         .padding(.horizontal, 10)
         .frame(height: height)
-        .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
-        .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
-        .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
+        .background(Theme.well, in: rounded(Theme.Radius.s))
+        .dsFieldBorder(focused: focused)
         .contentShape(rounded(Theme.Radius.s))
         .onTapGesture { focused = true }
         .animation(Theme.quick, value: focused)
@@ -670,9 +686,8 @@ struct DSNumberField<F: ParseableFormatStyle>: View where F.FormatOutput == Stri
             .accessibilityLabel(placeholder)
             .padding(.horizontal, 8)
             .frame(width: width, height: height)
-            .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
-            .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
-            .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
+            .background(Theme.well, in: rounded(Theme.Radius.s))
+            .dsFieldBorder(focused: focused)
     }
 }
 
@@ -726,7 +741,7 @@ struct ToastView: View {
         }
         .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: rounded(Theme.Radius.l))
-        .background(Color(hex: 0x1A1A1D).opacity(0.85), in: rounded(Theme.Radius.l))
+        .background(Theme.popoverFill, in: rounded(Theme.Radius.l))
         .overlay(rounded(Theme.Radius.l).stroke(Color.white.opacity(0.14), lineWidth: 1))
         .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
     }
@@ -755,7 +770,7 @@ struct DSCheckboxToggleStyle: ToggleStyle {
             .contentShape(Rectangle())
         }
         .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.xs))
-        .opacity(isEnabled ? 1 : 0.4)
+        .opacity(isEnabled ? 1 : Theme.disabledOpacity)
         .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
     }
 }

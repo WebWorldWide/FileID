@@ -267,7 +267,7 @@ struct CatalogWorkbench: View {
                             .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                     }
                     .padding(12)
-                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                    .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 }
                 if video {
                     MomentTimeline(duration: timelineDuration, examined: tracks.examined, chapters: chapters,

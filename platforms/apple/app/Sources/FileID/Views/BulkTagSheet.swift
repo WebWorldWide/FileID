@@ -30,7 +30,7 @@ struct BulkTagSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
             TextField("e.g. Vacation, Family, Important", text: $rawTags)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .font(Theme.Font.body(13.5))
             if let s = status {
                 Text(s).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
