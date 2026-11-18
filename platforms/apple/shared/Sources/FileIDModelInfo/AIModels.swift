@@ -1,6 +1,5 @@
-// AIModelKind — VLM choices for Deep Analyze + AI face clustering.
-// The app uses this to render the model picker; the engine passes the
-// `rawValue` to MLX. Both sides must agree on rawValues used in IPC.
+// AIModelKind: VLM choices for Deep Analyze and face clustering. The app renders the picker; the engine passes `rawValue` to MLX.
+// rawValues must match the Windows engine's ids byte-for-byte so a shared DB round-trips the "analyzed" state.
 import Foundation
 
 public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, Codable {
@@ -19,14 +18,8 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
-    // Commercial-clean lineup (2026-05): the non-commercial Qwen2.5-VL-3B
-    // (Qwen Research license) was dropped for the Apache-2.0 7B. Gemma /
-    // PaliGemma stay (Gemma Terms permit commercial use); Mistral-Small-3.2
-    // (Apache-2.0) is the max-quality pick. Mirrors the Windows VLM ladder.
-    // rawValues are the canonical cross-platform model-kind tokens — they
-    // must match the Windows engine (registry.rs ids / AppSettings
-    // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
-    // round-trips the "analyzed" state (skipExisting matches, badge lights).
+    // Commercial-clean lineup: Apache-2.0 models plus Gemma/PaliGemma (Gemma Terms permit commercial use). Mistral-Small-3.2 is the max-quality pick.
+    // Mirrors the Windows VLM ladder.
     public static let qwen2VL7B = Self(registeredValue: "qwen2_5_vl_7b")
     public static let qwen3VL2B = Self(registeredValue: "qwen3_vl_2b")
     public static let qwen3VL4B = Self(registeredValue: "qwen3_vl_4b")
@@ -171,17 +164,11 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return safeDefaultFor(ramGB: ramGB, freeDiskBytes: freeDiskBytes)
     }
 
-    /// Migrate a persisted rawValue that may predate the commercial-clean
-    /// lineup (e.g. the dropped "qwen2_vl_3b") or the cross-platform
-    /// model-kind token rename (the rawValues now match the Windows engine
-    /// tokens exactly). Call this when decoding a stored selection so an old
-    /// value maps to a supported model instead of failing to decode. Mirrors
-    /// the Windows AppSettings v5 migration.
+    /// Migrates a persisted rawValue that predates the commercial-clean lineup or the Windows-canonical token rename, so an old value maps to a supported model instead of failing to decode.
     public static func migrated(rawValue: String) -> AIModelKind {
         if let kind = AIModelKind(rawValue: rawValue) { return kind }
         switch rawValue {
-        // Pre-rename tokens for kinds whose rawValue changed to the Windows
-        // canonical form (qwen2_vl_7b → qwen2_5_vl_7b, gemma3_* → gemma_3_*).
+        // Tokens persisted before the Windows-canonical rename.
         case "qwen2_vl_7b":                  return .qwen2VL7B
         case "gemma3_4b":                    return .gemma3_4B
         case "gemma3_12b":                   return .gemma3_12B
@@ -198,15 +185,9 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     }
 }
 
-// MARK: - FaceEmbedderKind
 
-/// Per-face embedder used for clustering. SFace (OpenCV Zoo, Apache-2.0,
-/// 128-d) — the commercial-clean replacement for the non-commercial
-/// InsightFace ArcFace. Still run as ONNX via ONNX Runtime + CoreML EP
-/// (same `ArcFaceService` path); only the model file, the embedding
-/// dimension (512 → 128), and the input preprocessing changed — SFace
-/// takes RAW [0,255] RGB (it bakes its own normalization) rather than
-/// ArcFace's `(px − 127.5) / 127.5`. See `ArcFaceService`.
+/// Per-face embedder for clustering: SFace (OpenCV Zoo, Apache-2.0, 128-d), the commercial-clean replacement for InsightFace ArcFace. Runs as ONNX via ONNX Runtime + CoreML EP through `ArcFaceService`.
+/// SFace takes raw [0,255] RGB and bakes in its own normalization, unlike ArcFace's (px − 127.5) / 127.5.
 public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
     case sface = "sface"
 
@@ -225,8 +206,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
 
     public var approxBytes: Int64 { 38_700_000 }   // ~37 MB ONNX
 
-    /// L2-normalized 128-d float32 (= 512-byte DB blob). Replaces ArcFace's
-    /// 512-d (2048-byte) — old prints are wiped by migration v12.
+    /// L2-normalized 128-d float32 (512-byte DB blob). ArcFace's 512-d prints are not compatible.
     public var embeddingDim: Int { 128 }
 
     /// Approximate per-face embedding cost on M1 Pro ANE (ms).
@@ -234,8 +214,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
 
     public var licenseName: String { "Apache License 2.0 (OpenCV Zoo)" }
 
-    /// SFace is the only (commercial-clean) embedder now; the `ramGB`
-    /// parameter is retained for call-site compatibility.
+    /// SFace is the only embedder; `ramGB` is kept for call-site compatibility.
     public static func defaultFor(ramGB _: Double) -> FaceEmbedderKind { .sface }
 
     /// Installation directory shared between engine + app. Both check
