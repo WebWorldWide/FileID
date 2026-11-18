@@ -259,28 +259,9 @@ struct IPCProtocolTests {
         }
         #expect(decodedExcluded == ["/Users/adam/Private", "/Users/adam/Scratch"])
 
-        // Absent excludedFolders — fileIDs also nil (whole-library, no
-        // exclusions), the common case — must decode back to nil.
-        //
-        // Deliberately NOT asserting that the key is omitted from the wire
-        // rather than written as null: `IPCCommand.Payload` uses Swift's
-        // SYNTHESIZED Codable (there is no custom `encode(to:)` in
-        // IPCProtocol.swift), and synthesized enum encoding writes optional
-        // associated values with `encode`, not `encodeIfPresent` — so a nil
-        // very likely serializes as `"excludedFolders": null`. That is a
-        // pre-existing property of this case's three other optionals
-        // (`tagsOnly`, `proposeRenames`, `fileIDs`), not something
-        // excludedFolders introduces, so pinning it here would assert
-        // unverified behavior and could fail for a reason unrelated to this
-        // field. Round-trip fidelity — which holds either way — is the
-        // contract that actually matters app→engine.
-        //
-        // Cross-platform note for whoever picks this up: the Rust
-        // (`skip_serializing_if`) and C# (`JsonIgnore(WhenWritingNull)`)
-        // mirrors both OMIT these keys, and the JSON Schema types them as
-        // `array`/`boolean` (a null would violate strict validation). If
-        // macOS does emit nulls, that divergence predates this field and
-        // should be fixed for the whole Payload enum at once.
+        // excludedFolders nil is not asserted as an omitted key: the synthesized Payload Codable writes nil optionals as null, as it already does for
+        // tagsOnly, proposeRenames and fileIDs. Round-trip fidelity is the contract. If macOS emits nulls, the divergence from the Rust and C# mirrors
+        // (which omit these keys) predates this field.
         let withoutExclusions = IPCCommand.Payload.deepAnalyzeAll(
             modelKind: "qwen2_5_vl_7b", skipExisting: true, tagsOnly: nil,
             proposeRenames: nil, fileIDs: nil, excludedFolders: nil)

@@ -1,9 +1,5 @@
-// SEC-7 containment guard (restructure apply, engine + app). Regression cover
-// for: a valid in-root destination whose intermediate folder doesn't
-// exist yet was wrongly rejected when the root resolved through macOS's
-// `/private` shortening (it only strips `/private` when the path EXISTS, so an
-// existing root and a not-yet-created child landed in different canonical
-// forms). Found via an isolated on-hardware restructure-apply run.
+// SEC-7 containment guard tests. Regression cover: a valid in-root destination whose parent isn't created yet was rejected when the root
+// resolved through macOS's `/private` shortening, which only applies to existing paths.
 import Testing
 import Foundation
 @testable import FileIDShared
