@@ -104,6 +104,8 @@ fi
 SWIFT_SCRATCH="$(dirname "$BUILD_DIR")"
 APPLE_KIT="$BUILD_DIR/libFileIDAppleKit.dylib"
 read -r -a SWIFT_EXTRA_ARGS <<< "${FILEID_SWIFT_BUILD_ARGS:-}"
+# The App Store variant builds every module with the same flag (testflight.sh builds the app so).
+[ "${FILEID_APP_STORE:-0}" = "1" ] && SWIFT_EXTRA_ARGS+=(-Xswiftc -DFILEID_APP_STORE)
 swift build --package-path "$PROJECT_DIR" --scratch-path "$SWIFT_SCRATCH" \
     -c "$BUILD_CONFIGURATION" --product FileIDAppleKit ${SWIFT_EXTRA_ARGS[@]+"${SWIFT_EXTRA_ARGS[@]}"}
 [ -f "$APPLE_KIT" ] || { echo "❌ $APPLE_KIT missing after build"; exit 1; }
@@ -174,7 +176,7 @@ else
 fi
 # Ad-hoc signatures keep dev bundles launchable after install_name_tool;
 # release.sh re-signs everything with the Developer ID.
-for code in "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/Frameworks/libonnxruntime.dylib" "$CONTENTS/MacOS/fileidd"; do
+for code in "$CONTENTS/MacOS/mlx.metallib" "$CONTENTS/Frameworks/mlx.metallib" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/Frameworks/libonnxruntime.dylib" "$CONTENTS/MacOS/fileidd" "$CONTENTS/MacOS/FileID"; do
     [ -f "$code" ] && codesign --force --sign - "$code" >/dev/null
 done
 echo "🦀 Bundled the shared Rust engine as Contents/MacOS/fileidd"

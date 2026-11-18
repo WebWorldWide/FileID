@@ -6,12 +6,12 @@ Covers `platforms/apple/`. For the Windows build see `platforms/windows/CLAUDE.m
 
 ## Architecture
 
-Two binaries, newline-delimited JSON over stdin/stdout:
+Two binaries, newline-delimited JSON over stdin/stdout (the engine's events arrive on its stderr):
 - `app/Sources/FileID/` — SwiftUI app. UI state in `EngineClient` (`@MainActor @Observable`); spawns the engine, auto-respawns with backoff on crash.
-- `engine/Sources/FileIDEngine/` — Swift CLI child. Owns the DB, scan pipeline, ANE/GPU model loading.
+- `engine/Sources/FileIDEngine/` — the Swift engine, retired from the app: built only as the conformance peer, not shipped. The shipped engine is `fileidd`, the shared Rust engine (`../windows/src/engine`, `--features apple-adapters`); it owns the DB, scan pipeline and model loading.
 - `shared/Sources/FileIDShared/` — `IPCProtocol.swift` (`IPCCommand`/`IPCEvent`), DB row types, the AI model registry (`AIModels.swift`), mirrored against `../../shared/ipc-schema/ipc.schema.json`.
 - `shared/Sources/FileIDImaging/` — decode (ImageIO, HEIF, JPEG previews), Vision primary pass and text reads, and the MLX CLIP/RAM++ image graphs. The Swift engine and `FileIDAppleKit` both depend on it, so the two engines run the same code; declarations are `package`-visible.
-- `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`). Since Stage 10 a Developer ID build bundles `fileidd` and starts it first; the Swift engine stays bundled as the fallback and is selectable in Settings ▸ Advanced ▸ Engine, with `defaults write com.fileid.app engine.backend swift|rust` or `FILEID_ENGINE_BACKEND` (`EngineBackend.swift` holds the policy). App Store builds (`-DFILEID_APP_STORE`) run the Swift engine only and do not bundle `fileidd`. `scripts/assemble_app.sh` bundles it by default for release builds (`FILEID_WITH_RUST_ENGINE=0` leaves it out).
+- `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`). `fileidd` is the only engine the app starts, in Developer ID and App Store (`-DFILEID_APP_STORE`, child of the sandboxed app via `FileIDEngineAppStore.entitlements`) builds alike; there is no Swift fallback, Settings engine choice or `engine.backend` switch. When `fileidd` is missing, refused by the signing check, or stops twice before `ready`, `EngineClient` sets `startFailure` and `EngineUnavailableCard` offers Show log / Try again. `scripts/assemble_app.sh` builds and bundles it. The Swift engine target stays built only as the conformance peer and is not shipped.
 - `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
 
 Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v36**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
@@ -44,7 +44,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build   # quick t
 swift test                                                   # Shared + Engine suites
 ```
 
-`run.sh` needs cmake + the Xcode Metal Toolchain (for `mlx.metallib`). Release bundling: `swift build -c release --product {FileID,FileIDEngine}`, copy both into `FileID.app/Contents/MacOS/`, `open`.
+`run.sh` needs cmake + the Xcode Metal Toolchain (for `mlx.metallib`). Release bundling: `bash scripts/assemble_app.sh <bundle>` after `swift build -c release --product FileID` (it builds `fileidd` and `FileIDAppleKit`).
 
 `ensure_mlx_metallib.sh` keys the cached Metal library to the checked-out MLX revision and builds from a temporary source copy. It must never patch SwiftPM's checkout in place. For an isolated scratch build, set `FILEID_MLX_SOURCE` and `FILEID_METALLIB_CACHE` for that script, then `FILEID_BUILD_DIR` and the same `FILEID_METALLIB_CACHE` for `scripts/assemble_app.sh`.
 

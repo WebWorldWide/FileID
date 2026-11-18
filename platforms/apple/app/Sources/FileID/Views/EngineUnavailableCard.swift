@@ -76,7 +76,7 @@ struct EngineUnavailableOverlay: ViewModifier {
         content.overlay {
             if let failure = engine.startFailure, activeTab != .settings {
                 ZStack {
-                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(Color(red: 15 / 255, green: 15 / 255, blue: 17 / 255))
                     EngineUnavailableCard(failure: failure, onTryAgain: { engine.restart() })
                         .padding(24)
                 }
