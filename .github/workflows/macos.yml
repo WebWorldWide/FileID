@@ -290,8 +290,15 @@ jobs:
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          # The ONNX Runtime framework the app links, scanned on its own so
-          # an onnxruntime package update that adds Microsoft's uploader fails here.
+          # The shipped app and its shared modules link no ONNX Runtime.
+          for bin in "$RUNNER_TEMP/FileID.app/Contents/MacOS/FileID" "$RUNNER_TEMP/FileID.app/Contents/Frameworks/libFileIDAppleKit.dylib"; do
+            if [[ -n "$(otool -L "$bin" | grep -i onnxruntime || true)" || -n "$(nm -a "$bin" 2>/dev/null | grep -E 'OrtGetApiBase|OnnxRuntimeBindings|FileIDORT' || true)" ]]; then
+              echo "::error::$bin links ONNX Runtime"; exit 1
+            fi
+          done
+          # The ONNX Runtime framework the retired Swift engine (test peer, not
+          # shipped) links, scanned on its own so an onnxruntime package update
+          # that adds Microsoft's uploader still fails here.
           ort=.build/artifacts/onnxruntime-swift-package-manager/onnxruntime/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime
           CONTENTS="$RUNNER_TEMP/FileID.app/Contents"
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/fileidd" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$ort"
