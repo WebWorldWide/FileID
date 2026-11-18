@@ -22,6 +22,7 @@
 //   FILEID_SELF_SHOT_CHAT_SCOPED=<q>  one more question attached to the first FILEID_SELF_SHOT_CHAT_SCOPE_N (default 6) photos, the selection check
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
 //   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
+//   FILEID_SELF_SHOT_DRAWER=1      opens Chat beside the page before the captures
 //   FILEID_WIN_SIZE=WxH            content size of the window
 import AppKit
 import SwiftUI
@@ -143,6 +144,7 @@ enum SelfShot {
         environment: ProcessInfo.processInfo.environment,
         available: MainWindow.Tab.allCases.map(\.rawValue))
     static var isActive: Bool { plan != nil }
+    static let opensChatDrawer = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_DRAWER"] == "1" && plan != nil
     static let expandAdvanced = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_ADVANCED"] == "1" && plan != nil
     private static weak var engineRef: EngineClient?
     private static var started = false

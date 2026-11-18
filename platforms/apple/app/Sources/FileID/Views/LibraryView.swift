@@ -1093,6 +1093,8 @@ struct LibraryView: View {
             guard !Task.isCancelled else { return }
             if rows.isEmpty { gridAtTop = true }
             rows = newRows
+            // The file counts lag the listing mid-scan: ask for them again so the page header agrees with the grid.
+            if seed == nil, kind == nil, query.isEmpty, newRows.count > store.scopedTotalFiles { store.refreshCounters() }
             tagsByFile = tags
             rowsEpoch &+= 1
             canLoadMore = pageable

@@ -107,7 +107,11 @@ private struct ProposalRow: View {
                     ViewThatFits(in: .horizontal) {
                         Text("\(media) · " + TakeReview.dateText(group.capturedAt) + suffix).fixedSize()
                         Text("\(media) · " + TakeReview.shortDateText(group.capturedAt) + suffix).fixedSize()
-                        Text("\(media) · " + TakeReview.shortDateText(group.capturedAt) + suffix).fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("\(media) · " + TakeReview.dayText(group.capturedAt) + suffix)
+                            Text(TakeReview.clockTimeText(group.capturedAt))
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                     Text(TakeProposals.evidenceText(group.evidence))
