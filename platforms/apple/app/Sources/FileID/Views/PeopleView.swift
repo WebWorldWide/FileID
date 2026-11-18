@@ -59,6 +59,9 @@ struct PeopleView: View {
         }
     }
     @State private var activeSheet: ActiveSheet?
+    #if DEBUG
+    @Environment(\.pageActive) private var pageActive
+    #endif
     @State private var review: FaceReviewModel?
     @State private var mergeQueue: FaceQueueModel?
     @State private var splitQueue: FaceQueueModel?
@@ -85,6 +88,20 @@ struct PeopleView: View {
             if sheet == nil { refreshReview(); refreshMergeUndo() }
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard pageActive, let action = note.object as? String else { return }
+            let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
+            switch parts.first {
+            case "person":
+                let index = (Int(parts.last ?? "") ?? 1) - 1
+                if persons.indices.contains(index) { activeSheet = .personDetail(persons[index].id) }
+            case "review": activeSheet = .faceReview
+            case "close": activeSheet = nil
+            default: break
+            }
+        }
+        #endif
         .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: { reload() }))
         .confirmationDialog(
             "Merge \"\(pendingDragMerge?.targetName ?? "")\" with the dropped person?",

@@ -62,6 +62,11 @@ struct FileIDApp: App {
                     WelcomeSheet(engine: engine)
                         .onDisappear { welcomeSheetSeen = true }
                 }
+                #if DEBUG
+                .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                    if let action = note.object as? String, action == "welcome" || action == "close" { showWelcome = action == "welcome" }
+                }
+                #endif
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

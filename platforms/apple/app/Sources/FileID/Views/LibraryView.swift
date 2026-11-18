@@ -190,6 +190,16 @@ struct LibraryView: View {
                 if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
             }
             .onReceive(NotificationCenter.default.publisher(for: .selfShotClosePreview)) { _ in previewSelectedID = nil }
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                guard pageActive, let action = note.object as? String else { return }
+                let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
+                switch parts.first {
+                case "select": if parts.count == 2, let row = rows.first(where: { $0.url.lastPathComponent == parts[1] }) { paneSelectedID = row.id }
+                case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
+                case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
+                default: break
+                }
+            }
             #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
