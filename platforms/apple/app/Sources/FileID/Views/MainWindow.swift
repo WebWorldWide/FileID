@@ -182,8 +182,14 @@ struct MainWindow: View {
             .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: sidebarVisible)
             .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
             .accentColor(Theme.gold)
-            .background { shortcutHost }
             .onReceive(NotificationCenter.default.publisher(for: .fileIDChooseFolder)) { _ in pickFolder() }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDGoToTab)) { note in
+                if let raw = note.object as? String, let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleChat)) { _ in
+                if activeTab != .chat { chatPresented.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleMotion)) { _ in atmospherePaused.toggle() }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()
@@ -286,20 +292,6 @@ struct MainWindow: View {
             }
             return true
         }
-    }
-
-    /// ⌘1…⌘9 jump to pages; invisible buttons carry the shortcuts.
-    private var shortcutHost: some View {
-        Group {
-            ForEach(Array(Tab.order.enumerated()), id: \.offset) { index, tab in
-                Button("") { activeTabBinding.wrappedValue = tab }
-                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
-            }
-            Button("") { atmospherePaused.toggle() }.keyboardShortcut("m", modifiers: [.command, .shift])
-        }
-        .opacity(0)
-        .frame(width: 0, height: 0)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Folder picking
