@@ -1,7 +1,3 @@
-// Prototype v3 shell (shared/docs/DESIGN_V3.md): title bar, area sidebar with
-// the scan card, and page headers. Mirrors macOS `Views/Shell/*`,
-// `Views/Sidebar.swift` and the header in `Views/Detail.swift`.
-
 pub mod changes_sheet;
 pub mod page_header;
 pub mod sidebar;

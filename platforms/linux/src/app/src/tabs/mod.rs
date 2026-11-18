@@ -1,5 +1,3 @@
-// Native GTK tabs share the typed engine connection.
-
 pub mod chat;
 mod chat_actions;
 mod chat_cards;

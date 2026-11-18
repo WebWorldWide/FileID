@@ -1,9 +1,6 @@
-// Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated
-// clips by itself, scores each try without a model, and this page lets the
-// user check the starred best try, keep or skip, or move the rest to Trash
-// with Undo. Manual groups with a goal (YOUR GROUPS / MAKE A GROUP BY HAND)
-// live in takes_groups.rs. The Goal (optional) panel asks the engine to rank the
-// tries with the installed description model (`rankTakesWithGoal`).
+// Best Takes: the engine groups bursts and repeated clips and scores tries without a model; the user
+// keeps or skips the starred best try, or moves the rest to Trash (with Undo). Manual groups live in
+// takes_groups.rs; the Goal panel ranks tries with the installed description model via rankTakesWithGoal.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};

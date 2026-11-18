@@ -1,11 +1,5 @@
-// app_settings — Linux mirror of Windows `AppSettings.cs` / macOS `@AppStorage`.
-//
-// Reads and writes the SAME `app-settings.json` the other platforms use
-// (`fileid_engine::paths::app_settings_path()`), with the same camelCase keys,
-// so a shared/synced data dir round-trips. Only the keys this app owns are
-// touched; every other key is preserved verbatim (forward compatibility with
-// the Windows schema). Writes are atomic (temp file + rename) so a crash
-// mid-save can't corrupt the file.
+// Reads and writes the app-settings.json shared with Windows and macOS (camelCase keys).
+// Keys this app does not own are preserved verbatim; writes are atomic (temp file + rename).
 
 use std::path::{Path, PathBuf};
 
@@ -64,8 +58,6 @@ pub fn last_folder() -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// Persist the picked folder (path + leaf display label, matching the
-/// Windows `lastFolderPath` / `lastFolderDisplay` pair).
 pub fn remember_folder(path: &Path) {
     let display = path
         .file_name()
@@ -80,8 +72,7 @@ pub fn remember_folder(path: &Path) {
     ]);
 }
 
-/// The persisted active tab id (`library` / `people` / …), matching the
-/// Windows `activeTab` key. Unknown/empty values fall back to the default.
+/// Unknown or empty values fall back to the default tab.
 pub fn active_tab() -> Option<String> {
     get_string("activeTab").filter(|tab| !tab.trim().is_empty())
 }
@@ -127,7 +118,6 @@ pub fn remember_library_scope_root_id(id: Option<i64>) {
     save_map(&path, &map);
 }
 
-/// Sidebar visibility across launches (Windows `sidebarVisible`).
 pub fn sidebar_visible() -> bool {
     let Some(path) = settings_path() else {
         return true;
@@ -142,8 +132,6 @@ pub fn remember_sidebar_visible(visible: bool) {
     set_entries(&[("sidebarVisible", Value::Bool(visible))]);
 }
 
-/// Has the user dismissed the first-launch Welcome sheet? Mirrors the Windows
-/// `welcomeSheetSeen` key / macOS `@AppStorage("welcomeSheetSeen")`.
 pub fn welcome_sheet_seen() -> bool {
     let Some(path) = settings_path() else {
         return false;
@@ -158,7 +146,6 @@ pub fn remember_welcome_sheet_seen() {
     set_entries(&[("welcomeSheetSeen", Value::Bool(true))]);
 }
 
-// ── Cleanup auto-tag and Chat summaries (parity-gtk-shell) ───────────────────
 
 fn get_bool(key: &str, default: bool) -> bool {
     let Some(path) = settings_path() else {
@@ -170,8 +157,7 @@ fn get_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Tag the copies kept after Cleanup moves extras to Trash. Windows
-/// `CleanupAutoTagKept` / macOS `cleanup.autoTagKeepers`; default on.
+/// Tag the kept copies after Cleanup moves extras to Trash; default on.
 pub const CLEANUP_AUTO_TAG_NAME: &str = "duplicate-resolved";
 
 pub fn cleanup_auto_tag() -> bool {
@@ -253,20 +239,10 @@ pub fn remember_naming(naming: &NamingSettings) {
     ]);
 }
 
-/// Absolute folder paths to skip when running Deep Analyze over the whole
-/// library (mirrors Windows `AppSettings.DeepAnalyzeExcludedFolders`).
-/// Separate from the scan exclusion list — a folder can be fine to
-/// catalog/tag/search but too slow or private to run the VLM over. `None`
-/// (key absent, matching every settings.json written before this feature
-/// existed) means no exclusions, same as an empty list. Sent fresh with
-/// every deepAnalyzeAll; an explicit file selection is never filtered.
-/// Trim trailing separators, drop blanks, dedupe, cap the list (matches the
-/// schema's `deepAnalyzeAll.excludedFolders` maxItems). Mirrors the Windows
-/// `SanitizeExcludedFolders` except for case: Windows folds case because NTFS
-/// does, but Linux filesystems are case-sensitive, so `~/Photos` and
-/// `~/photos` are genuinely different directories. Folding here would silently
-/// drop one of them from a privacy-motivated control — the user would believe a
-/// folder was excluded when it wasn't.
+/// Folders skipped by whole-library Deep Analyze (scans are not affected). Trailing
+/// separators and blanks are dropped, duplicates removed. Case is kept: Linux filesystems
+/// are case-sensitive, and folding would silently drop a folder the user meant to exclude.
+/// Explicit file selections are never filtered.
 pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
     const MAX: usize = 256;
     let mut seen = std::collections::HashSet::new();
@@ -303,7 +279,6 @@ fn choice(key: &str, allowed: &[&str], default: &str) -> String {
 
 pub const TEXT_SIZE_IDS: [&str; 4] = ["small", "standard", "large", "larger"];
 
-/// Settings ▸ Appearance ▸ Text size (macOS `appearance.textSize`).
 pub fn text_size() -> String {
     choice("textSize", &TEXT_SIZE_IDS, "standard")
 }
@@ -312,8 +287,7 @@ pub fn remember_text_size(id: &str) {
     set_entries(&[("textSize", Value::String(id.to_owned()))]);
 }
 
-/// Settings ▸ Appearance ▸ Lava lamp (macOS `lavaMode`); Linux offers Full and
-/// Off. A synced "calm" counts as Full.
+/// A synced "calm" value counts as Full; Linux offers only Full and Off.
 pub fn lava_lamp_on() -> bool {
     choice("lavaMode", &["full", "calm", "off"], "full") != "off"
 }
@@ -324,8 +298,7 @@ pub fn remember_lava_lamp(on: bool) {
 
 pub const GRANULARITY_IDS: [&str; 3] = ["loose", "normal", "tight"];
 
-/// Organize Folders granularity (macOS `restructure.granularity`), passed to
-/// the engine as `FILEID_RESTRUCTURE_GRANULARITY` when it starts.
+/// Passed to the engine as FILEID_RESTRUCTURE_GRANULARITY at startup.
 pub fn restructure_granularity() -> String {
     choice("restructureGranularity", &GRANULARITY_IDS, "normal")
 }
@@ -334,7 +307,6 @@ pub fn remember_restructure_granularity(id: &str) {
     set_entries(&[("restructureGranularity", Value::String(id.to_owned()))]);
 }
 
-/// Settings ▸ "Folders not to describe" (`deepAnalyzeExcludedFolders`).
 pub fn deep_analyze_excluded_folders() -> Vec<String> {
     let Some(path) = settings_path() else { return Vec::new() };
     let raw: Vec<String> = load_map(&path)
