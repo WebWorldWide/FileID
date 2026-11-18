@@ -435,8 +435,10 @@ pub fn performance_core_count() -> usize {
         }
     }
     #[cfg(target_os = "linux")]
-    if let Some(count) = linux_top_capacity_cpus() {
-        return count.min(cpu_topology().p_cores as usize).max(1);
+    {
+        if let Some(count) = linux_top_capacity_cpus() {
+            return count.min(cpu_topology().p_cores as usize).max(1);
+        }
     }
     cpu_topology().p_cores as usize
 }
