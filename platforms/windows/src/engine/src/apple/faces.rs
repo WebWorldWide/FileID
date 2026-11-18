@@ -12,7 +12,7 @@
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use serde::Deserialize;
 

@@ -16,7 +16,7 @@ use std::sync::{Arc, Weak};
 use anyhow::{Context, Result};
 use ndarray::ArrayD;
 use tract_onnx::prelude::{
-    tvec, Datum, Framework, InferenceFact, InferenceModelExt, IntoRunnable, TDim, TValue, Tensor, TypedRunnableModel, TypedSimpleState,
+    tvec, f16, Datum, Framework, InferenceFact, InferenceModelExt, IntoRunnable, TDim, TValue, Tensor, TypedModel, TypedRunnableModel, TypedSimpleState,
 };
 use tract_onnx::tract_hir::infer::Factoid;
 
@@ -227,6 +227,7 @@ fn compile(path: &Path, specs: &[InputSpec]) -> Result<CompiledModel> {
         input_names.push(name);
     }
     let typed = model.into_typed()?.into_decluttered()?;
+    let typed = widen_half_precision(typed)?;
     let output_names = typed
         .output_outlets()?
         .iter()
@@ -234,6 +235,19 @@ fn compile(path: &Path, specs: &[InputSpec]) -> Result<CompiledModel> {
         .collect();
     let plan = typed.into_optimized()?.into_runnable()?;
     Ok(CompiledModel { plan, input_names, output_names, first_input_shape })
+}
+
+/// RAM++ ships as an f16 graph. tract's CPU f16 kernels round more than ONNX
+/// Runtime's f16 path does (tags near a threshold flip), so a graph with f16
+/// values runs in f32: the same weights, with the arithmetic done at full width.
+fn widen_half_precision(typed: TypedModel) -> Result<TypedModel> {
+    let half = f16::datum_type();
+    let has_half = typed.nodes().iter().any(|node| node.outputs.iter().any(|output| output.fact.datum_type == half));
+    if !has_half {
+        return Ok(typed);
+    }
+    let widen = tract_onnx::tract_core::transform::get_transform("f16_to_f32")?.context("tract has no f16_to_f32 transform")?;
+    Ok(widen.transform_into(typed)?)
 }
 
 fn run_tract(model: &CompiledModel, state: &mut TypedSimpleState, mut inputs: Vec<(&str, Input)>) -> Result<Vec<Output>> {

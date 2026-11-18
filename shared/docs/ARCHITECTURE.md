@@ -122,12 +122,12 @@ Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64
 
 ### macOS
 - Apple Vision (face rects + quality + OCR)
-- ONNX Runtime (CLIP ViT-B/32 image/text, RAM++, BGE-small; CoreML EP when supported, CPU fallback)
-- ONNX Runtime + CoreML EP/CPU (SFace 128-d embedder; legacy service names still say ArcFace)
+- tract, the pure-Rust ONNX runtime inside the shared Rust engine (CLIP ViT-B/32 image/text, RAM++, BGE-small; CPU). Scan CLIP and RAM++ run on MLX through the adapters
+- tract, CPU (SFace 128-d embedder; legacy service names still say ArcFace)
 - MLX Swift LM 3.32.3 (Deep Analyze: Qwen2.5-VL, Qwen3-VL, opt-in Qwen3.5 2B, Gemma 3, Mistral Small 3.2, PaliGemma). FileID verifies the pinned VLM repository locally before its offline-only MLX factory adapter loads weights and tokenizers; model residency still passes memory admission.
 
 ### Windows
-- ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN / CPU) — see GPU acceleration strategy below
+- tract (CPU) everywhere, plus ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN) in the `ort-accel` build — see GPU acceleration strategy below and `shared/docs/RUNTIME.md`
 - llama.cpp (VLMs: Qwen2.5-VL 7B, Gemma 3, Mistral-Small-3.2 — all commercial-clean) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
 - RAM++ ONNX (4585-tag auto-tagger, primary; CLIP scene tags as fallback) + CLIP ViT-B/32 ONNX (image + text)
 - YuNet ONNX (face detection) + SFace ONNX (128-d embedding) with 5-point similarity alignment; landmarks → PnP for pose

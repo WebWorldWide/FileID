@@ -2,8 +2,8 @@
   "model": "ram_plus/ram_plus.onnx",
   "input": "synthetic_rgb(384, 384) through the engine's bilinear-384 + ImageNet preprocessing; the raw per-tag logits",
   "tolerance": {
-    "maxAbs": 0.1,
-    "relNorm": 0.01
+    "maxAbs": 0.02,
+    "relNorm": 0.002
   },
   "outputs": [
     {

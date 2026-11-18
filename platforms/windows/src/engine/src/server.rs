@@ -128,6 +128,7 @@ async fn async_main() -> Result<()> {
     logging::install_panic_hook();
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
+    tracing::info!(backend = models::runtime::inference_backend(), "[ML] inference backend");
 
     // VRAM probe at startup. The ML session-pool sizer clamps pool size to
     // fit available video memory — without this clamp, a larger pool

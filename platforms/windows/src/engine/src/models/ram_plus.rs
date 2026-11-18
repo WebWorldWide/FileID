@@ -667,7 +667,7 @@ mod golden_tests {
             "ram_plus",
             PATH,
             "synthetic_rgb(384, 384) through the engine's bilinear-384 + ImageNet preprocessing; the raw per-tag logits",
-            Tolerance { max_abs: 0.1, rel_norm: 1e-2 },
+            Tolerance { max_abs: 0.02, rel_norm: 2e-3 },
             &[Probe { name: "logits", shape: vec![logits.len()], values: &logits }],
         );
     }
