@@ -158,7 +158,6 @@ internal static class TakeGroupsPolicy
     private static bool IsDraft(CatalogTake take) =>
         take.ModelVersion?.StartsWith("take-outcome-sequence-v1/", StringComparison.Ordinal) == true;
 
-    /// <summary>The card's headline and its tone.</summary>
     public static (string Text, Tone Tone) Headline(CatalogTake take)
     {
         if (take.Preferred) return ("Preferred by you", Tone.Gold);

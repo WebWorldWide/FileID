@@ -104,7 +104,6 @@ internal static partial class SearchStrengthPolicy
 
     public static string CountText(string plainCount, string? summary) => summary ?? plainCount;
 
-    /// <summary>What a screen reader says for the count line.</summary>
     public static string AccessibleName(string countText, string? summary) =>
         string.IsNullOrEmpty(countText) ? string.Empty
         : summary is null ? countText

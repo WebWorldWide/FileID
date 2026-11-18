@@ -7,9 +7,6 @@
 //   - Auto-tab-switch reactions to engine events (matches macOS:
 //     face clustering done → People; deep analyze done → Library)
 //
-// Settings persistence: any property setter that maps to a persisted key
-// calls AppSettings.Save() right after raising PropertyChanged. Cheap on
-// modern SSD; debouncing is a future polish if profiling demands it.
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -31,9 +28,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         _sidebarVisible = _settings.SidebarVisible;
         _folderPath = _settings.LastFolderPath;
         _folderDisplay = _settings.LastFolderDisplay;
-        // auto-tab-switch subscription removed. WorkflowAutoTabRouter
-        // owns that policy (single source of truth) so the tab doesn't flip
-        // twice on the same engine event.
     }
 
     public AppSettings Settings => _settings;
@@ -320,9 +314,6 @@ internal sealed class AppViewModel : INotifyPropertyChanged
     public void ToggleSidebar() => SidebarVisible = !SidebarVisible;
 
     public event PropertyChangedEventHandler? PropertyChanged;
-
-    // OnEngineClientPropertyChanged removed entirely. Auto-tab-switch
-    // policy lives in Services/WorkflowAutoTabRouter.cs as the single owner.
 
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

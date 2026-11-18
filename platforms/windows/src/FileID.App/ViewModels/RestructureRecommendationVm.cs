@@ -27,7 +27,6 @@ internal sealed class RestructureRecommendationVm : INotifyPropertyChanged
     /// <summary>Keep is informational — no files move, no toggles, no count.</summary>
     public bool IsInformational { get; init; }
 
-    /// <summary>Total files in this outcome (Files is capped for the inline list).</summary>
     public int MatchedCount { get; init; }
 
     public ObservableCollection<RestructureFileRowVm> Files { get; } = new();

@@ -292,7 +292,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>Shows the weaker matches held back for the current search.</summary>
     public void ShowWeakerMatches()
     {
         _showWeaker = true;
@@ -442,11 +441,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Outer call superseded OR view unloaded mid-flight — ignore.
         }
         catch (ObjectDisposedException)
         {
-            // Services torn down during shutdown — ignore.
         }
         catch (Exception ex)
         {
@@ -506,10 +503,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>
-    /// Fetch similar files directly using the seed file ID.
-    /// Eliminates the multi-step IPC roundtrip.
-    /// </summary>
     public async Task FindSimilarAsync(long fileId, CancellationToken ct)
     {
         if (_disposed) return;
@@ -861,7 +854,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         var existingById = new Dictionary<long, FileTile>(items.Count);
         foreach (var t in items) existingById[t.Id] = t;
 
-        // Target sequence: reuse surviving instances (merged), keep new ones.
         var desired = new List<FileTile>(next.Count);
         var nextIds = new HashSet<long>(next.Count);
         foreach (var fresh in next)
@@ -887,14 +879,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // 1) Remove gone rows (backwards so indices stay valid) → Remove events.
         for (int i = items.Count - 1; i >= 0; i--)
         {
             if (!nextIds.Contains(items[i].Id)) items.RemoveAt(i);
         }
 
-        // 2) Align order to `desired` via Remove+Insert of the instance.
-        //    items[0..j-1] already equals desired[0..j-1] each iteration.
         for (int j = 0; j < desired.Count; j++)
         {
             var want = desired[j];
@@ -1115,7 +1104,6 @@ internal sealed class FileTile : INotifyPropertyChanged
                 }
                 catch
                 {
-                    // Fallback
                 }
             }
             return string.Empty;

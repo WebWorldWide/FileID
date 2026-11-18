@@ -271,15 +271,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // 1) Remove any existing group we're not reusing by reference — both
-        //    genuinely-gone hashes and replaced-instance survivors.
         for (int i = groups.Count - 1; i >= 0; i--)
         {
             if (!reused.Contains(groups[i])) groups.RemoveAt(i);
         }
 
-        // 2) Align order to `desired` via Remove+Insert of the instance, so a
-        //    surviving-but-reordered group keeps its instance.
         for (int j = 0; j < desired.Count; j++)
         {
             var want = desired[j];

@@ -66,7 +66,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         {
             if (_isSelectMode == value) return;
             _isSelectMode = value;
-            // Leaving select mode clears every selection.
             if (!value)
             {
                 foreach (var c in Clusters) c.IsSelected = false;
@@ -76,7 +75,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>FEAT-CRIT-1: count of currently-selected cluster cards.</summary>
     public int SelectedCount
     {
         get
@@ -87,7 +85,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>FEAT-CRIT-1: cluster IDs of every selected card, in order.</summary>
     public IReadOnlyList<long> SelectedClusterIds
     {
         get
@@ -328,14 +325,11 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // 1) Remove any existing cluster we're not reusing by reference — both
-        //    genuinely-gone ids and replaced-instance survivors.
         for (int i = clusters.Count - 1; i >= 0; i--)
         {
             if (!reused.Contains(clusters[i])) clusters.RemoveAt(i);
         }
 
-        // 2) Align order to `desired` via Remove+Insert of the instance.
         for (int j = 0; j < desired.Count; j++)
         {
             var want = desired[j];
@@ -375,7 +369,6 @@ internal sealed class PersonCluster : INotifyPropertyChanged
         ? $"Person #{ClusterId} ({MemberCount} faces)"
         : $"{DisplayName} ({MemberCount} faces)";
 
-    // FEAT-CRIT-1: per-card selection state for People multi-select.
     private bool _isSelected;
     public bool IsSelected
     {
