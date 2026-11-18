@@ -8,18 +8,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{
-    classify_inference_error, ensure_gpu_inference_alive,
-};
+use super::inference::{Dim, InferenceSession, InputSpec};
 
 const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -56,21 +52,15 @@ impl ClipText {
             }
         let input = Array2::<i64>::from_shape_vec((1, CONTEXT_LEN), padded)
             .context("CLIP text input shape")?;
-        let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(tensor))])
-            .context("CLIP text session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), input.into())])
+            .context("CLIP text session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract CLIP text output as f32")?;
+        let data = &output.data;
         if data.len() != crate::models::mobileclip::CLIP_EMBED_DIM {
             anyhow::bail!(
                 "CLIP text produced a {}-d embedding, expected {} (wrong or corrupt model? text + image encoders must share the space)",
@@ -78,7 +68,7 @@ impl ClipText {
                 crate::models::mobileclip::CLIP_EMBED_DIM
             );
         }
-        let mut emb: Vec<f32> = data.to_vec();
+        let mut emb: Vec<f32> = output.data;
         l2_normalize(&mut emb);
         if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
         Ok(emb)
@@ -109,21 +99,15 @@ impl ClipText {
         }
         let input = Array2::<i64>::from_shape_vec((batch, CONTEXT_LEN), flat)
             .context("CLIP text batch input shape")?;
-        let tensor = Tensor::from_array(input).context("CLIP text batch input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(tensor))])
-            .context("CLIP text batch session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), input.into())])
+            .context("CLIP text batch session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract CLIP text batch output as f32")?;
+        let data = &output.data;
         if data.len() % batch != 0 {
             anyhow::bail!(
                 "CLIP text batch output len {} not divisible by batch {batch}",
@@ -148,28 +132,8 @@ impl ClipText {
     }
 }
 
-/// macOS: the CPU session with ONNX Runtime's default thread pool, as the Swift
-/// `CLIPTextEncoder` builds it. An explicit intra-op count (one per core) answered
-/// up to several times slower on a busy Mac, where other processes hold cores.
-#[cfg(target_os = "macos")]
-fn session(path: &Path) -> Result<(Session, String)> {
-    use ort::session::builder::GraphOptimizationLevel;
-    crate::ort_runtime::commit_environment().context("ORT environment")?;
-    let session = Session::builder()
-        .context("ORT session builder")?
-        .with_log_level(ort::logging::LogLevel::Error)
-        .context("configure session (CLIP text)")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("configure session (CLIP text)")?
-        .commit_from_file(path)
-        .context("ORT session commit (CLIP text)")?;
-    let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?.name.clone();
-    Ok((session, input_name))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn session(path: &Path) -> Result<(Session, String)> {
-    super::runtime::commit_chain_session("CLIP text", path)
+fn session(path: &Path) -> Result<(InferenceSession, String)> {
+    super::runtime::commit_chain_session("CLIP text", path, &[InputSpec::i64(&[Dim::Batch, Dim::Fixed(CONTEXT_LEN)])])
 }
 
 fn l2_normalize(v: &mut [f32]) {

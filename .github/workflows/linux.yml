@@ -73,7 +73,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/ort.pyke.io
             platforms/windows/src/engine/target
           key: cargo-engine-linux-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/windows/src/engine/Cargo.toml') }}
           restore-keys: |
@@ -153,7 +152,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/ort.pyke.io
             platforms/cli/target
           key: cargo-cli-linux-${{ hashFiles('platforms/cli/Cargo.lock', 'platforms/cli/Cargo.toml') }}
           restore-keys: |
@@ -200,7 +198,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/ort.pyke.io
             platforms/tui/target
           key: cargo-tui-linux-${{ hashFiles('platforms/tui/Cargo.lock', 'platforms/tui/Cargo.toml') }}
           restore-keys: |
@@ -264,7 +261,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/ort.pyke.io
             platforms/linux/target
           key: cargo-app-linux-${{ hashFiles('platforms/linux/Cargo.lock', 'platforms/linux/src/app/Cargo.toml') }}
           restore-keys: |

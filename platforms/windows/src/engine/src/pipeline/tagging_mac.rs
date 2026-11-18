@@ -55,10 +55,10 @@ pub(crate) fn unload_adapters() {
 }
 
 /// The models this path runs: CLIP and RAM++ on MLX through the adapter (CLIP
-/// falls back to ONNX Runtime when MLX cannot load), BGE through ONNX Runtime.
+/// falls back to the shared ONNX engine when MLX cannot load), BGE through the shared ONNX engine.
 /// Face models stay unloaded: faces come from Vision.
-pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> ModelStack {
-    let pool_size = if runtime_available { resolve_pool_size(worker_count) } else { 1 };
+pub(super) fn model_stack(worker_count: usize) -> ModelStack {
+    let pool_size = resolve_pool_size(worker_count);
     let (adapters, adapter_hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
         || {
             let clip = crate::models::mobileclip::default_weights_path()
@@ -85,11 +85,11 @@ pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> Model
     CLIP_READY.store(clip, Ordering::Release);
     RAM_PLUS_READY.store(ram_plus, Ordering::Release);
     tracing::info!(clip, ram_plus, "[TAGGING] Mac scan adapters (MLX)");
-    let mobileclip_pool = (!clip && runtime_available)
+    let mobileclip_pool = (!clip)
         .then(|| load_pool("MobileCLIP", pool_size, crate::models::mobileclip::default_weights_path(), |p| MobileClipImage::load(p)))
         .flatten();
     ModelStack {
-        bge_text: if runtime_available { load_bge_text() } else { None },
+        bge_text: load_bge_text(),
         mobileclip_pool,
         pool_size,
         apple_scan: true,

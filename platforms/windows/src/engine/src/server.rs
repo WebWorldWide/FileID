@@ -8,6 +8,7 @@
 //! Parent exit or stdin EOF cancels active work, quiesces mutations, checkpoints
 //! the WAL when safe, flushes the sink, and exits.
 
+#[cfg(feature = "ort-accel")]
 use crate::ort_runtime;
 use crate::{
     catalog_index, commands, coordinator, db, job_queue, logging, models, paths, pipeline,
@@ -51,6 +52,7 @@ fn oversized_frame_message(seen: usize) -> String {
 }
 
 pub fn run() -> Result<()> {
+    #[cfg(feature = "ort-accel")]
     ort_runtime::disable_telemetry_before_load();
 
     // SEC-3: lock DLL search FIRST. Must run before tokio::runtime spins
@@ -127,19 +129,6 @@ async fn async_main() -> Result<()> {
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
-    // macOS: the engine's `load-dynamic` ORT build `dlopen`s
-    // `libonnxruntime.dylib`, but `download-binaries` ships only a STATIC
-    // `libonnxruntime.a` for arm64 — so the dylib must be provisioned
-    // separately (`fileid runtime install` / `brew install onnxruntime`). Pin
-    // `ORT_DYLIB_PATH` to the provisioned dylib now, before any ORT session, so
-    // the loader finds it (and honor a pre-set `ORT_DYLIB_PATH`). No-op on
-    // Windows/Linux — they keep their own runtime resolution (the Windows
-    // accelerator-pack pin below; the Linux system/download-binaries path).
-    #[cfg(target_os = "macos")]
-    if let Some(dylib) = ort_runtime::pin_dylib_path() {
-        tracing::info!(path = %platform::redact_path_for_log(&dylib), "[ORT] pinned ORT_DYLIB_PATH to installed ONNX Runtime dylib");
-    }
-
     // VRAM probe at startup. The ML session-pool sizer clamps pool size to
     // fit available video memory — without this clamp, a larger pool
     // exhausts VRAM on a 6 GB RTX 2060 and wedges the DirectML driver
@@ -194,6 +183,7 @@ async fn async_main() -> Result<()> {
         // silent fallback or crash). Guarded on file presence + no pre-existing
         // override + not crash-disabled (ep_guard) → INERT until a matching
         // pack is installed. Must run before the first ORT session.
+        #[cfg(feature = "ort-accel")]
         if std::env::var_os("ORT_DYLIB_PATH").is_none()
             && let Some((ep, pack_dir)) = models::runtime::active_pack_dir()
                 && !models::ep_guard::is_disabled(ep) {
@@ -253,6 +243,7 @@ async fn async_main() -> Result<()> {
     // inside a catch_unwind'd handler, and the engine kept serving — contain
     // the eager path the same way so a bad dylib degrades instead of killing
     // startup (the arm64 CI runner carries a stale system onnxruntime 1.17).
+    #[cfg(feature = "ort-accel")]
     match std::panic::catch_unwind(ort_runtime::commit_environment) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {

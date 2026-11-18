@@ -18,13 +18,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::tensor::Shape;
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{Dim, InferenceSession, InputSpec};
+use super::runtime::commit_chain_session;
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -117,7 +113,7 @@ fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
 }
 
 pub struct RamPlusTagger {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load. Reused on every
     /// forward instead of re-walking `session.inputs.first()` per inference.
     input_name: String,
@@ -167,12 +163,10 @@ impl RamPlusTagger {
         }
 
         tracing::info!(model = "RAM++", tags = tags.len(), "tag list loaded");
-        let (session, input_name) = commit_chain_session("RAM++", onnx)?;
-        let supports_dynamic_batch = session
-            .inputs
-            .first()
-            .and_then(|input| input.input_type.tensor_shape())
-            .is_some_and(ram_plus_shape_has_dynamic_batch);
+        let n = INPUT_SIZE as usize;
+        let (session, input_name) =
+            commit_chain_session("RAM++", onnx, &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(n), Dim::Fixed(n)])])?;
+        let supports_dynamic_batch = ram_plus_shape_has_dynamic_batch(&session.first_input_shape());
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
         // disabled — handy for threshold sweeps). Otherwise load the per-class
@@ -306,21 +300,15 @@ impl RamPlusTagger {
 
     /// The model's raw per-tag logits for one pre-normalized input tensor.
     fn logits(&mut self, chw: Array4<f32>) -> Result<Vec<f32>> {
-        let input = Tensor::from_array(chw).context("RAM++ input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let logits = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("RAM++ session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("RAM++ session.run")?
+            .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-        let (_shape, logits) = value
-            .try_extract_tensor::<f32>()
-            .context("extract RAM++ logits as f32")?;
+            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?
+            .data;
         if logits.len() != self.tags.len() {
             anyhow::bail!(
                 "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
@@ -328,7 +316,7 @@ impl RamPlusTagger {
                 self.tags.len()
             );
         }
-        Ok(logits.to_vec())
+        Ok(logits)
     }
 
     /// Batched [`tag`]: preprocess N images into ONE (N,3,384,384) tensor and run
@@ -358,31 +346,19 @@ impl RamPlusTagger {
             let chw = Self::preprocess(rgb, *w, *h)?;
             batch.slice_mut(s![i..i + 1, .., .., ..]).assign(&chw);
         }
-        let input = Tensor::from_array(batch).context("RAM++ batch input tensor")?;
         let input_name = self.input_name.clone();
         let num_tags = self.tags.len();
-        let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
-            let outputs: SessionOutputs = self
-                .session
-                .run(vec![(input_name, SessionInputValue::from(input))])
-                .context("RAM++ batch session.run")
-                .map_err(classify_inference_error)?;
-            let (_, value) = outputs
-                .iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-            let (_shape, logits) = value
-                .try_extract_tensor::<f32>()
-                .context("extract RAM++ batch logits as f32")?;
-            if logits.len() != bs * num_tags {
-                anyhow::bail!(
-                    "RAM++ batch output len {} != {bs} images x {num_tags} tags",
-                    logits.len()
-                );
-            }
-            logits.to_vec()
-        };
+        let logits_vec = self
+            .session
+            .run(vec![(input_name.as_str(), batch.into())])
+            .context("RAM++ batch session.run")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?
+            .data;
+        if logits_vec.len() != bs * num_tags {
+            anyhow::bail!("RAM++ batch output len {} != {bs} images x {num_tags} tags", logits_vec.len());
+        }
         Ok(logits_vec
             .chunks_exact(num_tags)
             .map(|row| self.select_tags(row))
@@ -509,7 +485,7 @@ fn fill_imagenet_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: u
     }
 }
 
-fn ram_plus_shape_has_dynamic_batch(shape: &Shape) -> bool {
+fn ram_plus_shape_has_dynamic_batch(shape: &[i64]) -> bool {
     shape.first().is_some_and(|dim| *dim < 0)
 }
 
@@ -597,11 +573,11 @@ mod tests {
 
     #[test]
     fn batch_guard_accepts_only_dynamic_batch_axis() {
-        assert!(ram_plus_shape_has_dynamic_batch(&Shape::new([-1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([4, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new(Vec::<i64>::new())));
+        assert!(ram_plus_shape_has_dynamic_batch(&[-1, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[1, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[4, 3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[3, 384, 384]));
+        assert!(!ram_plus_shape_has_dynamic_batch(&[]));
     }
 
     #[test]
@@ -691,7 +667,7 @@ mod golden_tests {
             "ram_plus",
             PATH,
             "synthetic_rgb(384, 384) through the engine's bilinear-384 + ImageNet preprocessing; the raw per-tag logits",
-            Tolerance { max_abs: 0.6, rel_norm: 2e-3 },
+            Tolerance { max_abs: 0.1, rel_norm: 1e-2 },
             &[Probe { name: "logits", shape: vec![logits.len()], values: &logits }],
         );
     }

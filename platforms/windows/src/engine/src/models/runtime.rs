@@ -1,4 +1,8 @@
-// ONNX Runtime execution-provider picker + GPU vendor probe.
+// Inference-backend entry point, execution-provider picker + GPU vendor probe.
+//
+// Models run on tract (CPU) through the seam in `inference.rs`. The picker
+// below only matters to a build with the `ort-accel` feature, which binds an
+// ONNX Runtime accelerator when one is usable:
 //
 // Windows EP matrix:
 //   NVIDIA  → CUDA (if cuDNN+cudart present), else TensorRT, else DirectML
@@ -11,9 +15,12 @@
 // `Models/<pack>/` folders that Performance Pack downloads land in to
 // decide which EPs are actually loadable. The `RuntimeProbe` struct
 // is consumed by `emit_ready` (advertised back to the app) and by
-// the EP-priority builder when an ORT session is created.
+// the EP-priority builder when an ORT session is created. Without
+// `ort-accel` the effective provider is always CPU (tract).
 
 use std::path::{Path, PathBuf};
+
+use super::inference::{InferenceSession, InputSpec};
 
 pub const INSTALL_COMMAND: &str = "fileid scan-models download";
 
@@ -185,7 +192,10 @@ pub fn priority_chain(vendor: GpuVendor) -> Vec<ExecutionProvider> {
     chain
 }
 
-fn bind_chain(probe: &RuntimeProbe) -> Vec<ExecutionProvider> {
+pub(super) fn bind_chain(probe: &RuntimeProbe) -> Vec<ExecutionProvider> {
+    if !cfg!(feature = "ort-accel") {
+        return vec![ExecutionProvider::Cpu];
+    }
     bind_chain_with_availability(probe, tensorrt_provider_present())
 }
 
@@ -290,72 +300,6 @@ pub fn is_device_removed_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Resolve a priority chain of our internal `ExecutionProvider` variants
-/// into the `ExecutionProviderDispatch` values ORT's `SessionBuilder::
-/// with_execution_providers` consumes.
-///
-/// CPU is the implicit fallback (ORT always has the CPU EP), so we don't
-/// emit an explicit dispatch for it — letting it fall through means a
-/// failed-to-bind GPU EP cleanly degrades to CPU instead of failing
-/// session creation outright.
-pub fn execution_providers_for_chain(
-    chain: &[ExecutionProvider],
-    adapter_index: Option<u32>,
-) -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
-    use ort::execution_providers::{
-        cuda::CUDAExecutionProvider,
-        directml::DirectMLExecutionProvider,
-        openvino::OpenVINOExecutionProvider,
-        qnn::QNNExecutionProvider,
-        tensorrt::TensorRTExecutionProvider,
-    };
-    let mut out = Vec::with_capacity(chain.len());
-    for ep in chain {
-        match ep {
-            ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
-            ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
-            // Pin the OpenVINO device to AUTO:GPU,CPU so Intel boxes target
-            // the GPU (or NPU once detected) and only fall back to the OpenVINO
-            // CPU plugin when no accelerator binds — instead of OpenVINO's
-            // default possibly landing on CPU silently. AUTO keeps a safe
-            // fallback if the GPU plugin is unavailable.
-            ExecutionProvider::OpenVino => out.push(
-                OpenVINOExecutionProvider::default()
-                    .with_device_type("AUTO:GPU,CPU")
-                    .build(),
-            ),
-            ExecutionProvider::DirectMl => {
-                // Pin DirectML to the discrete adapter on hybrid iGPU+dGPU
-                // boxes. DirectML's `device_id` is the DXGI adapter index —
-                // the same enumeration `probe_gpu_vendor` walks — so the
-                // highest-VRAM adapter we found is the one we select. Without
-                // this DirectML defaults to adapter 0, which is often the iGPU.
-                // (CUDA/TensorRT use the CUDA device ordinal, not the DXGI
-                // index, and the iGPU isn't CUDA-visible, so they stay default.)
-                let mut dml = DirectMLExecutionProvider::default();
-                if let Some(idx) = adapter_index {
-                    dml = dml.with_device_id(idx as i32);
-                }
-                out.push(dml.build());
-            }
-            ExecutionProvider::Qnn => {
-                // Snapdragon: bind the Hexagon NPU (HTP) backend explicitly.
-                // `QnnHtp.dll` ships in the QNN Performance Pack and is on the
-                // process DLL search path (`register_dll_dirs_under`). If it's
-                // absent the EP fails to load and we fall through to DirectML
-                // on the Adreno GPU.
-                out.push(
-                    QNNExecutionProvider::default()
-                        .with_backend_path("QnnHtp.dll")
-                        .build(),
-                );
-            }
-            ExecutionProvider::Cpu => { /* CPU is the implicit fallback */ }
-        }
-    }
-    out
-}
-
 /// The execution provider this process will actually bind, cached. Single
 /// source of truth for per-EP decisions: model-variant selection
 /// (`models::variants`) and session tuning (`configure_session_builder`).
@@ -408,91 +352,41 @@ pub fn armed_provider() -> ExecutionProvider {
     ExecutionProvider::Cpu
 }
 
-/// Apply execution-provider-specific session tuning that would otherwise be
-/// copy-pasted into every model wrapper. Call right after `Session::builder()`
-/// and before `with_execution_providers` / `commit_from_file`; it replaces the
-/// bare `.with_intra_threads(1)` the wrappers used to hardcode.
-///
-/// - **Graph optimization**: Level3 (all) everywhere except QNN, where the
-///   Hexagon (HTP) backend's own partitioner wants Basic (Level1) — ORT's
-///   aggressive op fusion otherwise emits nodes QNN can't consume, silently
-///   forcing a CPU fallback. (Level3 is ORT's default; we set it explicitly
-///   so the intent is on the page.)
-/// - **Intra-op threads**: on the CPU EP, use all performance cores so
-///   CPU-only boxes get multi-threaded inference — the wrappers previously
-///   pinned 1, leaving CPU users single-threaded and badly underutilized. On
-///   GPU/NPU EPs keep 1: the accelerator does the parallelism and extra host
-///   threads only contend with it.
-pub fn configure_session_builder(
-    builder: ort::session::builder::SessionBuilder,
-) -> ort::Result<ort::session::builder::SessionBuilder> {
-    use ort::logging::LogLevel;
-    use ort::session::builder::GraphOptimizationLevel;
-    // Use the EP that will ACTUALLY bind — the first in the override-aware
-    // priority chain — not active_provider() (which is derived from pick_provider
-    // and ignores gpuExecutionProviderOverride, see armed_provider's doc). Else a
-    // forced "cpu" override (now a CPU-exclusive chain, the GPU-TDR recovery path)
-    // would be tuned with the GPU default of 1 intra-op thread → single-threaded
-    // CPU inference on a multi-core box. priority_chain always ends with Cpu, so
-    // next() is always Some.
-    let ep = bind_chain(RuntimeProbe::shared())
-        .into_iter()
-        .next()
-        .unwrap_or(ExecutionProvider::Cpu);
-    let opt = if ep == ExecutionProvider::Qnn {
-        GraphOptimizationLevel::Level1
-    } else {
-        GraphOptimizationLevel::Level3
-    };
-    let intra: usize = if ep == ExecutionProvider::Cpu {
-        crate::platform::cpu_topology().p_cores.max(1) as usize
-    } else {
-        1
-    };
-    builder
-        .with_log_level(LogLevel::Error)?
-        .with_optimization_level(opt)?
-        .with_intra_threads(intra)
-}
-
-/// Build -> configure -> register-EPs -> commit an ORT session from `onnx_path`
-/// over this process's EP priority chain, returning the session and its first
-/// input tensor name. Folds the identical per-wrapper session-bind boilerplate
-/// (RAM++, SFace, MobileCLIP, CLIP-text, YuNet, SCRFD) into one place; `label`
-/// flows into the `.context()` chain and the EP-chain log line. BGE binds the
-/// CPU EP with a thread override + multi-input binding, so it keeps its own path.
+/// Load `onnx_path` for the model wrapper `label`: on ONNX Runtime when this is
+/// an `ort-accel` build whose bind chain starts with an accelerator, on tract
+/// (CPU) otherwise. `specs` is the model's input contract; tract compiles
+/// against it. Returns the session and the ONNX's first input name.
 pub fn commit_chain_session(
     label: &str,
     onnx_path: &Path,
-) -> anyhow::Result<(ort::session::Session, String)> {
-    use anyhow::Context;
+    specs: &[InputSpec],
+) -> anyhow::Result<(InferenceSession, String)> {
     ensure_gpu_inference_alive()?;
-    let probe = RuntimeProbe::shared();
-    let chain = bind_chain(probe);
-    let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-    crate::ort_runtime::commit_environment().context("ORT environment")?;
-    let builder = ort::session::Session::builder().context("ORT session builder")?;
-    let mut builder =
-        configure_session_builder(builder).with_context(|| format!("configure session ({label})"))?;
-    let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-    if !providers.is_empty() {
-        builder = builder
-            .with_execution_providers(providers)
-            .with_context(|| format!("register execution providers ({label})"))
-            .map_err(classify_inference_error)?;
+    #[cfg(feature = "ort-accel")]
+    if let Some(session) = super::inference::ort_backend::chain_session(label, onnx_path)? {
+        return finish(label, InferenceSession::from_ort(session));
     }
-    tracing::info!(model = label, chain = ?chain_labels, "EP priority chain registered");
-    let session = builder
-        .commit_from_file(onnx_path)
-        .with_context(|| format!("ORT session commit ({label})"))
-        .map_err(classify_inference_error)?;
+    finish(label, InferenceSession::load_cpu(label, onnx_path, specs)?)
+}
+
+fn finish(label: &str, session: InferenceSession) -> anyhow::Result<(InferenceSession, String)> {
     let input_name = session
-        .inputs
+        .input_names()
         .first()
         .ok_or_else(|| anyhow::anyhow!("{label} ONNX has no inputs"))?
-        .name
         .clone();
     Ok((session, input_name))
+}
+
+/// The inference backend this process runs models on, for logs and status:
+/// `"tract-cpu"`, or the accelerator's name when the `ort-accel` bind chain
+/// starts with one.
+pub fn inference_backend() -> &'static str {
+    #[cfg(feature = "ort-accel")]
+    if let Some(accelerator) = bind_chain(RuntimeProbe::shared()).first().filter(|ep| **ep != ExecutionProvider::Cpu) {
+        return accelerator.as_str();
+    }
+    super::inference::TRACT_CPU
 }
 
 /// User-supplied EP override stored in the C# app's `app-settings.json`
@@ -530,6 +424,9 @@ fn pick_provider(
     ov_pack: bool,
     qnn_pack: bool,
 ) -> ExecutionProvider {
+    if !cfg!(feature = "ort-accel") {
+        return ExecutionProvider::Cpu;
+    }
     match vendor {
         GpuVendor::Nvidia => {
             if cuda_pack {
@@ -600,11 +497,19 @@ fn cuda_provider_present() -> bool {
 /// zip) is treated as absent. An unreadable runtime is refused too.
 pub fn pack_runtime_allowed(pack_dir: &Path) -> bool {
     match crate::platform::find_file_under(pack_dir, "onnxruntime.dll", 4) {
-        Some(runtime) => {
-            crate::ort_runtime::joins_windows_telemetry(&runtime).is_ok_and(|telemetry| !telemetry)
-        }
+        Some(runtime) => runtime_reports_telemetry(&runtime).is_ok_and(|telemetry| !telemetry),
         None => true,
     }
+}
+
+#[cfg(feature = "ort-accel")]
+fn runtime_reports_telemetry(runtime: &Path) -> std::io::Result<bool> {
+    crate::ort_runtime::joins_windows_telemetry(runtime)
+}
+
+#[cfg(not(feature = "ort-accel"))]
+fn runtime_reports_telemetry(_runtime: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 fn tensorrt_provider_present() -> bool {
@@ -1050,6 +955,7 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "ort-accel")]
     #[test]
     fn pack_with_a_telemetry_runtime_is_refused() {
         let pack = std::env::temp_dir().join(format!("fileid-pack-etw-{}", std::process::id()));

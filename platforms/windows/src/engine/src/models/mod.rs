@@ -33,6 +33,7 @@ pub mod ep_guard;
 #[cfg(test)]
 mod golden;
 pub mod idle;
+pub mod inference;
 pub mod mobileclip;
 pub mod ram_plus;
 pub mod ram_plus_batch;

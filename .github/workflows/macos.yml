@@ -97,7 +97,7 @@ jobs:
           set -euo pipefail
           swift build -c release --product FileIDAppleKit
           KIT_DIR="$PWD/.build/release"
-          (cd ../windows/src/engine && LIBRARY_PATH="$KIT_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo build --locked --jobs 4 --features test-trash-root --target-dir "$RUNNER_TEMP/fileid-conformance-engine-apple")
+          (cd ../windows/src/engine && LIBRARY_PATH="$KIT_DIR" cargo build --locked --jobs 4 --features test-trash-root --target-dir "$RUNNER_TEMP/fileid-conformance-engine-apple")
           ENGINE="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine"
           cp "$KIT_DIR/libFileIDAppleKit.dylib" "$(dirname "$ENGINE")/"
           install_name_tool -add_rpath @executable_path "$ENGINE"
@@ -181,8 +181,7 @@ jobs:
 
       # The shipped layout: the app plus the one engine, assembled the way
       # release.sh and testflight.sh do (App Store variant, unsigned), with the
-      # release Rust engine and no ONNX Runtime (runners do not have the pinned
-      # dylib; its absence only stops the ONNX models, not startup).
+      # release Rust engine; its models run on tract, so no ONNX Runtime ships.
       - name: Assemble the app bundle (fileidd only)
         timeout-minutes: 45
         run: |

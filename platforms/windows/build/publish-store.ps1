@@ -44,7 +44,7 @@ if (-not $sdkBin) { throw 'MakeAppx.exe from the Windows SDK is required.' }
 if (-not $SkipEngineBuild) {
     Push-Location $engineRoot
     try {
-        Invoke-Checked 'cargo' @('build', '--locked', '--release', '--target', 'x86_64-pc-windows-msvc')
+        Invoke-Checked 'cargo' @('build', '--locked', '--release', '--features', 'ort-accel', '--target', 'x86_64-pc-windows-msvc')
     } finally { Pop-Location }
 }
 if ([string]::IsNullOrWhiteSpace($EnginePath)) {

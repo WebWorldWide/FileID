@@ -19,15 +19,8 @@
 # FileIDAppleKit build. FILEID_APP_STORE=1
 # (testflight.sh) marks the sandboxed variant; the bundle layout is the same.
 #
-# ONNX Runtime: FILEID_ORT_DYLIB (default .build/cache/libonnxruntime.dylib) is
-# bundled as Contents/Frameworks/libonnxruntime.dylib. It must be the official
-# ONNX Runtime 1.22.0 osx-arm64 dylib (SHA-256 pinned below; 1.29+ carry
-# Microsoft's telemetry uploader) unless FILEID_ORT_DYLIB_SHA256 names another
-# vetted build, and it must pass check_binary_privacy.py --ort-runtime. Install
-# it from the official archive with shared/scripts/install_onnxruntime_macos.sh
-# (FILEID_ORT_ARCHIVE=<onnxruntime-osx-arm64-1.22.0.tgz>
-# FILEID_RUNTIME_DIR=.build/cache). FILEID_REQUIRE_ORT=1 (release.sh) refuses to
-# assemble without it.
+# The engine runs every model on tract, linked into fileidd: no ONNX Runtime
+# library is bundled, and the script refuses a bundle that contains one.
 
 set -euo pipefail
 
@@ -46,8 +39,6 @@ esac
 BUILD_DIR="${FILEID_BUILD_DIR:-$PROJECT_DIR/.build/$BUILD_CONFIGURATION}"
 CONTENTS="$APP_BUNDLE/Contents"
 METALLIB_CACHE="${FILEID_METALLIB_CACHE:-$PROJECT_DIR/.build/cache/mlx.metallib}"
-PINNED_ORT_DYLIB_SHA256="2b885992d3d6fa4130d39ec84a80d7504ff52750027c547bb22c86165f19406a"
-ORT_DYLIB="${FILEID_ORT_DYLIB:-$PROJECT_DIR/.build/cache/libonnxruntime.dylib}"
 [ -x "$BUILD_DIR/FileID" ] || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 
 # Run-path entries that point outside the bundle (the Xcode toolchain, a Metal
@@ -115,7 +106,7 @@ if [ -z "$RUST_ENGINE" ]; then
     CARGO_PROFILE_ARGS=()
     [ "$BUILD_CONFIGURATION" = "release" ] && CARGO_PROFILE_ARGS=(--release)
     (cd "$PROJECT_DIR/../windows/src/engine" && \
-        LIBRARY_PATH="$BUILD_DIR" CARGO_TARGET_DIR="$RUST_TARGET_DIR" LIBONNXRUNTIME_NO_PKG_CONFIG=1 \
+        LIBRARY_PATH="$BUILD_DIR" CARGO_TARGET_DIR="$RUST_TARGET_DIR" \
         cargo build --locked "${CARGO_PROFILE_ARGS[@]}" --features apple-adapters)
     RUST_ENGINE="$RUST_TARGET_DIR/$BUILD_CONFIGURATION/FileIDEngine"
 fi
@@ -126,11 +117,6 @@ otool -L "$RUST_ENGINE" | grep -F '@rpath/libFileIDAppleKit.dylib' >/dev/null ||
 # trashed files into a scratch folder instead of the Trash; never ship it.
 if grep -aqF 'FILEID_TEST_TRASH_ROOT' "$RUST_ENGINE"; then
     echo "❌ $RUST_ENGINE is a test build (test-trash-root feature)"; exit 1
-fi
-# ort-sys links a pkg-config ONNX Runtime (e.g. Homebrew's) when it finds
-# one; the engine must load the bundled runtime at run time instead.
-if otool -L "$RUST_ENGINE" | tail -n +2 | grep -F 'libonnxruntime' >/dev/null; then
-    echo "❌ $RUST_ENGINE links an ONNX Runtime at build time; rebuild with LIBONNXRUNTIME_NO_PKG_CONFIG=1"; exit 1
 fi
 cp "$RUST_ENGINE" "$CONTENTS/MacOS/fileidd"
 chmod +x "$CONTENTS/MacOS/fileidd"
@@ -150,33 +136,9 @@ fi
 if ! otool -l "$CONTENTS/MacOS/fileidd" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
     install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/fileidd"
 fi
-if [ -f "$ORT_DYLIB" ]; then
-    EXPECTED_ORT_SHA256="${FILEID_ORT_DYLIB_SHA256:-$PINNED_ORT_DYLIB_SHA256}"
-    GOT_ORT_SHA256="$(shasum -a 256 "$ORT_DYLIB" | awk '{print $1}')"
-    if [ "$GOT_ORT_SHA256" != "$EXPECTED_ORT_SHA256" ]; then
-        echo "❌ $ORT_DYLIB is not the pinned ONNX Runtime (SHA-256 $GOT_ORT_SHA256, expected $EXPECTED_ORT_SHA256)"; exit 1
-    fi
-    # Bundle only a self-contained runtime (system libraries only), never
-    # a Homebrew build that links other Homebrew libraries.
-    FOREIGN="$(otool -L "$ORT_DYLIB" | tail -n +2 | awk '{print $1}' \
-        | grep -vE '^(/usr/lib/|/System/Library/|@rpath/libonnxruntime)' || true)"
-    if [ -n "$FOREIGN" ]; then
-        echo "❌ $ORT_DYLIB links non-system libraries:"; echo "$FOREIGN"; exit 1
-    fi
-    # Builds with Microsoft's telemetry uploader (official 1.29+, Homebrew's
-    # 1.31.1) queue events under ~/Library/Application Support/Microsoft
-    # even with telemetry turned off; the check loads it in a throwaway home.
-    python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" --ort-runtime "$ORT_DYLIB" "$ORT_DYLIB" || {
-        echo "❌ $ORT_DYLIB failed the ONNX Runtime privacy check; bundle a build without the uploader"; exit 1; }
-    cp "$ORT_DYLIB" "$CONTENTS/Frameworks/libonnxruntime.dylib"
-elif [ "${FILEID_REQUIRE_ORT:-0}" = "1" ]; then
-    echo "❌ $ORT_DYLIB missing — install the pinned ONNX Runtime 1.22.0 (see the header of this script)"; exit 1
-else
-    echo "⚠️  $ORT_DYLIB missing — the Rust engine will run without ONNX models (SFace, CLIP text, BGE)."
-fi
 # Ad-hoc signatures keep dev bundles launchable after install_name_tool;
 # release.sh re-signs everything with the Developer ID.
-for code in "$CONTENTS/MacOS/mlx.metallib" "$CONTENTS/Frameworks/mlx.metallib" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/Frameworks/libonnxruntime.dylib" "$CONTENTS/MacOS/fileidd" "$CONTENTS/MacOS/FileID"; do
+for code in "$CONTENTS/MacOS/mlx.metallib" "$CONTENTS/Frameworks/mlx.metallib" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/MacOS/fileidd" "$CONTENTS/MacOS/FileID"; do
     [ -f "$code" ] && codesign --force --sign - "$code" >/dev/null
 done
 echo "🦀 Bundled the shared Rust engine as Contents/MacOS/fileidd"
@@ -187,6 +149,14 @@ while IFS= read -r macho; do
         echo "❌ $macho keeps run-path entries outside the bundle: $leftover"; exit 1
     fi
 done < <(bundle_macho_files)
+
+# No ONNX Runtime ships: not as a bundled library, and not linked into the engine.
+if [ -n "$(find "$APP_BUNDLE" -iname '*onnxruntime*' 2>/dev/null)" ]; then
+    echo "❌ the bundle contains an ONNX Runtime library; the engine runs its models on tract"; exit 1
+fi
+if otool -L "$CONTENTS/MacOS/fileidd" | tail -n +2 | grep -iF 'onnxruntime' >/dev/null; then
+    echo "❌ fileidd links an ONNX Runtime library"; exit 1
+fi
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -6,18 +6,11 @@
   #   nix run    ./packaging/nix#fileid
   #
   # Builds the GTK4 workspace (platforms/linux) plus the engine binary it
-  # spawns, with gtk4 + libadwaita + onnxruntime from nixpkgs and wrapGAppsHook4
+  # spawns, with gtk4 + libadwaita from nixpkgs and wrapGAppsHook4
   # for the GTK/GdkPixbuf/GSettings runtime environment.
   #
-  # ============================ ONNX RUNTIME — RISKIEST PART ==================
-  # Portable Linux builds statically link `download-binaries`, but the Nix
-  # sandbox has no network. Point ort-sys at nixpkgs' shared ONNX Runtime and
-  # prefer dynamic linker selection instead.
-  # We therefore:
-  #   * put nixpkgs `onnxruntime` in buildInputs,
-  #   * ORT_LIB_LOCATION suppresses the `download-binaries` fetch, and
-  #   * ORT_PREFER_DYNAMIC_LINK selects nixpkgs' libonnxruntime.so.
-  # ===========================================================================
+  # The engine runs its models on tract, built from the vendored crates: nothing
+  # to point at or download for inference.
 
   description = "FileID — on-device AI file organizer (GTK4 + libadwaita)";
 
@@ -60,17 +53,12 @@
             graphene
             cairo
             pango
-            onnxruntime
             sqlite
           ];
 
           # Build the engine binary too (the app spawns it over stdio). It is a
           # path-dependency package, selected by name from the workspace graph.
           cargoBuildFlags = [ "-p" "fileid-linux" "-p" "fileid-engine" "--bin" "fileid-linux" "--bin" "FileIDEngine" ];
-
-          # See the ONNX header above.
-          ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-          ORT_PREFER_DYNAMIC_LINK = "1";
 
           # GTK interaction tests need a display. Exercise the headless Linux
           # app suite here; the engine's standalone dev-dependency graph is

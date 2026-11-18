@@ -13,13 +13,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
-
-use super::runtime::{
-    classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    ExecutionProvider,
-};
+use super::inference::{Dim, Dtype, InferenceSession, Input, InputSpec};
+use super::runtime::ExecutionProvider;
 use super::wordpiece_tokenizer::WordPieceTokenizer;
 
 const HIDDEN: usize = 384;
@@ -27,7 +22,7 @@ const HIDDEN: usize = 384;
 const MAX_SEQ: usize = 256;
 
 pub struct BgeText {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's input tensor names, read once at load. BGE binds up to three
     /// inputs (ids/mask/token_type) by name; caching the list avoids rebuilding
     /// a `Vec<String>` from `session.inputs` on every `embed`.
@@ -44,37 +39,19 @@ impl BgeText {
         let tokenizer = WordPieceTokenizer::from_vocab_file(vocab_txt.as_ref(), true)
             .context("loading BGE vocab.txt")?;
 
-        // Pin BGE to the CPU EP. It is a tiny 384-d text encoder over short
-        // document strings, off the GPU-bound image hot path, so on a small-VRAM
-        // card (e.g. 4 GB DirectML) it must not consume VRAM or contend on the
-        // DirectML command queue at scan start. CPU is ORT's implicit fallback,
-        // so a CPU-only chain registers no GPU dispatch. Semantic doc-search is
-        // unchanged (same weights, same output) — only the EP differs.
-        let chain = vec![ExecutionProvider::Cpu];
-        crate::ort_runtime::commit_environment().context("ORT environment")?;
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder =
-            configure_session_builder(builder).context("configure session (BGE)")?;
-        // configure_session_builder tunes intra-op threads for the system's
-        // DEFAULT EP — 1 on a GPU box, where the accelerator does the parallelism.
-        // BGE is pinned to the CPU EP below, so on a GPU box it would otherwise run
-        // SINGLE-THREADED on the CPU. Force the CPU performance-core count here so
-        // this CPU-only encoder is multi-threaded regardless of the system EP.
-        // Output is identical (same weights/graph); only throughput changes.
-        builder = builder
-            .with_intra_threads(crate::platform::cpu_topology().p_cores.max(1) as usize)
-            .context("set BGE intra-op threads")?;
-        let providers = execution_providers_for_chain(&chain, None);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (BGE)")?;
-        }
-        tracing::info!(model = "BGE-small-en-v1.5", "pinned to CPU EP");
-        let session = builder
-            .commit_from_file(weights)
-            .context("ORT session commit (BGE)")?;
-        let input_names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();
+        // BGE is a tiny 384-d text encoder over short document strings, off the
+        // GPU-bound image hot path, so it always runs on the CPU: on a small-VRAM
+        // card it must not consume VRAM or contend on the accelerator queue at
+        // scan start. Semantic doc-search is unchanged (same weights, same
+        // output) — only where it runs differs.
+        let sequence = [Dim::Fixed(1), Dim::Symbol("S")];
+        let session = InferenceSession::load_cpu(
+            "BGE",
+            weights,
+            &["input_ids", "attention_mask", "token_type_ids"].map(|name| InputSpec::named(name, Dtype::I64, &sequence)),
+        )?;
+        tracing::info!(model = "BGE-small-en-v1.5", backend = session.backend(), "loaded");
+        let input_names: Vec<String> = session.input_names().to_vec();
 
         let mut model = Self { session, input_names, tokenizer };
         let _ = model.embed("warmup")?;
@@ -96,46 +73,38 @@ impl BgeText {
             mask[[0, i]] = enc.attention_mask[i];
             type_ids[[0, i]] = enc.type_ids[i];
         }
-        let ids_tensor = Tensor::from_array(ids).context("BGE input_ids tensor")?;
-        let mask_tensor = Tensor::from_array(mask).context("BGE attention_mask tensor")?;
-        let type_tensor = Tensor::from_array(type_ids).context("BGE token_type_ids tensor")?;
-
         // Bind by name so a session missing `token_type_ids` (some exports
         // do) still runs with just ids + mask. Names are cached at load.
-        let mut ids_opt = Some(SessionInputValue::from(ids_tensor));
-        let mut mask_opt = Some(SessionInputValue::from(mask_tensor));
-        let mut type_opt = Some(SessionInputValue::from(type_tensor));
-        let inputs: Vec<(String, SessionInputValue)> = self
+        let mut ids_opt = Some(Input::from(ids));
+        let mut mask_opt = Some(Input::from(mask));
+        let mut type_opt = Some(Input::from(type_ids));
+        let inputs: Vec<(&str, Input)> = self
             .input_names
             .iter()
             .filter_map(|name| match name.as_str() {
-                "input_ids" => ids_opt.take().map(|v| (name.clone(), v)),
-                "attention_mask" => mask_opt.take().map(|v| (name.clone(), v)),
-                "token_type_ids" => type_opt.take().map(|v| (name.clone(), v)),
+                "input_ids" => ids_opt.take().map(|v| (name.as_str(), v)),
+                "attention_mask" => mask_opt.take().map(|v| (name.as_str(), v)),
+                "token_type_ids" => type_opt.take().map(|v| (name.as_str(), v)),
                 _ => None,
             })
             .collect();
 
-        let outputs: SessionOutputs = self
+        let output = self
             .session
             .run(inputs)
-            .context("BGE session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .context("BGE session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("BGE produced no outputs"))?;
-        let (shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract BGE last_hidden_state as f32")?;
-        if shape.len() != 3 || shape[2] as usize != HIDDEN {
+        let (shape, data) = (&output.shape, &output.data);
+        if shape.len() != 3 || shape[2] != HIDDEN {
             anyhow::bail!("BGE output shape {:?} != (1, seq, {HIDDEN})", shape);
         }
         // The reported sequence length must match the tokens we fed (a malformed
         // or wrong-variant ONNX re-export can disagree). Validate before pooling
         // so a hostile/buggy model is a clean per-file error, not an index-OOB
         // panic that kills the scan worker.
-        let seq = shape[1] as usize;
+        let seq = shape[1];
         if shape[0] != 1 || seq != enc.attention_mask.len() || data.len() < seq * HIDDEN {
             anyhow::bail!(
                 "BGE output shape {:?} inconsistent with {} input tokens (HIDDEN={HIDDEN})",

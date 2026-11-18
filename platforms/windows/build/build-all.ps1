@@ -293,15 +293,15 @@ if (-not $SkipEngine) {
         # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
-            & cargo build --profile release-fast --target $($RustTarget) @jobsArg
+            & cargo build --profile release-fast --features ort-accel --target $($RustTarget) @jobsArg
         } elseif ($Release) {
-            & cargo build --release --target $($RustTarget) @jobsArg
+            & cargo build --release --features ort-accel --target $($RustTarget) @jobsArg
         } else {
-            & cargo build --target $($RustTarget) @jobsArg
+            & cargo build --features ort-accel --target $($RustTarget) @jobsArg
         }
         if ($RunTests) {
             Write-Host "Running cargo tests..." -ForegroundColor Cyan
-            & cargo test --target $($RustTarget) @jobsArg
+            & cargo test --features ort-accel --target $($RustTarget) @jobsArg
         }
     } finally {
         Pop-Location

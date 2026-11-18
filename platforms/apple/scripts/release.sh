@@ -112,9 +112,9 @@ else
 fi
 
 # The bundle's only engine is the shared Rust engine (Contents/MacOS/fileidd),
-# built by assemble_app.sh with the pinned ONNX Runtime. No Swift engine ships.
-FILEID_REQUIRE_ORT=1 \
-    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
+# built by assemble_app.sh (its models run on tract, so no ONNX Runtime ships).
+# No Swift engine ships.
+bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
 
 # ── Strip + scrub (must precede signing — both invalidate the cdhash) ────────
 echo "🧹 Stripping debug symbols…"
@@ -196,14 +196,13 @@ if [ -e "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine" ]; then
     exit 1
 fi
 PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
-ORT_CHECK=()
-if [ -f "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
-    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
-    ORT_CHECK=(--ort-runtime "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+if [ -e "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
+    echo "❌ An ONNX Runtime library is in the bundle; the engine runs its models on tract."
+    exit 1
 fi
 
 echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" ${ORT_CHECK[@]+"${ORT_CHECK[@]}"} "${PRIVACY_BINARIES[@]}"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "${PRIVACY_BINARIES[@]}"
 
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then

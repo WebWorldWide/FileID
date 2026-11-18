@@ -122,7 +122,7 @@ jobs:
         # `allow` with documented justifications. Real correctness lints
         # remain `deny`. Any new style-only noise should land an allow in
         # Cargo.toml with a comment, not a CI exception here.
-        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} --features ort-accel --all-targets -- -D warnings
 
       - name: Model integrity — every registry artifact pins a SHA256 (x64 only)
         if: matrix.label == 'x64'
@@ -268,14 +268,14 @@ jobs:
           Write-Host "All source URLs are on the allowlist. ✅"
 
       - name: Build (release)
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features ort-accel --target ${{ matrix.target }}
 
       - name: Test
         if: matrix.cross == false
         # --all-targets so the pure-Rust unit tests inside lib modules
         # (e.g. `pipeline::identity_clustering`) run, not just integration
         # tests at the workspace root.
-        run: cargo test --target ${{ matrix.target }} --all-targets
+        run: cargo test --target ${{ matrix.target }} --features ort-accel --all-targets
 
       - name: Verify binary exists
         shell: pwsh

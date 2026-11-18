@@ -132,23 +132,19 @@ quick-xml = "0.41"
 # transcription are documented follow-ups (need offline ONNX conversion).
 symphonia = { version = "0.5", default-features = false, features = ["all-codecs", "all-formats"] }
 
-# ONNX Runtime bindings + ndarray for tensor wrangling. Both pinned to
-# EXACT versions (no caret) because the 2.0 RC line had ABI churn between
-# rc.10 / rc.11 / rc.12. Exact pins prevent silent breakage on `cargo update`.
-#
-# Windows and macOS use `load-dynamic` and never enable `download-binaries`:
-# the runtime DLL/dylib is the pinned FileID build (`fetch-runtime-deps.ps1`,
-# the macOS bundle), found through `ORT_DYLIB_PATH`, and `copy-dylibs` is off,
-# so a pyke download (cdn.pyke.io) would only fill a cache nothing reads.
-# Linux statically links pyke's `.a`, so it keeps `download-binaries`.
-# CUDA/OpenVINO/QNN feature gates stay enabled so the session-creation API
-# compiles; their EP DLLs are delivered separately via Performance Packs.
-# `ort` moved to per-target deps so non-Windows builds don't pull `directml`.
-ort-sys = "=2.0.0-rc.10"
+# Inference: tract (pure Rust, MIT/Apache-2.0) runs every model on the CPU on
+# every platform. Pinned EXACT: minor versions have broken the API (0.22 -> 0.23).
+# shared/docs/DECISIONS.md (2026-11-18) has the rationale and the rejected
+# alternatives.
+tract-onnx = "=0.23.10"
 ndarray = "0.16"
 
-[target.'cfg(windows)'.dependencies]
-ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+# Optional accelerator: ONNX Runtime with the DirectML/CUDA/OpenVINO/QNN
+# execution providers, for Windows GPU/NPU users (tract has none of those). Off
+# by default; the Windows release builds turn it on with `--features ort-accel`.
+# Exact pins: the 2.0 RC line had ABI churn between rc.10 / rc.11 / rc.12. It
+# loads `onnxruntime.dll` dynamically (`ORT_DYLIB_PATH`) and never downloads one.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = [
     "load-dynamic",
     "ndarray",
     "directml",
@@ -160,6 +156,12 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     # falls back silently and the engine log shows nothing.
     "tracing",
 ] }
+
+# libc is for getppid() / parent-death + inode file_ref in platform.rs.
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
 # Authenticode, GlobalMemoryStatusEx.
@@ -200,54 +202,11 @@ windows = { version = "0.62", features = [
     "Foundation_Collections",
 ] }
 
-# Linux: STATIC-link the CPU ONNX Runtime.
-#
-# pyke's `download-binaries` ships ONLY a static `libonnxruntime.a` for Linux
-# x64 — verified empirically: neither the CPU set nor the `cu12` set contains a
-# dynamic `libonnxruntime.so`. So a `load-dynamic` build (which dlopens
-# `libonnxruntime.so` by name at runtime) has NOTHING to load on Linux and every
-# ML session fails — full-ML was silently broken here. Dropping `load-dynamic`
-# makes ort static-link the `.a` into the engine binary: self-contained,
-# "download-and-run", and ORT is guaranteed present.
-#
-# `cuda`/`openvino` are intentionally omitted on Linux: (1) enabling `cuda` makes
-# download-binaries select the `cu12` set whose `libonnxruntime_providers_cuda.so`
-# needs CUDA 12 + cuDNN 9 (mismatched on CUDA-13 hosts and absent on most), and
-# (2) there is no DirectML GPU fallback on Linux, so a GPU EP that fails to bind
-# would silently drop to single-threaded CPU. Linux therefore runs the CPU EP
-# (multi-threaded). Linux GPU acceleration needs a CUDA-version-matched dynamic
-# ORT build and is tracked as future work — see shared/docs/DECISIONS.md.
-#
-# libc is for getppid() / parent-death + inode file_ref in platform.rs.
-[target.'cfg(target_os = "linux")'.dependencies]
-# `std` is required for ort's `impl std::error::Error for ort::Error` (so the
-# engine's `.context()` on `ort::Result` works). The old config got it
-# transitively from `load-dynamic` (= ["std", ...]); now that we drop
-# load-dynamic for static linking, request `std` explicitly.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = [
-    "std",
-    "download-binaries",
-    "ndarray",
-] }
-libc = "0.2"
-
-# macOS / other Unix: `load-dynamic` + the macOS runtime-install flow
-# (`src/ort_runtime.rs`, `fileid runtime install`) provisions the `.dylib` at
-# runtime, since pyke ships only a static `.a` for arm64 macOS too; the Mac app
-# bundles the official MIT `libonnxruntime.dylib` in Contents/Frameworks.
-# `coreml` exposes the CoreML execution provider (owner decision 2026-11-10;
-# no new crate). cuda/openvino are inert on macOS.
-[target.'cfg(all(not(windows), not(target_os = "linux")))'.dependencies]
-ort = { version = "=2.0.0-rc.10", default-features = false, features = [
-    "load-dynamic",
-    "ndarray",
-    "cuda",
-    "openvino",
-    "coreml",
-] }
-libc = "0.2"
-
 [features]
+# ONNX Runtime as the inference backend when it can use a GPU/NPU execution
+# provider (Windows). Needs `onnxruntime.dll` beside the engine or in
+# `ORT_DYLIB_PATH`; without a usable accelerator the engine still runs on tract.
+ort-accel = ["dep:ort"]
 # `pdf-analyze` is on by default so Deep Analyze handles PDFs out of the
 # box (pdfium-render bundles its own pre-built libpdfium for Windows x64
 # / arm64, no system dependency). The non-feature stub in

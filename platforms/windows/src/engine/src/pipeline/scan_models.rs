@@ -170,7 +170,6 @@ impl ModelSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackKey {
     worker_count: usize,
-    runtime_available: bool,
     provider: String,
     apple_scan: bool,
     tuning: Vec<Option<String>>,
@@ -178,7 +177,7 @@ pub struct StackKey {
 }
 
 impl StackKey {
-    pub fn current(worker_count: usize, runtime_available: bool) -> Self {
+    pub fn current(worker_count: usize) -> Self {
         let paths = [
             crate::models::sface::default_weights_path(),
             crate::models::yunet::default_weights_path(),
@@ -190,14 +189,13 @@ impl StackKey {
         ];
         Self::of(
             worker_count,
-            runtime_available,
             crate::models::runtime::armed_provider().as_str(),
             crate::pipeline::tagging::apple_scan_enabled(),
             paths.into_iter().flatten().collect(),
         )
     }
 
-    fn of(worker_count: usize, runtime_available: bool, provider: &str, apple_scan: bool, paths: Vec<PathBuf>) -> Self {
+    fn of(worker_count: usize, provider: &str, apple_scan: bool, paths: Vec<PathBuf>) -> Self {
         let tuning = ["FILEID_MODEL_POOL_SIZE", "FILEID_CLIP_USE_BATCH", "FILEID_RAMPLUS_BATCH_SIZE"]
             .into_iter()
             .map(|name| std::env::var(name).ok())
@@ -209,7 +207,7 @@ impl StackKey {
                 (path, stat)
             })
             .collect();
-        Self { worker_count, runtime_available, provider: provider.to_string(), apple_scan, tuning, files }
+        Self { worker_count, provider: provider.to_string(), apple_scan, tuning, files }
     }
 }
 
@@ -261,7 +259,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     fn key(dir: &std::path::Path, provider: &str) -> StackKey {
-        StackKey::of(4, true, provider, false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")])
+        StackKey::of(4, provider, false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")])
     }
 
     #[test]
@@ -272,7 +270,7 @@ mod tests {
         let before = key(&dir, "cpu");
         assert_eq!(before, key(&dir, "cpu"));
         assert_ne!(before, key(&dir, "directml"));
-        assert_ne!(before, StackKey::of(2, true, "cpu", false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")]));
+        assert_ne!(before, StackKey::of(2, "cpu", false, vec![dir.join("clip.onnx"), dir.join("faces.onnx")]));
         std::fs::write(dir.join("faces.onnx"), b"installed later").unwrap();
         let installed = key(&dir, "cpu");
         assert_ne!(before, installed);
@@ -372,7 +370,7 @@ mod tests {
             UNLOADED.fetch_add(1, Ordering::AcqRel);
         }
         static SLOT: IdleSlot<(StackKey, Arc<ModelStack>)> = IdleSlot::new("test adapter holds", Duration::from_secs(60));
-        let key = StackKey::of(2, false, "cpu", true, vec![]);
+        let key = StackKey::of(2, "cpu", true, vec![]);
         let mut stack = ModelStack::empty();
         stack.adapter_hold = OWNER.hold(|| true, |loaded| *loaded, unload).1;
         let scan = Arc::new(stack);

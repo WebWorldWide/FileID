@@ -1,43 +1,10 @@
-//! ONNX Runtime dynamic-library resolution for the `load-dynamic` build.
+//! ONNX Runtime environment setup for the `ort-accel` build (Windows GPU/NPU
+//! execution providers).
 //!
-//! `ort` is compiled with `load-dynamic`, so on first use it `dlopen`s the ONNX
-//! Runtime shared library by name — `onnxruntime.dll` (Windows),
-//! `libonnxruntime.so` (Linux), `libonnxruntime.dylib` (macOS) — unless
-//! `ORT_DYLIB_PATH` points at an explicit file. For a bare relative name `ort`
-//! also probes beside the running executable before falling back to the OS
-//! loader search path.
-//!
-//! macOS is the problem case this module exists for. `ort`'s `download-binaries`
-//! feature fetches only a STATIC `libonnxruntime.a` for `aarch64-apple-darwin`
-//! (pyke's "none" tarball contains no `.dylib` — verified), so a `load-dynamic`
-//! build has NO runtime library unless the user provisions one. We locate that
-//! provisioned dylib and pin `ORT_DYLIB_PATH` to it before the first ML session.
-//!
-//! Provisioning options (all MIT-licensed ONNX Runtime, all documented in
-//! `shared/docs/RUNTIME.md`):
-//!   * `fileid runtime install`                       (the CLI subcommand)
-//!   * `shared/scripts/install_onnxruntime_macos.sh`  (plain shell)
-//!   * `brew install onnxruntime`                     (Homebrew prefix)
-//!
-//! Windows keeps its own accelerator-pack `ORT_DYLIB_PATH` pin in `main.rs`, and
-//! Linux relies on the system / `download-binaries` path — both untouched here.
-
-
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
-
-/// The bare shared-library file name `ort` `dlopen`s when `ORT_DYLIB_PATH` is
-/// unset. Also the file name the installers write into [`crate::paths::runtime_dir`].
-#[cfg(target_os = "windows")]
-pub const DYLIB_FILE_NAME: &str = "onnxruntime.dll";
-#[cfg(target_os = "macos")]
-pub const DYLIB_FILE_NAME: &str = "libonnxruntime.dylib";
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-pub const DYLIB_FILE_NAME: &str = "libonnxruntime.so";
-
-/// The one-time install command surfaced to the user when the runtime is
-/// missing. Distinct from the AI-model download (`fileid models download`).
-pub const INSTALL_COMMAND: &str = "fileid runtime install";
+//! `ort` is compiled with `load-dynamic`: on first use it loads
+//! `onnxruntime.dll` by name, or the file `ORT_DYLIB_PATH` points at (the
+//! accelerator-pack pin in `server.rs`). Every other platform, and a Windows
+//! build without `ort-accel`, runs on tract and never loads ONNX Runtime.
 
 /// Read by official ONNX Runtime builds from 1.29 on, whose macOS/Linux
 /// libraries carry Microsoft's 1DS uploader. The uploader starts with the first
@@ -89,153 +56,6 @@ pub fn commit_environment() -> ort::Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// macOS resolution.
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Where `fileid runtime install` writes the dylib:
-/// `<state-root>/runtime/libonnxruntime.dylib`.
-#[cfg(target_os = "macos")]
-pub fn install_path() -> anyhow::Result<PathBuf> {
-    Ok(crate::paths::runtime_dir()?.join(DYLIB_FILE_NAME))
-}
-#[cfg(not(target_os = "macos"))]
-pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
-    Ok(crate::paths::runtime_dir()?.join(DYLIB_FILE_NAME))
-}
-
-/// Ordered macOS search locations for an installed ONNX Runtime dylib (highest
-/// priority first), NOT counting an explicit `ORT_DYLIB_PATH` (resolved before
-/// this list):
-///   0. app-hosted engine only: `Contents/Frameworks` of the app bundle (it
-///      then searches only there and beside the executable);
-///   1. beside the running executable — also what `ort` itself probes for a
-///      bare name, surfaced here so `status`/error text can report it;
-///   2. the engine runtime dir (`fileid runtime install` target);
-///   3. Homebrew on Apple silicon (`/opt/homebrew/lib`);
-///   4. `/usr/local/lib` (Intel-prefix Homebrew / manual installs).
-#[cfg(target_os = "macos")]
-pub fn search_locations() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(5);
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            // The app bundle's copy (`Contents/Frameworks`) comes first for the
-            // engine the Mac app hosts.
-            if crate::paths::APP_HOSTED {
-                out.push(dir.join("../Frameworks").join(DYLIB_FILE_NAME));
-            }
-            out.push(dir.join(DYLIB_FILE_NAME));
-        }
-    // The app loads only code it ships: never a Homebrew or /usr/local runtime
-    // (Homebrew's build carries Microsoft's telemetry client).
-    if crate::paths::APP_HOSTED {
-        return out;
-    }
-    if let Ok(rt) = crate::paths::runtime_dir() {
-        out.push(rt.join(DYLIB_FILE_NAME));
-    }
-    out.push(PathBuf::from("/opt/homebrew/lib").join(DYLIB_FILE_NAME));
-    out.push(PathBuf::from("/usr/local/lib").join(DYLIB_FILE_NAME));
-    out
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn search_locations() -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(exe) = std::env::current_exe() && let Some(dir) = exe.parent() {
-        out.push(dir.join(DYLIB_FILE_NAME));
-    }
-    if let Ok(rt) = crate::paths::runtime_dir() {
-        out.push(rt.join(DYLIB_FILE_NAME));
-    }
-    out
-}
-
-/// Resolve an installed ONNX Runtime dylib, honoring an explicit, non-empty
-/// `ORT_DYLIB_PATH` first, then [`search_locations`]. Returns the first path
-/// that is an existing file.
-///
-/// Note: even when this returns `None`, `ort` may still `dlopen` a dylib placed
-/// on the dyld search path (`/usr/lib`, `DYLD_LIBRARY_PATH`, …) — so callers use
-/// this for a fast, actionable pre-flight, not as a hard proof of absence.
-#[cfg(target_os = "macos")]
-pub fn resolve_dylib() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH")
-        && !p.is_empty() {
-            let p = PathBuf::from(p);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    search_locations().into_iter().find(|p| p.is_file())
-}
-#[cfg(not(target_os = "macos"))]
-pub fn resolve_dylib() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") && !p.is_empty() {
-        let p = std::path::PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    search_locations().into_iter().find(|p| p.is_file())
-}
-
-/// Pin `ORT_DYLIB_PATH` to a resolved dylib so the `load-dynamic` loader finds
-/// it. No-op when `ORT_DYLIB_PATH` already points at an existing file (honor the
-/// user's override) or nothing resolves. A set-but-non-existent `ORT_DYLIB_PATH`
-/// is treated as unset and overwritten with a real search hit — matching
-/// [`resolve_dylib`], so the preflight and the loader agree. Call once, before
-/// the first ORT session. Returns the path pinned, if any.
-#[cfg(target_os = "macos")]
-pub fn pin_dylib_path() -> Option<PathBuf> {
-    // The engine the app hosts ignores an inherited ORT_DYLIB_PATH: it loads
-    // only the runtime it ships (or none).
-    if crate::paths::APP_HOSTED {
-        let bundled = search_locations().into_iter().find(|p| p.is_file());
-        // SAFETY note: single-threaded at this point in startup.
-        match &bundled {
-            Some(path) => unsafe { std::env::set_var("ORT_DYLIB_PATH", path) },
-            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
-        }
-        return bundled;
-    }
-    if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty() && PathBuf::from(&v).is_file())
-    {
-        return None;
-    }
-    let resolved = search_locations().into_iter().find(|p| p.is_file())?;
-    // SAFETY note: single-threaded at this point in startup (set before the
-    // tokio workers touch ORT), mirroring the Windows pin in main.rs.
-    unsafe { std::env::set_var("ORT_DYLIB_PATH", &resolved) };
-    Some(resolved)
-}
-
-/// Is the ONNX Runtime resolvable for this process? On macOS: an explicit
-/// `ORT_DYLIB_PATH` or a hit in [`search_locations`]. On every other platform
-/// the runtime is resolved through that platform's own path (bundled DLLs /
-/// system `.so`), so this is unconditionally `true` — the macOS provisioning
-/// gate must never block a Windows/Linux scan.
-#[cfg(target_os = "macos")]
-pub fn is_available() -> bool {
-    resolve_dylib().is_some()
-}
-#[cfg(not(target_os = "macos"))]
-pub fn is_available() -> bool {
-    true
-}
-
-/// One-line, user-facing message for a missing macOS runtime. Names the one-time
-/// install command and keeps it clearly distinct from the model download.
-#[cfg(target_os = "macos")]
-pub fn missing_runtime_message() -> String {
-    format!(
-        "ONNX Runtime is not installed, so the AI scan can't load its models. \
-         Install it once with `{INSTALL_COMMAND}` (or `brew install onnxruntime`), then scan \
-         again. This is a one-time setup, separate from the AI model download \
-         (`fileid models download`)."
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +74,6 @@ mod tests {
         for later in [
             "tokio::runtime::Builder",
             "logging::init()",
-            "ort_runtime::pin_dylib_path()",
             "ort_runtime::commit_environment",
         ] {
             assert!(
@@ -297,7 +116,7 @@ mod tests {
                 }
             }
         }
-        assert!(session_sites >= 2, "session builder sites moved; update this test");
+        assert!(session_sites >= 1, "session builder sites moved; update this test");
     }
 
     #[test]
@@ -323,107 +142,5 @@ mod tests {
         assert!(!joins_windows_telemetry(&source_build).unwrap());
         assert!(joins_windows_telemetry(&dir.join("missing.dll")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn dylib_file_name_matches_platform() {
-        if cfg!(target_os = "windows") {
-            assert_eq!(DYLIB_FILE_NAME, "onnxruntime.dll");
-        } else if cfg!(target_os = "macos") {
-            assert_eq!(DYLIB_FILE_NAME, "libonnxruntime.dylib");
-        } else {
-            assert_eq!(DYLIB_FILE_NAME, "libonnxruntime.so");
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn runtime_always_available_off_macos() {
-        // The macOS-only provisioning gate must never block Windows/Linux.
-        assert!(is_available());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn search_locations_are_ordered_and_named() {
-        let locs = search_locations();
-        // runtime dir + the two system prefixes are always present; the
-        // beside-exe entry is best-effort (current_exe may fail in a sandbox).
-        assert!(locs.iter().all(|p| p.ends_with(DYLIB_FILE_NAME)));
-        if crate::paths::APP_HOSTED {
-            assert!(locs.first().is_some_and(|p| p.to_string_lossy().contains("../Frameworks/")));
-            assert!(locs.iter().all(|p| !p.starts_with("/opt/homebrew") && !p.starts_with("/usr/local")));
-        } else {
-            assert!(locs.iter().any(|p| p.starts_with("/opt/homebrew/lib")));
-            assert!(locs.iter().any(|p| p.starts_with("/usr/local/lib")));
-        }
-    }
-
-    /// The engine the app hosts never loads an inherited ORT_DYLIB_PATH.
-    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-    #[test]
-    fn app_hosted_engine_ignores_an_inherited_dylib_path() {
-        let dir = std::env::temp_dir().join(format!("fileid-ort-hosted-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let foreign = dir.join(DYLIB_FILE_NAME);
-        std::fs::write(&foreign, b"not-a-real-dylib").unwrap();
-        let prev = std::env::var_os("ORT_DYLIB_PATH");
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &foreign) };
-
-        let pinned = pin_dylib_path();
-        assert_ne!(pinned.as_deref(), Some(foreign.as_path()));
-        assert_eq!(std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from), pinned);
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("ORT_DYLIB_PATH", v) },
-            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
-    #[test]
-    fn explicit_dylib_path_is_honored_first() {
-        // A non-existent ORT_DYLIB_PATH must NOT resolve (we only return real
-        // files), and must suppress the auto-pin (honor the user's intent).
-        let dir = std::env::temp_dir().join(format!("fileid-ort-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join(DYLIB_FILE_NAME);
-        std::fs::write(&fake, b"not-a-real-dylib").unwrap();
-
-        // Saved/restored so the test never leaks process env into siblings.
-        let prev = std::env::var_os("ORT_DYLIB_PATH");
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &fake) };
-        assert_eq!(resolve_dylib().as_deref(), Some(fake.as_path()));
-        assert!(
-            pin_dylib_path().is_none(),
-            "must not re-pin when already set to a real file"
-        );
-
-        // Stale/typo'd ORT_DYLIB_PATH (set but not a file) + a valid search hit:
-        // pin must treat the bogus var as unset and overwrite it with the real
-        // hit (mirroring resolve_dylib's existence check), so the scan preflight
-        // and the ort loader agree on the same dylib. The beside-exe slot is the
-        // highest-priority search location and is writable in the test sandbox.
-        let beside_exe = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(DYLIB_FILE_NAME);
-        std::fs::write(&beside_exe, b"not-a-real-dylib").unwrap();
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", dir.join("typo.dylib")) };
-        assert_eq!(pin_dylib_path().as_deref(), Some(beside_exe.as_path()));
-        assert_eq!(
-            std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from).as_deref(),
-            Some(beside_exe.as_path()),
-            "stale ORT_DYLIB_PATH must be overwritten with the real search hit"
-        );
-        std::fs::remove_file(&beside_exe).ok();
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("ORT_DYLIB_PATH", v) },
-            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
-        }
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

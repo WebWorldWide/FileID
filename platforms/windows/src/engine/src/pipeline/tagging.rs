@@ -890,13 +890,13 @@ impl ModelStack {
     }
 
     /// The scan's models: the Mac adapters' set when the app hosts the engine,
-    /// else whatever is installed (nothing without ONNX Runtime).
-    pub fn load_for_scan(worker_count: usize, runtime_available: bool) -> Self {
+    /// else whatever is installed.
+    pub fn load_for_scan(worker_count: usize) -> Self {
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         if mac::enabled() {
-            return mac::model_stack(worker_count, runtime_available);
+            return mac::model_stack(worker_count);
         }
-        if runtime_available { Self::load_default(worker_count) } else { Self::empty() }
+        Self::load_default(worker_count)
     }
 
     pub fn empty() -> Self {

@@ -14,12 +14,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{Dim, InferenceSession, InputSpec};
+use super::runtime::commit_chain_session;
 
 /// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
 /// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
@@ -38,7 +35,7 @@ const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 const INV_255: f32 = 1.0 / 255.0;
 
 pub struct MobileClipImage {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -52,7 +49,11 @@ impl MobileClipImage {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
         let (session, input_name) = super::clip_space::load_verified(&[(path, "mobileclip_s2", 0)], || {
-            commit_chain_session("MobileCLIP image", path)
+            commit_chain_session(
+                "MobileCLIP image",
+                path,
+                &[InputSpec::f32(&[Dim::Batch, Dim::Fixed(3), Dim::Fixed(224), Dim::Fixed(224)])],
+            )
         })?;
         // Warmup with a zero 224×224 frame so first-call kernel compile
         // happens during load.
@@ -82,28 +83,22 @@ impl MobileClipImage {
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
         fill_clip_chw(&mut chw, 0, rgb, n);
 
-        let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("MobileCLIP session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("MobileCLIP session.run")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("MobileCLIP produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract MobileCLIP output as f32")?;
+        let data = &output.data;
         if data.len() != CLIP_EMBED_DIM {
             anyhow::bail!(
                 "MobileCLIP produced a {}-d embedding, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)",
                 data.len()
             );
         }
-        let mut emb: Vec<f32> = data.to_vec();
+        let mut emb: Vec<f32> = output.data;
         l2_normalize(&mut emb);
         if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
         Ok(emb)
@@ -140,22 +135,16 @@ impl MobileClipImage {
         for (b, rgb) in rgb_images.iter().enumerate() {
             fill_clip_chw(&mut chw, b, rgb, n);
         }
-        let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
+        let output = self
             .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("MobileCLIP session.run (batch)")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
+            .run(vec![(input_name.as_str(), chw.into())])
+            .context("MobileCLIP session.run (batch)")?
+            .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("MobileCLIP produced no outputs"))?;
-        let (shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract MobileCLIP batch output as f32")?;
-        let total: usize = shape.iter().map(|d| *d as usize).product();
+        let (shape, data) = (&output.shape, &output.data);
+        let total: usize = shape.iter().product();
         if total != data.len() {
             anyhow::bail!(
                 "MobileCLIP output shape product {} != data len {}",

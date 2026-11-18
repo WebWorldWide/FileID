@@ -12,11 +12,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
 use super::face_geometry::Detection;
-use super::runtime::{classify_inference_error, commit_chain_session, ensure_gpu_inference_alive};
+use super::inference::{Dim, InferenceSession, InputSpec};
+use super::runtime::commit_chain_session;
 
 const INPUT: usize = 256;
 const POINTS: usize = 478;
@@ -46,7 +45,7 @@ impl Crop {
 }
 
 pub struct FaceMesh {
-    session: Session,
+    session: InferenceSession,
     input_name: String,
 }
 
@@ -54,32 +53,23 @@ impl FaceMesh {
     pub fn load<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        let (session, input_name) = commit_chain_session("FaceMesh", path)?;
+        let (session, input_name) = commit_chain_session("FaceMesh", path, &input_contract())?;
         Self::checked(session, input_name)
     }
 
-    /// ORT's CPU provider with `intra_threads` threads, for callers that keep one
-    /// session per worker (the Mac's take workers): sessions sized for every
-    /// core each would oversubscribe the CPU.
+    /// The CPU session, for callers that keep one per worker (the Mac's take
+    /// workers); sessions of the same file share one compiled model.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
-    pub fn load_cpu<P: AsRef<Path>>(weights: P, intra_threads: usize) -> Result<Self> {
-        use anyhow::Context;
+    pub fn load_cpu<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        crate::ort_runtime::commit_environment().context("ORT environment")?;
-        let session = Session::builder()
-            .context("ORT session builder")?
-            .with_log_level(ort::logging::LogLevel::Error)?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
-            .with_intra_threads(intra_threads.max(1))?
-            .commit_from_file(path)
-            .context("ORT session commit (FaceMesh)")?;
-        let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.name.clone();
+        let session = InferenceSession::load_cpu("FaceMesh", path, &input_contract())?;
+        let input_name = session.input_names().first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.clone();
         Self::checked(session, input_name)
     }
 
-    fn checked(session: Session, input_name: String) -> Result<Self> {
-        let names: Vec<&str> = session.outputs.iter().map(|o| o.name.as_str()).collect();
+    fn checked(session: InferenceSession, input_name: String) -> Result<Self> {
+        let names: Vec<&str> = session.output_names().iter().map(String::as_str).collect();
         anyhow::ensure!(
             names.contains(&LANDMARKS) && names.contains(&PRESENCE),
             "Face mesh ONNX outputs {names:?} don't match the landmark contract"
@@ -116,19 +106,17 @@ impl FaceMesh {
 
     /// One forward pass: the 478 x 3 landmark values and the presence logit.
     fn forward(&mut self, input: Array4<f32>) -> Result<(Vec<f32>, f32)> {
-        let input = Tensor::from_array(input).context("Face mesh input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
-            .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("Face mesh session.run")
-            .map_err(classify_inference_error)?;
-        let (_, presence) = outputs[PRESENCE].try_extract_tensor::<f32>().context("Face mesh presence")?;
-        let (_, landmarks) = outputs[LANDMARKS].try_extract_tensor::<f32>().context("Face mesh landmarks")?;
+        let outputs = self.session.run(vec![(input_name.as_str(), input.into())]).context("Face mesh session.run")?;
+        let find = |name: &str| outputs.iter().find(|output| output.name == name).map(|output| &output.data).with_context(|| format!("Face mesh output {name}"));
+        let (presence, landmarks) = (find(PRESENCE)?, find(LANDMARKS)?);
         anyhow::ensure!(landmarks.len() == POINTS * 3, "Face mesh produced {} values, expected {}", landmarks.len(), POINTS * 3);
-        Ok((landmarks.to_vec(), presence.first().copied().unwrap_or(f32::NAN)))
+        Ok((landmarks.clone(), presence.first().copied().unwrap_or(f32::NAN)))
     }
+}
+
+fn input_contract() -> [InputSpec; 1] {
+    [InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(INPUT), Dim::Fixed(INPUT), Dim::Fixed(3)])]
 }
 
 fn sample(rgb: &[u8], width: usize, height: usize, crop: &Crop) -> Array4<f32> {

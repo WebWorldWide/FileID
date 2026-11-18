@@ -6,7 +6,7 @@
 //! document text — exactly as the desktop apps do.
 //!
 //! The engine's `startScan` hard-requires the AI models and owns its own async
-//! runtime + ORT sessions, so we can't run it from a simple library call. We
+//! runtime + model sessions, so we can't run it from a simple library call. We
 //! reuse the engine the same way the desktop clients do: spawn the
 //! `FileIDEngine` binary and speak newline-delimited JSON over stdio, reusing
 //! the engine's own `ipc::IpcCommand` / `IpcEvent` types (no schema drift).
@@ -15,7 +15,7 @@
 //!   1. Models installed? We mirror the engine's exact `startScan` gate
 //!      (`mobileclip_s2` + `arcface` sentinels) and, if anything is missing,
 //!      print the exact install command and stop. macOS uses a separate Rust
-//!      engine model directory and also requires ONNX Runtime.
+//!      engine model directory.
 //!   2. Engine binary located? If not, we say how to point at it.
 //!
 //! The full pipeline writes the engine's canonical library by default. An
@@ -65,18 +65,6 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     if !missing.is_empty() {
         report_missing_models(ctx, &missing, models_dir.as_deref());
         anyhow::bail!("full-pipeline scan did not run: AI models not installed");
-    }
-
-    // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? ──────────────────
-    // The engine's `load-dynamic` build `dlopen`s `libonnxruntime.dylib`, but
-    // `ort`'s `download-binaries` ships only a STATIC lib for arm64 — so the
-    // runtime is a separate, one-time install from the model download. Catch it
-    // here with clear guidance instead of spawning an engine that will abort at
-    // model-load. No-op off macOS (`is_available()` is always true there).
-    #[cfg(target_os = "macos")]
-    if !fileid_engine::ort_runtime::is_available() {
-        report_runtime_missing(ctx);
-        anyhow::bail!("full-pipeline scan did not run: ONNX Runtime not installed");
     }
 
     // An explicit DB is forwarded to the child. Without one, the engine writes
@@ -207,42 +195,6 @@ fn report_missing_models(ctx: &Ctx, missing: &[MissingModel], models_dir: Option
     println!(
         "  {}",
         ctx.dim("The default `fileid scan` (model-free FTS) needs no models.")
-    );
-}
-
-/// Clear, actionable "ONNX Runtime not installed" message (macOS). Distinct from
-/// the model download — points at the one-time `fileid runtime install`. Reused
-/// by the pre-flight gate and the engine's `runtime_not_installed` mapping.
-fn report_runtime_missing(ctx: &Ctx) {
-    let cmd = fileid_engine::ort_runtime::INSTALL_COMMAND;
-    if ctx.json {
-        print_json(&serde_json::json!({
-            "command": "scan",
-            "mode": "models",
-            "error": "runtime_not_installed",
-            "message": "the full ML pipeline needs ONNX Runtime, which isn't installed",
-            "hint": format!(
-                "install it once with `{cmd}` (or `brew install onnxruntime`), then re-run. \
-                 This is separate from `fileid models download`. See shared/docs/RUNTIME.md"
-            ),
-        }));
-        return;
-    }
-    println!(
-        "{}",
-        ctx.bold("Full-pipeline scan unavailable — ONNX Runtime not installed.")
-    );
-    println!(
-        "  {}",
-        ctx.dim("The AI models are installed, but the runtime that loads them isn't.")
-    );
-    println!("  {}", ctx.bold("Install it once (any one):"));
-    println!("    {}", ctx.bold(cmd));
-    println!("    brew install onnxruntime");
-    println!("    shared/scripts/install_onnxruntime_macos.sh");
-    println!(
-        "  {}",
-        ctx.dim("Then re-run this scan. (Separate from `fileid models download`.) See shared/docs/RUNTIME.md.")
     );
 }
 
@@ -404,11 +356,6 @@ fn drive_scan(
                     "error": kind,
                     "message": message,
                 }));
-            } else if kind == "runtime_not_installed" {
-                // The pre-flight normally catches this; if the engine still
-                // reports it (e.g. the dylib vanished after pre-flight), surface
-                // the same clean install guidance rather than a raw engine error.
-                report_runtime_missing(ctx);
             }
             if kind.starts_with("face_clustering") {
                 anyhow::bail!("scan completed, but face grouping failed: {message}")

@@ -7,7 +7,7 @@
 #   flatpak-builder --user --force-clean --repo=repo \
 #     build-dir packaging/flatpak/io.github.fileid.FileID.yaml
 #
-# Cargo crates, ONNX Runtime and the llama.cpp source archive are immutable
+# Cargo crates and the llama.cpp source archive are immutable
 # manifest sources. The build sandbox has no network access and Cargo is
 # forced offline. llama-runtime builds llama-server from the pinned llama.cpp
 # b9254 source with platforms/linux/build/build-llama-runtime.sh into
@@ -62,14 +62,11 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/fileid/cargo
-        ORT_LIB_LOCATION: /run/build/fileid/onnxruntime
-        ORT_SKIP_DOWNLOAD: '1'
     build-commands:
       - |
         set -eu
         rustc --version
         cargo --version
-        test -f "$ORT_LIB_LOCATION/lib/libonnxruntime.a"
         cd platforms/linux
         cargo build --release --locked --offline
         cargo build --release --locked --offline -p fileid-engine --bin FileIDEngine
@@ -88,16 +85,6 @@ modules:
         done
     sources:
       - cargo-sources.json
-      - type: archive
-        only-arches: [x86_64]
-        url: https://cdn.pyke.io/0/pyke:ort-rs/ms@1.22.0/x86_64-unknown-linux-gnu.tgz
-        sha256: ed1716de95974bf47ab0223ca33734a0b5a5d09a181225d0e8ed62d070aea893
-        dest: onnxruntime
-      - type: archive
-        only-arches: [aarch64]
-        url: https://cdn.pyke.io/0/pyke:ort-rs/ms@1.22.0/aarch64-unknown-linux-gnu.tgz
-        sha256: 24e4760207136fc50b854bb5012ab81de6189039cf6d4fd3f5b8d3db7e929f1e
-        dest: onnxruntime
       - type: dir
         path: ../../platforms/linux
         dest: platforms/linux

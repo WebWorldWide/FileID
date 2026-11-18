@@ -40,7 +40,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/ort.pyke.io
             platforms/windows/src/engine/target
             platforms/cli/target
             platforms/tui/target
@@ -84,7 +83,7 @@ jobs:
 
       - name: Release builds
         run: |
-          cargo build --release --locked --manifest-path platforms/windows/src/engine/Cargo.toml
+          cargo build --release --locked ${{ runner.os == 'Windows' && '--features ort-accel' || '' }} --manifest-path platforms/windows/src/engine/Cargo.toml
           cargo build --release --locked --manifest-path platforms/cli/Cargo.toml
           cargo build --release --locked --manifest-path platforms/tui/Cargo.toml
 

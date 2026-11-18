@@ -13,15 +13,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
-};
+use super::inference::{Dim, InferenceSession, InputSpec};
+use super::runtime::commit_chain_session;
 
 pub struct SFace {
-    session: Session,
+    session: InferenceSession,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -30,13 +27,6 @@ pub struct SFace {
 
 impl SFace {
     pub fn load<P: AsRef<Path>>(weights: P) -> Result<Self> {
-        Self::load_with(weights, Provider::Chain)
-    }
-
-    /// Load with an explicit provider: the shared EP chain, ORT's CPU EP alone,
-    /// or (macOS) the CoreML EP configured as the Swift engine's
-    /// `ArcFaceService` configures it.
-    pub fn load_with<P: AsRef<Path>>(weights: P, provider: Provider) -> Result<Self> {
         let path = weights.as_ref();
         if !path.exists() {
             anyhow::bail!("SFace weights missing at {}", path.display());
@@ -46,11 +36,7 @@ impl SFace {
         anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
         let digest = crate::util::content_hash::exact_file_sha256(path, size)?;
         let model_version = format!("sface128-sha256:{}", hex::encode(digest));
-        let (session, input_name) = match provider {
-            Provider::Chain => commit_chain_session("SFace", path)?,
-            Provider::Cpu => plain_session(path, None, None)?,
-            Provider::CoreMl { cache_dir, intra_threads } => plain_session(path, Some(cache_dir), Some(intra_threads))?,
-        };
+        let (session, input_name) = commit_chain_session("SFace", path, &[InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(3), Dim::Fixed(112), Dim::Fixed(112)])])?;
         let after = std::fs::metadata(path)?;
         anyhow::ensure!(before.len() == after.len() && before.modified()? == after.modified()?, "SFace weights changed during load");
 
@@ -96,22 +82,8 @@ impl SFace {
             }
         }
 
-        let input = Tensor::from_array(chw).context("SFace input tensor")?;
-        let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
-            .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("SFace session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("SFace produced no outputs"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("extract SFace output as f32")?;
-        let mut emb: Vec<f32> = data.to_vec();
+        let outputs = self.session.run(vec![(self.input_name.as_str(), chw.into())]).context("SFace session.run")?;
+        let mut emb: Vec<f32> = outputs.into_iter().next().ok_or_else(|| anyhow::anyhow!("SFace produced no outputs"))?.data;
         // SFace is a 128-d embedder; a wrong/quantized export with a different
         // output width would silently mis-cluster and (worse) diverge from the
         // cross-platform face DB, which is keyed on 128-d / 512-byte blobs. Fail
@@ -127,63 +99,6 @@ impl SFace {
         anyhow::ensure!(emb.iter().all(|v| v.is_finite()), "SFace produced a non-finite embedding");
         Ok(emb)
     }
-}
-
-/// Where the SFace session runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Provider {
-    /// The process's execution-provider priority chain.
-    Chain,
-    /// ORT's CPU execution provider with default session options.
-    Cpu,
-    /// The CoreML execution provider as an ML program, also on subgraphs, with
-    /// all compute units and its compiled model cached in `cache_dir`; ORT's
-    /// CPU provider takes what CoreML declines, on `intra_threads` threads.
-    CoreMl { cache_dir: PathBuf, intra_threads: usize },
-}
-
-/// A session with ORT's default options, as the Swift engine builds its
-/// `ORTSession`s, plus the CoreML EP when a cache folder is given.
-fn plain_session(path: &Path, coreml_cache: Option<PathBuf>, intra_threads: Option<usize>) -> Result<(Session, String)> {
-    crate::ort_runtime::commit_environment().context("ORT environment")?;
-    let mut builder = Session::builder().context("ORT session builder")?;
-    if let Some(threads) = intra_threads {
-        builder = builder.with_intra_threads(threads.max(1))?;
-    }
-    if let Some(cache) = coreml_cache {
-        use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat};
-        std::fs::create_dir_all(&cache).with_context(|| format!("CoreML cache folder {}", cache.display()))?;
-        let provider = CoreMLExecutionProvider::default()
-            .with_model_format(CoreMLModelFormat::MLProgram)
-            .with_subgraphs(true)
-            .with_compute_units(CoreMLComputeUnits::All)
-            .with_model_cache_dir(cache.display())
-            .build()
-            .error_on_failure();
-        builder = builder.with_execution_providers([provider]).context("register the CoreML execution provider (SFace)")?;
-    }
-    let session = builder.commit_from_file(path).context("ORT session commit (SFace)")?;
-    let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("SFace ONNX has no inputs"))?.name.clone();
-    Ok((session, input_name))
-}
-
-/// ONNX Runtime's release as its build string names it (`rel-1.30.0` → `1.30.0`).
-/// Official builds made from a tag say `git-branch=HEAD`; their commit names them instead.
-pub fn runtime_release() -> String {
-    release_from_build_info(ort::info())
-}
-
-fn release_from_build_info(info: &str) -> String {
-    let field = |key: &str| {
-        info.split(key)
-            .nth(1)
-            .and_then(|rest| rest.split([',', ' ']).next())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
-    field("git-branch=rel-")
-        .or_else(|| field("git-commit-id=").map(|commit| format!("git-{commit}")))
-        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn l2_normalize(v: &mut [f32]) {
@@ -204,13 +119,6 @@ pub fn default_weights_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn runtime_release_reads_the_branch_or_the_commit() {
-        assert_eq!(super::release_from_build_info("ORT Build Info: git-branch=rel-1.30.0, git-commit-id=abc, build type=Release"), "1.30.0");
-        assert_eq!(super::release_from_build_info("ORT Build Info: git-branch=HEAD, git-commit-id=f217402897, build type=Release"), "git-f217402897");
-        assert_eq!(super::release_from_build_info(""), "unknown");
-    }
-
     use super::*;
 
     #[test]

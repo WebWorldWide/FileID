@@ -103,7 +103,6 @@ async fn load_scan_models(
     coord: ScanCoordinator,
     key: scan_models::StackKey,
     worker_count: usize,
-    runtime_available: bool,
     missing_models: Vec<&'static str>,
     late_loader: LateLoader,
 ) -> Result<Arc<ModelStack>, ModelLoadFailure> {
@@ -126,7 +125,7 @@ async fn load_scan_models(
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let started = std::time::Instant::now();
     let load_result = wait_for_blocking(
-        tokio::task::spawn_blocking(move || ModelStack::load_for_scan(worker_count, runtime_available)),
+        tokio::task::spawn_blocking(move || ModelStack::load_for_scan(worker_count)),
         Duration::from_secs(120),
     )
     .await;
@@ -184,29 +183,27 @@ async fn load_scan_models(
     // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
     // re-processes them once the model loads. The workers wait for this result
     // before they analyse anything, so no file is written without its stages.
-    if runtime_available {
-        let failed_to_load = models_that_failed_to_load(&models, &missing_models);
-        if !failed_to_load.is_empty() {
-            tracing::error!(
-                models = ?failed_to_load,
-                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
-            );
-            return Err(ModelLoadFailure::new(
-                "model_load_failed",
-                format!(
-                    "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
-                     Their files are probably incomplete or blocked by antivirus. \
-                     Reinstall them in Settings, under Local AI, then scan again. \
-                     (FileID stopped the scan so your files aren't marked as done \
-                     without these features.)",
-                    failed_to_load
-                        .iter()
-                        .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ));
-        }
+    let failed_to_load = models_that_failed_to_load(&models, &missing_models);
+    if !failed_to_load.is_empty() {
+        tracing::error!(
+            models = ?failed_to_load,
+            "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
+        );
+        return Err(ModelLoadFailure::new(
+            "model_load_failed",
+            format!(
+                "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
+                 Their files are probably incomplete or blocked by antivirus. \
+                 Reinstall them in Settings, under Local AI, then scan again. \
+                 (FileID stopped the scan so your files aren't marked as done \
+                 without these features.)",
+                failed_to_load
+                    .iter()
+                    .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     }
     scan_models::keep(key, models.clone());
     Ok(models)
@@ -225,16 +222,6 @@ fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> V
         failed_to_load.push("image embedding");
     }
     failed_to_load
-}
-
-#[cfg(target_os = "macos")]
-fn ort_runtime_available() -> bool {
-    crate::ort_runtime::is_available()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ort_runtime_available() -> bool {
-    true
 }
 
 /// An absolute path with no NUL, the only kind a scan may start from (the Swift engine's
@@ -362,15 +349,6 @@ pub(crate) async fn handle_start_scan(
     if !missing_models.is_empty() {
         tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; their stages will skip");
     }
-    // The macOS `load-dynamic` build cannot bind ONNX Runtime without an
-    // installed dylib (ORT's `download-binaries` ships only a static arm64 lib),
-    // so without it the scan runs with no models at all instead of panicking at
-    // the first session bind. Always true on Windows/Linux.
-    let runtime_available = ort_runtime_available();
-    if !runtime_available {
-        tracing::warn!("[SCAN] ONNX Runtime not installed; model stages will skip");
-    }
-
     // Emit Discovering immediately so the UI flips out of IdlePanel within
     // microseconds, regardless of how long ModelStack takes to load. Use
     // .await (not try_send) so the event can't be silently dropped under
@@ -406,14 +384,14 @@ pub(crate) async fn handle_start_scan(
     // walk, and stay loaded between scans (pipeline/scan_models.rs). A rescan
     // that finds nothing new loads nothing.
     let models_worker_count = platform::default_worker_cap() as usize;
-    let stack_key = scan_models::StackKey::current(models_worker_count, runtime_available);
+    let stack_key = scan_models::StackKey::current(models_worker_count);
     let evictions_before = scan_models::evictions();
     let late_loader: LateLoader = Arc::new(Mutex::new(None));
     let models = ModelSource::lazy({
         let (coord, key, late) = (coord.clone(), stack_key.clone(), late_loader.clone());
         let missing: Vec<&'static str> = missing_models.clone();
         move || -> scan_models::LoadFuture {
-            Box::pin(load_scan_models(coord, key, models_worker_count, runtime_available, missing, late))
+            Box::pin(load_scan_models(coord, key, models_worker_count, missing, late))
         }
     });
 
