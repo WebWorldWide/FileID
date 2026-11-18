@@ -526,10 +526,10 @@ pub(crate) fn containing_root(roots: &[std::path::PathBuf], path: &std::path::Pa
 /// still lets FileID put back what it trashed but nothing outside the folder it was trashed from.
 fn restore_roots(library_roots: &[std::path::PathBuf], item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
     let mut roots = library_roots.to_vec();
-    if let Some(recorded) = item.library_root.as_deref().and_then(|root| std::fs::canonicalize(root).ok()) {
-        if !roots.contains(&recorded) {
-            roots.push(recorded);
-        }
+    if let Some(recorded) = item.library_root.as_deref().and_then(|root| std::fs::canonicalize(root).ok())
+        && !roots.contains(&recorded)
+    {
+        roots.push(recorded);
     }
     roots
 }
