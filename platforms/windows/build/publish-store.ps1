@@ -73,11 +73,10 @@ Invoke-Checked 'pwsh' @(
     '-CacheDir', (Join-Path $platformRoot 'dist/runtime-cache')
 )
 foreach ($required in @(
-    'FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'onnxruntime.dll', 'DirectML.dll', 'pdfium.dll',
+    'FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'pdfium.dll',
     'RuntimeBundles/llama.cpp/llama-server.exe',
     'RuntimeBundles/llama.cpp/llama-mtmd-cli.exe',
     'RuntimeBundles/whisper.cpp/Release/whisper-cli.exe',
-    'RuntimeBundles/packs/openvino/onnxruntime.dll',
     'RuntimeBundles/THIRD-PARTY-NOTICES.txt'
 )) {
     if (-not (Test-Path (Join-Path $stage $required))) { throw "Missing package payload: $required" }

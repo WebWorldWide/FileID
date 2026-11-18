@@ -318,16 +318,12 @@ if (-not $SkipEngine) {
     $sz = [math]::Round((Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB, 1)
     Write-Host ("  FileIDEngine.exe staged ({0} MB)" -f $sz) -ForegroundColor Green
 
-    # V14.9-V: stage ORT (FileID's telemetry-free DirectML build, see
-    # build-ort-runtime.ps1) + DirectML runtime DLLs alongside
-    # FileIDEngine.exe in every staging location. Without these DLLs the
-    # engine LoadLibrary's Windows System32's onnxruntime.dll (1.17.x), the
-    # ort crate panics on version mismatch ("expected 1.22.x, got 1.17.1"),
-    # and even when the version matches the DirectML EP can't initialize
-    # without DirectML.dll → silent fallback to CPU, no GPU acceleration.
+    # Stage the native runtime DLL (pdfium.dll) alongside FileIDEngine.exe in
+    # every staging location. The models run on tract inside the engine, so
+    # no inference runtime DLL is needed.
     $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
     if (Test-Path $fetchScript) {
-        Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
+        Write-Host "Fetching runtime DLLs (PDFium)..." -ForegroundColor Cyan
         $runtimeOutput = & $fetchScript -Architecture $(if ($Arm64) { 'arm64' } else { 'x64' })
         $runtimeDlls = @{}
         foreach ($line in $runtimeOutput) {
@@ -351,7 +347,7 @@ if (-not $SkipEngine) {
         # Stash for the App-staging step below so we don't re-resolve.
         $script:RuntimeDlls = $runtimeDlls
     } else {
-        Write-Host "WARN: fetch-runtime-deps.ps1 not found; engine may fail to find ORT/DirectML at runtime." -ForegroundColor Yellow
+        Write-Host "WARN: fetch-runtime-deps.ps1 not found; PDF analysis may fail at runtime." -ForegroundColor Yellow
         $script:RuntimeDlls = @{}
     }
 }
@@ -419,12 +415,8 @@ if (-not $SkipApp) {
             Copy-Item $StagedEngine (Join-Path $AppOutDir "FileIDEngine.exe") -Force
             Write-Host "  FileIDEngine.exe colocated with FileID.exe" -ForegroundColor Green
         }
-        # V14.9-V: colocate ORT + DirectML DLLs with the engine in the
-        # publish output. Required so LoadLibrary finds our bundled 1.22
-        # DLL before Windows System32's 1.17 build (which our ort crate
-        # rejects with a fatal version mismatch). DirectML.dll also has
-        # to be next to the engine or DirectML EP silently falls back
-        # to CPU.
+        # Colocate the runtime DLLs (pdfium.dll) with the engine in the
+        # publish output.
         if ($script:RuntimeDlls) {
             foreach ($name in $script:RuntimeDlls.Keys) {
                 Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force

@@ -46,7 +46,7 @@ New-Item -ItemType Junction -Path (Join-Path $State "Models") -Target $RealModel
 $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 
-# --- colocate ORT + DirectML beside the engine -----------------------
+# --- colocate the runtime DLLs beside the engine ---------------------
 $fetch = Join-Path $BuildDir "fetch-runtime-deps.ps1"
 $outDir = Split-Path -Parent $EnginePath
 if (Test-Path $fetch) {
@@ -82,7 +82,6 @@ $psi.Environment["LOCALAPPDATA"]        = $Temp
 $psi.Environment["FILEID_LOG"]          = "info"
 $psi.Environment["FILEID_PERF_TRACE"]   = "1"
 $psi.Environment["FILEID_TEST_FILE_CAP"]= "$Cap"
-$psi.Environment["ORT_DYLIB_PATH"]      = Join-Path $outDir "onnxruntime.dll"
 if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
 if ($env:FILEID_CLIP_USE_BATCH)     { $psi.Environment["FILEID_CLIP_USE_BATCH"]     = $env:FILEID_CLIP_USE_BATCH }
 

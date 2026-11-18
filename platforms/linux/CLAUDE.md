@@ -6,7 +6,7 @@ This file covers the Linux code under `platforms/linux/`. For the macOS referenc
 
 ## Stack
 
-- **Engine**: Rust (`fileid-engine`), single-binary release with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference. **Shared with the Windows port** — same crate at `platforms/windows/src/engine/`, referenced via Cargo path dependency. V15.5 cfg-gated the Win32 surface (`shell/*.rs` modules + `ort` DirectML feature) so the same code compiles on Linux.
+- **Engine**: Rust (`fileid-engine`), single-binary release with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference. **Shared with the Windows port** — same crate at `platforms/windows/src/engine/`, referenced via Cargo path dependency. V15.5 cfg-gated the Win32 surface (`shell/*.rs` modules) so the same code compiles on Linux.
 - **App**: GTK4 + libadwaita via `gtk4-rs`. Rust binary, single executable; the staged distribution also contains the separately built shared engine executable. Native GTK window and navigation use the brand palette (gold #FFCC00, lavender #B19BCE, cyan #A0E2EA, pink #F2A6C0) via CSS, with dark mode forced in the current app.
 - **Distribution**: Flatpak (planned, primary), AppImage (planned, secondary). Both produced by the same Cargo binary; the manifest just wraps it.
 

@@ -156,15 +156,19 @@ mod golden_tests {
 
     const PATH: &str = "clip_text/clip_text.onnx";
 
-    #[test]
-    fn embedding_matches_the_golden_vector() {
-        let Some(path) = model_file(PATH) else { return };
+    fn tokenizer_next_to(path: &std::path::Path) -> ClipTokenizer {
         let directory = path.parent().unwrap();
-        let tokenizer = ClipTokenizer::new(
+        ClipTokenizer::new(
             &std::fs::read_to_string(directory.join("vocab.json")).unwrap(),
             &std::fs::read_to_string(directory.join("merges.txt")).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn embedding_matches_the_golden_vector() {
+        let Some(path) = model_file(PATH) else { return };
+        let tokenizer = tokenizer_next_to(&path);
         let mut model = ClipText::load(&path, tokenizer).unwrap();
         let embedding = model.embed("a photo of a dog running on a beach at sunset").unwrap();
         check(
@@ -173,6 +177,31 @@ mod golden_tests {
             "the query \"a photo of a dog running on a beach at sunset\" through the CLIP BPE tokenizer; L2-normalized 512-d embedding",
             Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
             &[Probe { name: "embedding", shape: vec![512], values: &embedding }],
+        );
+    }
+
+    #[test]
+    fn batched_embeddings_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = ClipText::load(&path, tokenizer_next_to(&path)).unwrap();
+        let queries: Vec<String> = [
+            "a photo of a dog running on a beach at sunset",
+            "invoice for the office printer",
+            "a birthday cake with candles",
+        ]
+        .map(String::from)
+        .into();
+        let batch = model.embed_batch(&queries).unwrap();
+        let single = model.embed(&queries[0]).unwrap();
+        let gap = single.iter().zip(&batch[0]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(gap < 1e-4, "row 0 of the batch drifts from the single-query embedding by {gap}");
+        let flat: Vec<f32> = batch.concat();
+        check(
+            "clip_text_batch",
+            PATH,
+            "the queries \"a photo of a dog running on a beach at sunset\", \"invoice for the office printer\" and \"a birthday cake with candles\" through the CLIP BPE tokenizer as one (3, 77) batch; L2-normalized 512-d embedding per row",
+            Tolerance { max_abs: 1e-4, rel_norm: 1e-4 },
+            &[Probe { name: "batch", shape: vec![3, 512], values: &flat }],
         );
     }
 }

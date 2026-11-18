@@ -20,8 +20,8 @@ try {
     if ($identity.Version -ne $version -or $identity.ProcessorArchitecture -ne 'x64') {
         throw 'Package version or architecture does not match the supported release.'
     }
-    foreach ($required in @('FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'onnxruntime.dll',
-            'DirectML.dll', 'pdfium.dll', 'Assets/StoreLogo.png', 'Assets/Square44x44Logo.png',
+    foreach ($required in @('FileID.exe', 'FileIDEngine.exe', 'FileID.pri',
+            'pdfium.dll', 'Assets/StoreLogo.png', 'Assets/Square44x44Logo.png',
             'Assets/Square150x150Logo.png', 'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt')) {
         if (-not $archive.GetEntry($required)) { throw "Package payload missing: $required" }
     }

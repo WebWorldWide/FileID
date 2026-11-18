@@ -1,0 +1,55 @@
+{
+  "model": "clip_text/clip_text.onnx",
+  "generator": "onnxruntime 1.22.0 cpu",
+  "input": "the queries \"a photo of a dog running on a beach at sunset\", \"invoice for the office printer\" and \"a birthday cake with candles\" through the CLIP BPE tokenizer as one (3, 77) batch; L2-normalized 512-d embedding per row",
+  "tolerance": {
+    "maxAbs": 0.0001,
+    "relNorm": 0.0001
+  },
+  "outputs": [
+    {
+      "name": "batch",
+      "shape": [
+        3,
+        512
+      ],
+      "norm": 1.7320508640818284,
+      "head": [
+        0.02654178,
+        0.041369133,
+        -0.06702215,
+        -0.0038141664,
+        0.06902657,
+        0.04700225,
+        -0.013961966,
+        0.014358697,
+        -0.0010301253,
+        0.053607896,
+        0.006989496,
+        -0.080032274,
+        0.030450026,
+        -0.02522811,
+        -0.0048287236,
+        0.0684905
+      ],
+      "strided": [
+        0.02654178,
+        -0.039213352,
+        0.004304298,
+        -0.0076955454,
+        0.0402275,
+        -0.017878747,
+        -0.014049642,
+        -0.008330021,
+        -0.011086377,
+        -0.0068080993,
+        -0.009652709,
+        0.044148233,
+        0.006197865,
+        0.01587025,
+        0.010230208,
+        -0.04521567
+      ]
+    }
+  ]
+}
