@@ -5377,7 +5377,8 @@ mod tests {
             std::fs::write(&moved_to, b"JPEG").unwrap();
             entry["source_identity"] = serde_json::to_value(crate::platform::file_identity(&moved_to).unwrap()).unwrap();
             insert_file_row(&conn, entry["file_id"].as_i64().unwrap(), &moved_to.to_string_lossy());
-            journal_text.push_str(&format!("{entry}\n"));
+            journal_text.push_str(&entry.to_string());
+            journal_text.push('\n');
             moved.push((moved_to, original));
         }
         let journal = root.join("undo.ndjson");

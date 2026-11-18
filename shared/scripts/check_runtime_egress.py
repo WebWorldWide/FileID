@@ -154,7 +154,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/vlm_server.rs": "c2f9540850b3a9f61031baac4d44c0f47353c2154de2bca49b1a379dce4a192f",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "fb83d73f21312ed331000d7f999db0cdf0ccd4ef11cbf795c093b755bc97e2b6",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "be3c426f5411a60ca7a91cc9387e578432aef5e9b9d932978fd12f1be46a41bd",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "b9f80fb19ae0a80eab0f9c23d848e7751fcd3d6fa77b3959f780f0308e88dc27",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "736892de4a3ce23697b6dd5b0ac69cac765521eb547739b313a1491588085efc",
   "platforms/windows/src/engine/src/platform.rs": "6b526f72778efe2873d3ac91e800db0d99905da9b8d5eda7804eb10b33b1b491",
   "platforms/windows/src/engine/src/shell/heic.rs": "890bce8f247d2da9ddd21d544efd5b34f39ec12370c6b420cd5e579f42f00862",
   "platforms/windows/src/engine/src/shell/mod.rs": "f762df3c2ebcf08884235ef89ba05a6c84db969e31af4f1c2fe9df71b6574553",
