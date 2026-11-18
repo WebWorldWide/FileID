@@ -49,7 +49,6 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "platforms/linux/build/build-llama-runtime.sh": "fe712236753a9dcc4b8e37d9629e0a0b4856e2899eeae013aca335f87cff76a3",
     "scripts/build-tools.sh": "a51e97da6eea88eda05eb211ee62f80d4274b683bf7aaba921ad06c71f3323ee",
     "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
-    "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",
     "shared/scripts/build_ffmpeg_lgpl_linux.sh": "18b235201c4fa3740f7c31b8bd429558520d6084a57b0a7f94beb880098be7db",
     "shared/scripts/build_ffmpeg_lgpl_windows_x64.sh": "9f1a958f27fcf20ec3ff762ca84528e0b4fcda1f88f81ccb988bf36ea3f10d46",
     "shared/scripts/run_local_audit_gate.sh": "96f0d2d77eddece17aba99229b92d7385d2c06bbead05f275b890e3eec99a2a7",
