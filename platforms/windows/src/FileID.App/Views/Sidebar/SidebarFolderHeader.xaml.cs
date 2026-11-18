@@ -227,7 +227,6 @@ public sealed partial class SidebarFolderHeader : UserControl
             }
             if (result.Path is null)
             {
-                // User cancelled — no-op.
                 return;
             }
 
@@ -322,16 +321,9 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     /// <summary>extracted from OnWipeClicked so the engine ALWAYS
-    /// comes back up — even when file delete fails. Previously every
-    /// failure path early-returned without calling StartAsync, leaving
-    /// the engine permanently Crashed and the entire app unusable. The
     /// finally block now restarts the engine unconditionally; the user
     /// sees "Wipe partially failed" alert but still has a working app.
     ///
-    /// Stages (each logged so a wipe hang or silent failure is
-    /// localizable from app.log alone — the original wipe code logged
-    /// only the IPC OUT line and went silent for 27 s on the user's
-    /// first repro):
     ///   1. ClearPhaseAndError + reset LastProgress/LastBatch — sidebar
     ///      stops showing the prior scan's "Completed" panel during the
     ///      shutdown window.
