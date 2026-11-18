@@ -66,9 +66,7 @@ struct BulkTagSheet: View {
         inFlight = true
         status = nil
         let urls = files.map(\.url)
-        // Work off-MainActor via `Task.detached().value`, then resume on
-        // MainActor for the UI updates. Avoids Swift 6 Sendable-capture
-        // issues with the view's onComplete closure.
+        // Off the MainActor via `Task.detached().value`, then back on MainActor for UI updates.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 // journal: nil — the sheet owns the journal write so a

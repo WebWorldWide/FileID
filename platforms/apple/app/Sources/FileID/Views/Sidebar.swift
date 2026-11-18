@@ -1,5 +1,4 @@
-// Sidebar: every page in one calm list (grouped Browse / Analyze / Act), then
-// a compact scan card. Mirrors the old sidebar's simplicity in the v3 look.
+// Sidebar: every page in one list (grouped Browse / Analyze / Act), then a compact scan card.
 import SwiftUI
 import FileIDShared
 

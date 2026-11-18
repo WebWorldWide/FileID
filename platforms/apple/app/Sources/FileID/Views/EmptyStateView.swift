@@ -1,7 +1,4 @@
-// Shared empty / awaiting-data state. Every primary tab gets the same
-// visual rhythm: large icon, title2 bold heading, callout body, optional
-// primary action below. Single source of truth for empty-state styling
-// matches Apple's HIG (consistency across primary destinations).
+// Shared empty / awaiting-data state used by every primary tab.
 import SwiftUI
 
 struct EmptyStateView: View {

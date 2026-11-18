@@ -1,4 +1,3 @@
-// AppKit NSVisualEffectView bridged for SwiftUI window backgrounds.
 import SwiftUI
 import AppKit
 
