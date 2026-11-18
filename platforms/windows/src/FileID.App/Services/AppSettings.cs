@@ -34,7 +34,6 @@ internal sealed class AppSettings
     /// <summary>Friendly display label for LastFolderPath (the leaf folder name on Windows).</summary>
     public string? LastFolderDisplay { get; set; }
 
-    /// <summary>Sidebar visible? Persists across launches like macOS.</summary>
     public bool SidebarVisible { get; set; } = true;
 
     /// <summary>Active tab id. Stored as the string identifier (matches macOS RawValue persistence).</summary>
@@ -56,7 +55,6 @@ internal sealed class AppSettings
     /// <summary>Library kind filter (image / video / pdf / document / audio / all).</summary>
     public string LibraryKindFilter { get; set; } = "all";
 
-    /// <summary>Hide marked-as-unknown clusters in People (matches macOS PeopleView toggle).</summary>
     public bool PeopleHideUnknown { get; set; } = false;
 
     /// <summary>
@@ -74,9 +72,6 @@ internal sealed class AppSettings
     /// on subsequent launches if any required model is missing.</summary>
     public bool WelcomeSheetSeen { get; set; } = false;
 
-    /// <summary>Item 4: the lay-person "Tagging vs. Deep Analyze" explainer
-    /// banner has been dismissed. Mirrors macOS @AppStorage("hideDeepAnalyzeExplainer").
-    /// Once true the banner stays hidden across launches.</summary>
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
     /// <summary>Legacy preference retained so existing settings files
@@ -118,7 +113,6 @@ internal sealed class AppSettings
 
     public bool NamingIncludeDate { get; set; } = ViewModels.NameStylePolicy.DefaultIncludeDate;
 
-    /// <summary>Apply the style learned from the user's edits to proposed names, and record new edits.</summary>
     public bool NamingLearn { get; set; } = ViewModels.NameStylePolicy.DefaultLearn;
 
     /// <summary>Settings ▸ Appearance ▸ Lava lamp (macOS `lavaMode`): "full" or "off". The Mac's "calm" is not offered here and loads as "full".</summary>
@@ -221,14 +215,6 @@ internal sealed class AppSettings
         return new AppSettings();
     }
 
-    /// <summary>Current schema version this build understands. Bumped only on
-    /// incompatible field renames or one-time value migrations. Sanitize()
-    /// clamps loaded values to this. v2: SmolVLM became the default tagger.
-    /// v3: tagging/Deep-Analyze split — SelectedVlmModelKind is the Deep
-    /// Analyze model. v4: SmolVLM removed — CLIP scene tags are the canonical
-    /// auto-tagger. v5: non-commercial qwen2_5_vl_3b removed (Qwen Research
-    /// License) — RAM++ is the auto-tagger and Qwen2.5-VL-7B (Apache) is the
-    /// default Deep Analyze model; any leftover 3B value migrates to 7B.</summary>
     private const int CurrentSchemaVersion = 5;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
@@ -244,19 +230,12 @@ internal sealed class AppSettings
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
         }
-        // One-time migration: SmolVLM was removed in v4. Any stored "smolvlm"
-        // is now an invalid model_kind; migrate straight to the current default
-        // (qwen2_5_vl_7b; the intermediate 3B was also removed in v5).
         if (s.SchemaVersion < 4
             && string.Equals(s.SelectedVlmModelKind, "smolvlm", StringComparison.OrdinalIgnoreCase))
         {
             DebugLog.Info("AppSettings: migrating Deep Analyze model smolvlm → qwen2_5_vl_7b (SmolVLM removed).");
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
-        // v5: the non-commercial Qwen2.5-VL-3B (Qwen Research License) was
-        // dropped for Mistral-Small-3.2 + Qwen-7B (both Apache). Migrate any
-        // persisted 3B pick to the 7B default. (The AllowedVlmKinds clamp below
-        // would coerce it regardless; this emits a traceable log line.)
         if (s.SchemaVersion < 5
             && string.Equals(s.SelectedVlmModelKind, "qwen2_5_vl_3b", StringComparison.OrdinalIgnoreCase))
         {
@@ -279,7 +258,6 @@ internal sealed class AppSettings
         {
             s.SchemaVersion = CurrentSchemaVersion;
         }
-        // Bound other ranges defensively.
         if (string.IsNullOrWhiteSpace(s.ActiveTab)) s.ActiveTab = "library";
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
         if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
@@ -295,11 +273,6 @@ internal sealed class AppSettings
         s.NamingMaxLength = ViewModels.NameStylePolicy.ClampLength(s.NamingMaxLength);
     }
 
-    // debounce + offload. The previous implementation ran every
-    // UI-thread property setter (ActiveTab, SidebarVisible, FolderPath…)
-    // through a synchronous WriteAllBytes + File.Move chain. On rapid
-    // changes (tab spam, sidebar toggle, scroll-driven kind-filter
-    // changes) that produced a visible UI stutter of 5-15 ms per change.
     // Now: setters call Save() to bump a debounce timer; the actual
     // write fires 200 ms after the LAST setter on a thread-pool thread
     // and is serialized through a SemaphoreSlim so concurrent debounced
@@ -310,9 +283,6 @@ internal sealed class AppSettings
 
     public void Save()
     {
-        // Cancel any pending save and replace with a new one. The async
-        // worker observes the new token; if it gets cancelled before the
-        // delay elapses, no IO happens.
         var newCts = new CancellationTokenSource();
         var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
         try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
@@ -338,7 +308,6 @@ internal sealed class AppSettings
     {
         try
         {
-            // Cancel any debounced save — the synchronous write supersedes.
             var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
             try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
             var snapshot = CloneForWrite();

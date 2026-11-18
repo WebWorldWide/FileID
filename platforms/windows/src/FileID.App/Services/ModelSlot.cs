@@ -1,8 +1,4 @@
 ﻿// ModelSlot — per-model install state row used by ModelInstallerService.
-// One of these for CLIP / ArcFace / VLM, observed by the Welcome sheet via
-// x:Bind. Split from ModelInstallerService.cs so the orchestrator file
-// focuses on cross-slot logic.
-//
 // PRIVACY: never makes a network call.
 
 using System.ComponentModel;
@@ -20,10 +16,6 @@ internal enum ModelInstallStatus
     Failed,
 }
 
-/// <summary>
-/// Per-model state. One of these for CLIP / ArcFace / VLM, observed by
-/// the Welcome sheet via x:Bind.
-/// </summary>
 internal sealed class ModelSlot : INotifyPropertyChanged
 {
     private string _displayLabel;
@@ -193,10 +185,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         UpdateRate(p);
     }
 
-    /// <summary>
-    /// Mark this slot's install as failed. Surface the message so the row
-    /// can render "Failed: …" + show a Retry button.
-    /// </summary>
     public void Fail(string message)
     {
         Status = ModelInstallStatus.Failed;
@@ -205,7 +193,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         EtaSeconds = 0;
     }
 
-    /// <summary>Reset state (e.g. user clicked Retry).</summary>
     public void ResetForRetry()
     {
         Status = ModelInstallStatus.NotInstalled;

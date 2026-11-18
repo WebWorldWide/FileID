@@ -179,10 +179,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         }
     }
 
-    /// <summary>
-    /// FTS5-backed full-text search over filename + OCR text. Uses the
-    /// same match-expression shape as macOS — whitespace-joined terms.
-    /// </summary>
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
         string query, int limit, CancellationToken ct, string? kind = null)
     {
@@ -214,7 +210,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var like = $"%{escapedSearch}%";
             var match = BuildMatchExpression(trimmedSearch);
             var hasMatch = !string.IsNullOrEmpty(match);
-            // PAR-116: filter kind in SQL (before LIMIT) so a kind-restricted grid fills.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
             var scope = _scope;
             kindClause += ScopeClause("f.path_text", scope);
@@ -376,7 +371,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                     heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
             }
-            // Heap holds best `limit` ordered worst→best; reverse to best→worst.
             var sorted = new List<FileRowWithScore>(heap.Count);
             while (heap.Count > 0)
             {
@@ -403,7 +397,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         {
             if (_connection == null) return Array.Empty<FileRow>();
 
-            // 1. Get seed embedding
             float[]? seedVec = null;
             using (var cmd = _connection.CreateCommand())
             {
@@ -421,7 +414,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 return Array.Empty<FileRow>();
             }
 
-            // 2. Fetch all other embeddings and calculate cosine similarity
             var heap = new PriorityQueue<long, float>(limit);
             using (var cmd = _connection.CreateCommand())
             {
@@ -452,7 +444,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 }
             }
 
-            // 3. Extract the best IDs in descending order
             var topIDs = new List<long>(heap.Count);
             while (heap.Count > 0)
             {
@@ -465,7 +456,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 return Array.Empty<FileRow>();
             }
 
-            // 4. Fetch file rows for those IDs in the ranked order
             return await RowsInOrderLockedAsync(_connection, topIDs, ct).ConfigureAwait(false);
         }
         finally { _gate.Release(); }

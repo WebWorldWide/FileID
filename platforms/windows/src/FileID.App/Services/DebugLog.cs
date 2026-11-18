@@ -211,7 +211,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 
@@ -336,7 +335,6 @@ internal static class DebugLog
         }
         catch
         {
-            // Breadcrumb is best-effort.
         }
     }
 
@@ -354,7 +352,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 
@@ -390,7 +387,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 }

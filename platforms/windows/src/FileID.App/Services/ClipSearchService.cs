@@ -1,17 +1,4 @@
 ﻿// ClipSearchService — orchestrates CLIP semantic search.
-//
-// On macOS this lives in `Library/CLIPSearch.swift`. The flow:
-//   1. User types a query in the Library search bar (debounced 200 ms).
-//   2. App tokenizes + embeds the query via the CLIP text encoder.
-//   3. App dot-products against `clip_embeddings.vector` rows in the DB.
-//   4. Top-N hits become the Library grid's result set.
-//
-// Windows mirrors this 1:1 — but the actual text-encoder call lives on
-// the engine side (the engine owns the ONNX session that's already loaded
-// in VRAM). The app sends a `embedTextQuery` IPC command and the engine
-// replies with the L2-normalized 512-d float32 vector. The app then runs
-// the dot-product locally via ReadStore.SemanticSearchAsync.
-//
 // FTS5 fallback returns matching results when the CLIP embedding path
 // isn't available; otherwise the engine reply lights up real semantic
 // search via the IPC round-trip.
@@ -49,9 +36,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     // detect via the prefix and discard.
     private int _generation;
 
-    /// <summary>Last non-cancellation error from a search round-trip. Null
-    /// when the most recent search succeeded. Bind in the search box UI to
-    /// surface "Search unavailable" instead of silently empty results.</summary>
     private string? _lastSearchError;
     public string? LastSearchError
     {
@@ -77,7 +61,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         if (_disposed) return;
         _disposed = true;
         EngineClient.Instance.PropertyChanged -= OnEngineClientChanged;
-        // Drain any in-flight requests so callers don't hang.
         foreach (var kv in _inflight)
         {
             kv.Value.TrySetResult(null);
@@ -186,8 +169,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             // Empty embedding = CLIP disabled engine-side —
             // treat as null so SearchAsync falls back to FTS5, no error banner.
             if (result is { Length: 0 }) { LastSearchError = null; return null; }
-            // Successful round-trip — clear any stale error banner + cache the
-            // deterministic embedding so an identical query skips the next encode.
             if (result is not null)
             {
                 LastSearchError = null;

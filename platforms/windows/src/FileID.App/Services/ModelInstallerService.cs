@@ -205,7 +205,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
         SeedFromSentinels();
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
-        // If engine has already published Info (raced our ctor), apply now.
         UpdateAcceleratorForVendor(EngineClient.Instance.Info?.Hardware?.GpuVendor);
     }
 
@@ -294,11 +293,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // LastProgressAt also resets so the no-progress watchdog (30 s)
             // doesn't false-fire while the slowest row waits for its IPC turn.
             //
-            // include Accelerator (cuDNN) when it's a real install
-            // candidate. Previously Install All omitted the Accelerator
-            // entirely, so NVIDIA users who clicked Install All got the
-            // three ML models but no cuDNN — the welcome sheet UX implied
-            // "this button installs everything on the page" but it didn't.
             // The IncludeAcceleratorInInstallAll() helper returns true only
             // for NVIDIA + NotInstalled/Failed; non-NVIDIA slots stay
             // pseudo-Installed and are skipped naturally.
@@ -443,7 +437,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         bool wants7b = ramGB >= 16.0 || vramMB >= 8000;
         // Capable boxes get Qwen2.5-VL-7B (Apache); weak boxes get the lighter
-        // Gemma-3-4B. The non-commercial Qwen-3B was removed.
         string kind = wants7b ? "qwen2_5_vl_7b" : "gemma_3_4b";
         if (_deepVlmModelKind == kind) return;
         _deepVlmModelKind = kind;
@@ -512,10 +505,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private void RecomputeAggregates()
     {
-        // RAM++ is the primary in-scan tagger and is now hosted on
-        // Web-World-Wide/ram-plus-onnx (WS5 upload landed), so it gates
-        // onboarding completion alongside CLIP/ArcFace/DeepVlm. (If RAM++ is
-        // ever missing at runtime, tagging still degrades to CLIP scene-tags.)
         CoreModelsInstalled =
             Clip.Status == ModelInstallStatus.Installed
             && Arcface.Status == ModelInstallStatus.Installed
@@ -678,9 +667,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // No-progress watchdog: 30 s after the IPC send, if Status is still
-        // Downloading and no progress event has landed, fail with a clear
-        // message. Mirrors macOS WelcomeSheet's "stuck install" handling.
         ScheduleNoProgressWatchdog(slot, modelKind);
     }
 
@@ -730,7 +716,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             }
             catch (OperationCanceledException)
             {
-                // Cancellation is a normal terminating condition.
             }
             catch (Exception ex)
             {
@@ -793,9 +778,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// non-model errors that still have a path). Path-substring matching
     /// is intentionally narrow — we DON'T match on substrings like "cuda"
     /// because pack paths and model paths can collide. The "in-flight
-    /// fallback" that used to live here was the root cause of D-track
-    /// cross-wiring (CUDA pack 404 + MobileCLIP in flight → MobileCLIP
-    /// row showed cuda.zip error) and has been removed.</summary>
     private ModelSlot? SlotForErrorPath(string? path)
     {
         if (string.IsNullOrEmpty(path)) return null;
@@ -933,11 +915,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // D-track fix: route by error.ModelKind first. The engine now stamps
-        // every install-failure event with the originating model id, so we
-        // don't need to infer it from the path string. SlotForErrorPath is
-        // kept as a fallback for legacy emitters / non-model errors that
-        // still carry a path.
         var slot = !string.IsNullOrEmpty(error.ModelKind)
             ? SlotFor(error.ModelKind)
             : SlotForErrorPath(error.Path);

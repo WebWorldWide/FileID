@@ -1,14 +1,5 @@
 ﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with
 // an in-process LRU cache and a disk-backed cache under thumbs.cache/.
-//
-// Mirror of the macOS app's QLThumbnailGenerator-backed `ThumbnailService.swift`.
-// Same behavior:
-//   - Render at 256×256 device-independent pixels (DIPs).
-//   - Cache by path+modified-time hash so a file edit invalidates its thumb.
-//   - Background queue drains a request channel so the UI thread never
-//     pays the shell-thumbnail cost.
-//   - Returns a SoftwareBitmapSource the WinUI grid binds directly into.
-//
 // Implements the cache + render orchestration. The actual interop call
 // either routes through the engine's shell::thumbnail helper or uses a
 // direct CsWinRT IShellItemImageFactory binding.
@@ -429,8 +420,6 @@ internal sealed class ThumbnailService : IDisposable
         }).ConfigureAwait(true);
     }
 
-    /// <summary>Complete + unregister the pending tile for a key with null
-    /// (placeholder). No-op when nothing is pending. Guarded by the lock.</summary>
     private void CompletePendingVideoNull(string key)
     {
         TaskCompletionSource<BitmapImage?>? pending;
@@ -484,7 +473,6 @@ internal sealed class ThumbnailService : IDisposable
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
 
-    /// <summary>Library tile width in device-independent pixels.</summary>
     internal const int TilePx = 256;
     private static readonly int[] s_imagePixelBuckets = { 256, 384, 512, 768 };
 
@@ -605,7 +593,6 @@ internal sealed class ThumbnailService : IDisposable
 
         var ext = Path.GetExtension(path);
 
-        // 0) Disk cache — survives app restart.
         int? diskVideoSize = VideoExtensions.Contains(ext) ? videoPixelSize : null;
         var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct, diskVideoSize, requestPx)
             .ConfigureAwait(false);
@@ -675,21 +662,11 @@ internal sealed class ThumbnailService : IDisposable
         }
         catch (Exception ex)
         {
-            // Previously this `catch` returned null directly,
-            // bypassing the image-extension fallback below. Now we log
-            // the exception TYPE (was just .Message) and fall through to
-            // the fallback path so a JPEG with a broken shell provider
-            // still renders. Don't bump _renderedFailed here — fallback
-            // gets a turn and bumps the right counter on the way out.
             if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] SHELL_EX file={PathRedactor.Redact(path)} ex={ex.GetType().Name}");
             DebugLog.Warn(
                 $"ThumbnailService shell-path ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
         }
 
-        // 2) Image-extension fallback — eager-decode from the original
-        //    file bytes. Reached when (a) shell returned null/empty, OR
-        //    (b) shell threw. The bug was that case (b) skipped
-        //    this branch.
         if (isKnownImage)
         {
             try

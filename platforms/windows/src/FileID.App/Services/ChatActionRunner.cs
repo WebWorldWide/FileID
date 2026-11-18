@@ -79,7 +79,6 @@ internal sealed class ChatActionRunner
         catch (Exception ex) { Set(action.Id, ChatActionPhase.Failed("Undo didn't finish: " + SqliteErrorTranslator.Humanize(ex))); }
     }
 
-    /// <summary>Runs <paramref name="action"/> once, from its card's button.</summary>
     public async Task RunAsync(ChatAction action)
     {
         if (!ChatActionPolicy.IsRunnable(action))

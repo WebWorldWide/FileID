@@ -3,18 +3,6 @@
 // with an inverse-action closure so the user can undo anything they didn't
 // mean before closing the app.
 //
-// Supersedes UndoStack's bounded pop-and-drop LIFO as the storage layer;
-// UndoStack remains as a facade over this log so Ctrl+Z and the Library
-// undo pill keep their exact semantics. Differences from the old stack:
-//   - Entries are never silently dropped: an undo failure marks the entry
-//     UndoFailed (with the reason) and leaves it visible for retry.
-//   - Undone entries stay in the list as a session activity record.
-//   - Reverse capacity is 500 (vs 16); overflowing entries lose only their
-//     reverse closure (→ NotUndoable "history limit"), not their history line.
-//   - A new Restructure entry marks older Restructure entries NotUndoable:
-//     the engine keeps a single truncate-per-batch inverse-move journal, so
-//     only the latest apply is engine-undoable.
-//
 // Threading: Push arrives from EngineClient PropertyChanged handlers (the
 // untrusted engine-event path) while reads/undo run on the UI thread — all
 // list access is under _gate; reverse closures run OUTSIDE the lock
@@ -98,7 +86,6 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
     }
 
     private string? _statusDetail;
-    /// <summary>Human-readable reason for UndoFailed / NotUndoable.</summary>
     public string? StatusDetail
     {
         get => _statusDetail;
@@ -159,8 +146,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     private readonly LinkedList<ChangeLogEntry> _entries = new();
     private bool _undoInFlight;
 
-    /// <summary>Entries still undoable — drives the close-confirm gate and
-    /// the shell badge.</summary>
     public int UndoableCount
     {
         get
@@ -219,8 +204,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>The newest undoable change made on <paramref name="page"/>,
-    /// skipping newer changes made on other pages.</summary>
     public ChangeLogEntry? MostRecentUndoableOn(ChangePage page)
     {
         lock (_gate)

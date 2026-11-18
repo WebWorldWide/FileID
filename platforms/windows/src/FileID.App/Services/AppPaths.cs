@@ -60,9 +60,6 @@ internal static class AppPaths
         }
     }
 
-    // Run-once guard. The app's directory tree does not vanish mid-session, so
-    // the six CreateDirectory syscalls only need to happen the first time. This
-    // matters most for the DebugLog.Write hot path, which calls EnsureDirectories
     // per line (twice per inbound IPC event via the [APPLY:N] enter/exit lines):
     // without this guard each log line paid ~6 fs syscalls.
     private static volatile bool _directoriesEnsured;

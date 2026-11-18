@@ -41,7 +41,6 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // KeyNotFound / unresolvable — fall through to the fallback.
         }
         if (FindInThemeDictionaries(key) is Brush themed)
         {
@@ -65,7 +64,6 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // missing — return null (default style), no crash.
         }
         WarnOnce(key);
         return null;
@@ -96,7 +94,6 @@ public static class ThemeHelper
         }
         catch (Exception)
         {
-            // Unresolvable — caller falls back.
         }
         return null;
     }

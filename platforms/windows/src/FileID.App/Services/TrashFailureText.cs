@@ -2,8 +2,6 @@
 
 namespace FileID.Services;
 
-/// <summary>Plain sentences for files that could not be moved to the
-/// Recycle Bin, from the reason FileID's helper gives for each one.</summary>
 internal static class TrashFailureText
 {
     public const string Changed = "changed";
