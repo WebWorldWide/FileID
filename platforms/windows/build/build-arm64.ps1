@@ -34,7 +34,6 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Error "cargo not found. Install Rust via https://rustup.rs and re-run."
 }
 
-# Ensure the ARM64 toolchain target is installed.
 $installed = (rustup target list --installed) -split "`n"
 if (-not ($installed -contains "aarch64-pc-windows-msvc")) {
     Write-Host "Adding aarch64-pc-windows-msvc target..." -ForegroundColor Yellow

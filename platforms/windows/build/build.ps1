@@ -19,7 +19,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-# Resolve repo root + platforms/windows root, regardless of where this is invoked from.
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
@@ -30,12 +29,10 @@ Write-Host "FileID Windows build (x64)" -ForegroundColor Cyan
 Write-Host "  engine: $EngineDir"
 Write-Host "  dist:   $StagingDir"
 
-# ─── 1. Toolchain probes ─────────────────────────────────────────────────────
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Error "cargo not found. Install Rust via https://rustup.rs and re-run."
 }
 
-# ─── 2. Clean ───────────────────────────────────────────────────────────────
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     Push-Location $EngineDir
@@ -44,7 +41,6 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# ─── 2b. Wipe library database (keep downloaded models) ──────────────────────
 # Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch
 # does a full re-scan + re-tag from scratch. Leaves Models\ (CLIP / ArcFace /
 # VLM — hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
@@ -71,7 +67,6 @@ if ($WipeDb) {
     }
 }
 
-# ─── 3. Build engine ────────────────────────────────────────────────────────
 Push-Location $EngineDir
 try {
     $profileFlag = if ($Release) { "--release" } else { "" }
@@ -87,7 +82,6 @@ finally {
     Pop-Location
 }
 
-# ─── 4. Stage ───────────────────────────────────────────────────────────────
 $BuildDir = if ($Release) {
     Join-Path $EngineDir "target/x86_64-pc-windows-msvc/release"
 } else {

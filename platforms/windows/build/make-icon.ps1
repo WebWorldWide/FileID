@@ -59,7 +59,6 @@ $StoreLogo      = Join-Path $StoreAssetsDir "StoreLogo.png"
 $WebsiteIcon    = Join-Path $WebsiteAssetsDir "app-icon.png"
 $BundleLogo     = Join-Path $BundleTheme "logo.png"
 
-# Idempotency: skip if every output is newer than the master.
 $masterMtime = (Get-Item $Master).LastWriteTimeUtc
 $outputs = @($IcoOut, $Logo16, $Logo96, $Logo256, $Store44, $Store150, $StoreLogo, $WebsiteIcon, $BundleLogo)
 $allUpToDate = $true
@@ -97,7 +96,6 @@ try {
         $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     }
 
-    # --- Logo PNGs ----------------------------------------------------
     Write-Host "Generating Logo PNGs..." -ForegroundColor Cyan
     foreach ($pair in @(
         @{ Size = 16;  Out = $Logo16 },
@@ -111,7 +109,6 @@ try {
         } finally { $bmp.Dispose() }
     }
 
-# --- Store + website icons -----------------------------------------
 Write-Host "Generating Store and website icons..." -ForegroundColor Cyan
 foreach ($pair in @(
     @{ Size = 44; Out = $Store44 },
@@ -126,7 +123,6 @@ foreach ($pair in @(
     } finally { $bmp.Dispose() }
 }
 
-# --- Burn bundle logo (130x102 letterbox) -------------------------
     Write-Host "Generating Burn theme logo (130x102 letterbox)..." -ForegroundColor Cyan
     $boxW = 130; $boxH = 102
     $bundleBmp = New-Object System.Drawing.Bitmap $boxW, $boxH
@@ -137,7 +133,6 @@ foreach ($pair in @(
         $g.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
         $g.Clear([System.Drawing.Color]::Transparent)
-        # Preserve aspect ratio; letterbox the shorter side.
         $scale = [Math]::Min($boxW / $srcImg.Width, $boxH / $srcImg.Height)
         $drawW = [int]($srcImg.Width * $scale)
         $drawH = [int]($srcImg.Height * $scale)
@@ -149,7 +144,6 @@ foreach ($pair in @(
     $bundleBmp.Dispose()
     Write-Host "  $BundleLogo  (130x102)" -ForegroundColor DarkGreen
 
-    # --- Multi-resolution .ico ----------------------------------------
     # ICO format: 6-byte header, 16-byte ICONDIRENTRY per image, then
     # raw image data appended. We embed PNG-encoded images (modern Vista+
     # ICO format) for sizes >= 64; classic uncompressed BMP DIB for the
@@ -158,7 +152,6 @@ foreach ($pair in @(
     Write-Host "Generating multi-resolution FileID.ico..." -ForegroundColor Cyan
     $sizes = @(16, 32, 48, 64, 128, 256)
 
-    # Encode each size to a PNG byte array first.
     $pngs = @{}
     foreach ($s in $sizes) {
         $bmp = Resize-To $s
@@ -173,12 +166,10 @@ foreach ($pair in @(
     $ico = New-Object System.IO.MemoryStream
     $w = New-Object System.IO.BinaryWriter $ico
     try {
-        # ICONDIR header.
         $w.Write([UInt16]0)               # reserved
         $w.Write([UInt16]1)               # type = 1 (icon)
         $w.Write([UInt16]$sizes.Count)    # image count
 
-        # Compute offsets. First image data starts after the dir + entries.
         $offset = 6 + (16 * $sizes.Count)
         $entryStream = New-Object System.IO.MemoryStream
         $entryWriter = New-Object System.IO.BinaryWriter $entryStream

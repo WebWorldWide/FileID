@@ -416,7 +416,6 @@ def evaluate(labels, assigned):
 
 
 def queue_report(labels, assigned, database: Path):
-    """Score the stored merge and split suggestions against the labels."""
     connection = sqlite3.connect(database)
     tables = tables_of(connection)
     merges = list(connection.execute("SELECT person_id, other_person_id, score FROM face_merge_suggestions")) \

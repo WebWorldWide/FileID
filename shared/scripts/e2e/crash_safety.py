@@ -20,7 +20,7 @@ The app-hosted Rust engine built with the `test-trash-root` feature (test builds
 touches the real Trash: set FILEID_CRASH_TRASH to a scratch folder, which the engine then uses
 as its Trash (FILEID_TEST_TRASH_ROOT) and this harness inspects.
 """
-import glob, hashlib, json, os, random, signal, sqlite3, subprocess, sys, threading, time, uuid
+import glob, hashlib, json, os, signal, sqlite3, subprocess, sys, time, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive import Engine, kind
 
@@ -70,7 +70,6 @@ class Lab:
         for i, f in enumerate(photos):
             sub = "Trip" if i < half else "Misc"
             subprocess.run(["cp", "-c", os.path.join(SRC, f), f"{self.lib}/{sub}/{self.tag}_{f}"], check=True)
-        # Two byte-identical duplicates of Trip photos, planted in Misc.
         for i in (0, 1):
             subprocess.run(["cp", "-c", os.path.join(SRC, photos[i]), f"{self.lib}/Misc/{self.tag}_copy{i + 1}.JPG"], check=True)
         self.before_paths = self.tree()
@@ -313,7 +312,6 @@ def dup_ids(lab):
     return [r[0] for r in lab.sql("SELECT id FROM files WHERE path_text LIKE ? ORDER BY id", (f"%/{lab.tag}_copy%",))]
 
 
-# ---------------------------------------------------------------- experiments
 
 def exp_scan_kill():
     for point in ("discovering", "tagging", "postScan"):
@@ -334,7 +332,6 @@ def exp_scan_kill():
 
 
 def exp_trash_kill():
-    # (a) the two duplicates, killed at a range of delays; (b) a 30-file batch killed mid-way.
     for delay in (0.0, 0.004, 0.012, 0.03):
         lab = Lab("trash-dups")
         e = start(lab); scan(e, lab)
@@ -410,7 +407,6 @@ def exp_restructure_kill():
         scan(e, lab)
         lab.check(f"3 apply {int(fraction * 100)}%: rescan after undo", layout=True)
         e.close()
-    # Kill DURING the undo, then undo again.
     lab = Lab("restructure-undo")
     e = start(lab); scan(e, lab)
     moves = plan(e, lab)
@@ -525,7 +521,6 @@ def collect(e, needed, timeout=600):
 
 
 def exp_concurrency():
-    # (a) startScan twice without waiting.
     lab = Lab("conc-double")
     e = start(lab)
     e.send("startScan", {"rootPath": lab.lib}); e.send("startScan", {"rootPath": lab.lib})
@@ -536,7 +531,6 @@ def exp_concurrency():
     lab.check("6a startScan twice")
     e.close()
 
-    # (b) scan + trash + rename + apply + chat + wipe interleaved, nothing awaited.
     lab = Lab("conc-storm")
     e = start(lab); scan(e, lab)
     moves = plan(e, lab)
@@ -571,7 +565,6 @@ def exp_concurrency():
     lab.check(f"6b storm: after restore + undo ({r.get('applied')} back, {r.get('failed')} failed) + rename back + rescan", layout=True)
     e.close()
 
-    # (c) a file deleted and another renamed on disk while a scan runs.
     lab = Lab("conc-mutate")
     e = start(lab)
     victims = sorted(glob.glob(lab.lib + "/Misc/*_DSC*"))[:2]
@@ -587,7 +580,6 @@ def exp_concurrency():
     lab.check("6c file deleted + renamed mid-scan (deleted one intentionally gone)")
     e.close()
 
-    # (d) the root folder renamed away mid-scan (a drive unplugged), then back.
     lab = Lab("conc-unplug")
     e = start(lab); scan(e, lab)
     before = lab.sql("SELECT id, path_text, (SELECT count(*) FROM tags t WHERE t.file_id=f.id) FROM files f ORDER BY id")

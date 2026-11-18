@@ -30,7 +30,6 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import eval_common  # noqa: E402
 from eval_common import EVAL_ROOT, Engine, database_path, diff_snapshots, live_state_snapshot, require_internal  # noqa: E402
 
 # Subject -> tags that count as naming it (lowercase, RAM++ vocabulary words).
@@ -268,7 +267,6 @@ def refine(hits):
 
 
 def simulate(photos: dict, thresholds: dict, rules: dict, matrix: dict | None):
-    """Re-select tags from a wide catalog the way the engine would."""
     floor = rules.get("floor", 0.62)
     cap = rules.get("max_tags", 8)
     thr_delta = rules.get("thr_delta", 0.0)

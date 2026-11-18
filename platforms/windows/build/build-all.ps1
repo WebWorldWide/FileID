@@ -95,7 +95,6 @@ if ($Wipe -and $WipeDbOnly) {
     exit 1
 }
 
-# -Wipe implies -Clean + -Desktop. Destructive flag -- see param block.
 if ($Wipe) { $Clean = $true; $Desktop = $true }
 
 # -Desktop implies -Release: a publish folder is what users actually want
@@ -103,14 +102,11 @@ if ($Wipe) { $Clean = $true; $Desktop = $true }
 # on the host to launch.
 if ($Desktop) { $Release = $true }
 
-# ARM64 cross-compile mode: implies -Release; uses the aarch64-pc-windows-msvc
-# Rust target + win-arm64 .NET RID.
 if ($Arm64) { $Release = $true }
 $RustTarget    = if ($Arm64) { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $DotnetRid     = if ($Arm64) { "win-arm64" } else { "win-x64" }
 $ArchLabel     = if ($Arm64) { "arm64" } else { "x64" }
 
-# --- Paths ------------------------------------------------------------------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
@@ -147,7 +143,6 @@ Write-Host "  solution:      $Solution"
 Write-Host "  staging:       $StagingDir"
 Write-Host ""
 
-# --- 1. Toolchain probes ----------------------------------------------------
 function Require-Command($name, $hint) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: '$name' not found on PATH." -ForegroundColor Red
@@ -158,7 +153,6 @@ function Require-Command($name, $hint) {
 
 if (-not $SkipEngine) {
     Require-Command "cargo" "Install Rust via https://rustup.rs and re-open your shell."
-    # Ensure x64 target is installed.
     $targets = & rustup target list --installed 2>$null
     if ($LASTEXITCODE -eq 0 -and $targets -notcontains "$($RustTarget)") {
         Write-Host "Adding rust target $($RustTarget)..." -ForegroundColor Yellow
@@ -186,7 +180,6 @@ if (-not $SkipApp) {
     }
 }
 
-# --- 1.5a. WipeDbOnly (lightest scope) -------------------------------------
 # Only delete the SQLite triplet. Don't touch Desktop\FileID, don't clean
 # build artifacts, don't wipe Models / logs / settings / sentinels / cache.
 # Use case: "I want a fresh scan but want to keep everything else."
@@ -209,7 +202,6 @@ if ($WipeDbOnly) {
     Write-Host ""
 }
 
-# --- 1.5. Wipe --------------------------------------------------------------
 # Destructive: removes user data dir + Desktop staging dir. The build-artifact
 # cleanup happens in the regular Clean block below (Wipe implies Clean).
 if ($Wipe) {
@@ -256,7 +248,6 @@ if ($Wipe) {
     Write-Host ""
 }
 
-# --- 2. Clean ---------------------------------------------------------------
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     if (-not $SkipEngine) {
@@ -269,7 +260,6 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# --- 3. Engine build + dotnet restore (in parallel) ------------------------
 # Cargo build and NuGet restore are fully independent -- running them
 # concurrently saves 20-40 seconds on a cold build. The dotnet build/
 # publish step below joins on both before continuing.
@@ -288,9 +278,6 @@ if (-not $SkipEngine) {
     Write-Host "Building engine ($RustProfile, $($RustTarget))..." -ForegroundColor Cyan
     Push-Location $EngineDir
     try {
-        # Cargo uses every CPU by default; `-j` is redundant but explicit
-        # makes the intent obvious. The big win is the profile choice
-        # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
             & cargo build --profile release-fast --target $($RustTarget) @jobsArg
@@ -344,7 +331,6 @@ if (-not $SkipEngine) {
             $destCargo = Join-Path $cargoOutDir $name
             Copy-Item -LiteralPath $runtimeDlls[$name] -Destination $destCargo -Force -ErrorAction SilentlyContinue
         }
-        # Stash for the App-staging step below so we don't re-resolve.
         $script:RuntimeDlls = $runtimeDlls
     } else {
         Write-Host "WARN: fetch-runtime-deps.ps1 not found; PDF analysis may fail at runtime." -ForegroundColor Yellow
@@ -357,10 +343,8 @@ if ($MediaDir) {
     & $stageMedia -SourceDir $MediaDir -DestinationRoot $StagingDir
 }
 
-# --- 4. App build -----------------------------------------------------------
 if (-not $SkipApp) {
     if ($restoreJob) {
-        # Wait for the restore that started in step 3.
         $null = Wait-Job $restoreJob
         Receive-Job $restoreJob | Out-Null
         Remove-Job $restoreJob
@@ -392,7 +376,6 @@ if (-not $SkipApp) {
     }
 }
 
-# --- 5. Stage engine alongside app ------------------------------------------
 function Resolve-AppOutputDir {
     if ($Release) {
         return Join-Path $PlatformDir "src/FileID.App/bin/$ArchLabel/$Configuration/$AppTfm/$AppRid/publish"
@@ -415,8 +398,6 @@ if (-not $SkipApp) {
             Copy-Item $StagedEngine (Join-Path $AppOutDir "FileIDEngine.exe") -Force
             Write-Host "  FileIDEngine.exe colocated with FileID.exe" -ForegroundColor Green
         }
-        # Colocate the runtime DLLs (pdfium.dll) with the engine in the
-        # publish output.
         if ($script:RuntimeDlls) {
             foreach ($name in $script:RuntimeDlls.Keys) {
                 Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force
@@ -428,7 +409,6 @@ if (-not $SkipApp) {
         }
     }
 
-    # --- Sign (optional) ----------------------------------------------------
     if ($Sign) {
         $signScript = Join-Path $ScriptDir "sign.ps1"
         if (Test-Path $signScript) {
@@ -445,7 +425,6 @@ if (-not $SkipApp) {
         }
     }
 
-    # --- 6. Smoke -----------------------------------------------------------
     $appSize = [math]::Round((Get-Item $AppExe).Length / 1KB, 0)
     Write-Host ("  FileID.exe       OK ({0} KB)" -f $appSize) -ForegroundColor Green
     $bootstrap = Join-Path $AppOutDir "Microsoft.WindowsAppRuntime.Bootstrap.dll"
@@ -457,7 +436,6 @@ if (-not $SkipApp) {
     }
 }
 
-# --- 7. Install to LocalAppData + Desktop shortcut --------------------------
 # WinUI 3 self-contained publish produces ~900 companion files (the .NET
 # runtime, WinAppSDK runtime, Win2D, project DLLs). Dumping that on the
 # Desktop is unfriendly. Instead: put the files in %LOCALAPPDATA% (out of
@@ -491,8 +469,6 @@ if ($Desktop) {
     $totalMb = [math]::Round(((Get-ChildItem -Recurse $InstallDir | Measure-Object -Property Length -Sum).Sum / 1MB), 1)
     Write-Host ("  Installed $fileCount files ({0} MB) under LocalAppData" -f $totalMb) -ForegroundColor Green
 
-    # Create / refresh the Desktop shortcut. WScript.Shell COM is the
-    # idiomatic way to make a .lnk from PowerShell; no extra deps.
     $InstalledExe = Join-Path $InstallDir "FileID.exe"
     $shell = New-Object -ComObject WScript.Shell
     $sc = $shell.CreateShortcut($ShortcutPath)
@@ -504,14 +480,11 @@ if ($Desktop) {
     Write-Host "  Desktop shortcut: $ShortcutPath" -ForegroundColor Green
 }
 
-# --- 8. Run -----------------------------------------------------------------
 if ($Run) {
     if ($SkipApp) {
         Write-Host "Cannot -Run with -SkipApp." -ForegroundColor Red
         exit 1
     }
-    # If -Desktop was set, launch from the installed copy. Otherwise run
-    # from the build output dir.
     $LaunchDir = if ($Desktop) { $InstallDir } else { Resolve-AppOutputDir }
     $LaunchExe = Join-Path $LaunchDir "FileID.exe"
     Write-Host "Launching $LaunchExe..." -ForegroundColor Cyan
