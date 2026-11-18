@@ -1,4 +1,4 @@
-//! Stage 6: faces on the Mac, end to end. Vision (landmarks, capture quality,
+//! Faces on the Mac, end to end. Vision (landmarks, capture quality,
 //! human rectangles) and the ImageIO / HEIF decode run in FileIDAppleKit; the
 //! landmark match, the one-buffer alignment, SFace and every decision stay
 //! here. The result lands in the Swift engine's face space
@@ -346,8 +346,6 @@ pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Conne
         Err(error) => tracing::error!(?error, "face_print_persist_failed"),
     }
 }
-
-// MARK: - Best Takes (VisionTakeFaceAnalyzer, TakeMediaAnalysis.signals)
 
 /// Which decode of a photo Best Takes reads (`fileid_apple_take_decode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
