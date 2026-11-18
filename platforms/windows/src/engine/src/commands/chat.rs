@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{parse_intent, parse_question};
+use super::chat_intent::{parse_intent, parse_question, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -1007,6 +1007,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
             structured.subject = Some(plan.query.clone());
         }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
+        let message = with_unnamed_people_note(conn, &text, &plan, root.as_ref(), message)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
     let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds, root.as_ref());
@@ -1117,7 +1118,20 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         let noun = if hits.len() == 1 { "match" } else { "matches" };
         format!("Found {} {noun} {scope}{qualifiers}.{sample_note}", hits.len())
     };
+    let explanation = with_unnamed_people_note(conn, &text, &plan, root.as_ref(), explanation)?;
     Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
+}
+
+const UNNAMED_PEOPLE_NOTE: &str = "People aren't named yet — name them in People to search by person.";
+
+/// "Photos of Kyle" with no named person is searched as a word; say so, and where to name people.
+fn with_unnamed_people_note(conn: &Connection, text: &str, plan: &SearchPlan, root: Option<&super::roots::RootScope>, message: String) -> Result<String> {
+    let Some(name) = spoken_name(text) else { return Ok(message) };
+    let searched = plan.query.to_lowercase().contains(&name.to_lowercase());
+    if !searched || !plan.person_ids.is_empty() || !chat_facts::people_unnamed(conn, root)? {
+        return Ok(message);
+    }
+    Ok(format!("{message} {UNNAMED_PEOPLE_NOTE}"))
 }
 
 /// Mirrors Swift `ChatService.weakSummary`: weaker look-alikes are counted, and
@@ -1360,6 +1374,31 @@ mod tests {
             ask(&mut conn, "how many people are in my library?").message,
             "No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups."
         );
+    }
+
+    #[test]
+    fn a_name_that_matches_no_person_says_people_are_not_named_yet() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES (1,'/p/Kyle at the beach.jpg',1,1,0,'image','jpg'),(2,'/p/2.jpg',2,1,0,'image','jpg'),(3,'/p/Kyle Senior Pics/3.jpg',3,1,0,'image','jpg');\
+             INSERT INTO persons(id,name,created_at,is_unknown) VALUES (1,NULL,0,0);\
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES (2,1,x'00','',0);",
+        )
+        .unwrap();
+        let note = "People aren't named yet — name them in People to search by person.";
+        let found = ask(&mut conn, "show me photos of Kyle");
+        assert_eq!(found.message, format!("Found 2 matches for “Kyle” (photos). {note}"));
+        assert_eq!(ask(&mut conn, "show me photos of Zorro").message, format!("No matches for “Zorro” (photos). Try names or a few descriptive words; files that haven't been analyzed may still contain it. {note}"));
+        assert!(ask(&mut conn, "how many photos of Kyle?").message.ends_with(note));
+        for text in ["show me photos of kyle", "photos from Kyle Senior Pics", "show me photos of Kyle Senior Pics"] {
+            assert!(!ask(&mut conn, text).message.contains(note), "{text}");
+        }
+        conn.execute("UPDATE persons SET name='Kyle' WHERE id=1", []).unwrap();
+        assert!(!ask(&mut conn, "show me photos of Kyle").message.contains(note));
+        conn.execute("UPDATE persons SET name='Maya' WHERE id=1", []).unwrap();
+        assert!(!ask(&mut conn, "show me photos of Zorro").message.contains(note));
+        conn.execute("DELETE FROM face_prints", []).unwrap();
+        assert!(!ask(&mut conn, "show me photos of Kyle").message.contains(note));
     }
 
     #[test]

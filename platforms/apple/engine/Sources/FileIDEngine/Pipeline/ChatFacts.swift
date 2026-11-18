@@ -305,6 +305,13 @@ enum ChatFacts {
         }
     }
 
+    /// True when faces are grouped but no group has a name, so a person's name in a question can
+    /// only be searched as a word. Mirrors Rust `people_unnamed`.
+    static func peopleUnnamed(_ db: GRDB.Database, root: LibraryRoots.Scope?) throws -> Bool {
+        let groups = try personGroups(db, root: root)
+        return !groups.isEmpty && groups.allSatisfy { $0.name == nil }
+    }
+
     /// "How many people are in my library?" and "who is in my photos?": answered
     /// from the face groups, never from the word "people". Files with a counted
     /// face are listed. Mirrors Rust `people_answer`.

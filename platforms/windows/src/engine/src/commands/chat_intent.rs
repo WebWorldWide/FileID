@@ -1231,6 +1231,33 @@ pub fn noun(kinds: &[String], count: i64) -> String {
     }
 }
 
+const NAME_LEADS: [&str; 5] = ["of", "with", "featuring", "including", "showing"];
+const NOT_NAMES: &[&str] = &[
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "christmas", "halloween", "thanksgiving", "easter", "hanukkah", "diwali", "valentines", "new", "summer", "winter",
+    "spring", "fall", "autumn", "iphone", "ipad", "mac", "macbook", "google", "apple", "instagram", "facebook", "whatsapp",
+];
+
+fn capitalised_word(word: &str) -> bool {
+    let mut letters = word.chars();
+    letters.next().is_some_and(char::is_uppercase)
+        && word.chars().all(|c| c.is_alphabetic() || matches!(c, '\'' | '’' | '-'))
+        && word.chars().any(char::is_lowercase)
+}
+
+/// The person a question is spoken about, when it asks "of Kyle" or "with Kyle Smith": one or two
+/// capitalised words after of/with/featuring/including/showing. Longer capitalised runs are folder
+/// or event titles, and months, weekdays, holidays and brands are not people. Mirrors Swift
+/// `ChatIntent.spokenName`; the shared cases are the corpus `spokenNames`.
+pub fn spoken_name(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric())).collect();
+    let lead = words.iter().position(|word| NAME_LEADS.contains(&word.to_lowercase().as_str()))?;
+    let run: Vec<&str> = words[lead + 1..].iter().copied().take_while(|word| capitalised_word(word)).collect();
+    let first = run.first()?.to_lowercase();
+    ((1..=2).contains(&run.len()) && !NOT_NAMES.contains(&first.as_str())).then(|| run.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1240,6 +1267,14 @@ mod tests {
         intents: Vec<IntentCase>,
         questions: Vec<QuestionCase>,
         labels: Vec<(i64, String)>,
+        #[serde(rename = "spokenNames")]
+        spoken_names: Vec<SpokenNameCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct SpokenNameCase {
+        text: String,
+        name: Option<String>,
     }
     #[derive(Deserialize)]
     struct IntentCase {
@@ -1277,6 +1312,19 @@ mod tests {
             .filter_map(|case| {
                 let actual = parse_question(&case.text);
                 (actual != case.question).then(|| format!("{} → {}", case.text, serde_json::to_string(&actual).unwrap()))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn shared_spoken_names() {
+        let failures: Vec<String> = fixtures()
+            .spoken_names
+            .into_iter()
+            .filter_map(|case| {
+                let actual = spoken_name(&case.text);
+                (actual != case.name).then(|| format!("{} → {actual:?}", case.text))
             })
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));

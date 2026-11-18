@@ -871,6 +871,31 @@ struct ChatIntent: Codable, Equatable, Sendable {
         return "\(tenths / 10).\(tenths % 10) \(units[index])"
     }
 
+    private static let nameLeads: Set<String> = ["of", "with", "featuring", "including", "showing"]
+    private static let notNames: Set<String> = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "christmas", "halloween", "thanksgiving", "easter", "hanukkah", "diwali", "valentines", "new", "summer", "winter",
+        "spring", "fall", "autumn", "iphone", "ipad", "mac", "macbook", "google", "apple", "instagram", "facebook", "whatsapp",
+    ]
+
+    private static func capitalisedWord(_ word: String) -> Bool {
+        guard let first = word.first, first.isUppercase else { return false }
+        return word.allSatisfy { $0.isLetter || $0 == "'" || $0 == "’" || $0 == "-" } && word.contains { $0.isLowercase }
+    }
+
+    /// The person a question is spoken about, when it asks "of Kyle" or "with Kyle Smith": one or two
+    /// capitalised words after of/with/featuring/including/showing. Longer capitalised runs are folder
+    /// or event titles, and months, weekdays, holidays and brands are not people. Mirrors Rust
+    /// `spoken_name`; the shared cases are the corpus `spokenNames`.
+    static func spokenName(_ text: String) -> String? {
+        let words = text.split(whereSeparator: \.isWhitespace).map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+        guard let lead = words.firstIndex(where: { nameLeads.contains($0.lowercased()) }) else { return nil }
+        let run = Array(words[(lead + 1)...].prefix { capitalisedWord($0) })
+        guard (1...2).contains(run.count), !notNames.contains(run[0].lowercased()) else { return nil }
+        return run.joined(separator: " ")
+    }
+
     /// "15,021".
     static func countLabel(_ value: Int64) -> String {
         let digits = String(value.magnitude)

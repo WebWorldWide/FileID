@@ -11,6 +11,8 @@ import FileIDShared
         let intents: [IntentCase]
         let questions: [QuestionCase]
         let labels: [[Label]]
+        struct SpokenNameCase: Decodable { let text: String; let name: String? }
+        let spokenNames: [SpokenNameCase]
         enum Label: Decodable {
             case number(Int64), text(String)
             init(from decoder: Decoder) throws {
@@ -35,6 +37,14 @@ import FileIDShared
         let failures = try fixtures().intents.compactMap { item -> String? in
             let actual = ChatIntent.parse(item.text)
             return actual == item.intent ? nil : "\(item.text) → \(json(actual))"
+        }
+        #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+    }
+
+    @Test func sharedSpokenNames() throws {
+        let failures = try fixtures().spokenNames.compactMap { item -> String? in
+            let actual = ChatIntent.spokenName(item.text)
+            return actual == item.name ? nil : "\(item.text) → \(actual ?? "nil")"
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
     }

@@ -56,6 +56,30 @@ struct ChatPeopleAndPeakTests {
         #expect(try await ask("how many people are in my library?", database).message == "No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups.")
     }
 
+    @Test func aNameThatMatchesNoPersonSaysPeopleAreNotNamedYet() async throws {
+        let (database, directory) = try await catalog { db in
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES (1,'/p/Kyle at the beach.jpg',1,1,0,'image','jpg'),(2,'/p/2.jpg',2,1,0,'image','jpg'),(3,'/p/Kyle Senior Pics/3.jpg',3,1,0,'image','jpg');
+                INSERT INTO persons(id,name,created_at,is_unknown) VALUES (1,NULL,0,0);
+                INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES (2,1,x'00','',0);
+                """)
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let note = "People aren't named yet — name them in People to search by person."
+        #expect(try await ask("show me photos of Kyle", database).message == "Found 2 matches for “Kyle” (photos). \(note)")
+        #expect(try await ask("show me photos of Zorro", database).message == "No matches for “Zorro” (photos). Try names or a few descriptive words; files that haven't been analyzed may still contain it. \(note)")
+        #expect(try await ask("how many photos of Kyle?", database).message.hasSuffix(note))
+        for text in ["show me photos of kyle", "photos from Kyle Senior Pics", "show me photos of Kyle Senior Pics"] {
+            #expect(!(try await ask(text, database).message.contains(note)), Comment(rawValue: text))
+        }
+        try await database.pool.write { db in try db.execute(sql: "UPDATE persons SET name='Kyle' WHERE id=1") }
+        #expect(!(try await ask("show me photos of Kyle", database).message.contains(note)))
+        try await database.pool.write { db in try db.execute(sql: "UPDATE persons SET name='Maya' WHERE id=1") }
+        #expect(!(try await ask("show me photos of Zorro", database).message.contains(note)))
+        try await database.pool.write { db in try db.execute(sql: "DELETE FROM face_prints") }
+        #expect(!(try await ask("show me photos of Kyle", database).message.contains(note)))
+    }
+
     @Test func peakQuestionsAnswerByYearOrMonthOrSayTheyCannot() async throws {
         let (database, directory) = try await catalog { db in
             for (id, taken) in [(1, 1_718_452_800), (2, 1_749_988_800), (3, 1_752_580_800), (4, 1_781_524_800), (5, 1_781_524_900), (6, 1_781_525_000)] {

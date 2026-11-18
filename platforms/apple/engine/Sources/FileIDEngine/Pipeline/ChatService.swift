@@ -216,7 +216,7 @@ actor ChatService {
                     structured.subject = plan.query
                 }
                 let (message, hits) = try ChatFacts.answer(db, question, structured)
-                return (Prepared(message: message, hits: hits, summarize: false), plan, question, [])
+                return (Prepared(message: try withUnnamedPeopleNote(db, text, plan, root, message), hits: hits, summarize: false), plan, question, [])
             }
             let groups = ChatFacts.subjectGroups(plan.query)
             let hits = groups.count > 1
@@ -297,7 +297,18 @@ actor ChatService {
                 : hits.isEmpty
                     ? "No matches \(scope)\(qualifiers). Try names or a few descriptive words; files that haven't been analyzed may still contain it."
                     : "Found \(hits.count) \(hits.count == 1 ? "match" : "matches") \(scope)\(qualifiers)." + sampled
-        return Prepared(message: message, hits: hits, summarize: true)
+        let noted = try await database.pool.read { db in try withUnnamedPeopleNote(db, text, plan, root, message) }
+        return Prepared(message: noted, hits: hits, summarize: true)
+    }
+
+    static let unnamedPeopleNote = "People aren't named yet — name them in People to search by person."
+
+    /// "Photos of Kyle" with no named person is searched as a word; say so, and where to name people.
+    /// Mirrors Rust `chat::with_unnamed_people_note`.
+    private static func withUnnamedPeopleNote(_ db: GRDB.Database, _ text: String, _ plan: ChatSearchPlan, _ root: LibraryRoots.Scope?, _ message: String) throws -> String {
+        guard let name = ChatIntent.spokenName(text), plan.query.lowercased().contains(name.lowercased()),
+              plan.personIDs.isEmpty, try ChatFacts.peopleUnnamed(db, root: root) else { return message }
+        return "\(message) \(unnamedPeopleNote)"
     }
 
     /// Mirrors Rust `chat::weak_summary`: weaker look-alikes are counted, and

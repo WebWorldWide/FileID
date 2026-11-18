@@ -475,6 +475,13 @@ fn person_groups(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<Pers
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// True when faces are grouped but no group has a name, so a person's name in a question can
+/// only be searched as a word.
+pub(crate) fn people_unnamed(conn: &Connection, root: Option<&RootScope>) -> Result<bool> {
+    let groups = person_groups(conn, root)?;
+    Ok(!groups.is_empty() && groups.iter().all(|group| group.name.is_none()))
+}
+
 /// "How many people are in my library?" and "who is in my photos?": answered
 /// from the face groups, never from the word "people". Files with a counted
 /// face are listed.
