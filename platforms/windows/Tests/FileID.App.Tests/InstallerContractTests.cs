@@ -129,20 +129,13 @@ public sealed class InstallerContractTests
     }
 
     [Fact]
-    public void Msi_RefusesToPackageWithoutNativeInferenceAndPdfRuntimes()
+    public void Msi_RefusesToPackageWithoutPdfRuntime()
     {
         var project = File.ReadAllText(PathInRepo("platforms", "windows", "installer", "FileID.Msi", "FileID.Msi.wixproj"));
 
-        foreach (var requiredFile in new[]
-                 {
-                     "onnxruntime.dll",
-                     "onnxruntime_providers_shared.dll",
-                     "DirectML.dll",
-                     "pdfium.dll",
-                 })
-        {
-            Assert.Contains($"$(PublishRoot)\\{requiredFile}", project, StringComparison.Ordinal);
-        }
+        Assert.Contains("$(PublishRoot)\\pdfium.dll", project, StringComparison.Ordinal);
+        Assert.DoesNotContain("onnxruntime.dll", project, StringComparison.Ordinal);
+        Assert.DoesNotContain("DirectML.dll", project, StringComparison.Ordinal);
     }
 
     [Fact]
